@@ -9,6 +9,11 @@
     onPullAll,
     onPullAllStatus,
     onPullAllComplete,
+    onPullFlow,
+    onPullFlowStatus,
+    onPullFlowComplete,
+    onRunFlow,
+    onOpenOperations,
     workspaces,
     currentWorkspaceId,
     onOpenWorkspaces,
@@ -19,15 +24,22 @@
   let helpOpen = $state(false);
   let pulling = $state(false);
   let pullState = $state(null); // null | 'running' | 'done' | 'error'
-  let pullLog = $state('');
-  let logOpen = $state(false);
   let pollTimer = null;
 
+  // The flow-scoped action button: git ("Pull flow") on the Repos tab,
+  // docker ("Run flow") on the Actual tab — same currentFlow, different verb
+  // depending which half of fghj's model that tab represents.
+  let flowPulling = $state(false);
+  let flowPullState = $state(null); // null | 'running' | 'done' | 'error'
+  let flowPollTimer = null;
+  let runningFlow = $state(false);
+
+  // Only tracks completion so the graph can be reloaded and the button's
+  // spinner cleared — the actual log lives in the shared operations drawer.
   async function poll() {
     if (!onPullAllStatus) return;
     const s = await onPullAllStatus();
     if (!s) return;
-    pullLog = s.log ?? '';
     pullState = s.status;
     if (s.status !== 'running') {
       clearInterval(pollTimer);
@@ -41,8 +53,6 @@
     if (!onPullAll || pulling) return;
     pulling = true;
     pullState = 'running';
-    pullLog = '';
-    logOpen = true;
     await onPullAll();
     await poll();
     if (pullState === 'running') {
@@ -53,6 +63,48 @@
   $effect(() => {
     return () => {
       if (pollTimer) clearInterval(pollTimer);
+    };
+  });
+
+  async function flowPoll() {
+    if (!onPullFlowStatus) return;
+    const s = await onPullFlowStatus(currentFlow);
+    if (!s) return;
+    flowPullState = s.status;
+    if (s.status !== 'running') {
+      clearInterval(flowPollTimer);
+      flowPollTimer = null;
+      flowPulling = false;
+      if (s.status === 'done' && onPullFlowComplete) await onPullFlowComplete();
+    }
+  }
+
+  async function pullFlow() {
+    if (!onPullFlow || flowPulling || !currentFlow) return;
+    flowPulling = true;
+    flowPullState = 'running';
+    await onPullFlow(currentFlow);
+    await flowPoll();
+    if (flowPullState === 'running') {
+      flowPollTimer = setInterval(flowPoll, 600);
+    }
+  }
+
+  async function runFlow() {
+    if (!onRunFlow || !currentFlow || runningFlow) return;
+    runningFlow = true;
+    try {
+      // Idempotent server-side: only tops up whatever this flow still
+      // needs, so clicking again when it's already running is a no-op.
+      await onRunFlow(currentFlow);
+    } finally {
+      runningFlow = false;
+    }
+  }
+
+  $effect(() => {
+    return () => {
+      if (flowPollTimer) clearInterval(flowPollTimer);
     };
   });
 
@@ -118,29 +170,32 @@
     {/if}
   </div>
 
+  {#if activeTab === 'repos'}
+    <button class="pull-btn" onclick={pullFlow} disabled={!currentFlow || flowPulling} title="clone every not-yet-downloaded repo in this flow">
+      {#if flowPulling}<span class="spinner"></span> pulling flow…{:else}Pull flow{/if}
+    </button>
+    {#if flowPullState && flowPullState !== 'running'}
+      <span class="pull-result" class:ok={flowPullState === 'done'} class:error={flowPullState === 'error'}
+        >{flowPullState === 'done' ? '✓' : '✕'}</span
+      >
+    {/if}
+  {:else if activeTab === 'containers'}
+    <button class="pull-btn" onclick={runFlow} disabled={!currentFlow || runningFlow} title="ensure this flow's containers are running (leaves everything else untouched)">
+      {#if runningFlow}<span class="spinner"></span> running…{:else}Run flow{/if}
+    </button>
+  {/if}
+
   <div class="divider"></div>
   <div class="pull-wrap">
     <button class="pull-btn" onclick={pullAll} disabled={pulling}>
       {#if pulling}<span class="spinner"></span> pulling…{:else}Pull all{/if}
     </button>
     {#if pullState && pullState !== 'running'}
-      <span
-        class="pull-result"
-        class:ok={pullState === 'done'}
-        class:error={pullState === 'error'}
-        onclick={() => (logOpen = !logOpen)}
-        title="click to toggle log"
-      >{pullState === 'done' ? '✓' : '✕'}</span>
+      <span class="pull-result" class:ok={pullState === 'done'} class:error={pullState === 'error'}
+        >{pullState === 'done' ? '✓' : '✕'}</span
+      >
     {/if}
-    {#if logOpen && (pulling || pullLog)}
-      <div class="pull-log">
-        <div class="pull-log-head">
-          <span>pull log</span>
-          <span class="close" onclick={() => (logOpen = false)}>×</span>
-        </div>
-        <pre>{pullLog || 'starting…'}</pre>
-      </div>
-    {/if}
+    <span class="ops-link" onclick={onOpenOperations} title="view pull/download operations queue">☰</span>
   </div>
 
   <div class="divider"></div>
@@ -200,23 +255,11 @@
     animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 2px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .pull-result { cursor: pointer; font: 700 13px var(--font-mono); }
+  .pull-result { font: 700 13px var(--font-mono); }
   .pull-result.ok { color: var(--success); }
   .pull-result.error { color: var(--danger); }
-  .pull-log {
-    position: absolute; top: calc(100% + 8px); left: 0; width: 380px; background: var(--panel-2);
-    border: 1px solid var(--line-strong); border-radius: 6px; box-shadow: 0 12px 32px -8px rgba(0,0,0,0.5); z-index: 60;
-  }
-  .pull-log-head {
-    display: flex; align-items: center; justify-content: space-between; padding: 6px 10px;
-    font: 700 10px var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint);
-    border-bottom: 1px solid var(--line);
-  }
-  .pull-log-head .close { cursor: pointer; color: var(--ink-dim); }
-  .pull-log pre {
-    margin: 0; background: #000; color: #b8ffb8; padding: 10px; font: 400 10.5px var(--font-mono);
-    max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-all;
-  }
+  .ops-link { cursor: pointer; color: var(--ink-faint); font-size: 13px; }
+  .ops-link:hover { color: var(--ink); }
 
   .view-switch { display: flex; padding: 2px; background: var(--panel-2); border-radius: 6px; gap: 2px; }
   .view-tab { padding: 6px 14px; border-radius: 4px; font: 700 11px var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer; color: var(--ink-faint); }

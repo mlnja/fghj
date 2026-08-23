@@ -1,7 +1,7 @@
 <script>
   let { graph, currentFlow, mode, runContainers, onSelectNode } = $props();
 
-  const NODE_W = 200, NODE_H = 116, LEVEL_GAP = 250, ROW_GAP = 146;
+  const NODE_W = 260, NODE_H = 132, LEVEL_GAP = 340, ROW_GAP = 168;
 
   function shortRepo(url) {
     if (!url) return '';
@@ -100,12 +100,15 @@
   {#each graph.nodes as n}
     {@const p = l.pos[n.id]}
     {@const inFlow = n.flows.includes(currentFlow)}
+    {@const dimmed = currentFlow && !inFlow}
     {@const live = runContainers?.[n.id]}
     {@const dotColor = live ? (live.status === 'running' ? 'var(--success)' : 'var(--danger)') : 'var(--success)'}
+    {@const containerState = mode === 'containers' && n.kind !== 'flow' ? (live ? (live.status === 'running' ? 'running' : 'stopped') : 'none') : null}
     <div
       class="node"
       class:not-downloaded={n.downloaded === false}
       class:in-flow={inFlow}
+      class:dimmed={dimmed}
       style="left:{p.x}px;top:{p.y}px"
       onclick={() => onSelectNode(n)}
     >
@@ -120,6 +123,10 @@
         </div>
         <span class="crate-tag">{l.codeOf.get(n.id)}</span>
       </div>
+      <div class="kind-row">
+        <span class="kind-pill" class:infra={n.kind === 'infra'}>{n.kind}</span>
+        {#if n.ports?.length}<span class="ports">{n.ports.join(', ')}</span>{/if}
+      </div>
       <div class="node-domain">{mode === 'containers' ? (n.domain || n.image || '') : shortRepo(n.repo)}</div>
       {#if n.branch}
         <div class="node-meta branch-row">
@@ -132,6 +139,11 @@
       {#if live}
         <div class="node-meta">{live.status}{#if live.published_port} · 127.0.0.1:{live.published_port}{/if}</div>
       {/if}
+      {#if containerState}
+        <div class="status-bar state-{containerState}" title="container: {containerState}">
+          {containerState === 'none' ? 'absent' : containerState}
+        </div>
+      {/if}
     </div>
   {/each}
 </div>
@@ -139,15 +151,32 @@
 <style>
   .graph-area { position: relative; }
   .node {
-    position: absolute; width: 200px; min-height: 116px; padding: 13px; border-radius: 6px;
+    position: absolute; width: 260px; min-height: 132px; padding: 14px; border-radius: 6px;
     background: var(--panel-2); border: 1px solid var(--line-strong); cursor: pointer;
+    overflow: hidden; transition: opacity 0.15s ease;
   }
   .node.in-flow { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .node.not-downloaded { border-style: dashed; opacity: 0.7; background: transparent; }
+  .node.dimmed { opacity: 0.35; }
+  .status-bar {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 26px;
+    display: flex; align-items: center; justify-content: center;
+    font: 700 12px var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .status-bar.state-running { background: var(--success); color: var(--bg); }
+  .status-bar.state-stopped { background: var(--warning); color: var(--bg); }
+  .status-bar.state-none { background: var(--line-strong); color: var(--ink-faint); }
   .node-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; gap: 8px; }
   .node-id-wrap { display: flex; align-items: center; gap: 6px; min-width: 0; }
-  .node-id { font: 600 13.5px var(--font-mono); color: var(--ink); }
-  .node-domain { font: 500 11px var(--font-mono); color: var(--ink-faint); }
+  .node-id { font: 600 13.5px var(--font-mono); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kind-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .kind-pill {
+    font: 700 8.5px var(--font-mono); text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--accent); border: 1px solid var(--accent-dim); border-radius: 3px; padding: 1px 5px; flex: 0 0 auto;
+  }
+  .kind-pill.infra { color: var(--ink-faint); border-color: var(--line-strong); }
+  .ports { font: 500 10px var(--font-mono); color: var(--ink-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .node-domain { font: 500 11px var(--font-mono); color: var(--ink-faint); word-break: break-all; }
   .node-meta { font: 500 10px var(--font-mono); color: var(--ink-faint); margin-top: 6px; }
   .badge {
     font: 700 8.5px var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint);

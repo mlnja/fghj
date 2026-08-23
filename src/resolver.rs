@@ -160,7 +160,11 @@ pub struct Graph {
 /// needing a separate checkout per branch — used only by the review-run
 /// branch-override path (`src/runs.rs`), which still needs to build an
 /// arbitrary branch without touching the live workspace checkout.
-pub fn ensure_mirror(repo: &str, workdir: &Path) -> Result<PathBuf> {
+/// `owner` drops the clone's privileges back to the real user who wired the
+/// workspace (see [`crate::store::WorkspaceOwner`]) — `fghjd` runs as root
+/// and has no SSH credentials of its own for a private remote. Pass `None`
+/// when already running as the correct user.
+pub fn ensure_mirror(repo: &str, workdir: &Path, owner: Option<&crate::store::WorkspaceOwner>) -> Result<PathBuf> {
     let dir_name = repo
         .rsplit('/')
         .next()
@@ -170,13 +174,20 @@ pub fn ensure_mirror(repo: &str, workdir: &Path) -> Result<PathBuf> {
     let mirror_path = workdir.join(format!("{dir_name}.git"));
 
     if !mirror_path.exists() {
-        let status = Command::new("git")
-            .args(["clone", "--quiet", "--mirror", repo])
-            .arg(&mirror_path)
-            .status()
+        let mut cmd = Command::new("git");
+        cmd.args(["clone", "--quiet", "--mirror", repo]).arg(&mirror_path);
+        if let Some(owner) = owner {
+            owner.apply_to_command(&mut cmd);
+        }
+        crate::store::harden_git_ssh(&mut cmd);
+        let output = cmd
+            .output()
             .with_context(|| format!("failed to run git clone --mirror for {repo}"))?;
-        if !status.success() {
-            bail!("git clone --mirror failed for {repo}");
+        if !output.status.success() {
+            bail!(
+                "git clone --mirror failed for {repo}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
         }
     }
 
@@ -422,7 +433,7 @@ impl<'a> ResolveCtx<'a> {
                 environment,
                 ports,
             } => {
-                let infra_id = format!("{owner_id}/{name}");
+                let infra_id = format!("{owner_id}.{name}");
                 self.nodes.entry(infra_id.clone()).or_insert_with(|| Node {
                     id: infra_id.clone(),
                     label: name.clone(),
@@ -448,7 +459,7 @@ impl<'a> ResolveCtx<'a> {
                 });
             }
             Dependency::SharedInfra { service, name } => {
-                let infra_id = format!("{service}/{name}");
+                let infra_id = format!("{service}.{name}");
                 self.edges.push(Edge {
                     from: owner_id.to_string(),
                     to: infra_id,

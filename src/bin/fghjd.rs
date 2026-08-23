@@ -7,12 +7,13 @@ use anyhow::{bail, Result};
 /// terminal; in a real install it's supervised by systemd (Linux) or a
 /// launchd LaunchDaemon (macOS), which already handle backgrounding,
 /// restart-on-crash, and log capture.
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         bail!("fghjd must run as root — invoke it via `sudo fghjd`");
     }
 
     fghj::daemon::write_pid(std::process::id())?;
     println!("fghjd listening on 127.0.0.1:{}", fghj::daemon::CONTROL_PORT);
-    fghj::daemon::run_control_api()
+    fghj::daemon::run_control_api().await
 }

@@ -82,7 +82,7 @@ fn validate(path: &Path) -> Result<()> {
 }
 
 fn graph(entry: String, workspace: Option<PathBuf>) -> Result<()> {
-    let workspace = fghj::resolve_workspace(Some(entry), workspace)?;
+    let workspace = fghj::resolve_workspace(Some(entry), workspace, None)?;
     let g = fghj::resolver::resolve_universe(&workspace)?;
     println!("{}", serde_json::to_string_pretty(&g)?);
     Ok(())
@@ -131,9 +131,23 @@ fn wire(entry: String, workspace: Option<PathBuf>) -> Result<()> {
         std::env::current_dir()?.join(workspace)
     };
 
+    // `fghjd` runs as root and has no credentials of its own for private
+    // remotes — captured here (as the real, unprivileged user) so the daemon
+    // can later drop privileges back to this user before shelling out to
+    // `git clone`. Only sent when HOME is known; the daemon falls back to
+    // its old (root-only) behavior otherwise.
+    let owner = std::env::var("HOME").ok().map(|home| {
+        serde_json::json!({
+            "uid": unsafe { libc::getuid() },
+            "gid": unsafe { libc::getgid() },
+            "home": home,
+            "ssh_auth_sock": std::env::var("SSH_AUTH_SOCK").ok(),
+        })
+    });
+
     let resp = http_post_json(
         "/workspaces",
-        &serde_json::json!({ "entry": entry, "workspace": absolute_workspace }),
+        &serde_json::json!({ "entry": entry, "workspace": absolute_workspace, "owner": owner }),
     )?;
     if let Some(err) = resp.get("error") {
         bail!("fghjd rejected workspace: {err}");

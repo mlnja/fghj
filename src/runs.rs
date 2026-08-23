@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::docker;
@@ -29,6 +29,11 @@ pub struct RunSpec {
     pub run_id: Option<String>,
     #[serde(default)]
     pub overrides: BTreeMap<String, String>,
+    /// Scopes the run to only the nodes reachable from this flow (see
+    /// `Node::flows`) instead of the whole graph — e.g. starting just the
+    /// checkout flow's services instead of every service fghj knows about.
+    #[serde(default)]
+    pub flow: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -51,6 +56,7 @@ pub struct RunState {
 pub struct RunRegistry {
     workspace: std::path::PathBuf,
     db: Arc<WorkspaceDb>,
+    docker: Arc<bollard::Docker>,
     runs: Mutex<BTreeMap<String, RunState>>,
 }
 
@@ -60,13 +66,17 @@ impl RunRegistry {
     /// all still alive is restored with freshly-inspected statuses, and a run
     /// missing any container (removed out-of-band, or lost across a reboot
     /// with no restart policy) is dropped rather than presented as running.
-    pub fn new(workspace: std::path::PathBuf, db: Arc<WorkspaceDb>) -> Result<Self> {
-        let persisted = db.load_runs()?;
+    pub async fn new(
+        workspace: std::path::PathBuf,
+        db: Arc<WorkspaceDb>,
+        docker: Arc<bollard::Docker>,
+    ) -> Result<Self> {
+        let persisted = db.clone().load_runs().await?;
         let mut reconciled = BTreeMap::new();
         for (run_id, mut state) in persisted {
             let mut alive = true;
             for c in &mut state.containers {
-                match docker::inspect_status(&c.container_name, "") {
+                match docker::inspect_status(&docker, &c.container_name, "").await {
                     Ok(Some(status)) => c.status = status.status,
                     _ => {
                         alive = false;
@@ -77,12 +87,13 @@ impl RunRegistry {
             if alive {
                 reconciled.insert(run_id, state);
             } else {
-                let _ = db.delete_run(&run_id);
+                let _ = db.clone().delete_run(run_id).await;
             }
         }
         Ok(Self {
             workspace,
             db,
+            docker,
             runs: Mutex::new(reconciled),
         })
     }
@@ -97,23 +108,54 @@ impl RunRegistry {
     /// as `"removed"` — so the next `/runs` poll reflects reality instead of
     /// a snapshot frozen at whenever the run last started or was persisted.
     /// Purely observational: it never touches docker itself.
-    pub fn refresh(&self) {
-        let mut runs = self.runs.lock().unwrap();
-        for state in runs.values_mut() {
-            let mut changed = false;
-            for c in &mut state.containers {
-                let status = match docker::inspect_status(&c.container_name, "") {
+    ///
+    /// Snapshots the container names while holding the lock, inspects them
+    /// all without holding it (inspection is an async docker call), then
+    /// re-locks to write results back — the lock is never held across an
+    /// `.await`.
+    pub async fn refresh(&self) {
+        let snapshot: Vec<(String, Vec<String>)> = {
+            let runs = self.runs.lock().unwrap();
+            runs.iter()
+                .map(|(run_id, state)| {
+                    (run_id.clone(), state.containers.iter().map(|c| c.container_name.clone()).collect())
+                })
+                .collect()
+        };
+
+        let mut results: Vec<(String, Vec<String>)> = Vec::new();
+        for (run_id, container_names) in snapshot {
+            let mut statuses = Vec::new();
+            for name in container_names {
+                let status = match docker::inspect_status(&self.docker, &name, "").await {
                     Ok(Some(s)) => s.status,
                     _ => "removed".to_string(),
                 };
-                if status != c.status {
-                    c.status = status;
-                    changed = true;
+                statuses.push(status);
+            }
+            results.push((run_id, statuses));
+        }
+
+        let mut changed_states: Vec<RunState> = Vec::new();
+        {
+            let mut runs = self.runs.lock().unwrap();
+            for (run_id, statuses) in results {
+                if let Some(state) = runs.get_mut(&run_id) {
+                    let mut changed = false;
+                    for (c, status) in state.containers.iter_mut().zip(statuses) {
+                        if status != c.status {
+                            c.status = status;
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        changed_states.push(state.clone());
+                    }
                 }
             }
-            if changed {
-                let _ = self.db.save_run(state);
-            }
+        }
+        for state in changed_states {
+            let _ = self.db.clone().save_run(state).await;
         }
     }
 
@@ -121,20 +163,23 @@ impl RunRegistry {
         self.runs.lock().unwrap().get(run_id).cloned()
     }
 
-    pub fn stop(&self, run_id: &str) -> Result<()> {
-        let mut runs = self.runs.lock().unwrap();
-        let Some(state) = runs.remove(run_id) else {
-            bail!("no such run: {run_id}");
+    pub async fn stop(&self, run_id: &str) -> Result<()> {
+        let state = {
+            let mut runs = self.runs.lock().unwrap();
+            let Some(state) = runs.remove(run_id) else {
+                bail!("no such run: {run_id}");
+            };
+            state
         };
         for c in &state.containers {
-            docker::stop_and_remove(&c.container_name)?;
+            docker::stop_and_remove(&self.docker, &c.container_name).await;
         }
-        docker::remove_network(&state.network)?;
-        self.db.delete_run(run_id)?;
+        docker::remove_network(&self.docker, &state.network).await;
+        self.db.clone().delete_run(run_id.to_string()).await?;
         Ok(())
     }
 
-    pub fn start(&self, graph: &Graph, spec: RunSpec) -> Result<RunState> {
+    pub async fn start(&self, graph: &Graph, spec: RunSpec) -> Result<RunState> {
         let run_id = spec
             .run_id
             .as_deref()
@@ -143,25 +188,33 @@ impl RunRegistry {
             .unwrap_or_else(|| DEFAULT_RUN_ID.to_string());
 
         // starting an already-running run replaces it cleanly
-        if self.runs.lock().unwrap().contains_key(&run_id) {
-            self.stop(&run_id)?;
+        let already_running = self.runs.lock().unwrap().contains_key(&run_id);
+        if already_running {
+            self.stop(&run_id).await?;
         }
 
         let network = format!("fghj-{}-{}", sanitize_label(&graph.workspace_name), run_id);
-        docker::ensure_network(&network)?;
+        docker::ensure_network(&self.docker, &network).await?;
+
+        let owner = self.db.clone().load_owner().await.ok().flatten();
 
         let mut containers = Vec::new();
         for node in &graph.nodes {
             if node.kind == "flow" {
                 continue;
             }
-            match self.start_node(graph, node, &run_id, &network, &spec.overrides) {
+            if let Some(flow) = &spec.flow {
+                if !node.flows.iter().any(|f| f == flow) {
+                    continue;
+                }
+            }
+            match self.start_node(graph, node, &run_id, &network, &spec.overrides, owner.as_ref()).await {
                 Ok(info) => containers.push(info),
                 Err(e) => {
                     for c in &containers {
-                        let _ = docker::stop_and_remove(&c.container_name);
+                        docker::stop_and_remove(&self.docker, &c.container_name).await;
                     }
-                    docker::remove_network(&network)?;
+                    docker::remove_network(&self.docker, &network).await;
                     return Err(e);
                 }
             }
@@ -173,18 +226,78 @@ impl RunRegistry {
             network,
             containers,
         };
-        self.db.save_run(&state)?;
+        self.db.clone().save_run(state.clone()).await?;
         self.runs.lock().unwrap().insert(run_id, state.clone());
         Ok(state)
     }
 
-    fn start_node(
+    /// Tops up the single default environment so every node reachable from
+    /// `flow` (or every node in the graph, if `flow` is `None`) is running —
+    /// unlike `start`, this never touches a container that's already alive.
+    /// fghj models one shared set of running containers per workspace, not a
+    /// separate environment per flow, so picking a flow should never restart
+    /// (or duplicate) whatever's already up.
+    ///
+    /// Liveness is checked directly against docker on every call rather than
+    /// trusting the persisted `RunState`, since a container can be
+    /// stopped/removed out-of-band between calls (see `refresh`).
+    pub async fn ensure_running(&self, graph: &Graph, flow: Option<&str>) -> Result<RunState> {
+        let run_id = DEFAULT_RUN_ID.to_string();
+        let network = format!("fghj-{}-{}", sanitize_label(&graph.workspace_name), run_id);
+        docker::ensure_network(&self.docker, &network).await?;
+
+        let mut state = self.runs.lock().unwrap().get(&run_id).cloned().unwrap_or_else(|| RunState {
+            run_id: run_id.clone(),
+            overrides: BTreeMap::new(),
+            network: network.clone(),
+            containers: Vec::new(),
+        });
+
+        let owner = self.db.clone().load_owner().await.ok().flatten();
+
+        let targets: Vec<&Node> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind != "flow")
+            .filter(|n| flow.is_none_or(|flow| n.flows.iter().any(|f| f == flow)))
+            .collect();
+
+        for node in targets {
+            let container_name = format!("fghj-{}-{}-{}", sanitize_label(&graph.workspace_name), run_id, sanitize_label(&node.id));
+            let alive = matches!(
+                docker::inspect_status(&self.docker, &container_name, "").await,
+                Ok(Some(s)) if s.status == "running"
+            );
+            if alive {
+                continue;
+            }
+            // A stopped-but-not-removed container from a previous run would
+            // otherwise collide with create_container's fixed name.
+            docker::stop_and_remove(&self.docker, &container_name).await;
+
+            let info = self
+                .start_node(graph, node, &run_id, &network, &BTreeMap::new(), owner.as_ref())
+                .await?;
+            state.containers.retain(|c| c.node_id != info.node_id);
+            state.containers.push(info);
+            // Saved after every node, not just at the end, so a later
+            // failure in this same call doesn't lose track of containers
+            // that did start successfully.
+            self.db.clone().save_run(state.clone()).await?;
+            self.runs.lock().unwrap().insert(run_id.clone(), state.clone());
+        }
+
+        Ok(state)
+    }
+
+    async fn start_node(
         &self,
         graph: &Graph,
         node: &Node,
         run_id: &str,
         network: &str,
         overrides: &BTreeMap<String, String>,
+        owner: Option<&crate::store::WorkspaceOwner>,
     ) -> Result<ContainerInfo> {
         let workspace = sanitize_label(&graph.workspace_name);
         let container_name = format!("fghj-{workspace}-{run_id}-{}", sanitize_label(&node.id));
@@ -220,16 +333,22 @@ impl RunRegistry {
                             sanitize_label(branch)
                         );
                         let internal_dir = self.workspace.join(".fghj");
-                        let mirror = crate::resolver::ensure_mirror(&repo, &internal_dir)?;
+                        let mirror_dir = internal_dir.clone();
+                        let owner_for_mirror = owner.cloned();
+                        let mirror = tokio::task::spawn_blocking(move || {
+                            crate::resolver::ensure_mirror(&repo, &mirror_dir, owner_for_mirror.as_ref())
+                        })
+                        .await
+                        .context("ensure_mirror task panicked")??;
                         let checkout = internal_dir.join("checkouts").join(format!(
                             "{}-{}",
                             sanitize_label(&node.id),
                             sanitize_label(branch)
                         ));
                         let build_dir =
-                            docker::materialize_checkout(&mirror, branch, &checkout)?
+                            docker::materialize_checkout(&mirror, branch, &checkout).await?
                                 .join(&build.context);
-                        docker::build_image(&build_dir, &build.dockerfile, &tag)?;
+                        docker::build_image(&self.docker, &build_dir, &build.dockerfile, &tag).await?;
                         tag
                     }
                     // Default: build straight from the live workspace checkout,
@@ -246,7 +365,7 @@ impl RunRegistry {
                             sanitize_label(&branch)
                         );
                         let build_dir = self.workspace.join(&local_path).join(&build.context);
-                        docker::build_image(&build_dir, &build.dockerfile, &tag)?;
+                        docker::build_image(&self.docker, &build_dir, &build.dockerfile, &tag).await?;
                         tag
                     }
                 }
@@ -258,21 +377,25 @@ impl RunRegistry {
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>();
 
-        docker::run_container(&docker::RunOpts {
-            name: &container_name,
-            network,
-            aliases: &aliases,
-            env: &node.environment,
-            ports: &node.ports,
-            image: &image,
-            project: network,
-            service_name: &node.id,
-        })?;
+        docker::run_container(
+            &self.docker,
+            &docker::RunOpts {
+                name: &container_name,
+                network,
+                aliases: &aliases,
+                env: &node.environment,
+                ports: &node.ports,
+                image: &image,
+                project: network,
+                service_name: &node.id,
+            },
+        )
+        .await?;
 
         let first_port = node.ports.first().map(|p| p.split('/').next().unwrap_or(p).to_string());
         let inspected = match &first_port {
-            Some(p) => docker::inspect_status(&container_name, p)?,
-            None => docker::inspect_status(&container_name, "")?,
+            Some(p) => docker::inspect_status(&self.docker, &container_name, p).await?,
+            None => docker::inspect_status(&self.docker, &container_name, "").await?,
         };
         let (status, published_port) = match inspected {
             Some(s) => (s.status, s.published_port),
@@ -289,11 +412,22 @@ impl RunRegistry {
     }
 }
 
-pub fn logs_for(state: &RunState, node_id: &str, tail: usize) -> Result<String> {
+pub async fn logs_for_tail(docker: &bollard::Docker, state: &RunState, node_id: &str, tail: usize) -> Result<String> {
     let Some(c) = state.containers.iter().find(|c| c.node_id == node_id) else {
         bail!("no such node in run: {node_id}");
     };
-    docker::logs(&c.container_name, tail)
+    docker::logs_tail(docker, &c.container_name, tail).await
+}
+
+/// Returns the container name backing `node_id` in `state`, for the SSE
+/// live-follow endpoint to build a `docker::logs_follow` stream from.
+pub fn container_name_for<'a>(state: &'a RunState, node_id: &str) -> Result<&'a str> {
+    state
+        .containers
+        .iter()
+        .find(|c| c.node_id == node_id)
+        .map(|c| c.container_name.as_str())
+        .ok_or_else(|| anyhow::anyhow!("no such node in run: {node_id}"))
 }
 
 #[cfg(test)]

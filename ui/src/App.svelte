@@ -4,12 +4,14 @@
   import Drawer from './lib/Drawer.svelte';
   import Placeholder from './lib/Placeholder.svelte';
   import RunControls from './lib/RunControls.svelte';
+  import OperationsDrawer from './lib/OperationsDrawer.svelte';
 
   let universe = $state(null);
   let error = $state(null);
   let activeTab = $state('repos');
   let currentFlow = $state(null);
   let selectedNode = $state(null);
+  let opsOpen = $state(false);
   let runs = $state([]);
   let selectedRunId = $state(null);
   let runsPoll = null;
@@ -99,12 +101,32 @@
     await load();
   }
 
+  async function pullFlow(flow) {
+    await fetch(withWs(`/pull-all?flow=${encodeURIComponent(flow)}`), { method: 'POST' });
+  }
+
+  async function pullFlowStatus(flow) {
+    const res = await fetch(withWs(`/pull-all/status?flow=${encodeURIComponent(flow)}`));
+    if (!res.ok) return null;
+    return await res.json();
+  }
+
+  async function runFlow(flow) {
+    await startRun({ run_id: null, overrides: {}, flow });
+  }
+
+  async function listPullJobs() {
+    const res = await fetch(withWs('/pull-jobs'));
+    if (!res.ok) return [];
+    return await res.json();
+  }
+
   async function downloadNode(nodeId) {
-    await fetch(withWs(`/pull/${nodeId}`), { method: 'POST' });
+    await fetch(withWs(`/pull/${encodeURIComponent(nodeId)}`), { method: 'POST' });
   }
 
   async function pullStatus(nodeId) {
-    const res = await fetch(withWs(`/pull/${nodeId}/status`));
+    const res = await fetch(withWs(`/pull/${encodeURIComponent(nodeId)}/status`));
     if (!res.ok) return null;
     return await res.json();
   }
@@ -116,9 +138,14 @@
 
   async function fetchLogs(nodeId) {
     if (!selectedRunId) return '';
-    const res = await fetch(withWs(`/runs/${selectedRunId}/nodes/${nodeId}/logs`));
+    const res = await fetch(withWs(`/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/logs`));
     const data = await res.json();
     return data.logs ?? data.error ?? '';
+  }
+
+  function logStreamUrl(nodeId) {
+    if (!selectedRunId) return null;
+    return withWs(`/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/logs/stream`);
   }
 
   $effect(() => {
@@ -182,6 +209,11 @@
     onPullAll={pullAll}
     onPullAllStatus={pullAllStatus}
     onPullAllComplete={onPullAllComplete}
+    onPullFlow={pullFlow}
+    onPullFlowStatus={pullFlowStatus}
+    onPullFlowComplete={onPullAllComplete}
+    onRunFlow={runFlow}
+    onOpenOperations={() => (opsOpen = true)}
     workspaces={workspaces}
     currentWorkspaceId={currentWorkspaceId}
     onOpenWorkspaces={loadWorkspaces}
@@ -214,6 +246,7 @@
             serviceIds={universe.nodes.filter((n) => n.kind === 'service').map((n) => n.id)}
             onStart={startRun}
             onStop={stopRun}
+            onOpenOperations={() => (opsOpen = true)}
           />
           <GraphView graph={containersGraph} {currentFlow} mode="containers" {runContainers} onSelectNode={(n) => (selectedNode = n)} />
         </Placeholder>
@@ -232,10 +265,15 @@
       onClose={() => (selectedNode = null)}
       {liveInfo}
       onFetchLogs={fetchLogs}
+      onLogStreamUrl={logStreamUrl}
       onDownload={downloadNode}
       onPullStatus={pullStatus}
       onDownloadComplete={onDownloadComplete}
     />
+  {/if}
+
+  {#if opsOpen}
+    <OperationsDrawer onClose={() => (opsOpen = false)} onListJobs={listPullJobs} />
   {/if}
 </div>
 

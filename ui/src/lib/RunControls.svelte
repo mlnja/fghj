@@ -1,5 +1,5 @@
 <script>
-  let { runs, serviceIds, onStart, onStop } = $props();
+  let { runs, serviceIds, onStart, onStop, onOpenOperations } = $props();
 
   let showForm = $state(false);
   let runName = $state('');
@@ -27,6 +27,7 @@
   <div class="row">
     <button class="btn" onclick={startDefault}>Start default environment</button>
     <button class="btn ghost" onclick={() => (showForm = !showForm)}>+ Review run</button>
+    <button class="btn ghost icon" onclick={onOpenOperations} title="view pull/download operations queue">☰ Operations</button>
   </div>
 
   {#if showForm}
