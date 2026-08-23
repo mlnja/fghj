@@ -1,0 +1,96 @@
+@import url('https://fonts.googleapis.com/css2?family=Big+Shoulders+Stencil:wght@700;800&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+:root {
+  /* fghj "Container Yard" design system */
+  --bg: oklch(13% 0.012 260);
+  --panel: oklch(17% 0.014 260);
+  --panel-2: oklch(21% 0.016 260);
+  --line: oklch(30% 0.012 260);
+  --line-strong: oklch(38% 0.014 260);
+
+  --ink: oklch(96% 0.006 90);
+  --ink-dim: oklch(74% 0.012 90);
+  --ink-faint: oklch(52% 0.012 90);
+
+  --accent: oklch(72% 0.19 55);
+  --accent-dim: oklch(55% 0.16 55);
+  --accent-bg: oklch(24% 0.05 55);
+
+  --success: oklch(76% 0.17 150);
+  --success-bg: oklch(23% 0.05 150);
+  --warning: oklch(82% 0.15 95);
+  --warning-bg: oklch(25% 0.05 95);
+  --danger: oklch(68% 0.19 25);
+  --danger-bg: oklch(24% 0.06 25);
+
+  --font-display: 'Big Shoulders Stencil', 'Space Grotesk', sans-serif;
+  --font-body: 'Space Grotesk', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+  --space-5: 24px; --space-6: 32px; --space-7: 48px; --space-8: 64px;
+  --radius-sm: 6px; --radius-md: 10px; --radius-lg: 14px;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--font-body);
+  color: var(--ink);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+h1, h2, h3, h4, p { margin: 0; }
+a { color: var(--accent); }
+a:hover { color: var(--accent-dim); }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 8px; }
+
+.grid-bg {
+  background-image:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 7px;
+  font: 600 11px/1 var(--font-mono);
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.eyebrow::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+.lede { font: 400 15px/1.55 var(--font-body); color: var(--ink-dim); }
+.body-sm { font: 400 12.5px/1.55 var(--font-body); color: var(--ink-dim); }
+.body-xs { font: 400 11px/1.5 var(--font-body); color: var(--ink-faint); }
+
+.stencil {
+  font-family: var(--font-display);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.01em;
+}
+
+.crate-tag {
+  font: 500 10px/1 var(--font-mono);
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+  border: 1px solid var(--line-strong);
+  padding: 3px 7px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.corner-brackets { position: relative; }
+.corner-brackets::before, .corner-brackets::after {
+  content: ""; position: absolute; width: 9px; height: 9px;
+  border: 1.5px solid var(--accent-dim); opacity: 0.4; pointer-events: none;
+}
+.corner-brackets::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; }
+.corner-brackets::after { bottom: -1px; right: -1px; border-left: 0; border-top: 0; }
+
+.hazard-bar { background: var(--warning); opacity: 0.85; }
+
+.dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }

@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    a { color: var(--accent); }
+    a:hover { color: var(--accent-dim); }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 8px; }
+    select, input, textarea { font-family: inherit; }
+  </style>
+</helmet>
+<div class="grid-bg" style="position:relative;height:100vh;width:100vw;overflow:auto;font-family:var(--font-body);background:var(--bg);color:var(--ink)">
+
+  <div style="position:fixed;top:16px;left:16px;z-index:50;display:flex;align-items:center;gap:10px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;box-shadow:0 12px 32px -12px rgba(0,0,0,0.6)">
+    <div style="display:flex;align-items:center;gap:6px">
+      <div style="width:18px;height:18px;background:var(--accent);display:flex;align-items:center;justify-content:center;font:800 11px var(--font-mono);color:var(--bg)">f</div>
+      <div class="stencil" style="font-size:15px;color:var(--ink)">fghj</div>
+    </div>
+    <div style="width:1px;height:18px;background:var(--line)"></div>
+
+    <div style="position:relative">
+      <div onClick="{{ toggleFlowMenu }}" style="display:flex;align-items:center;gap:7px;padding:6px 10px;border:1px solid var(--line-strong);border-radius:4px;cursor:pointer;font:600 12px var(--font-mono);color:var(--ink)">
+        {{ selectedFlow.name }}
+        <div style="width:6px;height:6px;background:{{ flowStatusColor }}"></div>
+      </div>
+      <sc-if value="{{ flowMenuOpen }}">
+        <div style="position:absolute;top:calc(100% + 6px);left:0;background:var(--panel-2);border:1px solid var(--line-strong);border-radius:6px;box-shadow:0 12px 32px -8px rgba(0,0,0,0.5);z-index:50;min-width:200px;overflow:hidden">
+          <sc-for list="{{ flowList }}" as="f" hint-placeholder-count="2">
+            <div onClick="{{ f.onSelect }}" style="padding:9px 12px;cursor:pointer;font:600 12px var(--font-mono);display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--line);color:var(--ink)" style-hover="{{ hoverRow }}">
+              <div style="width:6px;height:6px;background:{{ f.dotColor }}"></div>
+              {{ f.id }}
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+    </div>
+    <div onClick="{{ toggleLaunch }}" style="padding:6px 12px;border-radius:4px;font:700 10.5px var(--font-mono);text-transform:uppercase;letter-spacing:0.04em;cursor:pointer;background:{{ launchButtonBg }};color:{{ launchButtonColor }}">{{ launchButtonLabel }}</div>
+    <div style="width:1px;height:18px;background:var(--line)"></div>
+    <div style="display:flex;padding:2px;background:var(--panel-2);border-radius:6px;gap:2px">
+      <sc-for list="{{ viewSwitch }}" as="v" hint-placeholder-count="2">
+        <div onClick="{{ v.onClick }}" style="{{ v.style }}">{{ v.label }}</div>
+      </sc-for>
+    </div>
+    <div style="width:1px;height:18px;background:var(--line)"></div>
+    <div style="width:7px;height:7px;border-radius:50%;background:{{ daemonColor }};box-shadow:0 0 0 3px {{ daemonGlow }}"></div>
+    <div style="width:1px;height:18px;background:var(--line)"></div>
+    <div onClick="{{ toggleHelp }}" style="width:22px;height:22px;border-radius:50%;background:var(--panel-2);display:flex;align-items:center;justify-content:center;font:700 12px var(--font-mono);color:var(--ink-dim);cursor:pointer">?</div>
+  </div>
+
+  <sc-if value="{{ helpOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ toggleHelp }}" style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:80;display:flex;align-items:center;justify-content:center">
+      <div onClick="{{ stopProp }}" style="background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:26px 28px;max-width:440px;box-shadow:0 24px 60px -20px rgba(0,0,0,0.7)">
+        <div style="font:600 16px var(--font-body);color:var(--ink);margin-bottom:14px">How to read the map</div>
+        <div style="display:flex;flex-direction:column;gap:10px;font:400 12.5px/1.5 var(--font-body);color:var(--ink-dim)">
+          <div><b style="color:var(--ink)">Solid border</b> — repo cloned / container running. <b style="color:var(--ink)">Dashed</b> — not yet.</div>
+          <div><b style="color:var(--ink)">Tinted block</b> — infrastructure (postgres, redis): fixed image, no branch.</div>
+          <div><span style="color:var(--success)">●</span> clean git status &nbsp; <span style="color:var(--warning)">●</span> uncommitted changes — switching branch will prompt to stash/commit.</div>
+          <div>Click any node to open its panel: pick a branch, view logs, or send a request.</div>
+          <div>Switching a repo's branch in <b style="color:var(--ink)">Repos</b> can change its own dependencies. <b style="color:var(--ink)">Actual</b> shows what's really running, and flags containers still on an old branch with a Sync button.</div>
+        </div>
+        <div onClick="{{ toggleHelp }}" style="margin-top:18px;padding:8px 0;text-align:center;border-radius:4px;background:var(--panel-2);font:700 11px var(--font-mono);text-transform:uppercase;letter-spacing:0.04em;cursor:pointer;color:var(--ink)">Close</div>
+      </div>
+    </div>
+  </sc-if>
+
+  <div style="min-height:100%;position:relative">
+
+      <sc-if value="{{ isReposTab }}" hint-placeholder-val="{{ true }}">
+        <div style="position:relative;width:{{ repoGraphWidth }}px;height:{{ repoGraphHeight }}px;min-width:100%;min-height:100%;box-sizing:border-box">
+          <svg width="{{ repoGraphWidth }}" height="{{ repoGraphHeight }}" style="position:absolute;top:0;left:0">
+            <sc-for list="{{ repoEdges }}" as="e" hint-placeholder-count="0">
+              <line x1="{{ e.x1 }}" y1="{{ e.y1 }}" x2="{{ e.x2 }}" y2="{{ e.y2 }}" stroke="var(--accent-dim)" stroke-width="1.5" stroke-dasharray="5,4"></line>
+            </sc-for>
+          </svg>
+          <sc-for list="{{ repoNodes }}" as="n" hint-placeholder-count="3">
+            <div onClick="{{ n.onSelect }}" onContextMenu="{{ n.onContext }}" style="{{ n.cardStyle }}">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+                <div style="display:flex;align-items:center;gap:6px">
+                  <sc-if value="{{ n.cloned }}" hint-placeholder-val="{{ true }}">
+                    <div style="width:6px;height:6px;border-radius:50%;background:{{ n.dirtyColor }}"></div>
+                  </sc-if>
+                  <div style="font:600 13.5px var(--font-mono);color:var(--ink)">{{ n.id }}</div>
+                </div>
+                <div class="crate-tag">{{ n.code }}</div>
+              </div>
+              <div style="font:500 11px var(--font-mono);color:var(--ink-faint)">{{ n.repo }}</div>
+              <sc-if value="{{ n.cloned }}" hint-placeholder-val="{{ true }}">
+                <div style="font:500 10px var(--font-mono);color:var(--ink-faint);margin-top:6px">{{ n.branch }} · {{ n.dirtyLabel }}</div>
+              </sc-if>
+              <sc-if value="{{ n.notCloned }}" hint-placeholder-val="{{ false }}">
+                <div onClick="{{ n.onClone }}" style="margin-top:8px;padding:5px 0;text-align:center;border-radius:3px;background:var(--accent);color:var(--bg);font:700 10.5px var(--font-mono);text-transform:uppercase;letter-spacing:0.04em">git clone</div>
+              </sc-if>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isContainersTab }}" hint-placeholder-val="{{ false }}">
+        <div style="position:relative;width:{{ containerGraphWidth }}px;height:{{ containerGraphHeight }}px;min-width:100%;min-height:100%;box-sizing:border-box">
+          <svg width="{{ containerGraphWidth }}" height="{{ containerGraphHeight }}" style="position:absolute;top:0;left:0">
+            <sc-for list="{{ containerEdges }}" as="e" hint-placeholder-count="0">
+              <line x1="{{ e.x1 }}" y1="{{ e.y1 }}" x2="{{ e.x2 }}" y2="{{ e.y2 }}" stroke="var(--accent-dim)" stroke-width="1.5" stroke-dasharray="5,4"></line>
+            </sc-for>
+          </svg>
+          <sc-for list="{{ containerNodes }}" as="c" hint-placeholder-count="3">
+            <div onClick="{{ c.onOpen }}" onContextMenu="{{ c.onContext }}" style="{{ c.cardStyle }}">
+              <sc-if value="{{ c.drift }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;background:var(--warning-bg);color:var(--warning);padding:3px 6px;border-radius:3px;margin-bottom:6px;font:600 9px var(--font-mono)">
+                  <span>old code</span>
+                  <span onClick="{{ c.onSync }}" style="text-decoration:underline;cursor:pointer">sync</span>
+                </div>
+              </sc-if>
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+                <div style="font:600 13px var(--font-mono);color:var(--ink)">{{ c.id }}</div>
+                <div class="crate-tag">{{ c.code }}</div>
+              </div>
+              <div style="font:500 10.5px var(--font-mono);color:var(--ink-faint)">{{ c.domain }}</div>
+              <sc-if value="{{ c.showStart }}" hint-placeholder-val="{{ false }}">
+                <div onClick="{{ c.onStart }}" style="margin-top:6px;padding:4px 0;text-align:center;border-radius:3px;background:var(--panel-2);color:var(--ink);font:700 9.5px var(--font-mono);text-transform:uppercase;letter-spacing:0.04em">start</div>
+              </sc-if>
+              <sc-if value="{{ c.notInFlow }}" hint-placeholder-val="{{ false }}">
+                <div style="margin-top:6px;font:500 9px var(--font-mono);color:var(--ink-faint)">not in {{ selectedFlow.name }}</div>
+              </sc-if>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isConfigTab }}" hint-placeholder-val="{{ false }}">
+        <div style="position:relative;width:100%;min-height:100%;padding:130px 40px 40px;box-sizing:border-box;display:flex;gap:16px;flex-wrap:wrap">
+          <sc-for list="{{ configBlocks }}" as="b" hint-placeholder-count="3">
+            <div onClick="{{ b.onOpen }}" style="width:200px;height:90px;background:var(--panel-2);border:1px solid var(--line-strong);border-radius:6px;padding:13px;cursor:pointer">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                <div style="font:600 13px var(--font-mono);color:var(--ink)">{{ b.label }}</div>
+                <div class="crate-tag">{{ b.code }}</div>
+              </div>
+              <div style="font:500 10.5px var(--font-mono);color:var(--ink-faint)">{{ b.subLabel }}</div>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ configDrawer }}" hint-placeholder-val="{{ false }}">
+        <div onClick="{{ closeConfigDrawer }}" style="position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:90"></div>
+        <div onClick="{{ stopProp }}" style="position:fixed;top:0;right:0;bottom:0;width:70vw;background:var(--panel);border-left:1px solid var(--line);box-shadow:-16px 0 32px -16px rgba(0,0,0,0.6);display:flex;flex-direction:column;z-index:91">
+          <div style="display:flex;align-items:center;gap:10px;padding:18px 20px;border-bottom:1px solid var(--line)">
+            <div style="font:600 15px var(--font-mono);color:var(--ink)">{{ configDrawer.label }}</div>
+            <div style="flex:1"></div>
+            <div onClick="{{ closeConfigDrawer }}" style="cursor:pointer;color:var(--ink-faint);font:400 18px var(--font-body);line-height:1;padding:2px 4px">×</div>
+          </div>
+          <div style="flex:1;overflow-y:auto;padding:18px 20px">
+            <sc-if value="{{ configDrawer.isSecrets }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;flex-direction:column;gap:18px">
+                <sc-for list="{{ configDrawer.envGroups }}" as="g" hint-placeholder-count="2">
+                  <div>
+                    <div style="font:700 10px/1 var(--font-mono);letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:8px">{{ g.service }}</div>
+                    <sc-for list="{{ g.vars }}" as="v" hint-placeholder-count="1">
+                      <div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--line);font:500 12px var(--font-mono)">
+                        <span style="color:var(--ink)">{{ v.key }}</span>
+                        <span style="color:{{ v.valueColor }}">{{ v.value }}</span>
+                      </div>
+                    </sc-for>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{ configDrawer.isDns }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;flex-direction:column">
+                <div style="display:grid;grid-template-columns:1.6fr 1fr 1fr;gap:8px;padding:8px 0;border-bottom:1px solid var(--line-strong);font:700 9.5px/1 var(--font-mono);letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-faint)">
+                  <div>Domain</div><div>Resolves to</div><div>Status</div>
+                </div>
+                <sc-for list="{{ configDrawer.dnsRows }}" as="r" hint-placeholder-count="4">
+                  <div style="display:grid;grid-template-columns:1.6fr 1fr 1fr;gap:8px;padding:9px 0;border-bottom:1px solid var(--line);font:500 11.5px var(--font-mono)">
+                    <div style="color:var(--ink)">{{ r.domain }}</div>
+                    <div style="color:var(--ink-faint)">{{ r.ip }}</div>
+                    <div style="color:{{ r.statusColor }}">{{ r.statusLabel }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{ configDrawer.isTls }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;flex-direction:column;gap:14px;font:400 12.5px var(--font-body);color:var(--ink-dim)">
+                <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--success-bg);border-radius:6px;color:var(--success);font:600 12px var(--font-mono)">Root CA installed in System Keychain</div>
+                <div>
+                  <div style="font:700 10px/1 var(--font-mono);letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:8px">Issued certificates</div>
+                  <sc-for list="{{ configDrawer.certRows }}" as="c" hint-placeholder-count="2">
+                    <div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line);font:500 12px var(--font-mono)">
+                      <span style="color:var(--ink)">{{ c.domain }}</span>
+                      <span style="color:var(--ink-faint)">{{ c.validUntil }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+            </sc-if>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ repoDrawer }}" hint-placeholder-val="{{ false }}">
+        <div onClick="{{ closeRepoDrawer }}" style="position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:90"></div>
+        <div onClick="{{ stopProp }}" style="position:fixed;top:0;right:0;bottom:0;width:70vw;background:var(--panel);border-left:1px solid var(--line);box-shadow:-16px 0 32px -16px rgba(0,0,0,0.6);display:flex;flex-direction:column;z-index:91">
+          <div style="display:flex;align-items:center;gap:10px;padding:18px 20px;border-bottom:1px solid var(--line)">
+            <div style="font:600 15px var(--font-mono);color:var(--ink)">{{ repoDrawer.id }}</div>
+            <div style="flex:1"></div>
+            <div onClick="{{ closeRepoDrawer }}" style="cursor:pointer;color:var(--ink-faint);font:400 18px var(--font-body);line-height:1;padding:2px 4px">×</div>
+          </div>
+          <div style="flex:1;overflow-y:auto;padding:18px 20px">
+            <div style="font:400 12px var(--font-body);color:var(--ink-dim);margin-bottom:14px">Switching branches can change this repo's own dependencies.</div>
+            <sc-if value="{{ repoGuardActive }}" hint-placeholder-val="{{ false }}">
+              <div style="padding:14px;border:1px solid var(--line);border-radius:6px;background:var(--panel-2)">
+                <div style="font:700 11.5px var(--font-mono);text-transform:uppercase;letter-spacing:0.04em;color:var(--warning);margin-bottom:4px">Uncommitted changes</div>
+                <div style="font:400 11.5px var(--font-body);color:var(--ink-dim);margin-bottom:10px">git status is dirty on {{ repoDrawer.id }}.</div>
+                <div style="display:flex;flex-direction:column;gap:6px">
+                  <div onClick="{{ onRepoStash }}" style="padding:7px 10px;border-radius:4px;background:var(--panel);font:600 11.5px var(--font-mono);cursor:pointer;color:var(--ink)">Stash & switch</div>
+                  <div onClick="{{ onRepoCommit }}" style="padding:7px 10px;border-radius:4px;background:var(--panel);font:600 11.5px var(--font-mono);cursor:pointer;color:var(--ink)">Commit & switch</div>
+                  <div onClick="{{ onRepoAbort }}" style="padding:7px 10px;border-radius:4px;font:600 11.5px var(--font-mono);cursor:pointer;color:var(--ink-faint)">Abort</div>
+                </div>
+              </div>
+            </sc-if>
+            <sc-if value="{{ repoGuardActive }}" hint-placeholder-val="{{ true }}">
+              <sc-for list="{{ repoBranchOptions }}" as="b" hint-placeholder-count="4">
+                <div onClick="{{ b.onPick }}" style="{{ b.style }}">
+                  <span>{{ b.name }}</span>
+                  <sc-if value="{{ b.current }}" hint-placeholder-val="{{ false }}"><span style="color:var(--accent);font-size:10px">current</span></sc-if>
+                </div>
+              </sc-for>
+            </sc-if>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ containerDrawer }}" hint-placeholder-val="{{ false }}">
+        <div onClick="{{ closeContainerDrawer }}" style="position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:90"></div>
+        <div onClick="{{ stopProp }}" style="position:fixed;top:0;right:0;bottom:0;width:70vw;background:var(--panel);border-left:1px solid var(--line);box-shadow:-16px 0 32px -16px rgba(0,0,0,0.6);display:flex;flex-direction:column;z-index:91">
+          <div style="display:flex;align-items:center;gap:10px;padding:18px 20px;border-bottom:1px solid var(--line)">
+            <div style="width:7px;height:7px;background:{{ containerDrawer.statusColor }}"></div>
+            <div style="font:600 15px var(--font-mono);color:var(--ink)">{{ containerDrawer.id }}</div>
+            <div style="flex:1"></div>
+            <div onClick="{{ closeContainerDrawer }}" style="cursor:pointer;color:var(--ink-faint);font:400 18px var(--font-body);line-height:1;padding:2px 4px">×</div>
+          </div>
+          <div style="display:flex;gap:4px;padding:12px 20px 0">
+            <sc-for list="{{ containerDrawerTabs }}" as="t" hint-placeholder-count="2">
+              <div onClick="{{ t.onClick }}" style="{{ t.style }}">{{ t.label }}</div>
+            </sc-for>
+          </div>
+          <div style="flex:1;overflow-y:auto;padding:18px 20px">
+            <sc-if value="{{ isContainerOverview }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;flex-direction:column;gap:12px;font:400 12.5px var(--font-body);color:var(--ink-dim)">
+                <div style="font:400 11px var(--font-mono);color:var(--accent)">{{ containerDrawer.domain }}</div>
+                <sc-if value="{{ containerDrawer.branch }}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex;justify-content:space-between"><span>Branch</span><span style="font-family:var(--font-mono);font-size:11px;color:var(--ink)">{{ containerDrawer.branch }}</span></div>
+                </sc-if>
+                <div style="display:flex;justify-content:space-between"><span>Status</span><span style="font-family:var(--font-mono);font-size:11px;color:{{ containerDrawer.statusColor }}">{{ containerDrawer.statusLabel }}</span></div>
+                <sc-if value="{{ containerDrawer.drift }}" hint-placeholder-val="{{ false }}">
+                  <div style="padding:10px 12px;border-radius:6px;background:var(--warning-bg)">
+                    <div style="font:600 11.5px var(--font-mono);color:var(--warning);margin-bottom:8px">Running old code — repo branch changed</div>
+                    <div onClick="{{ containerDrawer.onSync }}" style="padding:7px 0;text-align:center;border-radius:4px;background:var(--panel);font:700 11px var(--font-mono);text-transform:uppercase;letter-spacing:0.04em;cursor:pointer;color:var(--ink)">Sync container</div>
+                  </div>
+                </sc-if>
+              </div>
+            </sc-if>
+            <sc-if value="{{ isContainerRequest }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;flex-direction:column;gap:12px">
+                <div style="display:flex;gap:8px">
+                  <select value="{{ requestMethod }}" onChange="{{ onMethodChange }}" style="font:700 12px var(--font-mono);padding:8px 9px;border:1px solid var(--line-strong);border-radius:4px;background:var(--panel);color:var(--ink)">
+                    <option value="GET">GET</option>
+                    <option value="POST">POST</option>
+                    <option value="PUT">PUT</option>
+                    <option value="DELETE">DELETE</option>
+                  </select>
+                  <input value="{{ requestPath }}" onChange="{{ onPathChange }}" placeholder="/api/health" style="flex:1;font:500 12px var(--font-mono);padding:8px 10px;border:1px solid var(--line-strong);border-radius:4px;background:var(--panel);color:var(--ink);min-width:0" />
+                </div>
+                <div style="font:700 9.5px/1 var(--font-mono);letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-faint)">Headers</div>
+                <textarea value="{{ requestHeaders }}" onChange="{{ onHeadersChange }}" rows="2" style="font:400 11.5px var(--font-mono);padding:8px 10px;border:1px solid var(--line-strong);border-radius:4px;resize:vertical;background:var(--panel);color:var(--ink)"></textarea>
+                <sc-if value="{{ showBody }}" hint-placeholder-val="{{ false }}">
+                  <div style="font:700 9.5px/1 var(--font-mono);letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-faint)">Body</div>
+                  <textarea value="{{ requestBody }}" onChange="{{ onBodyChange }}" rows="3" style="font:400 11.5px var(--font-mono);padding:8px 10px;border:1px solid var(--line-strong);border-radius:4px;resize:vertical;background:var(--panel);color:var(--ink)"></textarea>
+                </sc-if>
+                <div onClick="{{ onSend }}" style="padding:9px 0;text-align:center;border-radius:4px;background:var(--accent);color:var(--bg);font:700 12px var(--font-mono);text-transform:uppercase;letter-spacing:0.05em;cursor:pointer">{{ sendLabel }}</div>
+                <div style="border:1px solid var(--line);border-radius:6px;min-height:120px;padding:12px 14px;background:var(--bg)">
+                  <sc-if value="{{ response }}" hint-placeholder-val="{{ false }}">
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font:700 11px var(--font-mono)">
+                      <div style="padding:3px 8px;border-radius:3px;background:var(--panel-2);color:{{ response.statusColor }}">{{ response.status }}</div>
+                      <div style="color:var(--ink-faint)">{{ response.time }}ms</div>
+                    </div>
+                    <pre style="margin:0;font:400 11.5px/1.6 var(--font-mono);white-space:pre-wrap;color:var(--ink-dim)">{{ response.body }}</pre>
+                  </sc-if>
+                  <sc-if value="{{ response }}" hint-placeholder-val="{{ true }}">
+                    <div style="color:var(--ink-faint);font:400 12.5px var(--font-body)">Send a request to see the response.</div>
+                  </sc-if>
+                </div>
+              </div>
+            </sc-if>
+            <sc-if value="{{ isContainerLogs }}" hint-placeholder-val="{{ false }}">
+              <div class="grid-bg" style="background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:12px 14px;font:400 11.5px/1.7 var(--font-mono);color:var(--ink-dim);height:100%;overflow-y:auto">
+                <sc-for list="{{ containerLogs }}" as="line" hint-placeholder-count="6">
+                  <div style="display:flex;gap:8px;white-space:pre-wrap">
+                    <span style="color:var(--ink-faint)">{{ line.ts }}</span>
+                    <span style="color:{{ line.levelColor }};flex:0 0 auto">{{ line.level }}</span>
+                    <span>{{ line.msg }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ contextMenu }}" hint-placeholder-val="{{ false }}">
+        <div onClick="{{ closeContextMenu }}" onContextMenu="{{ preventDefault }}" style="position:fixed;inset:0;z-index:95"></div>
+        <div style="position:fixed;left:{{ contextMenu.x }}px;top:{{ contextMenu.y }}px;z-index:96;background:var(--panel-2);border:1px solid var(--line-strong);border-radius:6px;box-shadow:0 12px 32px -12px rgba(0,0,0,0.6);min-width:190px;overflow:hidden">
+          <sc-for list="{{ contextMenu.items }}" as="item" hint-placeholder-count="2">
+            <div onClick="{{ item.onClick }}" style="padding:9px 14px;font:500 12px var(--font-mono);cursor:pointer;color:var(--ink);border-bottom:1px solid var(--line)" style-hover="{{ hoverRow }}">{{ item.label }}</div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+    </div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+const FLOWS = {
+  'checkout-flow': { name: 'checkout-flow', code: 'FLOW-01', services: ['cart-service', 'payment-service'] },
+  'auth-flow': { name: 'auth-flow', code: 'FLOW-02', services: ['auth-service'] }
+};
+const REPOS = {
+  'cart-service': { domain: 'cart.fghj.internal', repo: 'company/cart-service', code: 'CTR-01' },
+  'payment-service': { domain: 'payment.fghj.internal', repo: 'company/payment-service', code: 'PAY-02' },
+  'auth-service': { domain: 'auth.fghj.internal', repo: 'company/auth-service', code: 'AUT-03' },
+  'loyalty-service': { domain: 'loyalty.fghj.internal', repo: 'company/loyalty-service', code: 'LOY-04' }
+};
+const INFRA = {
+  'postgres': { domain: 'postgres.fghj.internal', code: 'DB-01' },
+  'redis': { domain: 'redis.fghj.internal', code: 'CACHE-01' }
+};
+const BRANCH_DEPS = {
+  'cart-service': {
+    'main': { infra: ['postgres'], services: ['auth-service'] },
+    'develop': { infra: ['postgres'], services: ['auth-service'] },
+    'fix/session-timeout': { infra: ['postgres'], services: ['auth-service'] },
+    'feature/apple-pay': { infra: ['postgres', 'redis'], services: ['auth-service', 'loyalty-service'] }
+  },
+  'payment-service': { '*': { infra: [], services: [] } },
+  'auth-service': { '*': { infra: ['postgres'], services: [] } },
+  'loyalty-service': { '*': { infra: ['redis'], services: [] } }
+};
+const BRANCHES = ['main', 'develop', 'feature/apple-pay', 'fix/session-timeout'];
+const CONFIG_BLOCKS = [
+  { id: 'secrets', label: 'Secrets & Env', code: 'CFG-01' },
+  { id: 'dns', label: 'Split DNS', code: 'CFG-02' },
+  { id: 'tls', label: 'Root CA & TLS', code: 'CFG-03' }
+];
+const ENV_DATA = {
+  'cart-service': [{ key: 'DB_HOST', value: 'postgres.fghj.internal', secret: false }, { key: 'AUTH_API_URL', value: 'https://auth.fghj.internal', secret: false }],
+  'payment-service': [{ key: 'STRIPE_SECRET_KEY', value: 'sk_live_••••••••3f21', secret: true }],
+  'auth-service': [{ key: 'JWT_SIGNING_KEY', value: '••••••••••••••••', secret: true }],
+  'loyalty-service': [{ key: 'POINTS_API_KEY', value: '••••••••1a9c', secret: true }]
+};
+const DNS_IPS = {
+  'cart-service': '172.28.0.4', 'payment-service': '172.28.0.5', 'auth-service': '172.28.0.2', 'loyalty-service': '172.28.0.6',
+  'postgres': '172.28.0.10', 'redis': '172.28.0.11'
+};
+const NODE_W = 200, NODE_H = 116, LEVEL_GAP = 250, ROW_GAP = 146;
+const LOG_TEMPLATES = [
+  { level: 'INFO', color: 'var(--ink-faint)', msgs: ['GET /health 200 4ms', 'connected to postgres.fghj.internal', 'cache warm (312 keys)'] },
+  { level: 'WARN', color: 'var(--warning)', msgs: ['slow query 480ms on orders table', 'retrying upstream call (1/3)'] },
+  { level: 'ERROR', color: 'var(--danger)', msgs: ['upstream 503 from auth.fghj.internal', 'connection reset by peer'] }
+];
+
+function depsFor(id, branch) {
+  const table = BRANCH_DEPS[id] || {};
+  return table[branch] || table['*'] || table['main'] || { infra: [], services: [] };
+}
+function relaxDepth(nodeIds, edges) {
+  const depth = {}; nodeIds.forEach(id => depth[id] = 0);
+  let changed = true, guard = 0;
+  while (changed && guard < 20) {
+    changed = false; guard++;
+    edges.forEach(([a, b]) => { const d = (depth[a] || 0) + 1; if (d > (depth[b] || 0)) { depth[b] = d; changed = true; } });
+  }
+  return depth;
+}
+
+class Component extends DCLogic {
+  state = {
+    activeTab: 'repos',
+    selectedFlowId: 'checkout-flow',
+    flowMenuOpen: false,
+    repoBranches: {
+      'cart-service': { branch: 'main', dirty: false },
+      'payment-service': { branch: 'develop', dirty: true },
+      'auth-service': { branch: 'main', dirty: false },
+      'loyalty-service': { branch: 'main', dirty: false }
+    },
+    repoCloned: { 'cart-service': true, 'payment-service': true, 'auth-service': true, 'loyalty-service': false },
+    containers: {
+      'cart-service': { running: true, runningBranch: 'main' },
+      'payment-service': { running: false, runningBranch: 'develop' },
+      'auth-service': { running: true, runningBranch: 'main' },
+      'postgres': { running: true },
+      'redis': { running: false }
+    },
+    helpOpen: false,
+    contextMenu: null,
+    configDrawerId: null,
+    repoDrawerId: null, repoGuardActive: false, repoPendingBranch: null,
+    containerDrawerId: null, containerDrawerTab: 'overview',
+    requestMethod: 'GET', requestServiceId: 'cart-service', requestPath: '/api/cart/123',
+    requestHeaders: 'Authorization: Bearer dev-token', requestBody: '{\n  "quantity": 2\n}',
+    sending: false, response: null,
+    logs: []
+  };
+
+  componentDidMount() {
+    this._timer = setInterval(() => {
+      const running = Object.keys(this.state.containers).filter(id => this.state.containers[id] && this.state.containers[id].running && REPOS[id]);
+      if (!running.length) return;
+      const svc = running[Math.floor(Math.random() * running.length)];
+      const tpl = LOG_TEMPLATES[Math.random() < 0.7 ? 0 : (Math.random() < 0.6 ? 1 : 2)];
+      const msg = tpl.msgs[Math.floor(Math.random() * tpl.msgs.length)];
+      const ts = new Date().toTimeString().slice(0, 8);
+      this.setState(s => ({ logs: [...s.logs.slice(-200), { ts, service: svc, level: tpl.level, levelColor: tpl.color, msg }] }));
+    }, 1200);
+  }
+  componentWillUnmount() { clearInterval(this._timer); }
+
+  buildRepoGraph() {
+    const ids = Object.keys(REPOS);
+    const edges = [];
+    ids.forEach(id => {
+      if (this.state.repoCloned[id]) {
+        depsFor(id, this.state.repoBranches[id].branch).services.forEach(dep => edges.push([id, dep]));
+      }
+    });
+    const depth = relaxDepth(ids, edges);
+    return { ids, edges, depth };
+  }
+
+  resolveFlowSet(flowId) {
+    const visited = new Set();
+    let queue = FLOWS[flowId].services.slice();
+    while (queue.length) {
+      const id = queue.shift();
+      if (visited.has(id)) continue;
+      visited.add(id);
+      if (!this.state.repoCloned[id]) continue;
+      const deps = depsFor(id, this.state.repoBranches[id].branch);
+      deps.infra.forEach(i => visited.add(i));
+      deps.services.forEach(s => { if (!visited.has(s)) queue.push(s); });
+    }
+    return visited;
+  }
+
+  // static, full universe — every known repo + infra, regardless of any flow. Positions never change when the flow changes.
+  buildFullGraph() {
+    const nodes = [...Object.keys(REPOS).map(id => ({ id, type: 'service' })), ...Object.keys(INFRA).map(id => ({ id, type: 'infra' }))];
+    const edges = [];
+    Object.keys(REPOS).forEach(id => {
+      if (!this.state.repoCloned[id]) return;
+      const deps = depsFor(id, this.state.repoBranches[id].branch);
+      deps.infra.forEach(i => edges.push([id, i]));
+      deps.services.forEach(sid => edges.push([id, sid]));
+    });
+    const ids = nodes.map(n => n.id);
+    const depth = relaxDepth(ids, edges);
+    nodes.forEach(n => n.depth = depth[n.id] || 0);
+    return { nodes, edges };
+  }
+
+  flowStateFor(flowId) {
+    const flowSet = this.resolveFlowSet(flowId);
+    let allGood = true, anyRunning = false;
+    flowSet.forEach(id => {
+      const c = this.state.containers[id] || { running: false };
+      if (!c.running) { allGood = false; return; }
+      anyRunning = true;
+      if (REPOS[id] && c.runningBranch !== this.state.repoBranches[id].branch) allGood = false;
+    });
+    if (allGood) return 'up';
+    if (!anyRunning) return 'down';
+    return 'partial';
+  }
+
+  handleLaunchAction() {
+    const state = this.flowStateFor(this.state.selectedFlowId);
+    const flowSet = this.resolveFlowSet(this.state.selectedFlowId);
+    if (state === 'up') {
+      this.setState(s => {
+        const containers = { ...s.containers };
+        flowSet.forEach(id => { containers[id] = { ...containers[id], running: false }; });
+        return { containers };
+      });
+    } else {
+      this.setState(s => {
+        const containers = { ...s.containers };
+        flowSet.forEach(id => {
+          const c = containers[id] || { running: false };
+          const drifted = REPOS[id] && c.running && c.runningBranch !== s.repoBranches[id].branch;
+          if (!c.running || drifted) {
+            containers[id] = REPOS[id] ? { running: true, runningBranch: s.repoBranches[id].branch } : { running: true };
+          }
+        });
+        return { containers };
+      });
+    }
+  }
+
+  setTab(id) { this.setState({ activeTab: id, flowMenuOpen: false, repoDrawerId: null, containerDrawerId: null }); }
+  selectFlow(id) { this.setState({ selectedFlowId: id, flowMenuOpen: false, requestServiceId: FLOWS[id].services[0] }); }
+
+  closeContextMenu() { this.setState({ contextMenu: null }); }
+  openContextMenu(e, id, kind) {
+    e.preventDefault(); e.stopPropagation();
+    const items = [];
+    if (kind === 'repo') {
+      if (!this.state.repoCloned[id]) {
+        items.push({ label: 'Clone repository', onClick: () => { this.cloneRepo(id); this.closeContextMenu(); } });
+      } else {
+        items.push({ label: 'Switch branch…', onClick: () => { this.openRepoDrawer(id); this.closeContextMenu(); } });
+        items.push({ label: 'Pull latest', onClick: () => this.closeContextMenu() });
+      }
+    } else {
+      const isInfra = !!INFRA[id];
+      const c = this.state.containers[id] || { running: false };
+      if (c.running) {
+        items.push({ label: 'Restart container', onClick: () => { this.startContainer(id); this.closeContextMenu(); } });
+        items.push({ label: 'Stop container', onClick: () => { this.stopContainer(id); this.closeContextMenu(); } });
+        if (!isInfra && c.runningBranch !== this.state.repoBranches[id].branch) {
+          items.push({ label: 'Sync to latest branch', onClick: () => { this.syncContainer(id); this.closeContextMenu(); } });
+        }
+      } else {
+        items.push({ label: 'Start container', onClick: () => { this.startContainer(id); this.closeContextMenu(); } });
+      }
+      items.push({ label: 'View logs', onClick: () => { this.openContainerDrawer(id); this.setState({ containerDrawerTab: 'logs' }); this.closeContextMenu(); } });
+      items.push({ label: 'Open panel', onClick: () => { this.openContainerDrawer(id); this.closeContextMenu(); } });
+    }
+    this.setState({ contextMenu: { x: e.clientX, y: e.clientY, items } });
+  }
+
+  cloneRepo(id) { this.setState(s => ({ repoCloned: { ...s.repoCloned, [id]: true } })); }
+  openRepoDrawer(id) { if (!this.state.repoCloned[id]) return; this.setState({ repoDrawerId: id, repoGuardActive: false }); }
+  closeRepoDrawer() { this.setState({ repoDrawerId: null, repoGuardActive: false }); }
+  pickRepoBranch(branch) {
+    const id = this.state.repoDrawerId;
+    const info = this.state.repoBranches[id];
+    if (branch === info.branch) return;
+    if (info.dirty) this.setState({ repoGuardActive: true, repoPendingBranch: branch });
+    else this.setState(s => ({ repoBranches: { ...s.repoBranches, [id]: { ...info, branch } } }));
+  }
+  resolveRepoGuard(action) {
+    const id = this.state.repoDrawerId;
+    if (action === 'abort') { this.setState({ repoGuardActive: false }); return; }
+    this.setState(s => ({ repoBranches: { ...s.repoBranches, [id]: { branch: s.repoPendingBranch, dirty: false } }, repoGuardActive: false }));
+  }
+
+  openConfigDrawer(id) { this.setState({ configDrawerId: id }); }
+  closeConfigDrawer() { this.setState({ configDrawerId: null }); }
+
+  openContainerDrawer(id) {
+    this.setState({ containerDrawerId: id, containerDrawerTab: 'overview', requestServiceId: id, requestPath: '/api/health', response: null });
+  }
+  closeContainerDrawer() { this.setState({ containerDrawerId: null }); }
+  startContainer(id) {
+    this.setState(s => ({ containers: { ...s.containers, [id]: REPOS[id] ? { running: true, runningBranch: s.repoBranches[id].branch } : { running: true } } }));
+  }
+  syncContainer(id) {
+    this.setState(s => ({ containers: { ...s.containers, [id]: { running: true, runningBranch: s.repoBranches[id].branch } } }));
+  }
+  stopContainer(id) {
+    this.setState(s => ({ containers: { ...s.containers, [id]: { ...s.containers[id], running: false } } }));
+  }
+
+  send() {
+    this.setState({ sending: true, response: null });
+    setTimeout(() => {
+      const status = Math.random() < 0.85 ? 200 : 503;
+      const body = status === 200
+        ? JSON.stringify({ ok: true, service: this.state.requestServiceId, path: this.state.requestPath }, null, 2)
+        : JSON.stringify({ error: 'Service Unavailable' }, null, 2);
+      this.setState({ sending: false, response: { status, statusColor: status === 200 ? 'var(--success)' : 'var(--danger)', time: 30 + Math.floor(Math.random() * 90), body } });
+    }, 700);
+  }
+
+  renderVals() {
+    const s = this.state;
+    const selectedFlow = { id: s.selectedFlowId, ...FLOWS[s.selectedFlowId] };
+    const flowSet = this.resolveFlowSet(s.selectedFlowId);
+    const flowState = this.flowStateFor(s.selectedFlowId);
+
+    const viewSwitch = [['repos', 'Repos'], ['containers', 'Actual'], ['config', 'Config']].map(([id, label]) => {
+      const active = s.activeTab === id;
+      return {
+        label, onClick: () => this.setTab(id),
+        style: { padding: '6px 14px', borderRadius: '4px', font: '700 11px var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.04em', cursor: 'pointer', background: active ? 'var(--accent)' : 'transparent', color: active ? 'var(--bg)' : 'var(--ink-faint)' }
+      };
+    });
+    const flowList = Object.keys(FLOWS).map(id => {
+      const st = this.flowStateFor(id);
+      return { id, dotColor: st === 'up' ? 'var(--success)' : (st === 'partial' ? 'var(--warning)' : 'var(--line-strong)'), onSelect: () => this.selectFlow(id) };
+    });
+
+    // Repos graph
+    const rg = this.buildRepoGraph();
+    const byDepthR = {};
+    rg.ids.forEach(id => { (byDepthR[rg.depth[id]] = byDepthR[rg.depth[id]] || []).push(id); });
+    const maxDepthR = Math.max(0, ...Object.values(rg.depth));
+    const maxPerLevelR = Math.max(1, ...Object.values(byDepthR).map(a => a.length));
+    const repoGraphWidth = (maxDepthR + 1) * LEVEL_GAP + NODE_W - 50 + 40;
+    const repoGraphHeight = Math.max(300, maxPerLevelR * ROW_GAP + 40) + 90;
+    const posR = {};
+    Object.keys(byDepthR).forEach(d => {
+      const arr = byDepthR[d]; const totalH = arr.length * ROW_GAP; const offY = (repoGraphHeight - totalH) / 2;
+      arr.forEach((id, i) => { posR[id] = { x: d * LEVEL_GAP + 30 + 40, y: offY + i * ROW_GAP + 10 + 90 }; });
+    });
+    const repoNodes = rg.ids.map(id => {
+      const cloned = s.repoCloned[id]; const pos = posR[id]; const meta = REPOS[id];
+      const selected = s.repoDrawerId === id;
+      const inFlow = flowSet.has(id);
+      return {
+        id, code: meta.code, repo: meta.repo, cloned, notCloned: !cloned, branch: cloned ? s.repoBranches[id].branch : null,
+        dirtyColor: cloned ? (s.repoBranches[id].dirty ? 'var(--warning)' : 'var(--success)') : 'transparent',
+        dirtyLabel: cloned ? (s.repoBranches[id].dirty ? 'dirty' : 'clean') : '',
+        onSelect: () => this.openRepoDrawer(id), onClone: () => this.cloneRepo(id),
+        onContext: (e) => this.openContextMenu(e, id, 'repo'),
+        cardStyle: {
+          position: 'absolute', left: pos.x + 'px', top: pos.y + 'px', width: NODE_W + 'px', minHeight: NODE_H + 'px',
+          background: cloned ? 'var(--panel-2)' : 'transparent',
+          border: selected ? '1.5px solid var(--accent)' : (cloned ? '1px solid var(--line-strong)' : '1.5px dashed var(--ink-faint)'),
+          borderRadius: '6px', padding: '13px', cursor: cloned ? 'pointer' : 'default',
+          opacity: cloned ? (inFlow ? 1 : 0.4) : 0.75
+        }
+      };
+    });
+    const repoEdges = rg.edges.map(([a, b]) => ({ x1: posR[a].x + NODE_W, y1: posR[a].y + NODE_H / 2, x2: posR[b].x, y2: posR[b].y + NODE_H / 2 }));
+
+    let repoDrawer = null, repoBranchOptions = [];
+    if (s.repoDrawerId) {
+      const id = s.repoDrawerId; const info = s.repoBranches[id];
+      repoDrawer = { id };
+      repoBranchOptions = BRANCHES.map(name => ({
+        name, current: name === info.branch, onPick: () => this.pickRepoBranch(name),
+        style: { display: 'flex', justifyContent: 'space-between', padding: '9px 10px', borderRadius: '4px', font: '500 12px var(--font-mono)', cursor: 'pointer', color: 'var(--ink)', background: name === info.branch ? 'var(--panel-2)' : 'transparent' }
+      }));
+    }
+
+    // Containers — static full universe; only highlighting changes with the selected flow
+    const cg = this.buildFullGraph();
+    const byDepthC = {};
+    cg.nodes.forEach(n => { (byDepthC[n.depth] = byDepthC[n.depth] || []).push(n); });
+    const maxDepthC = Math.max(0, ...cg.nodes.map(n => n.depth));
+    const maxPerLevelC = Math.max(1, ...Object.values(byDepthC).map(a => a.length));
+    const containerGraphWidth = (maxDepthC + 1) * LEVEL_GAP + NODE_W - 50 + 40;
+    const containerGraphHeight = Math.max(300, maxPerLevelC * ROW_GAP + 40) + 90;
+    const posC = {};
+    Object.keys(byDepthC).forEach(d => {
+      const arr = byDepthC[d]; const totalH = arr.length * ROW_GAP; const offY = (containerGraphHeight - totalH) / 2;
+      arr.forEach((n, i) => { posC[n.id] = { x: d * LEVEL_GAP + 30 + 40, y: offY + i * ROW_GAP + 10 + 90 }; });
+    });
+    const nodeMeta = (id, isInfra) => isInfra ? INFRA[id] : REPOS[id];
+    const containerNodes = cg.nodes.map(n => {
+      const isInfra = n.type === 'infra';
+      const meta = nodeMeta(n.id, isInfra);
+      const c = s.containers[n.id] || { running: false };
+      const currentBranch = isInfra ? null : (s.repoBranches[n.id] && s.repoBranches[n.id].branch);
+      const drift = !isInfra && c.running && c.runningBranch !== currentBranch;
+      const inFlow = flowSet.has(n.id);
+      const pos = posC[n.id];
+      return {
+        id: n.id, code: meta.code, domain: meta.domain, drift, showStart: !c.running, notInFlow: !inFlow,
+        onOpen: () => this.openContainerDrawer(n.id), onStart: () => this.startContainer(n.id), onSync: () => this.syncContainer(n.id),
+        onContext: (e) => this.openContextMenu(e, n.id, 'container'),
+        cardStyle: {
+          position: 'absolute', left: pos.x + 'px', top: pos.y + 'px', width: NODE_W + 'px', minHeight: NODE_H + 'px',
+          background: isInfra ? 'var(--accent-bg)' : 'var(--panel-2)',
+          border: s.containerDrawerId === n.id ? '1.5px solid var(--accent)' : (c.running ? (isInfra ? '1px solid var(--accent-dim)' : '1px solid var(--line-strong)') : '1.5px dashed var(--line-strong)'),
+          borderRadius: '6px', padding: '13px', cursor: 'pointer', opacity: inFlow ? 1 : 0.4
+        }
+      };
+    });
+    const containerEdges = cg.edges.map(([a, b]) => ({ x1: posC[a].x + NODE_W, y1: posC[a].y + NODE_H / 2, x2: posC[b].x, y2: posC[b].y + NODE_H / 2 }));
+
+    let containerDrawer = null, containerLogs = [], containerDrawerTabs = [];
+    if (s.containerDrawerId) {
+      const id = s.containerDrawerId; const isInfra = !!INFRA[id];
+      const meta = isInfra ? INFRA[id] : REPOS[id];
+      const c = s.containers[id] || { running: false };
+      const currentBranch = isInfra ? null : s.repoBranches[id].branch;
+      const drift = !isInfra && c.running && c.runningBranch !== currentBranch;
+      containerDrawer = {
+        id, domain: meta.domain, branch: isInfra ? null : c.runningBranch,
+        statusLabel: c.running ? 'running' : 'stopped', statusColor: c.running ? 'var(--success)' : 'var(--ink-faint)',
+        drift, onSync: () => this.syncContainer(id), onRequest: () => this.goRequest(id)
+      };
+      const tabDefs = isInfra ? [['overview', 'Overview'], ['logs', 'Logs']] : [['overview', 'Overview'], ['request', 'Request'], ['logs', 'Logs']];
+      containerDrawerTabs = tabDefs.map(([t, label]) => {
+        const active = s.containerDrawerTab === t;
+        return { label, onClick: () => this.setState({ containerDrawerTab: t }), style: { padding: '7px 12px', borderRadius: '4px 4px 0 0', font: '600 11.5px var(--font-mono)', cursor: 'pointer', color: active ? 'var(--ink)' : 'var(--ink-faint)', background: active ? 'var(--panel-2)' : 'transparent', borderBottom: active ? '2px solid var(--accent)' : '2px solid transparent' } };
+      });
+      containerLogs = s.logs.filter(l => l.service === id);
+    }
+
+    return {
+      viewSwitch, flowList,
+      daemonColor: 'var(--success)', daemonGlow: 'var(--success-bg)', daemonLabel: 'Running',
+      helpOpen: s.helpOpen, toggleHelp: () => this.setState(st => ({ helpOpen: !st.helpOpen })), stopProp: e => e.stopPropagation(),
+      contextMenu: s.contextMenu, closeContextMenu: () => this.closeContextMenu(), preventDefault: e => e.preventDefault(),
+      selectedFlow,
+      flowMenuOpen: s.flowMenuOpen, toggleFlowMenu: () => this.setState(st => ({ flowMenuOpen: !st.flowMenuOpen })),
+      toggleLaunch: () => this.handleLaunchAction(),
+      launchButtonLabel: flowState === 'up' ? 'Stop' : (flowState === 'down' ? 'Launch' : 'Sync'),
+      launchButtonBg: flowState === 'up' ? 'var(--panel-2)' : (flowState === 'down' ? 'var(--accent)' : 'var(--warning)'),
+      launchButtonColor: flowState === 'up' ? 'var(--ink)' : 'var(--bg)',
+      flowStatusColor: flowState === 'up' ? 'var(--success)' : (flowState === 'down' ? 'var(--line-strong)' : 'var(--warning)'),
+      flowStatusLabel: flowState === 'up' ? 'RUNNING' : (flowState === 'down' ? 'STOPPED' : 'PARTIAL'),
+      hoverRow: { background: 'var(--panel)' },
+
+      isReposTab: s.activeTab === 'repos', isContainersTab: s.activeTab === 'containers', isConfigTab: s.activeTab === 'config',
+      configBlocks: CONFIG_BLOCKS.map(b => ({ ...b, subLabel: b.id === 'secrets' ? Object.keys(ENV_DATA).length + ' services' : (b.id === 'dns' ? Object.keys(DNS_IPS).length + ' domains' : '*.fghj.internal'), onOpen: () => this.openConfigDrawer(b.id) })),
+      configDrawer: (() => {
+        if (!s.configDrawerId) return null;
+        const id = s.configDrawerId;
+        const block = CONFIG_BLOCKS.find(b => b.id === id);
+        if (id === 'secrets') {
+          return {
+            label: block.label, isSecrets: true,
+            envGroups: Object.keys(ENV_DATA).filter(sid => s.repoCloned[sid]).map(sid => ({
+              service: sid, vars: ENV_DATA[sid].map(v => ({ key: v.key, value: v.value, valueColor: v.secret ? 'var(--warning)' : 'var(--ink-faint)' }))
+            }))
+          };
+        }
+        if (id === 'dns') {
+          return {
+            label: block.label, isDns: true,
+            dnsRows: Object.keys(DNS_IPS).filter(nid => REPOS[nid] ? s.repoCloned[nid] : true).map(nid => {
+              const c = s.containers[nid] || { running: false };
+              return { domain: (REPOS[nid] || INFRA[nid]).domain, ip: DNS_IPS[nid], statusLabel: c.running ? 'resolved' : 'unresolved', statusColor: c.running ? 'var(--success)' : 'var(--ink-faint)' };
+            })
+          };
+        }
+        return {
+          label: block.label, isTls: true,
+          certRows: [{ domain: '*.fghj.internal', validUntil: 'valid until Aug 2027' }]
+        };
+      })(),
+      closeConfigDrawer: () => this.closeConfigDrawer(),
+
+      repoGraphWidth, repoGraphHeight, repoNodes, repoEdges,
+      repoDrawer, closeRepoDrawer: () => this.closeRepoDrawer(),
+      repoGuardActive: s.repoGuardActive, repoBranchOptions,
+      onRepoStash: () => this.resolveRepoGuard('stash'), onRepoCommit: () => this.resolveRepoGuard('commit'), onRepoAbort: () => this.resolveRepoGuard('abort'),
+
+      containerGraphWidth, containerGraphHeight, containerNodes, containerEdges,
+      containerDrawer, closeContainerDrawer: () => this.closeContainerDrawer(),
+      containerDrawerTabs, isContainerOverview: s.containerDrawerTab === 'overview', isContainerRequest: s.containerDrawerTab === 'request', isContainerLogs: s.containerDrawerTab === 'logs',
+      containerLogs,
+
+      requestMethod: s.requestMethod, requestServiceId: s.requestServiceId, requestPath: s.requestPath,
+      requestHeaders: s.requestHeaders, requestBody: s.requestBody,
+      showBody: s.requestMethod === 'POST' || s.requestMethod === 'PUT',
+      onMethodChange: e => this.setState({ requestMethod: e.target.value }),
+      onServiceChange: e => this.setState({ requestServiceId: e.target.value }),
+      onPathChange: e => this.setState({ requestPath: e.target.value }),
+      onHeadersChange: e => this.setState({ requestHeaders: e.target.value }),
+      onBodyChange: e => this.setState({ requestBody: e.target.value }),
+      onSend: () => this.send(),
+      sendLabel: s.sending ? 'Sending…' : 'Send request',
+      response: s.response
+    };
+  }
+}
+</script>
+</body>
+</html>

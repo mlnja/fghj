@@ -1,0 +1,25 @@
+:root {
+  /* dark industrial canvas */
+  --bg: oklch(13% 0.012 260);
+  --panel: oklch(17% 0.014 260);
+  --panel-2: oklch(21% 0.016 260);
+  --line: oklch(30% 0.012 260);
+  --line-strong: oklch(38% 0.014 260);
+
+  --ink: oklch(96% 0.006 90);
+  --ink-dim: oklch(74% 0.012 90);
+  --ink-faint: oklch(52% 0.012 90);
+
+  /* safety-orange brand accent */
+  --accent: oklch(72% 0.19 55);
+  --accent-dim: oklch(55% 0.16 55);
+  --accent-bg: oklch(24% 0.05 55);
+
+  /* semantic status */
+  --success: oklch(76% 0.17 150);
+  --success-bg: oklch(23% 0.05 150);
+  --warning: oklch(82% 0.15 95);
+  --warning-bg: oklch(25% 0.05 95);
+  --danger: oklch(68% 0.19 25);
+  --danger-bg: oklch(24% 0.06 25);
+}
