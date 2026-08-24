@@ -163,8 +163,8 @@
     display: flex; align-items: center; justify-content: center;
     font: 700 12px var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em;
   }
-  .status-bar.state-running { background: var(--success); color: var(--bg); }
-  .status-bar.state-stopped { background: var(--warning); color: var(--bg); }
+  .status-bar.state-running { background: var(--success); color: #ffffff; }
+  .status-bar.state-stopped { background: var(--warning); color: #ffffff; }
   .status-bar.state-none { background: var(--line-strong); color: var(--ink-faint); }
   .node-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; gap: 8px; }
   .node-id-wrap { display: flex; align-items: center; gap: 6px; min-width: 0; }

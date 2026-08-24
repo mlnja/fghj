@@ -188,7 +188,7 @@
   }
   .spinner {
     display: inline-block; width: 9px; height: 9px; border-radius: 50%;
-    border: 2px solid rgba(255,255,255,0.35); border-top-color: var(--ink);
+    border: 2px solid var(--line-strong); border-top-color: var(--ink);
     animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 2px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }

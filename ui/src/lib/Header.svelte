@@ -225,7 +225,7 @@
   .topbar {
     position: fixed; top: 16px; left: 16px; z-index: 50; display: flex; align-items: center; gap: 10px;
     background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
-    box-shadow: 0 12px 32px -12px rgba(0,0,0,0.6);
+    box-shadow: 0 12px 32px -12px rgba(19,27,46,0.18);
   }
   .logo { display: flex; align-items: center; gap: 6px; }
   .logo-mark { width: 18px; height: 18px; background: var(--accent); display: flex; align-items: center; justify-content: center; font: 800 11px var(--font-mono); color: var(--bg); }
@@ -238,7 +238,7 @@
   }
   .flow-menu {
     position: absolute; top: calc(100% + 6px); left: 0; background: var(--panel-2); border: 1px solid var(--line-strong);
-    border-radius: 6px; box-shadow: 0 12px 32px -8px rgba(0,0,0,0.5); z-index: 50; min-width: 200px; overflow: hidden;
+    border-radius: 6px; box-shadow: 0 12px 32px -8px rgba(19,27,46,0.16); z-index: 50; min-width: 200px; overflow: hidden;
   }
   .flow-row { padding: 9px 12px; cursor: pointer; font: 600 12px var(--font-mono); border-bottom: 1px solid var(--line); color: var(--ink); }
   .flow-row:hover { background: var(--panel); }
@@ -251,7 +251,7 @@
   .pull-btn:disabled { opacity: 0.6; cursor: default; }
   .spinner {
     display: inline-block; width: 9px; height: 9px; border-radius: 50%;
-    border: 2px solid rgba(255,255,255,0.35); border-top-color: var(--ink);
+    border: 2px solid var(--line-strong); border-top-color: var(--ink);
     animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 2px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -268,7 +268,7 @@
   .help-btn { width: 22px; height: 22px; border-radius: 50%; background: var(--panel-2); display: flex; align-items: center; justify-content: center; font: 700 12px var(--font-mono); color: var(--ink-dim); cursor: pointer; }
 
   .modal-veil { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 80; display: flex; align-items: center; justify-content: center; }
-  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 26px 28px; max-width: 460px; box-shadow: 0 24px 60px -20px rgba(0,0,0,0.7); }
+  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 26px 28px; max-width: 460px; box-shadow: 0 24px 60px -20px rgba(19,27,46,0.22); }
   .modal h3 { font: 600 16px var(--font-body); color: var(--ink); margin: 0 0 14px; }
   .modal .line { font: 400 12.5px/1.5 var(--font-body); color: var(--ink-dim); margin-bottom: 10px; }
   .modal .close { margin-top: 18px; padding: 8px 0; text-align: center; border-radius: 4px; background: var(--panel-2); font: 700 11px var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer; color: var(--ink); }
