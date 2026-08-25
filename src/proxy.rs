@@ -1,3 +1,4 @@
+use std::io;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -200,8 +201,48 @@ async fn proxy_to_control(tls_stream: &mut TlsStream<TcpStream>, control_port: u
     let mut backend = TcpStream::connect(("127.0.0.1", control_port))
         .await
         .with_context(|| format!("failed to connect to the control API on 127.0.0.1:{control_port}"))?;
-    tokio::io::copy_bidirectional(tls_stream, &mut backend).await.context("proxy relay to control API failed")?;
+
+    // Split into two independently-tracked copy directions (instead of one
+    // `copy_bidirectional`) so an error can be attributed to a side: the
+    // client (browser) is inherently noisy — it opens spare/speculative
+    // connections and resets them, or a tab gets closed mid-request — while
+    // the backend is our own local control API process, which should always
+    // be reachable and well-behaved once connected. This isn't perfectly
+    // precise (a client disappearing mid-download still surfaces as a write
+    // error on the backend -> client leg) but it's a much better signal than
+    // treating every reset/broken-pipe/EOF the same regardless of cause.
+    let (mut client_read, mut client_write) = tokio::io::split(tls_stream);
+    let (mut backend_read, mut backend_write) = backend.split();
+
+    let client_to_backend = async {
+        let result = tokio::io::copy(&mut client_read, &mut backend_write).await;
+        let _ = backend_write.shutdown().await;
+        result
+    };
+    let backend_to_client = async {
+        let result = tokio::io::copy(&mut backend_read, &mut client_write).await;
+        let _ = client_write.shutdown().await;
+        result
+    };
+    let (c2b, b2c) = tokio::join!(client_to_backend, backend_to_client);
+
+    if let Err(e) = c2b
+        && !is_benign_disconnect(&e)
+    {
+        return Err(e).context("proxy relay (client -> control API) failed");
+    }
+    if let Err(e) = b2c {
+        return Err(e).context("proxy relay (control API -> client) failed");
+    }
+
     Ok(())
+}
+
+/// Whether `e` is the kind of IO error a client (browser) routinely produces
+/// by resetting a spare/speculative connection or closing a tab mid-request —
+/// not a sign of an actual proxy or backend problem.
+fn is_benign_disconnect(e: &io::Error) -> bool {
+    matches!(e.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe | io::ErrorKind::UnexpectedEof)
 }
 
 #[cfg(test)]
@@ -322,5 +363,100 @@ mod tests {
         let server_name = ServerName::try_from(dns::ZONE.to_string()).unwrap();
         let result = connector.connect(server_name, tcp).await;
         assert!(result.is_err(), "a client trusting an unrelated CA must not accept this handshake");
+    }
+
+    #[test]
+    fn benign_disconnect_kinds_are_recognized() {
+        assert!(is_benign_disconnect(&io::Error::from(io::ErrorKind::ConnectionReset)));
+        assert!(is_benign_disconnect(&io::Error::from(io::ErrorKind::BrokenPipe)));
+        assert!(is_benign_disconnect(&io::Error::from(io::ErrorKind::UnexpectedEof)));
+        assert!(!is_benign_disconnect(&io::Error::from(io::ErrorKind::TimedOut)));
+        assert!(!is_benign_disconnect(&io::Error::from(io::ErrorKind::PermissionDenied)));
+    }
+
+    /// Sets up a real TLS handshake over a loopback socket and hands back
+    /// both ends: the server-side stream `proxy_to_control` operates on, and
+    /// the client-side stream the test uses to simulate a well-behaved or
+    /// abruptly-reset browser connection.
+    async fn handshake_pair(resolver: Arc<ca::DynamicCertResolver>, ca_der: rustls::pki_types::CertificateDer<'static>) -> (TlsStream<TcpStream>, tokio_rustls::client::TlsStream<TcpStream>) {
+        let server_config = Arc::new(
+            ServerConfig::builder_with_provider(provider())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_cert_resolver(resolver),
+        );
+        let acceptor = TlsAcceptor::from(server_config);
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            acceptor.accept(tcp).await.unwrap()
+        });
+
+        let client_config = trusting_client_config(ca_der, provider());
+        let connector = tokio_rustls::TlsConnector::from(client_config);
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let server_name = ServerName::try_from(dns::ZONE.to_string()).unwrap();
+        let client_tls = connector.connect(server_name, tcp).await.unwrap();
+
+        let server_tls = server_task.await.unwrap();
+        (server_tls, client_tls)
+    }
+
+    #[tokio::test]
+    async fn client_side_reset_is_not_reported_as_a_relay_failure() {
+        let ca = ca::generate_ca_for_tests();
+        let ca_der = ca.cert_der_for_tests();
+        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider()));
+        let (mut server_tls, client_tls) = handshake_pair(resolver, ca_der).await;
+
+        // Force a hard reset (RST) instead of a graceful close, mirroring a
+        // browser abandoning a spare/speculative connection mid-relay.
+        // `set_linger` is deprecated because a *nonzero* linger can block a
+        // runtime thread on drop — doesn't apply here, a zero linger closes
+        // immediately (that's precisely what forces the RST).
+        let (client_tcp, _) = client_tls.get_ref();
+        #[allow(deprecated)]
+        client_tcp.set_linger(Some(std::time::Duration::ZERO)).unwrap();
+        drop(client_tls);
+
+        let backend = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let backend_port = backend.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (sock, _) = backend.accept().await.unwrap();
+            drop(sock);
+        });
+
+        let result = proxy_to_control(&mut server_tls, backend_port).await;
+        assert!(result.is_ok(), "a client-side reset must not be reported as a relay failure: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn backend_side_reset_is_reported_as_a_relay_failure() {
+        let ca = ca::generate_ca_for_tests();
+        let ca_der = ca.cert_der_for_tests();
+        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider()));
+        let (mut server_tls, client_tls) = handshake_pair(resolver, ca_der).await;
+
+        // Clean close on the client side, so the client -> backend leg sees
+        // an ordinary EOF rather than an error — isolating the backend as
+        // the only source of trouble in this relay.
+        drop(client_tls);
+
+        let backend = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let backend_port = backend.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (sock, _) = backend.accept().await.unwrap();
+            // Force a hard reset, mirroring the control API dying mid-relay
+            // (crash, panic, forcibly closed) rather than closing cleanly.
+            #[allow(deprecated)]
+            sock.set_linger(Some(std::time::Duration::ZERO)).unwrap();
+            drop(sock);
+        });
+
+        let result = proxy_to_control(&mut server_tls, backend_port).await;
+        assert!(result.is_err(), "a backend-side reset must be reported as a relay failure, not silently swallowed");
     }
 }
