@@ -64,9 +64,23 @@ durable record, plans in `~/.claude/plans/` are not.
   and persisted at `/var/lib/fghjd/ca/{ca-cert,ca-key}.pem` (durable, survives
   reboot — unlike the pidfile/port file under `/var/run`), and installed into
   the system trust store on macOS (`ca::install_macos_trust`, via `security
-  add-trusted-cert`, idempotent/safe every restart) — kept as a separate step
-  from CA generation so the latter stays a pure, testable filesystem
-  operation. Only `https://fghj.internal` (the zone apex) is routed anywhere
+  add-trusted-cert`) — kept as a separate step from CA generation so the
+  latter stays a pure, testable filesystem operation.
+  **`install_macos_trust` is safe to call on every `fghjd` start**, same as
+  `dns::install_os_resolver_config`: it first runs `security verify-cert`
+  (`ca::is_trusted_on_macos`) — a read-only trust *evaluation*, not a
+  modification, so it never triggers a prompt — and only falls through to the
+  actual `add-trusted-cert` write when the cert genuinely isn't trusted yet.
+  This matters because modifying System keychain trust settings on macOS
+  always triggers an interactive Authorization Services password prompt —
+  running as root does *not* bypass it (that only bypasses filesystem
+  permission checks, not this) — so without the pre-check, a crash-restart
+  loop would re-prompt for a password every single restart. The check-first
+  design also means trust that's missing for any reason — first-ever run, or
+  a user manually revoking it via Keychain Access while the persisted CA
+  files remain on disk — self-heals on the next `fghjd` start: it prompts
+  exactly once, when (and only when) trust is actually absent. Only
+  `https://fghj.internal` (the zone apex) is routed anywhere
   today — relayed via a plain `TcpStream` + `copy_bidirectional` to the
   control API's port. **Everything else in-zone gets a styled "fancy 404"
   placeholder page, not real per-service routing** — routing

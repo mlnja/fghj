@@ -117,12 +117,33 @@ fn pem_to_der(pem: &str) -> Result<CertificateDer<'static>> {
         .context("failed to parse PEM certificate")
 }
 
-/// Installs `ca_cert_path` into the macOS System keychain as a trusted root,
+/// Whether `ca_cert_path` is already trusted as a root in the macOS System
+/// keychain. `security verify-cert` is a trust *evaluation*, not a trust
+/// *modification* — unlike `add-trusted-cert` it never triggers an
+/// interactive Authorization Services prompt, so this is safe (and cheap) to
+/// call unconditionally, including from a non-macOS caller that will never
+/// invoke it.
+fn is_trusted_on_macos(ca_cert_path: &Path) -> bool {
+    Command::new("security")
+        .args(["verify-cert", "-c"])
+        .arg(ca_cert_path)
+        .args(["-k", "/Library/Keychains/System.keychain"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Ensures `ca_cert_path` is trusted as a root in the macOS System keychain,
 /// so certificates this CA issues are accepted by the browser without a
-/// warning. Requires root (matches the rest of `fghjd`'s privilege model).
-/// Safe to call on every `fghjd` start, same as `dns::install_os_resolver_config`
-/// — re-trusting an already-trusted cert is a harmless no-op, and `fghjd`
-/// already runs fully as root so it never triggers an interactive prompt.
+/// warning. Safe to call on every `fghjd` start, same as
+/// `dns::install_os_resolver_config`: it first checks whether the cert is
+/// already trusted (a promptless read) and only falls through to the actual
+/// `add-trusted-cert` write — which always triggers an interactive
+/// Authorization Services password prompt on macOS, root privilege
+/// notwithstanding — when it genuinely isn't. This also means trust that
+/// goes missing after the fact (e.g. a user manually revokes it in Keychain
+/// Access, or the keychain gets reset) self-heals on the next `fghjd`
+/// restart instead of silently staying broken.
 pub fn install_macos_trust(ca_cert_path: &Path) -> Result<()> {
     if !cfg!(target_os = "macos") {
         eprintln!(
@@ -130,6 +151,10 @@ pub fn install_macos_trust(ca_cert_path: &Path) -> Result<()> {
              trust {} manually so browsers accept fghj's issued certificates",
             ca_cert_path.display()
         );
+        return Ok(());
+    }
+
+    if is_trusted_on_macos(ca_cert_path) {
         return Ok(());
     }
 
