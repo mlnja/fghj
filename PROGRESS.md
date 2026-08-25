@@ -117,7 +117,7 @@ durable record, plans in `~/.claude/plans/` are not.
   an author-typed string could. `run_id` is always folded in, no exception
   for the default run either (matching `container_name`/network naming,
   which already never dropped it). The one opt-out is
-  `#InfraDependency.domain_scope: *"run" | "stable"` — `"stable"` drops the
+  `#BackingDependency.domain_scope: *"run" | "stable"` — `"stable"` drops the
   run id for that one dependency, a deliberate per-dependency CUE choice
   (e.g. a postgres meant to be the same identity across every run), not an
   implicit bypass. Named ports' domains (`{port.name}.{node's domain}`)

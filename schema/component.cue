@@ -22,7 +22,7 @@ package fghj
 	// random ephemeral one — for protocols whose clients hardcode a port
 	// number and can't go through name-based routing at all (raw MQTT, a
 	// custom TCP protocol, etc). This is the same trade-off as
-	// `#InfraDependency.domain_scope: "stable"`: an explicit, conscious
+	// `#BackingDependency.domain_scope: "stable"`: an explicit, conscious
 	// opt-out of per-run isolation — only one run can hold this exact host
 	// port at a time, so starting a second run with the same fixed port
 	// will fail to bind rather than silently getting its own copy.
@@ -37,7 +37,7 @@ package fghj
 	// started it, same as every other node — two runs of this service never
 	// collide. "stable" drops the run id, giving it one fixed identity
 	// shared across every run of this graph, the same trade-off as
-	// `#InfraDependency.domain_scope: "stable"`: only one run can own that
+	// `#BackingDependency.domain_scope: "stable"`: only one run can own that
 	// name from the host at a time, but it's the same name every time.
 	domain_scope: *"run" | "stable"
 	environment: #Environment | *[]

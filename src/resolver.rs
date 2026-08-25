@@ -109,8 +109,8 @@ enum Dependency {
         repo: String,
         default_branch: String,
     },
-    #[serde(rename = "infra")]
-    Infra {
+    #[serde(rename = "backing")]
+    Backing {
         name: String,
         image: String,
         #[serde(default)]
@@ -120,15 +120,15 @@ enum Dependency {
         #[serde(default = "default_domain_scope")]
         domain_scope: String,
     },
-    #[serde(rename = "shared-infra")]
-    SharedInfra { service: String, name: String },
+    #[serde(rename = "shared-backing")]
+    SharedBacking { service: String, name: String },
 }
 
 #[derive(Debug, Serialize, Clone)]
 pub struct Node {
     pub id: String,
     pub label: String,
-    pub kind: String, // "service" | "infra" | "flow"
+    pub kind: String, // "service" | "backing" | "flow"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -140,7 +140,7 @@ pub struct Node {
     /// is no CUE-declared domain override for any node kind, so this can
     /// never be bypassed. "run" (the default) folds the run id in so two
     /// runs never collide; "stable" (opt-in via `#Service.domain_scope` /
-    /// `#InfraDependency.domain_scope`) drops it, for a node a CUE author
+    /// `#BackingDependency.domain_scope`) drops it, for a node a CUE author
     /// deliberately wants one fixed identity shared across every run — only
     /// one run can own that name from the host at a time. Stub (not-yet-
     /// pulled) nodes are always "run": the real value is unknown until the
@@ -151,7 +151,7 @@ pub struct Node {
     pub downloaded: bool,
     /// Whether the on-disk checkout has uncommitted changes — see
     /// `concepts/branch-ownership-model.md`. Always `false` for stub
-    /// (`downloaded: false`), infra, and flow nodes, which have no checkout.
+    /// (`downloaded: false`), backing, and flow nodes, which have no checkout.
     pub dirty: bool,
     /// names of the flows this node is reachable from, in the full resolved universe
     pub flows: Vec<String>,
@@ -174,7 +174,7 @@ pub struct NodeBuild {
 pub struct Edge {
     pub from: String,
     pub to: String,
-    pub kind: String, // "depends-on" | "owns" | "shared-infra"
+    pub kind: String, // "depends-on" | "owns" | "shared-backing"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     pub flows: Vec<String>,
@@ -482,18 +482,18 @@ impl<'a> ResolveCtx<'a> {
             } => {
                 self.visit_service_dependency(owner_id, &repo, &default_branch);
             }
-            Dependency::Infra {
+            Dependency::Backing {
                 name,
                 image,
                 environment,
                 ports,
                 domain_scope,
             } => {
-                let infra_id = format!("{owner_id}.{name}");
-                self.nodes.entry(infra_id.clone()).or_insert_with(|| Node {
-                    id: infra_id.clone(),
+                let backing_id = format!("{owner_id}.{name}");
+                self.nodes.entry(backing_id.clone()).or_insert_with(|| Node {
+                    id: backing_id.clone(),
                     label: name.clone(),
-                    kind: "infra".into(),
+                    kind: "backing".into(),
                     image: Some(image),
                     branch: None,
                     repo: None,
@@ -508,18 +508,18 @@ impl<'a> ResolveCtx<'a> {
                 });
                 self.edges.push(Edge {
                     from: owner_id.to_string(),
-                    to: infra_id,
+                    to: backing_id,
                     kind: "owns".into(),
                     branch: None,
                     flows: Vec::new(),
                 });
             }
-            Dependency::SharedInfra { service, name } => {
-                let infra_id = format!("{service}.{name}");
+            Dependency::SharedBacking { service, name } => {
+                let backing_id = format!("{service}.{name}");
                 self.edges.push(Edge {
                     from: owner_id.to_string(),
-                    to: infra_id,
-                    kind: "shared-infra".into(),
+                    to: backing_id,
+                    kind: "shared-backing".into(),
                     branch: None,
                     flows: Vec::new(),
                 });
@@ -576,24 +576,24 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     // Every repo actually on disk is part of the map, whether or not any flow
     // reaches it — flows are a highlight overlay, not a visibility filter.
     // This is what makes an entry repo with no flows (or one nothing else
-    // references) still show up, along with its own infra/service deps.
+    // references) still show up, along with its own backing/service deps.
     for (local_path, component) in &scanned {
         ctx.visit_local_service(local_path, component);
     }
 
-    // Validate shared-infra references resolve to a real, resolved infra node.
+    // Validate shared-backing references resolve to a real, resolved backing node.
     let known_ids: HashSet<&str> = ctx.nodes.keys().map(|s| s.as_str()).collect();
     for edge in &ctx.edges {
-        if edge.kind == "shared-infra" && !known_ids.contains(edge.to.as_str()) {
+        if edge.kind == "shared-backing" && !known_ids.contains(edge.to.as_str()) {
             ctx.warnings.push(format!(
-                "dangling shared-infra reference: '{}' points at '{}', which was never resolved as an infra dependency",
+                "dangling shared-backing reference: '{}' points at '{}', which was never resolved as a backing dependency",
                 edge.from, edge.to
             ));
         }
     }
 
     // Per-flow reachability: BFS from each flow's root over depends-on/owns edges
-    // (shared-infra is a cross-reference, not a structural membership edge).
+    // (shared-backing is a cross-reference, not a structural membership edge).
     let mut adjacency: HashMap<&str, Vec<(usize, &str)>> = HashMap::new();
     for (idx, edge) in ctx.edges.iter().enumerate() {
         if edge.kind == "depends-on" || edge.kind == "owns" {
@@ -630,10 +630,10 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
         }
     }
 
-    // shared-infra edges are cross-references, not structural edges, so they were
+    // shared-backing edges are cross-references, not structural edges, so they were
     // excluded from the BFS above — inherit flow membership from their `from` node instead.
     for (edge, flows) in ctx.edges.iter().zip(edge_flows.iter_mut()) {
-        if edge.kind == "shared-infra" {
+        if edge.kind == "shared-backing" {
             if let Some(fl) = node_flows.get(&edge.from) {
                 flows.extend(fl.iter().cloned());
             }
