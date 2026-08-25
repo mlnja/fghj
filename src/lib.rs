@@ -4,9 +4,12 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
+pub mod ca;
 pub mod daemon;
+pub mod dns;
 pub mod docker;
 pub mod downloads;
+pub mod proxy;
 pub mod resolver;
 pub mod runs;
 pub mod server;

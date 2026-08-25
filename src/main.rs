@@ -89,7 +89,7 @@ fn graph(entry: String, workspace: Option<PathBuf>) -> Result<()> {
 }
 
 fn probe_daemon() -> bool {
-    TcpStream::connect(("127.0.0.1", fghj::daemon::CONTROL_PORT)).is_ok()
+    fghj::daemon::read_port().is_some_and(|port| TcpStream::connect(("127.0.0.1", port)).is_ok())
 }
 
 /// Sends a JSON POST over a raw TCP connection and parses the JSON response
@@ -97,7 +97,8 @@ fn probe_daemon() -> bool {
 /// hand-rolled request avoids pulling in an HTTP client crate for this one
 /// call site.
 fn http_post_json(path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
-    let port = fghj::daemon::CONTROL_PORT;
+    let port = fghj::daemon::read_port()
+        .context("fghjd's control API port file wasn't found — is fghjd running? (`sudo fghjd`)")?;
     let body = body.to_string();
     let mut stream = TcpStream::connect(("127.0.0.1", port))
         .with_context(|| format!("failed to connect to fghjd control API on port {port}"))?;
@@ -118,9 +119,8 @@ fn http_post_json(path: &str, body: &serde_json::Value) -> Result<serde_json::Va
 fn wire(entry: String, workspace: Option<PathBuf>) -> Result<()> {
     if !probe_daemon() {
         bail!(
-            "fghjd isn't running on 127.0.0.1:{} — start it with `sudo fghjd` in another terminal \
-             (or install it as a system service; see SPEC.md)",
-            fghj::daemon::CONTROL_PORT
+            "fghjd isn't running — start it with `sudo fghjd` in another terminal \
+             (or install it as a system service; see SPEC.md)"
         );
     }
 
@@ -154,8 +154,7 @@ fn wire(entry: String, workspace: Option<PathBuf>) -> Result<()> {
     }
     let id = resp["id"].as_str().context("fghjd response missing workspace id")?;
 
-    let url = format!("http://127.0.0.1:{}/?workspace={id}", fghj::daemon::CONTROL_PORT);
-    println!("data is wired — open the UI to see it: {url}");
+    println!("data is wired — open the UI to see it: https://fghj.internal/?workspace={id}");
 
     Ok(())
 }
@@ -165,7 +164,16 @@ fn daemon_stop() -> Result<()> {
         Some(pid) if fghj::daemon::pid_alive(pid) => {
             println!("stopping fghjd (pid {pid}, requires sudo)...");
             let pidfile = fghj::daemon::pid_path();
-            let cmd = format!("kill {pid} && rm -f {}", pidfile.display());
+            let resolver_file = fghj::dns::macos_resolver_path();
+            let port_file = fghj::daemon::port_path();
+            // `rm -f` is a no-op if a file doesn't exist (e.g. the resolver
+            // file on non-macOS), so this is safe to run unconditionally.
+            let cmd = format!(
+                "kill {pid} && rm -f {} {} {}",
+                pidfile.display(),
+                resolver_file.display(),
+                port_file.display()
+            );
             let status = Command::new("sudo")
                 .args(["sh", "-c", &cmd])
                 .status()

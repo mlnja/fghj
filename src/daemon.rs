@@ -17,9 +17,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 
 use crate::server::{self, WorkspaceState};
-use crate::{docker, downloads, resolver, runs, store};
-
-pub const CONTROL_PORT: u16 = 7880;
+use crate::{ca, dns, docker, downloads, proxy, resolver, runs, store};
 
 /// How often the background reconciler re-inspects live containers. Kept in
 /// step with the frontend's `/runs` poll interval (see `App.svelte`) so the
@@ -41,6 +39,29 @@ pub fn read_pid() -> Option<u32> {
 
 pub fn remove_pid() {
     let _ = std::fs::remove_file(pid_path());
+}
+
+/// Where the control API's actual (ephemeral) port is published, mirroring
+/// `pid_path` — only meaningful while `fghjd` is alive, so `/var/run` (not
+/// the durable `/var/lib/fghjd` the CA lives under) is the right place.
+pub fn port_path() -> PathBuf {
+    PathBuf::from("/var/run/fghjd.port")
+}
+
+pub fn write_port(port: u16) -> Result<()> {
+    std::fs::write(port_path(), port.to_string())
+        .with_context(|| format!("failed to write port file {}", port_path().display()))
+}
+
+pub fn read_port() -> Option<u16> {
+    std::fs::read_to_string(port_path()).ok()?.trim().parse().ok()
+}
+
+/// Durable storage for the local CA — must survive a reboot, unlike the
+/// pidfile/port file, or every `fghjd` restart would need the user to
+/// re-approve a brand new CA in Keychain Access.
+fn ca_dir() -> PathBuf {
+    PathBuf::from("/var/lib/fghjd/ca")
 }
 
 /// Checks whether a process with the given pid is alive, via a signal-0 kill.
@@ -485,10 +506,12 @@ fn connect_docker() -> Result<bollard::Docker> {
     }
 }
 
-/// Connects to the Docker Engine API over its local socket, binds the
-/// control API on `CONTROL_PORT`, and serves it forever. Fails fast if
-/// Docker isn't reachable, rather than letting that surface confusingly on
-/// the first run attempt.
+/// Connects to the Docker Engine API over its local socket, stands up DNS
+/// (Subsystem B) and the TLS reverse proxy (Subsystem C) in front of the
+/// control API, and serves the control API/UI forever. Fails fast if Docker
+/// isn't reachable or any of the fixed/privileged ports (80, 443) or the
+/// system trust store can't be bound/installed, rather than letting that
+/// surface confusingly on the first request.
 pub async fn run_control_api() -> Result<()> {
     let docker = connect_docker()?;
     docker
@@ -497,14 +520,53 @@ pub async fn run_control_api() -> Result<()> {
         .context("failed to reach the Docker daemon over its socket — is Docker running?")?;
     let docker = Arc::new(docker);
 
+    // Bound (and OS-routed) before the control API comes up, so `fghjd`
+    // fails fast on a bind error instead of silently serving the UI/API
+    // without any *.fghj.internal resolution. The port is whatever the OS
+    // handed out (see `dns::bind`), so `install_os_resolver_config` needs it
+    // explicitly rather than assuming a fixed well-known one.
+    let dns_socket = dns::bind().await?;
+    let dns_port = dns_socket.local_addr().context("DNS socket has no local address")?.port();
+    tokio::spawn(dns::serve(dns_socket));
+    dns::install_os_resolver_config(dns_port)?;
+
+    // The control API itself now binds an OS-assigned port too (see
+    // `port_path`/`write_port`) — the CLI has no fixed port to hardcode
+    // anymore, since it's fghj's own TLS proxy on 443 that owns the
+    // well-known address (`https://fghj.internal`), not this listener.
+    let control_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .context("failed to bind control API")?;
+    let control_port = control_listener.local_addr().context("control API socket has no local address")?.port();
+    write_port(control_port)?;
+
+    let cert_path = ca::ca_cert_path(&ca_dir());
+    let ca = {
+        let dir = ca_dir();
+        tokio::task::spawn_blocking(move || ca::ensure_ca(&dir)).await.context("CA setup task panicked")??
+    };
+    tokio::task::spawn_blocking(move || ca::install_macos_trust(&cert_path))
+        .await
+        .context("CA trust install task panicked")??;
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let cert_resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider.clone()));
+
+    // Occupied before the registry loads and the control API is reachable
+    // at all, so a bind failure on 80/443 ("something else is already
+    // listening there") is reported clearly instead of leaving `fghjd`
+    // half-started.
+    let http_listener = proxy::bind_http().await?;
+    let https_listener = proxy::bind_https().await?;
+    tokio::spawn(proxy::serve_http_redirect(http_listener));
+    tokio::spawn(proxy::serve_https(https_listener, cert_resolver, control_port, provider));
+
     let registry = Arc::new(WorkspaceRegistry::load(docker).await);
     spawn_reconciler(Arc::clone(&registry));
 
     let app = build_router(registry);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", CONTROL_PORT))
-        .await
-        .with_context(|| format!("failed to bind control API on port {CONTROL_PORT}"))?;
-    axum::serve(listener, app).await.context("control API server error")?;
+    println!("fghjd: control API listening on 127.0.0.1:{control_port} (reachable via https://{})", dns::ZONE);
+    axum::serve(control_listener, app).await.context("control API server error")?;
 
     Ok(())
 }

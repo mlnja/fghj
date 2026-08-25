@@ -14,6 +14,5 @@ async fn main() -> Result<()> {
     }
 
     fghj::daemon::write_pid(std::process::id())?;
-    println!("fghjd listening on 127.0.0.1:{}", fghj::daemon::CONTROL_PORT);
     fghj::daemon::run_control_api().await
 }

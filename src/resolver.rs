@@ -74,9 +74,23 @@ struct ServiceConfig {
     #[serde(default)]
     ports: Vec<String>,
     #[serde(default)]
+    http_port: Option<String>,
+    #[serde(default)]
+    http_routes: Vec<HttpRoute>,
+    #[serde(default)]
     environment: Environment,
     #[serde(default)]
     dependencies: Vec<Dependency>,
+}
+
+/// An additional named HTTP surface on a service beyond its primary
+/// `http_port` — e.g. Prometheus exposing both a scrape port and an admin UI
+/// port, each wanting its own `*.fghj.internal` name. Mirrors `#HttpRoute` in
+/// `schema/component.cue`.
+#[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct HttpRoute {
+    pub port: String,
+    pub domain: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -126,6 +140,10 @@ pub struct Node {
     pub build: Option<NodeBuild>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub ports: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_port: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub http_routes: Vec<HttpRoute>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub environment: Vec<String>,
 }
@@ -346,6 +364,8 @@ impl<'a> ResolveCtx<'a> {
                     args: b.args.clone(),
                 }),
                 ports: component.service.ports.clone(),
+                http_port: component.service.http_port.clone(),
+                http_routes: component.service.http_routes.clone(),
                 environment: component.service.environment.to_pairs(),
                 }
             });
@@ -354,11 +374,36 @@ impl<'a> ResolveCtx<'a> {
             return service_id;
         }
 
+        self.check_http_routes(&service_id, &component.service);
+
         for dep in component.service.dependencies.clone() {
             self.visit_dependency(&service_id, dep);
         }
 
         service_id
+    }
+
+    /// Warns (non-fatally — CUE already validated shape/domain syntax) when
+    /// `http_port` or an `http_routes` entry names a port the service never
+    /// declared in `ports`.
+    fn check_http_routes(&mut self, service_id: &str, service: &ServiceConfig) {
+        let known_ports: HashSet<&str> = service.ports.iter().map(|p| p.as_str()).collect();
+
+        if let Some(port) = &service.http_port
+            && !known_ports.contains(port.as_str())
+        {
+            self.warnings
+                .push(format!("'{service_id}' declares http_port '{port}', which is not in its ports list"));
+        }
+
+        for route in &service.http_routes {
+            if !known_ports.contains(route.port.as_str()) {
+                self.warnings.push(format!(
+                    "'{service_id}' declares an http_routes entry for port '{}' (domain '{}'), which is not in its ports list",
+                    route.port, route.domain
+                ));
+            }
+        }
     }
 
     /// Resolves a `Dependency::Service` reference to its conventional local
@@ -403,6 +448,8 @@ impl<'a> ResolveCtx<'a> {
                 flows: Vec::new(),
                 build: None,
                 ports: Vec::new(),
+                http_port: None,
+                http_routes: Vec::new(),
                 environment: Vec::new(),
             });
             stub_id
@@ -448,6 +495,8 @@ impl<'a> ResolveCtx<'a> {
                     flows: Vec::new(),
                     build: None,
                     ports,
+                    http_port: None,
+                    http_routes: Vec::new(),
                     environment: environment.to_pairs(),
                 });
                 self.edges.push(Edge {
@@ -624,3 +673,79 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
 // `downloads::DownloadRegistry`, which runs clones in a background thread and
 // streams their output to the UI instead of blocking the request. See
 // `src/downloads.rs`.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_component(workspace: &Path, local_path: &str, service_yaml: &str) {
+        let dir = workspace.join(local_path);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("fghj.yaml"),
+            format!("version: \"1.0\"\nservice:\n{service_yaml}\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn http_port_and_http_routes_round_trip_into_graph_nodes() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  name: myservice\n\
+             \x20 internal_domain: myservice.fghj.internal\n\
+             \x20 ports: [\"8080\", \"9090\"]\n\
+             \x20 http_port: \"8080\"\n\
+             \x20 http_routes:\n\
+             \x20   - port: \"9090\"\n\
+             \x20     domain: metrics.myservice.fghj.internal\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        let node = graph.nodes.iter().find(|n| n.id == "myservice").unwrap();
+        assert_eq!(node.http_port.as_deref(), Some("8080"));
+        assert_eq!(node.http_routes.len(), 1);
+        assert_eq!(node.http_routes[0].port, "9090");
+        assert_eq!(node.http_routes[0].domain, "metrics.myservice.fghj.internal");
+        assert!(graph.warnings.is_empty());
+    }
+
+    #[test]
+    fn warns_when_http_port_references_an_undeclared_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  name: myservice\n\
+             \x20 internal_domain: myservice.fghj.internal\n\
+             \x20 ports: [\"8080\"]\n\
+             \x20 http_port: \"9999\"\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        assert!(graph.warnings.iter().any(|w| w.contains("myservice") && w.contains("9999")));
+    }
+
+    #[test]
+    fn warns_when_http_routes_entry_references_an_undeclared_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  name: myservice\n\
+             \x20 internal_domain: myservice.fghj.internal\n\
+             \x20 ports: [\"8080\"]\n\
+             \x20 http_routes:\n\
+             \x20   - port: \"9999\"\n\
+             \x20     domain: admin.myservice.fghj.internal\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        assert!(graph.warnings.iter().any(|w| w.contains("myservice") && w.contains("9999")));
+    }
+}
