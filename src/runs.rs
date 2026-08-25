@@ -301,10 +301,31 @@ impl RunRegistry {
     ) -> Result<ContainerInfo> {
         let workspace = sanitize_label(&graph.workspace_name);
         let container_name = format!("fghj-{workspace}-{run_id}-{}", sanitize_label(&node.id));
-        let domain = if run_id == DEFAULT_RUN_ID {
-            format!("{}.{}.fghj", node.label, workspace)
+        // Every node's domain is derived the same way, unconditionally —
+        // there's no CUE-declared override for any node kind (services
+        // included) that could bypass this, so two nodes can never collide
+        // on a name the way a hand-written one could. Built from `node.id`
+        // rather than `node.label`: `id` is a unique dotted chain
+        // (`owning-service.dep-name` for infra — see
+        // `resolver::visit_dependency` — or just the service name for
+        // services), while `label` is only the bare name and can collide,
+        // e.g. when two different services each own their own same-named
+        // infra dependency. `run_id` is folded in just like it is for
+        // `container_name`/the network name above — including for the
+        // default run, deliberately no exception there, so "scoped" always
+        // means scoped. The one opt-out is `node.domain_scope == "stable"`
+        // (CUE `#InfraDependency.domain_scope`, infra-only): a deliberate,
+        // explicit choice by the CUE author to give a dependency one fixed
+        // identity shared across every run, instead of an implicit bypass.
+        //
+        // This is also the sole Docker network alias registered below, so
+        // it resolves identically whether asked from inside this run's
+        // docker network (Docker's own embedded DNS) or from the host
+        // (fghjd's DNS server, which answers any name in the zone).
+        let domain = if node.domain_scope == "stable" {
+            format!("{}.{}.fghj.internal", node.id, workspace)
         } else {
-            format!("{}.{}.{}.fghj", node.label, run_id, workspace)
+            format!("{}.{}.{}.fghj.internal", node.id, run_id, workspace)
         };
 
         let image = match node.kind.as_str() {
@@ -372,10 +393,17 @@ impl RunRegistry {
             }
         };
 
-        let aliases = vec![node.domain.clone().unwrap_or_default(), domain.clone()]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>();
+        // Named ports (`#Port.name`) get their own domain, nested under this
+        // node's — `admin.api.default.shop.fghj.internal` — and need to be
+        // real Docker aliases too, or they'd resolve from the host (fghjd's
+        // DNS answers anything in the zone) but not from sibling containers,
+        // breaking the same inside/outside consistency the primary domain
+        // relies on.
+        let mut aliases = vec![domain.clone()];
+        aliases.extend(node.ports.values().filter_map(|p| p.name.as_ref()).map(|name| format!("{name}.{domain}")));
+
+        let port_list: Vec<(String, Option<u16>)> =
+            node.ports.iter().map(|(port, cfg)| (port.clone(), cfg.host_port)).collect();
 
         docker::run_container(
             &self.docker,
@@ -384,7 +412,7 @@ impl RunRegistry {
                 network,
                 aliases: &aliases,
                 env: &node.environment,
-                ports: &node.ports,
+                ports: &port_list,
                 image: &image,
                 project: network,
                 service_name: &node.id,
@@ -392,8 +420,17 @@ impl RunRegistry {
         )
         .await?;
 
-        let first_port = node.ports.first().map(|p| p.split('/').next().unwrap_or(p).to_string());
-        let inspected = match &first_port {
+        // Prefer the port explicitly marked `primary` — the one actually
+        // meant to be "the" entrypoint — over an arbitrary map-iteration
+        // order (a `BTreeMap<String, _>` sorts port numbers as strings, so
+        // e.g. "10000" would otherwise sort before "9000").
+        let status_port = node
+            .ports
+            .iter()
+            .find(|(_, cfg)| cfg.primary)
+            .map(|(port, _)| port.clone())
+            .or_else(|| node.ports.keys().next().cloned());
+        let inspected = match &status_port {
             Some(p) => docker::inspect_status(&self.docker, &container_name, p).await?,
             None => docker::inspect_status(&self.docker, &container_name, "").await?,
         };

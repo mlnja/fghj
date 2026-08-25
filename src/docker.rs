@@ -94,8 +94,10 @@ pub struct RunOpts<'a> {
     pub network: &'a str,
     pub aliases: &'a [String],
     pub env: &'a [String],
-    /// container-side ports to publish to an ephemeral localhost port
-    pub ports: &'a [String],
+    /// container-side ports to publish, each with an optional fixed
+    /// host-side port — `None` publishes to a random ephemeral localhost
+    /// port (the default), `Some(p)` binds exactly `127.0.0.1:p`.
+    pub ports: &'a [(String, Option<u16>)],
     pub image: &'a str,
     /// stack/project id — mirrors Docker Compose's `com.docker.compose.project`
     /// label so Docker Desktop (and `docker ps`/`compose ls` tooling) groups
@@ -112,13 +114,16 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
 
     let mut exposed_ports = Vec::new();
     let mut port_bindings = HashMap::new();
-    for port in opts.ports {
+    for (port, host_port) in opts.ports {
         let container_port = port.split('/').next().unwrap_or(port);
         let key = format!("{container_port}/tcp");
         exposed_ports.push(key.clone());
         port_bindings.insert(
             key,
-            Some(vec![PortBinding { host_ip: Some("127.0.0.1".to_string()), host_port: None }]),
+            Some(vec![PortBinding {
+                host_ip: Some("127.0.0.1".to_string()),
+                host_port: host_port.map(|p| p.to_string()),
+            }]),
         );
     }
 

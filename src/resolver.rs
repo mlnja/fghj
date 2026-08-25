@@ -40,6 +40,10 @@ fn default_dockerfile() -> String {
     "Dockerfile".to_string()
 }
 
+fn default_domain_scope() -> String {
+    "run".to_string()
+}
+
 /// Mirrors `#Environment` in `schema/dependency.cue`: Compose accepts `environment`
 /// as either a map of KEY: value or a list of "KEY=value" strings.
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -68,29 +72,33 @@ impl Environment {
 #[derive(Debug, Deserialize, Clone)]
 struct ServiceConfig {
     name: String,
-    internal_domain: String,
     #[serde(default)]
     build: Option<Build>,
     #[serde(default)]
-    ports: Vec<String>,
-    #[serde(default)]
-    http_port: Option<String>,
-    #[serde(default)]
-    http_routes: Vec<HttpRoute>,
+    ports: BTreeMap<String, PortConfig>,
+    #[serde(default = "default_domain_scope")]
+    domain_scope: String,
     #[serde(default)]
     environment: Environment,
     #[serde(default)]
     dependencies: Vec<Dependency>,
 }
 
-/// An additional named HTTP surface on a service beyond its primary
-/// `http_port` — e.g. Prometheus exposing both a scrape port and an admin UI
-/// port, each wanting its own `*.fghj.internal` name. Mirrors `#HttpRoute` in
-/// `schema/component.cue`.
-#[derive(Debug, Deserialize, Clone, Serialize)]
-pub struct HttpRoute {
-    pub port: String,
-    pub domain: String,
+/// A declared container port and its role. `primary` (at most one per node)
+/// puts it at the node's own derived domain; `name` gives it an additional
+/// nested domain `{name}.{node's domain}` — `runs::start_node` derives both
+/// the same way it derives the node's own domain, so a named port can never
+/// collide across runs/workspaces either. Neither set: still published to an
+/// ephemeral localhost port, just with no `*.fghj.internal` name. Mirrors
+/// `#Port` in `schema/component.cue`.
+#[derive(Debug, Default, Deserialize, Clone, Serialize)]
+pub struct PortConfig {
+    #[serde(default)]
+    pub primary: bool,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub host_port: Option<u16>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -109,6 +117,8 @@ enum Dependency {
         environment: Environment,
         #[serde(default)]
         ports: Vec<String>,
+        #[serde(default = "default_domain_scope")]
+        domain_scope: String,
     },
     #[serde(rename = "shared-infra")]
     SharedInfra { service: String, name: String },
@@ -125,8 +135,17 @@ pub struct Node {
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub domain: Option<String>,
+    /// "run" | "stable" — every node's actual `*.fghj.internal` domain is
+    /// derived from `id` + workspace (+ run id) by `runs::start_node`; there
+    /// is no CUE-declared domain override for any node kind, so this can
+    /// never be bypassed. "run" (the default) folds the run id in so two
+    /// runs never collide; "stable" (opt-in via `#Service.domain_scope` /
+    /// `#InfraDependency.domain_scope`) drops it, for a node a CUE author
+    /// deliberately wants one fixed identity shared across every run — only
+    /// one run can own that name from the host at a time. Stub (not-yet-
+    /// pulled) nodes are always "run": the real value is unknown until the
+    /// repo is actually pulled and its `fghj.yaml` read.
+    pub domain_scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_path: Option<String>,
     pub downloaded: bool,
@@ -138,12 +157,8 @@ pub struct Node {
     pub flows: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build: Option<NodeBuild>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub ports: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub http_port: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub http_routes: Vec<HttpRoute>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub ports: BTreeMap<String, PortConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub environment: Vec<String>,
 }
@@ -353,7 +368,7 @@ impl<'a> ResolveCtx<'a> {
                 image: None,
                 branch,
                 repo,
-                domain: Some(component.service.internal_domain.clone()),
+                domain_scope: component.service.domain_scope.clone(),
                 local_path: Some(local_path.to_string()),
                 downloaded: true,
                 dirty,
@@ -364,8 +379,6 @@ impl<'a> ResolveCtx<'a> {
                     args: b.args.clone(),
                 }),
                 ports: component.service.ports.clone(),
-                http_port: component.service.http_port.clone(),
-                http_routes: component.service.http_routes.clone(),
                 environment: component.service.environment.to_pairs(),
                 }
             });
@@ -374,7 +387,7 @@ impl<'a> ResolveCtx<'a> {
             return service_id;
         }
 
-        self.check_http_routes(&service_id, &component.service);
+        self.check_ports(&service_id, &component.service);
 
         for dep in component.service.dependencies.clone() {
             self.visit_dependency(&service_id, dep);
@@ -383,26 +396,23 @@ impl<'a> ResolveCtx<'a> {
         service_id
     }
 
-    /// Warns (non-fatally — CUE already validated shape/domain syntax) when
-    /// `http_port` or an `http_routes` entry names a port the service never
-    /// declared in `ports`.
-    fn check_http_routes(&mut self, service_id: &str, service: &ServiceConfig) {
-        let known_ports: HashSet<&str> = service.ports.iter().map(|p| p.as_str()).collect();
-
-        if let Some(port) = &service.http_port
-            && !known_ports.contains(port.as_str())
-        {
-            self.warnings
-                .push(format!("'{service_id}' declares http_port '{port}', which is not in its ports list"));
-        }
-
-        for route in &service.http_routes {
-            if !known_ports.contains(route.port.as_str()) {
-                self.warnings.push(format!(
-                    "'{service_id}' declares an http_routes entry for port '{}' (domain '{}'), which is not in its ports list",
-                    route.port, route.domain
-                ));
-            }
+    /// Warns (non-fatally) when a service declares more than one `primary`
+    /// port — at most one port can sit at the service's own derived domain.
+    /// Everything `check_http_routes` used to check (a route naming a port
+    /// the service never declared) is now structurally impossible: port and
+    /// role are one `ports` map entry, not two lists to keep in sync.
+    fn check_ports(&mut self, service_id: &str, service: &ServiceConfig) {
+        let primaries: Vec<&str> = service
+            .ports
+            .iter()
+            .filter(|(_, cfg)| cfg.primary)
+            .map(|(port, _)| port.as_str())
+            .collect();
+        if primaries.len() > 1 {
+            self.warnings.push(format!(
+                "'{service_id}' declares more than one primary port ({}); only one can sit at its own domain",
+                primaries.join(", ")
+            ));
         }
     }
 
@@ -441,15 +451,13 @@ impl<'a> ResolveCtx<'a> {
                 image: None,
                 branch: Some(default_branch.to_string()),
                 repo: Some(repo.to_string()),
-                domain: None,
+                domain_scope: default_domain_scope(),
                 local_path: Some(stub_id.clone()),
                 downloaded: false,
                 dirty: false,
                 flows: Vec::new(),
                 build: None,
-                ports: Vec::new(),
-                http_port: None,
-                http_routes: Vec::new(),
+                ports: BTreeMap::new(),
                 environment: Vec::new(),
             });
             stub_id
@@ -479,6 +487,7 @@ impl<'a> ResolveCtx<'a> {
                 image,
                 environment,
                 ports,
+                domain_scope,
             } => {
                 let infra_id = format!("{owner_id}.{name}");
                 self.nodes.entry(infra_id.clone()).or_insert_with(|| Node {
@@ -488,15 +497,13 @@ impl<'a> ResolveCtx<'a> {
                     image: Some(image),
                     branch: None,
                     repo: None,
-                    domain: None,
+                    domain_scope,
                     local_path: None,
                     downloaded: true,
                     dirty: false,
                     flows: Vec::new(),
                     build: None,
-                    ports,
-                    http_port: None,
-                    http_routes: Vec::new(),
+                    ports: ports.into_iter().map(|p| (p, PortConfig::default())).collect(),
                     environment: environment.to_pairs(),
                 });
                 self.edges.push(Edge {
@@ -689,63 +696,58 @@ mod tests {
     }
 
     #[test]
-    fn http_port_and_http_routes_round_trip_into_graph_nodes() {
+    fn service_domain_scope_defaults_to_run_and_can_opt_into_stable() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(tmp.path(), "svc-a", "  name: svc-a\n");
+        write_component(tmp.path(), "svc-b", "  name: svc-b\n\x20 domain_scope: stable\n");
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        let a = graph.nodes.iter().find(|n| n.id == "svc-a").unwrap();
+        let b = graph.nodes.iter().find(|n| n.id == "svc-b").unwrap();
+        assert_eq!(a.domain_scope, "run");
+        assert_eq!(b.domain_scope, "stable");
+    }
+
+    #[test]
+    fn ports_round_trip_into_graph_nodes() {
         let tmp = tempfile::tempdir().unwrap();
         write_component(
             tmp.path(),
             "myservice",
             "  name: myservice\n\
-             \x20 internal_domain: myservice.fghj.internal\n\
-             \x20 ports: [\"8080\", \"9090\"]\n\
-             \x20 http_port: \"8080\"\n\
-             \x20 http_routes:\n\
-             \x20   - port: \"9090\"\n\
-             \x20     domain: metrics.myservice.fghj.internal\n",
+             \x20 ports:\n\
+             \x20   \"8080\":\n\
+             \x20     primary: true\n\
+             \x20   \"9090\":\n\
+             \x20     name: metrics\n",
         );
 
         let graph = resolve_universe(tmp.path()).unwrap();
 
         let node = graph.nodes.iter().find(|n| n.id == "myservice").unwrap();
-        assert_eq!(node.http_port.as_deref(), Some("8080"));
-        assert_eq!(node.http_routes.len(), 1);
-        assert_eq!(node.http_routes[0].port, "9090");
-        assert_eq!(node.http_routes[0].domain, "metrics.myservice.fghj.internal");
+        assert_eq!(node.ports.len(), 2);
+        assert!(node.ports["8080"].primary);
+        assert_eq!(node.ports["9090"].name.as_deref(), Some("metrics"));
         assert!(graph.warnings.is_empty());
     }
 
     #[test]
-    fn warns_when_http_port_references_an_undeclared_port() {
+    fn warns_when_more_than_one_port_is_primary() {
         let tmp = tempfile::tempdir().unwrap();
         write_component(
             tmp.path(),
             "myservice",
             "  name: myservice\n\
-             \x20 internal_domain: myservice.fghj.internal\n\
-             \x20 ports: [\"8080\"]\n\
-             \x20 http_port: \"9999\"\n",
+             \x20 ports:\n\
+             \x20   \"8080\":\n\
+             \x20     primary: true\n\
+             \x20   \"9090\":\n\
+             \x20     primary: true\n",
         );
 
         let graph = resolve_universe(tmp.path()).unwrap();
 
-        assert!(graph.warnings.iter().any(|w| w.contains("myservice") && w.contains("9999")));
-    }
-
-    #[test]
-    fn warns_when_http_routes_entry_references_an_undeclared_port() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_component(
-            tmp.path(),
-            "myservice",
-            "  name: myservice\n\
-             \x20 internal_domain: myservice.fghj.internal\n\
-             \x20 ports: [\"8080\"]\n\
-             \x20 http_routes:\n\
-             \x20   - port: \"9999\"\n\
-             \x20     domain: admin.myservice.fghj.internal\n",
-        );
-
-        let graph = resolve_universe(tmp.path()).unwrap();
-
-        assert!(graph.warnings.iter().any(|w| w.contains("myservice") && w.contains("9999")));
+        assert!(graph.warnings.iter().any(|w| w.contains("myservice") && w.contains("8080") && w.contains("9090")));
     }
 }

@@ -25,6 +25,15 @@ package fghj
 	image:       string & =~"^[a-z0-9][a-z0-9._/-]*(:[a-zA-Z0-9._-]+)?$"
 	environment: #Environment | *[]
 	ports: [...string]
+	// Every node's domain is derived by fghj, never author-declared (see
+	// #Service.name) — this just picks whether the derived name carries the
+	// run id. "run" (the default) scopes it to the run that started it —
+	// e.g. a preview run's postgres never collides with the default run's,
+	// since each run gets its own docker network and its own name. "stable"
+	// drops the run from the name, giving this dependency one fixed identity
+	// shared across every run of this graph — only one run can own that name
+	// from the host at a time, but it's the same name every time.
+	domain_scope: *"run" | "stable"
 }
 
 // A reference to an #InfraDependency owned by another service already present

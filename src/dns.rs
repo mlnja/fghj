@@ -5,9 +5,10 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use tokio::net::UdpSocket;
 
-/// The zone this server is authoritative for. Matches the `internal_domain`
-/// pattern enforced by `schema/component.cue`
-/// (`^[a-z0-9-]+(\.[a-z0-9-]+)*\.fghj\.internal$`).
+/// The zone this server is authoritative for. Every node's domain
+/// (`runs::start_node`) is derived into this zone from its id, workspace,
+/// and run id — never author-declared, so nothing outside this zone needs
+/// answering.
 pub(crate) const ZONE: &str = "fghj.internal";
 const ZONE_SUFFIX: &str = ".fghj.internal";
 

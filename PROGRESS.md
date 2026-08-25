@@ -96,16 +96,35 @@ durable record, plans in `~/.claude/plans/` are not.
   points at `https://fghj.internal/...` instead of a raw `127.0.0.1:<port>`
   URL.
   Schema/resolver support for services with multiple HTTP surfaces (e.g.
-  Prometheus's scrape port + admin UI) landed alongside this:
-  `#Service.http_port` (which declared port is the primary entrypoint,
-  defaults to the first `ports` entry) and `#Service.http_routes` (a list of
-  `{port, domain}` extra surfaces, each `domain` validated by CUE against the
-  same `*.fghj.internal` regex as `internal_domain`) in
-  `schema/component.cue`, mirrored into `resolver::ServiceConfig`/`Node`. Not
+  Prometheus's scrape port + admin UI) landed alongside this: `#Service.ports`
+  is a map (`{[port]: #Port}`, `#Port: {primary: bool | *false, name?: string}`)
+  instead of a plain list — a port's role is declared together with the port
+  itself, so a route naming a port the service never declared is structurally
+  impossible (no more separate `http_port`/`http_routes` lists to keep in
+  sync, and the `resolver`-side cross-reference warning that used to catch
+  that mismatch is gone, replaced by a warning if more than one port claims
+  `primary`). `primary` puts a port at the service's own derived domain;
+  `name` gives one an additional nested domain (see the domain-naming entry
+  below). Mirrored into `resolver::ServiceConfig`/`Node` (`PortConfig`). Not
   yet wired into `proxy.rs`'s routing (that's the same deferred
-  per-service-routing follow-up above) — currently validated and
-  cross-referenced (a `resolver`-side, non-fatal warning if a referenced port
-  isn't actually in `ports`) but otherwise inert.
+  per-service-routing follow-up above) — currently validated but otherwise
+  inert.
+- **Uniform, scoped `*.fghj.internal` domain derivation**: no node kind can
+  declare its own raw domain anymore (`#Service.internal_domain` is gone,
+  `#HttpRoute.domain` is now `#HttpRoute.name`, a bare label). Every node's
+  domain — services included — is derived by `runs::start_node` the same
+  way, from `node.id` + workspace + run id, so it can never collide the way
+  an author-typed string could. `run_id` is always folded in, no exception
+  for the default run either (matching `container_name`/network naming,
+  which already never dropped it). The one opt-out is
+  `#InfraDependency.domain_scope: *"run" | "stable"` — `"stable"` drops the
+  run id for that one dependency, a deliberate per-dependency CUE choice
+  (e.g. a postgres meant to be the same identity across every run), not an
+  implicit bypass. Named ports' domains (`{port.name}.{node's domain}`)
+  are now also registered as real Docker network aliases alongside the
+  primary domain, so they resolve the same from inside the run's docker
+  network and from the host, closing a gap where they only worked from the
+  host via fghjd's wildcard DNS.
 - **Flat workspace model** ([[flat-workspace-model]] concept): no
   root/component config split — every repo is a peer, any repo can declare
   `flows:`. Implemented in `src/resolver.rs` (`scan_workspace`,
@@ -227,7 +246,7 @@ plans referenced above.
    of always returning the fancy-404 placeholder — the natural follow-up to
    this session's Subsystem C work, and the last piece needed for
    `https://cart.fghj.internal` to actually reach a container.
-2. Wire `http_port`/`http_routes` (now validated in the schema/`resolver.rs`
+2. Wire `#Port.primary`/`#Port.name` (now validated in the schema/`resolver.rs`
    but inert) into that same per-service routing, so a service like
    Prometheus can expose its scrape port and admin UI on two different
    `*.fghj.internal` names.

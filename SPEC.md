@@ -74,7 +74,6 @@ flows:
 version: "1.0"
 service:
   name: "cart-service"
-  internal_domain: "cart.fghj.internal"
   build:
     context: "."
     dockerfile: "Dockerfile"
@@ -109,7 +108,7 @@ service:
 ### Subsystem C: Local Automated Root CA & TLS Reverse Proxy
 *   **Certificate Generation:** Upon initial service startup (`fghj setup`), the engine automatically builds a completely unique, locally scoped cryptographic Root Certificate Authority (Root CA).
 *   **System Trust Injection:** The system automatically implants the generated Root CA directly into the underlying platform trusted keychains (`/Library/Keychains/System.keychain` on macOS, NSS shared databases for browsers, and the local Windows Root Certificate Storage).
-*   **On-The-Fly Server Certificates:** As containers spin up, the embedded proxy issues valid TLS server certificates matching the declared `internal_domain` values (e.g., `https://api.fghj.internal`). It hosts a built-in reverse proxy routing TLS traffic directly into unexposed container ports, delivering a seamless native HTTPS experience across local browsers and HTTP clients.
+*   **On-The-Fly Server Certificates:** As containers spin up, the embedded proxy issues valid TLS server certificates matching each node's derived domain (e.g., `https://cart-service.default.myworkspace.fghj.internal`). It hosts a built-in reverse proxy routing TLS traffic directly into unexposed container ports, delivering a seamless native HTTPS experience across local browsers and HTTP clients.
 
 ---
 
