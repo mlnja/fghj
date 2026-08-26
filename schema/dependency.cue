@@ -39,12 +39,15 @@ package fghj
 
 // A reference to a #BackingDependency owned by another service already present
 // in the resolved flow graph — binds to that same running instance instead of
-// provisioning a second one. `service` + `name` must match another service's
-// declared #BackingDependency exactly; the resolver rejects dangling references.
+// provisioning a second one. Identifies the owning service by `repo` (same as
+// #GitDependency), not by its declared #Service.name — that name alone isn't
+// unique across peer repos (see #Service.name), while `repo` is. `repo` +
+// `name` must match another service's declared #BackingDependency exactly;
+// the resolver rejects dangling references.
 #SharedBackingDependency: {
-	kind:    "shared-backing"
-	service: string & =~"^[a-z0-9][a-z0-9-]*$"
-	name:    string & =~"^[a-z0-9][a-z0-9-]*$"
+	kind: "shared-backing"
+	repo: string & =~"^(git@|https://|ssh://)"
+	name: string & =~"^[a-z0-9][a-z0-9-]*$"
 }
 
 #Dependency: #GitDependency | #BackingDependency | #SharedBackingDependency

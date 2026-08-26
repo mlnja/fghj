@@ -1,6 +1,6 @@
 # fghj — Progress Tracker
 
-Last updated: 2026-08-26 (real per-service HTTPS routing session).
+Last updated: 2026-08-26 (leaf-first, repo-qualified node ids session).
 Keep this file current as work lands — update the relevant section instead of
 appending a changelog.
 
@@ -134,7 +134,23 @@ durable record, plans in `~/.claude/plans/` are not.
   `#BackingDependency.domain_scope: *"run" | "stable"` — `"stable"` drops the
   run id for that one dependency regardless of which run it's in, a
   deliberate per-dependency CUE choice (e.g. a postgres meant to be the same
-  identity across every run), not an implicit bypass. Named ports' domains (`{port.name}.{node's domain}`)
+  identity across every run), not an implicit bypass.
+- **Leaf-first, repo-qualified node ids** (`resolver.rs`): `#Service.name`
+  (e.g. `"bff"`) is only a friendly label now, not a unique id — two peer
+  repos (no ownership relation between them, per
+  [[flat-workspace-model]]) can legitimately declare the same one, e.g. two
+  departments each with their own `bff`. `visit_local_service` builds
+  `node.id` as `{service.name}.{repo's workspace folder name}` (e.g.
+  `bff.dept-a-repo`) always, unconditionally — not only when a collision is
+  actually detected — so adding a same-named peer repo later can never
+  silently rehost an existing service's domain out from under it. Backing
+  dependency ids flipped to match the same leaf-first convention already
+  used by named ports (`{port_name}.{node's domain}`): `{dep.name}.{owner's
+  id}` (e.g. `s3.bff.dept-a-repo`), not `{owner}.{dep.name}` as before.
+  `#SharedBackingDependency` now identifies the owning service by `repo`
+  (like `#GitDependency`) instead of by its declared `#Service.name`, since
+  that name alone is no longer unique — resolved the same way
+  `visit_service_dependency` resolves an owner id. Named ports' domains (`{port.name}.{node's domain}`)
   are now also registered as real Docker network aliases alongside the
   primary domain, so they resolve the same from inside the run's docker
   network and from the host, closing a gap where they only worked from the

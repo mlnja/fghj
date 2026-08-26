@@ -316,12 +316,14 @@ impl RunRegistry {
         // there's no CUE-declared override for any node kind (services
         // included) that could bypass this, so two nodes can never collide
         // on a name the way a hand-written one could. Built from `node.id`
-        // rather than `node.label`: `id` is a unique dotted chain
-        // (`owning-service.dep-name` for backing deps — see
-        // `resolver::visit_dependency` — or just the service name for
-        // services), while `label` is only the bare name and can collide,
-        // e.g. when two different services each own their own same-named
-        // backing dependency. `run_id` is folded in just like it is for
+        // rather than `node.label`: `id` is a unique, leaf-first dotted
+        // chain (`dep-name.owning-service-id` for backing deps — see
+        // `resolver::visit_dependency` — or `service-name.repo-local-path`
+        // for services — see `resolver::visit_local_service`), while `label`
+        // is only the bare declared name and can collide, e.g. when two
+        // peer repos each declare a same-named service, or two different
+        // services each own their own same-named backing dependency.
+        // `run_id` is folded in just like it is for
         // `container_name`/the network name above, *except* for the default
         // run: fghj models one shared, singular default environment per
         // workspace (see `ensure_running`), so it needs no disambiguating

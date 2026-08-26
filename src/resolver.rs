@@ -121,7 +121,7 @@ enum Dependency {
         domain_scope: String,
     },
     #[serde(rename = "shared-backing")]
-    SharedBacking { service: String, name: String },
+    SharedBacking { repo: String, name: String },
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -353,7 +353,16 @@ impl<'a> ResolveCtx<'a> {
     /// Registers (and, unless already visited, recursively expands) the service
     /// node for a repo already present on disk at `local_path`.
     fn visit_local_service(&mut self, local_path: &str, component: &ComponentConfig) -> String {
-        let service_id = component.service.name.clone();
+        // Leaf-first, qualified by the repo's own workspace folder name —
+        // `#Service.name` alone (e.g. "bff") is only a friendly label, not a
+        // unique id: two peer repos (no ownership relation between them, per
+        // [[flat-workspace-model]]) can legitimately declare the same one.
+        // `local_path` is the one thing guaranteed unique per repo (it's a
+        // real folder name — `scan_workspace` can't have two), so folding it
+        // in always (not just when a collision is actually detected) means
+        // adding a same-named peer repo later can never silently rehost an
+        // existing one's domain out from under it.
+        let service_id = format!("{}.{local_path}", component.service.name);
 
         self.nodes
             .entry(service_id.clone())
@@ -363,7 +372,7 @@ impl<'a> ResolveCtx<'a> {
                 let dirty = git_status_dirty(&dir);
                 Node {
                 id: service_id.clone(),
-                label: service_id.clone(),
+                label: component.service.name.clone(),
                 kind: "service".into(),
                 image: None,
                 branch,
@@ -489,7 +498,10 @@ impl<'a> ResolveCtx<'a> {
                 ports,
                 domain_scope,
             } => {
-                let backing_id = format!("{owner_id}.{name}");
+                // Leaf-first, same convention as service ids and named
+                // ports (`{port_name}.{node's domain}`): the specific thing
+                // comes first, its owning scope after.
+                let backing_id = format!("{name}.{owner_id}");
                 self.nodes.entry(backing_id.clone()).or_insert_with(|| Node {
                     id: backing_id.clone(),
                     label: name.clone(),
@@ -514,8 +526,29 @@ impl<'a> ResolveCtx<'a> {
                     flows: Vec::new(),
                 });
             }
-            Dependency::SharedBacking { service, name } => {
-                let backing_id = format!("{service}.{name}");
+            Dependency::SharedBacking { repo, name } => {
+                // References the owning service by `repo` (like
+                // `#GitDependency`), not by its declared `#Service.name` —
+                // that name alone is no longer unique (see
+                // `visit_local_service`), and `repo` is the one identifier
+                // that's portable across workspaces, unlike a local_path
+                // folder-naming convention. Resolved the same way
+                // `visit_service_dependency` resolves an owner id, without
+                // registering a `depends-on` edge or recursing into it (this
+                // is a reference to an already-declared backing dependency,
+                // not a new one).
+                let norm = normalize_repo_url(&repo);
+                let local_path = self
+                    .repo_index
+                    .get(&norm)
+                    .cloned()
+                    .unwrap_or_else(|| repo_name_from_url(&repo));
+                let target_owner_id = self
+                    .scanned
+                    .get(&local_path)
+                    .map(|c| format!("{}.{local_path}", c.service.name))
+                    .unwrap_or(local_path);
+                let backing_id = format!("{name}.{target_owner_id}");
                 self.edges.push(Edge {
                     from: owner_id.to_string(),
                     to: backing_id,
@@ -703,8 +736,8 @@ mod tests {
 
         let graph = resolve_universe(tmp.path()).unwrap();
 
-        let a = graph.nodes.iter().find(|n| n.id == "svc-a").unwrap();
-        let b = graph.nodes.iter().find(|n| n.id == "svc-b").unwrap();
+        let a = graph.nodes.iter().find(|n| n.id == "svc-a.svc-a").unwrap();
+        let b = graph.nodes.iter().find(|n| n.id == "svc-b.svc-b").unwrap();
         assert_eq!(a.domain_scope, "run");
         assert_eq!(b.domain_scope, "stable");
     }
@@ -725,7 +758,7 @@ mod tests {
 
         let graph = resolve_universe(tmp.path()).unwrap();
 
-        let node = graph.nodes.iter().find(|n| n.id == "myservice").unwrap();
+        let node = graph.nodes.iter().find(|n| n.id == "myservice.myservice").unwrap();
         assert_eq!(node.ports.len(), 2);
         assert!(node.ports["8080"].primary);
         assert_eq!(node.ports["9090"].name.as_deref(), Some("metrics"));
