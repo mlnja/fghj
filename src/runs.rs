@@ -36,6 +36,16 @@ pub struct RunSpec {
     pub flow: Option<String>,
 }
 
+/// A `*.fghj.internal` name this container answers to, and the `127.0.0.1`
+/// port Docker actually published its backing container-side port on — the
+/// SNI -> backend lookup `proxy::serve_https` dispatches real per-service
+/// HTTPS routing through (see `WorkspaceRegistry::resolve_route`).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PortRoute {
+    pub domain: String,
+    pub host_port: u16,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct ContainerInfo {
     pub node_id: String,
@@ -43,6 +53,7 @@ pub struct ContainerInfo {
     pub status: String,
     pub published_port: Option<u16>,
     pub domain: String,
+    pub routes: Vec<PortRoute>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -311,19 +322,21 @@ impl RunRegistry {
         // services), while `label` is only the bare name and can collide,
         // e.g. when two different services each own their own same-named
         // backing dependency. `run_id` is folded in just like it is for
-        // `container_name`/the network name above — including for the
-        // default run, deliberately no exception there, so "scoped" always
-        // means scoped. The one opt-out is `node.domain_scope == "stable"`
-        // (CUE `#Service.domain_scope` / `#BackingDependency.domain_scope`):
-        // a deliberate, explicit choice by the CUE author to give a node one
-        // fixed identity shared across every run, instead of an implicit
-        // bypass.
+        // `container_name`/the network name above, *except* for the default
+        // run: fghj models one shared, singular default environment per
+        // workspace (see `ensure_running`), so it needs no disambiguating
+        // segment — only a named/review run does, since more than one of
+        // those can be alive at once. `node.domain_scope == "stable"` is the
+        // other opt-out (CUE `#Service.domain_scope` /
+        // `#BackingDependency.domain_scope`): a deliberate, explicit choice
+        // by the CUE author to give a node one fixed identity shared across
+        // every run, not just the default one.
         //
         // This is also the sole Docker network alias registered below, so
         // it resolves identically whether asked from inside this run's
         // docker network (Docker's own embedded DNS) or from the host
         // (fghjd's DNS server, which answers any name in the zone).
-        let domain = if node.domain_scope == "stable" {
+        let domain = if node.domain_scope == "stable" || run_id == DEFAULT_RUN_ID {
             format!("{}.{}.fghj.internal", node.id, workspace)
         } else {
             format!("{}.{}.{}.fghj.internal", node.id, run_id, workspace)
@@ -440,12 +453,46 @@ impl RunRegistry {
             None => ("unknown".to_string(), None),
         };
 
+        // Every port with a domain — the `primary` one, at this node's own
+        // domain, and/or any `name`d one, at `{name}.{domain}` (a port can
+        // be both) — gets a route to the host port Docker actually
+        // published it on. `fghjd` runs on the host, not inside the docker
+        // network, so it can't resolve these names the way sibling
+        // containers do (via Docker's embedded per-network DNS, which only
+        // answers from inside that network) — this is what lets
+        // `proxy::serve_https` dispatch an incoming SNI straight to the
+        // right container instead. Reuses the inspect already done above
+        // for `status_port`'s own binding rather than re-inspecting it.
+        let mut routes = Vec::new();
+        for (port, cfg) in &node.ports {
+            if !cfg.primary && cfg.name.is_none() {
+                continue;
+            }
+            let host_port = if status_port.as_deref() == Some(port.as_str()) {
+                published_port
+            } else {
+                docker::inspect_status(&self.docker, &container_name, port)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.published_port)
+            };
+            let Some(host_port) = host_port else { continue };
+            if cfg.primary {
+                routes.push(PortRoute { domain: domain.clone(), host_port });
+            }
+            if let Some(name) = &cfg.name {
+                routes.push(PortRoute { domain: format!("{name}.{domain}"), host_port });
+            }
+        }
+
         Ok(ContainerInfo {
             node_id: node.id.clone(),
             container_name,
             status,
             published_port,
             domain,
+            routes,
         })
     }
 }

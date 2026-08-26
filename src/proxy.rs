@@ -11,6 +11,16 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::{ca, dns};
 
+/// Resolves an in-zone hostname that isn't the zone apex to the `127.0.0.1`
+/// port of the running container it should be proxied to, if any. Kept as a
+/// trait (implemented by `daemon::WorkspaceRegistry::resolve_route` in
+/// production) rather than a concrete dependency so this module doesn't need
+/// to know anything about workspaces, runs, or Docker — and so tests can
+/// exercise dispatch with a plain in-memory map instead of real containers.
+pub trait RouteResolver: Send + Sync {
+    fn resolve(&self, host: &str) -> Option<u16>;
+}
+
 /// `fghj` occupies these unconditionally while `fghjd` runs — unlike the
 /// DNS/control-API ports, these can't be ephemeral: a bare
 /// `https://fghj.internal` URL with no `:port` only ever reaches port 443.
@@ -136,12 +146,20 @@ fn not_found_response() -> Vec<u8> {
 /// Serves forever on `listener` (port 443): terminates TLS using
 /// `cert_resolver` (which also rejects any out-of-zone SNI at the handshake
 /// layer — see `ca::DynamicCertResolver`), then routes by the negotiated
-/// server name. Only the zone apex (`fghj.internal`) is proxied anywhere —
-/// to `127.0.0.1:{control_port}`, i.e. `fghjd`'s own control API/UI — since
-/// per-service routing to running containers is a deferred follow-up.
-/// Everything else in-zone gets a styled 404 instead of a browser TLS error,
-/// since it already has a valid certificate for its name.
-pub async fn serve_https(listener: TcpListener, cert_resolver: Arc<ca::DynamicCertResolver>, control_port: u16, provider: Arc<CryptoProvider>) {
+/// server name. The zone apex (`fghj.internal`) always goes to
+/// `127.0.0.1:{control_port}`, i.e. `fghjd`'s own control API/UI; any other
+/// in-zone name is looked up via `routes` (backed by
+/// `daemon::WorkspaceRegistry::resolve_route` in production) and proxied to
+/// that container's published port if a running one claims it. Anything else
+/// gets a styled 404 instead of a browser TLS error, since it already has a
+/// valid certificate for its name.
+pub async fn serve_https(
+    listener: TcpListener,
+    cert_resolver: Arc<ca::DynamicCertResolver>,
+    control_port: u16,
+    provider: Arc<CryptoProvider>,
+    routes: Arc<dyn RouteResolver>,
+) {
     let config = ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .expect("ring/aws-lc-rs providers always support the default protocol versions")
@@ -159,9 +177,10 @@ pub async fn serve_https(listener: TcpListener, cert_resolver: Arc<ca::DynamicCe
             }
         };
         let acceptor = acceptor.clone();
+        let routes = routes.clone();
         tokio::spawn(async move {
             match acceptor.accept(stream).await {
-                Ok(tls_stream) => handle_https_connection(tls_stream, control_port).await,
+                Ok(tls_stream) => handle_https_connection(tls_stream, control_port, routes).await,
                 // Expected and frequent for out-of-zone SNI, which
                 // `cert_resolver` intentionally aborts the handshake for.
                 Err(e) => eprintln!("fghjd: TLS handshake error: {e}"),
@@ -170,7 +189,7 @@ pub async fn serve_https(listener: TcpListener, cert_resolver: Arc<ca::DynamicCe
     }
 }
 
-async fn handle_https_connection(mut tls_stream: TlsStream<TcpStream>, control_port: u16) {
+async fn handle_https_connection(mut tls_stream: TlsStream<TcpStream>, control_port: u16, routes: Arc<dyn RouteResolver>) {
     let server_name = {
         let (_, conn) = tls_stream.get_ref();
         conn.server_name().map(|s| s.to_string())
@@ -183,31 +202,39 @@ async fn handle_https_connection(mut tls_stream: TlsStream<TcpStream>, control_p
         return;
     };
 
-    if name == dns::ZONE {
-        if let Err(e) = proxy_to_control(&mut tls_stream, control_port).await {
-            eprintln!("fghjd: control API proxy error: {e}");
+    let backend_port = if name == dns::ZONE { Some(control_port) } else { routes.resolve(&name) };
+
+    match backend_port {
+        Some(port) => {
+            if let Err(e) = relay_to_backend(&mut tls_stream, port).await {
+                eprintln!("fghjd: backend proxy error ({name}): {e}");
+            }
         }
-    } else {
-        let _ = tls_stream.write_all(&not_found_response()).await;
-        // Sends a proper TLS close_notify rather than just dropping the
-        // socket — otherwise well-behaved TLS clients (rustls included)
-        // treat the abrupt EOF as a truncation error instead of a clean end
-        // of response.
-        let _ = tls_stream.shutdown().await;
+        None => {
+            let _ = tls_stream.write_all(&not_found_response()).await;
+            // Sends a proper TLS close_notify rather than just dropping the
+            // socket — otherwise well-behaved TLS clients (rustls included)
+            // treat the abrupt EOF as a truncation error instead of a clean end
+            // of response.
+            let _ = tls_stream.shutdown().await;
+        }
     }
 }
 
-async fn proxy_to_control(tls_stream: &mut TlsStream<TcpStream>, control_port: u16) -> Result<()> {
-    let mut backend = TcpStream::connect(("127.0.0.1", control_port))
+/// Relays `tls_stream` to whatever is listening on `127.0.0.1:port` — the
+/// control API for the zone apex, or a running container's published port
+/// for everything else `routes` recognizes.
+async fn relay_to_backend(tls_stream: &mut TlsStream<TcpStream>, port: u16) -> Result<()> {
+    let mut backend = TcpStream::connect(("127.0.0.1", port))
         .await
-        .with_context(|| format!("failed to connect to the control API on 127.0.0.1:{control_port}"))?;
+        .with_context(|| format!("failed to connect to backend on 127.0.0.1:{port}"))?;
 
     // Split into two independently-tracked copy directions (instead of one
     // `copy_bidirectional`) so an error can be attributed to a side: the
     // client (browser) is inherently noisy — it opens spare/speculative
     // connections and resets them, or a tab gets closed mid-request — while
-    // the backend is our own local control API process, which should always
-    // be reachable and well-behaved once connected. This isn't perfectly
+    // the backend is our own control API or a locally-run container, which
+    // should always be reachable and well-behaved once connected. This isn't perfectly
     // precise (a client disappearing mid-download still surfaces as a write
     // error on the backend -> client leg) but it's a much better signal than
     // treating every reset/broken-pipe/EOF the same regardless of cause.
@@ -229,10 +256,10 @@ async fn proxy_to_control(tls_stream: &mut TlsStream<TcpStream>, control_port: u
     if let Err(e) = c2b
         && !is_benign_disconnect(&e)
     {
-        return Err(e).context("proxy relay (client -> control API) failed");
+        return Err(e).context("proxy relay (client -> backend) failed");
     }
     if let Err(e) = b2c {
-        return Err(e).context("proxy relay (control API -> client) failed");
+        return Err(e).context("proxy relay (backend -> client) failed");
     }
 
     Ok(())
@@ -273,6 +300,20 @@ mod tests {
         Arc::new(rustls::crypto::ring::default_provider())
     }
 
+    /// A `RouteResolver` backed by a plain in-memory map, so dispatch logic
+    /// can be exercised without a real workspace/run/Docker stack.
+    struct StaticRoutes(std::collections::HashMap<String, u16>);
+
+    impl RouteResolver for StaticRoutes {
+        fn resolve(&self, host: &str) -> Option<u16> {
+            self.0.get(host).copied()
+        }
+    }
+
+    fn no_routes() -> Arc<dyn RouteResolver> {
+        Arc::new(StaticRoutes(std::collections::HashMap::new()))
+    }
+
     fn trusting_client_config(ca_der: rustls::pki_types::CertificateDer<'static>, provider: Arc<CryptoProvider>) -> Arc<ClientConfig> {
         let mut roots = RootCertStore::empty();
         roots.add(ca_der).unwrap();
@@ -306,7 +347,7 @@ mod tests {
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve_https(listener, resolver, backend_port, provider()));
+        tokio::spawn(serve_https(listener, resolver, backend_port, provider(), no_routes()));
 
         let client_config = trusting_client_config(ca_der, provider());
         let connector = tokio_rustls::TlsConnector::from(client_config);
@@ -329,7 +370,7 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         // control_port is never dialed for a non-apex name, so 0 is fine here.
-        tokio::spawn(serve_https(listener, resolver, 0, provider()));
+        tokio::spawn(serve_https(listener, resolver, 0, provider(), no_routes()));
 
         let client_config = trusting_client_config(ca_der, provider());
         let connector = tokio_rustls::TlsConnector::from(client_config);
@@ -344,6 +385,46 @@ mod tests {
         assert!(text.contains("fghj doesn't know this service yet"));
     }
 
+    /// A non-apex, in-zone SNI that a `RouteResolver` recognizes must be
+    /// proxied to that route's backend, exactly like the zone apex is —
+    /// the real per-service dispatch path this session wires up.
+    #[tokio::test]
+    async fn routed_in_zone_sni_proxies_to_its_registered_backend() {
+        let ca = ca::generate_ca_for_tests();
+        let ca_der = ca.cert_der_for_tests();
+        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider()));
+
+        let backend = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let backend_port = backend.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = backend.accept().await.unwrap();
+            let mut buf = [0u8; 5];
+            sock.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"hello");
+            sock.write_all(b"world").await.unwrap();
+        });
+
+        let mut map = std::collections::HashMap::new();
+        map.insert("cart.default.shop.fghj.internal".to_string(), backend_port);
+        let routes: Arc<dyn RouteResolver> = Arc::new(StaticRoutes(map));
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // control_port is never dialed for a routed non-apex name, so 0 is fine here.
+        tokio::spawn(serve_https(listener, resolver, 0, provider(), routes));
+
+        let client_config = trusting_client_config(ca_der, provider());
+        let connector = tokio_rustls::TlsConnector::from(client_config);
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let server_name = ServerName::try_from("cart.default.shop.fghj.internal".to_string()).unwrap();
+        let mut tls = connector.connect(server_name, tcp).await.expect("handshake with trusted CA must succeed");
+
+        tls.write_all(b"hello").await.unwrap();
+        let mut buf = [0u8; 5];
+        tls.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"world");
+    }
+
     #[tokio::test]
     async fn client_that_does_not_trust_our_ca_fails_the_handshake() {
         let ca = ca::generate_ca_for_tests();
@@ -351,7 +432,7 @@ mod tests {
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve_https(listener, resolver, 0, provider()));
+        tokio::spawn(serve_https(listener, resolver, 0, provider(), no_routes()));
 
         // A root store with a *different* CA — this client must not accept
         // the certificate our proxy presents.
@@ -375,7 +456,7 @@ mod tests {
     }
 
     /// Sets up a real TLS handshake over a loopback socket and hands back
-    /// both ends: the server-side stream `proxy_to_control` operates on, and
+    /// both ends: the server-side stream `relay_to_backend` operates on, and
     /// the client-side stream the test uses to simulate a well-behaved or
     /// abruptly-reset browser connection.
     async fn handshake_pair(resolver: Arc<ca::DynamicCertResolver>, ca_der: rustls::pki_types::CertificateDer<'static>) -> (TlsStream<TcpStream>, tokio_rustls::client::TlsStream<TcpStream>) {
@@ -429,7 +510,7 @@ mod tests {
             drop(sock);
         });
 
-        let result = proxy_to_control(&mut server_tls, backend_port).await;
+        let result = relay_to_backend(&mut server_tls, backend_port).await;
         assert!(result.is_ok(), "a client-side reset must not be reported as a relay failure: {result:?}");
     }
 
@@ -456,7 +537,7 @@ mod tests {
             drop(sock);
         });
 
-        let result = proxy_to_control(&mut server_tls, backend_port).await;
+        let result = relay_to_backend(&mut server_tls, backend_port).await;
         assert!(result.is_err(), "a backend-side reset must be reported as a relay failure, not silently swallowed");
     }
 }

@@ -124,7 +124,9 @@
         {#if liveInfo && node.downloaded !== false}
           <div class="row"><span class="k">container status</span><span class="v">{liveInfo.status}</span></div>
           <div class="row"><span class="k">container name</span><span class="v">{liveInfo.container_name}</span></div>
-          {#if liveInfo.published_port}
+          {#if liveInfo.routes?.some((r) => r.domain === node.domain)}
+            <div class="row"><span class="k">open</span><span class="v"><a href="https://{node.domain}" target="_blank">https://{node.domain}</a></span></div>
+          {:else if liveInfo.published_port}
             <div class="row"><span class="k">open</span><span class="v"><a href="http://127.0.0.1:{liveInfo.published_port}" target="_blank">127.0.0.1:{liveInfo.published_port}</a></span></div>
           {/if}
         {/if}

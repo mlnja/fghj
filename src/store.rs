@@ -166,16 +166,18 @@ impl WorkspaceDb {
                 PRIMARY KEY (run_id, node_id)
             );",
         )?;
-        // Best-effort migration for `meta` databases created before the
-        // owner_* columns existed — SQLite's `CREATE TABLE IF NOT EXISTS`
-        // above is a no-op against an already-existing table, so an older db
-        // needs these added explicitly. Ignore the error when they're
-        // already present (no `IF NOT EXISTS` for `ADD COLUMN` in SQLite).
+        // Best-effort migration for `meta`/`containers` databases created
+        // before these columns existed — SQLite's `CREATE TABLE IF NOT
+        // EXISTS` above is a no-op against an already-existing table, so an
+        // older db needs these added explicitly. Ignore the error when
+        // they're already present (no `IF NOT EXISTS` for `ADD COLUMN` in
+        // SQLite).
         for stmt in [
             "ALTER TABLE meta ADD COLUMN owner_uid INTEGER",
             "ALTER TABLE meta ADD COLUMN owner_gid INTEGER",
             "ALTER TABLE meta ADD COLUMN owner_home TEXT",
             "ALTER TABLE meta ADD COLUMN owner_ssh_auth_sock TEXT",
+            "ALTER TABLE containers ADD COLUMN routes_json TEXT",
         ] {
             let _ = conn.execute(stmt, []);
         }
@@ -254,9 +256,17 @@ impl WorkspaceDb {
             tx.execute("DELETE FROM containers WHERE run_id = ?1", rusqlite::params![state.run_id])?;
             for c in &state.containers {
                 tx.execute(
-                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    rusqlite::params![state.run_id, c.node_id, c.container_name, c.status, c.published_port, c.domain],
+                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![
+                        state.run_id,
+                        c.node_id,
+                        c.container_name,
+                        c.status,
+                        c.published_port,
+                        c.domain,
+                        serde_json::to_string(&c.routes)?
+                    ],
                 )?;
             }
             tx.commit()?;
@@ -293,9 +303,13 @@ impl WorkspaceDb {
             drop(stmt);
 
             let mut stmt = conn.prepare(
-                "SELECT run_id, node_id, container_name, status, published_port, domain FROM containers",
+                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json FROM containers",
             )?;
             let rows = stmt.query_map([], |row| {
+                let routes_json: Option<String> = row.get(6)?;
+                let routes = routes_json
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
                 Ok((
                     row.get::<_, String>(0)?,
                     ContainerInfo {
@@ -304,6 +318,7 @@ impl WorkspaceDb {
                         status: row.get(3)?,
                         published_port: row.get::<_, Option<i64>>(4)?.map(|p| p as u16),
                         domain: row.get(5)?,
+                        routes,
                     },
                 ))
             })?;
@@ -365,6 +380,7 @@ mod tests {
                 status: "running".to_string(),
                 published_port: Some(8080),
                 domain: "svc-a.demo.fghj".to_string(),
+                routes: vec![crate::runs::PortRoute { domain: "svc-a.demo.fghj".to_string(), host_port: 8080 }],
             }],
         };
         db.clone().save_run(state).await.unwrap();
@@ -375,6 +391,8 @@ mod tests {
         assert_eq!(restored.network, "fghj-demo-default");
         assert_eq!(restored.containers.len(), 1);
         assert_eq!(restored.containers[0].published_port, Some(8080));
+        assert_eq!(restored.containers[0].routes.len(), 1);
+        assert_eq!(restored.containers[0].routes[0].host_port, 8080);
         assert_eq!(restored.overrides.get("svc-a"), Some(&"feature-x".to_string()));
 
         db.clone().delete_run("default".to_string()).await.unwrap();

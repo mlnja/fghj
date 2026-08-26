@@ -201,6 +201,24 @@ impl WorkspaceRegistry {
         self.by_id.lock().unwrap().get(id).cloned()
     }
 
+    /// Finds the `127.0.0.1:<port>` a running container in any wired
+    /// workspace's active runs publishes `host` at, if any — the SNI ->
+    /// container lookup backing real per-service HTTPS routing (see
+    /// `proxy::serve_https`). Only `"running"` containers are considered, so
+    /// a stopped-but-not-yet-reconciled container's stale route doesn't hand
+    /// back a dead port.
+    pub fn resolve_route(&self, host: &str) -> Option<u16> {
+        let states: Vec<Arc<WorkspaceState>> = self.by_id.lock().unwrap().values().cloned().collect();
+        states.iter().find_map(|state| {
+            state.runs.list().iter().find_map(|run| {
+                run.containers
+                    .iter()
+                    .filter(|c| c.status == "running")
+                    .find_map(|c| c.routes.iter().find(|r| r.domain == host).map(|r| r.host_port))
+            })
+        })
+    }
+
     pub fn list(&self) -> Vec<(String, PathBuf)> {
         self.by_id.lock().unwrap().iter().map(|(id, s)| (id.clone(), s.path.clone())).collect()
     }
@@ -222,6 +240,12 @@ impl WorkspaceRegistry {
             }
             None => false,
         }
+    }
+}
+
+impl proxy::RouteResolver for WorkspaceRegistry {
+    fn resolve(&self, host: &str) -> Option<u16> {
+        self.resolve_route(host)
     }
 }
 
@@ -552,17 +576,20 @@ pub async fn run_control_api() -> Result<()> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let cert_resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider.clone()));
 
-    // Occupied before the registry loads and the control API is reachable
-    // at all, so a bind failure on 80/443 ("something else is already
-    // listening there") is reported clearly instead of leaving `fghjd`
-    // half-started.
+    // Loaded before the HTTPS proxy is spawned (but the ports below are
+    // still bound first — see the comment there) since `serve_https` needs
+    // it for real per-service SNI -> container routing, not just the zone
+    // apex.
+    let registry = Arc::new(WorkspaceRegistry::load(docker).await);
+    spawn_reconciler(Arc::clone(&registry));
+
+    // Occupied before the control API is reachable at all, so a bind
+    // failure on 80/443 ("something else is already listening there") is
+    // reported clearly instead of leaving `fghjd` half-started.
     let http_listener = proxy::bind_http().await?;
     let https_listener = proxy::bind_https().await?;
     tokio::spawn(proxy::serve_http_redirect(http_listener));
-    tokio::spawn(proxy::serve_https(https_listener, cert_resolver, control_port, provider));
-
-    let registry = Arc::new(WorkspaceRegistry::load(docker).await);
-    spawn_reconciler(Arc::clone(&registry));
+    tokio::spawn(proxy::serve_https(https_listener, cert_resolver, control_port, provider, registry.clone()));
 
     let app = build_router(registry);
     println!("fghjd: control API listening on 127.0.0.1:{control_port} (reachable via https://{})", dns::ZONE);
