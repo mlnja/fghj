@@ -148,6 +148,16 @@ pub struct Node {
     pub domain_scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_path: Option<String>,
+    /// This node's canonical `*.fghj.internal` address for the *default*
+    /// run — the same value `runs::start_node` derives when it actually
+    /// launches a container for this node under `runs::DEFAULT_RUN_ID`.
+    /// Populated as a final pass in `resolve_universe` (not at node
+    /// construction time, since it needs the workspace name, only known
+    /// once resolution is complete) so the UI can show/link to a node's
+    /// expected address before any container is running. A node started
+    /// under a *named* run gets a different, run-id-qualified domain (see
+    /// `runs::derive_domain`) that this field does not reflect.
+    pub domain: String,
     pub downloaded: bool,
     /// Whether the on-disk checkout has uncommitted changes — see
     /// `concepts/branch-ownership-model.md`. Always `false` for stub
@@ -379,6 +389,7 @@ impl<'a> ResolveCtx<'a> {
                 repo,
                 domain_scope: component.service.domain_scope.clone(),
                 local_path: Some(local_path.to_string()),
+                domain: String::new(),
                 downloaded: true,
                 dirty,
                 flows: Vec::new(),
@@ -462,6 +473,7 @@ impl<'a> ResolveCtx<'a> {
                 repo: Some(repo.to_string()),
                 domain_scope: default_domain_scope(),
                 local_path: Some(stub_id.clone()),
+                domain: String::new(),
                 downloaded: false,
                 dirty: false,
                 flows: Vec::new(),
@@ -511,6 +523,7 @@ impl<'a> ResolveCtx<'a> {
                     repo: None,
                     domain_scope,
                     local_path: None,
+                    domain: String::new(),
                     downloaded: true,
                     dirty: false,
                     flows: Vec::new(),
@@ -673,6 +686,14 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
         }
     }
 
+    let workspace_name = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf())
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace")
+        .to_string();
+
     // Sorted by id so node order — and therefore the frontend's computed
     // layout — is stable across polls. `ctx.nodes` is a HashMap, so without
     // this, each `resolve_universe` call could hand back the same nodes in a
@@ -684,6 +705,10 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
         if let Some(fl) = node_flows.remove(&node.id) {
             node.flows = fl;
         }
+        // Default-run domain, always known once a node's id and
+        // domain_scope are — see the field's own doc comment for why this
+        // isn't just set at construction time.
+        node.domain = crate::runs::derive_domain(&node.id, &node.domain_scope, &workspace_name, crate::runs::DEFAULT_RUN_ID);
     }
 
     let mut edges = ctx.edges;
@@ -692,14 +717,6 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
         fl.sort();
         edge.flows = fl;
     }
-
-    let workspace_name = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf())
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("workspace")
-        .to_string();
 
     Ok(Graph {
         workspace_name,

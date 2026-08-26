@@ -36,6 +36,24 @@ pub struct RunSpec {
     pub flow: Option<String>,
 }
 
+/// Derives a node's canonical `*.fghj.internal` domain for a given run — the
+/// single definition `start_node` uses when actually launching a container,
+/// also called from `resolver::resolve_universe` (always with
+/// `DEFAULT_RUN_ID`) so `Node.domain` can carry a node's default-run address
+/// before any container for it has ever been started. Two nodes can never
+/// collide on the result: `node_id` is already the unique, leaf-first id
+/// (see `resolver::visit_local_service`/`visit_dependency`), and `run_id` is
+/// folded in for every run except the default one (see `start_node`'s own
+/// comment for why).
+pub fn derive_domain(node_id: &str, domain_scope: &str, workspace_name: &str, run_id: &str) -> String {
+    let workspace = sanitize_label(workspace_name);
+    if domain_scope == "stable" || run_id == DEFAULT_RUN_ID {
+        format!("{node_id}.{workspace}.fghj.internal")
+    } else {
+        format!("{node_id}.{run_id}.{workspace}.fghj.internal")
+    }
+}
+
 /// A `*.fghj.internal` name this container answers to, and the `127.0.0.1`
 /// port Docker actually published its backing container-side port on — the
 /// SNI -> backend lookup `proxy::serve_https` dispatches real per-service
@@ -338,11 +356,7 @@ impl RunRegistry {
         // it resolves identically whether asked from inside this run's
         // docker network (Docker's own embedded DNS) or from the host
         // (fghjd's DNS server, which answers any name in the zone).
-        let domain = if node.domain_scope == "stable" || run_id == DEFAULT_RUN_ID {
-            format!("{}.{}.fghj.internal", node.id, workspace)
-        } else {
-            format!("{}.{}.{}.fghj.internal", node.id, run_id, workspace)
-        };
+        let domain = derive_domain(&node.id, &node.domain_scope, &graph.workspace_name, run_id);
 
         let image = match node.kind.as_str() {
             "backing" => match node.image.clone() {

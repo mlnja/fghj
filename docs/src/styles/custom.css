@@ -1,0 +1,16 @@
+/* ── fghj accent colors — light theme ──────────────────────────────────── */
+:root[data-theme='light'],
+:root:not([data-theme='dark']) {
+  --sl-color-accent-low:  #dcfce7;
+  --sl-color-accent:      #16a34a;
+  --sl-color-accent-high: #15803d;
+  --sl-color-text-accent: #16a34a;
+}
+
+/* ── fghj accent colors — dark theme ───────────────────────────────────── */
+:root[data-theme='dark'] {
+  --sl-color-accent-low:  #052e16;
+  --sl-color-accent:      #4ade80;
+  --sl-color-accent-high: #86efac;
+  --sl-color-text-accent: #4ade80;
+}

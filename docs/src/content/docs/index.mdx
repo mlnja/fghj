@@ -1,0 +1,86 @@
+---
+title: fghj
+description: Local development orchestration for multi-repo user flows. Spin up exactly the services a user journey needs, wired together with real HTTPS domains.
+template: splash
+hero:
+  tagline: Local dev environments scoped to a user flow, not your whole microservice fleet.
+  actions:
+    - text: Get Started
+      link: /getting-started/quickstart
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/virviil/fghj
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Why fghj?
+
+Testing one user journey shouldn't require booting every microservice you own.
+`fghj` reads a small `fghj.yaml` in each repo, follows declared dependencies
+outward from whichever repos you're actually working on, and brings up just
+that subgraph — with real `*.fghj.internal` HTTPS domains, trusted locally
+signed certs, and no `docker-compose.yml` to hand-maintain.
+
+<CardGrid stagger>
+  <Card title="Federated config" icon="puzzle">
+    No mega-repo. Every service declares its own dependencies in its own
+    `fghj.yaml` — peers, not a tree with one root.
+  </Card>
+  <Card title="Real HTTPS, locally" icon="approve-check">
+    A local CA and a TLS-terminating reverse proxy issue trusted certs
+    on the fly for every `*.fghj.internal` domain your services get.
+  </Card>
+  <Card title="Fog-of-war visibility" icon="magnifier">
+    The graph only shows what's actually on disk. Selecting a user flow
+    highlights its slice — it never hides the rest.
+  </Card>
+  <Card title="One shared environment" icon="rocket">
+    A default run tops up idempotently as you touch more of the graph,
+    plus disposable named runs for testing a specific branch in isolation.
+  </Card>
+</CardGrid>
+
+## At a glance
+
+```bash
+# Wire a workspace into the running daemon
+fghj wire git@github.com:acme/checkout-service.git
+
+# Validate a service's fghj.yaml against the schema
+fghj validate ./fghj.yaml
+
+# Resolve the full dependency graph and print it as JSON
+fghj graph git@github.com:acme/checkout-service.git
+```
+
+```yaml
+# fghj.yaml
+version: "1.0"
+service:
+  name: checkout-service
+  build:
+    context: .
+  ports:
+    http:
+      primary: true
+  dependencies:
+    - kind: service
+      repo: git@github.com:acme/payments-service.git
+      default_branch: main
+    - kind: backing
+      name: postgres
+      image: postgres:16
+      ports: ["5432"]
+
+flows:
+  checkout:
+    description: End-to-end checkout journey
+    dependencies:
+      - kind: service
+        repo: git@github.com:acme/payments-service.git
+        default_branch: main
+```

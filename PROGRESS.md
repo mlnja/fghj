@@ -1,8 +1,15 @@
 # fghj — Progress Tracker
 
-Last updated: 2026-08-26 (leaf-first, repo-qualified node ids session).
-Keep this file current as work lands — update the relevant section instead of
-appending a changelog.
+Last updated: 2026-08-26 (leaf-first, repo-qualified node ids session; found
+and fixed a dead `Node.domain` UI wire-up while writing `concepts/` docs).
+`concepts/` now also has a full set of 8 Phoenix-guide-style subsystem
+guides (`node-identity-and-domains`, `local-ca-and-tls-proxy`, `split-dns`,
+`run-lifecycle-and-registry`, `persistence-and-workspace-store`,
+`docker-and-downloads`, `control-api-and-cli`, `ui-architecture`), each
+synthesized from the non-trivial `//`/`///` comments across the whole
+codebase, alongside the pre-existing short design-decision docs — see
+`concepts/README.md`. Keep this file current as work lands — update the
+relevant section instead of appending a changelog.
 
 ## What this is
 
@@ -155,6 +162,30 @@ durable record, plans in `~/.claude/plans/` are not.
   primary domain, so they resolve the same from inside the run's docker
   network and from the host, closing a gap where they only worked from the
   host via fghjd's wildcard DNS.
+- **Fixed: `Node.domain` was never populated** (`resolver.rs`/`runs.rs`).
+  `Drawer.svelte` and `GraphView.svelte` have shown/relied on `node.domain`
+  (a "domain" info row, and — more importantly — the check that decides
+  whether a running container's "open" link uses its nice
+  `https://...fghj.internal` address instead of falling back to a raw
+  `127.0.0.1:<port>` link) since the per-service-routing work landed, but
+  `resolver::Node` had no `domain` field to send them — it was apparently
+  dropped, without a derived replacement, during the "no node kind can
+  declare its own raw domain" refactor (see the domain-derivation entry
+  above). The result: that UI path was dead code, and the "open" link never
+  used a node's real domain even when `proxy.rs`'s per-service routing was
+  working correctly underneath it. Fixed by extracting the domain formula
+  `start_node` already used into a standalone `runs::derive_domain(node_id,
+  domain_scope, workspace_name, run_id)`, and having `resolve_universe` call
+  it (with `run_id = DEFAULT_RUN_ID`) as a final pass over `nodes` to
+  populate `Node.domain` with each node's default-run address — the one
+  stable identity every node has before any review run touches it. No
+  frontend change was needed; both Svelte files were already written to
+  expect this field. Caveat, not further fixed: `Node.domain` always
+  reflects the *default*-run address, so the "open via domain" match only
+  succeeds while the *default* run's containers are what's shown in the
+  drawer — for a review/named run (which gets a different, run-id-qualified
+  domain), the link falls back to the raw port, and the domain row shown is
+  the node's default-run identity, not that run's actual live one.
 - **Flat workspace model** ([[flat-workspace-model]] concept): no
   root/component config split — every repo is a peer, any repo can declare
   `flows:`. Implemented in `src/resolver.rs` (`scan_workspace`,
