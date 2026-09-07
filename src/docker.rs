@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use bollard::Docker;
 use bollard::body_full;
+use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::models::{
     ContainerCreateBody, EndpointSettings, HealthConfig, HostConfig, NetworkCreateRequest,
     NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
@@ -15,6 +17,7 @@ use bollard::query_parameters::{
 };
 use futures_util::StreamExt;
 use futures_util::stream::Stream;
+use tokio::io::AsyncWrite;
 
 use crate::resolver::Healthcheck;
 
@@ -421,4 +424,235 @@ pub fn logs_follow(
         .tail("0")
         .build();
     docker.logs(name, Some(options))
+}
+
+/// A live `docker exec` session — `output` and `input` are independent
+/// halves of one duplex connection (Docker upgrades the HTTP connection to a
+/// raw byte stream once attached), so both directions can be driven
+/// concurrently by a `tokio::select!` loop. See `bollard::exec::start_exec`'s
+/// `StartExecResults::Attached` variant, which this wraps.
+pub struct ExecSession {
+    pub id: String,
+    pub output: Pin<
+        Box<
+            dyn Stream<Item = Result<bollard::container::LogOutput, bollard::errors::Error>> + Send,
+        >,
+    >,
+    pub input: Pin<Box<dyn AsyncWrite + Send>>,
+}
+
+/// Starts a command inside an already-running container and attaches to it,
+/// full duplex. `tty` merges stdout/stderr into one undifferentiated stream
+/// (real terminal semantics) — same simplification `fghj exec` relies on to
+/// avoid stream-tagging both with and without a TTY.
+pub async fn exec_start(
+    docker: &Docker,
+    container_name: &str,
+    cmd: &[String],
+    user: Option<&str>,
+    working_dir: Option<&str>,
+    tty: bool,
+) -> Result<ExecSession> {
+    let create_opts = CreateExecOptions {
+        attach_stdin: Some(true),
+        attach_stdout: Some(true),
+        attach_stderr: Some(true),
+        tty: Some(tty),
+        cmd: Some(cmd.to_vec()),
+        user: user.map(|s| s.to_string()),
+        working_dir: working_dir.map(|s| s.to_string()),
+        ..Default::default()
+    };
+    let created = docker
+        .create_exec(container_name, create_opts)
+        .await
+        .context("docker create_exec failed")?;
+
+    let started = docker
+        .start_exec(
+            &created.id,
+            Some(StartExecOptions {
+                detach: false,
+                tty,
+                ..Default::default()
+            }),
+        )
+        .await
+        .context("docker start_exec failed")?;
+
+    match started {
+        StartExecResults::Attached { output, input } => Ok(ExecSession {
+            id: created.id,
+            output,
+            input,
+        }),
+        // We always pass `detach: false` above, so Docker never takes the
+        // detached path — `start_exec` only returns `Detached` when the
+        // caller asks for it.
+        StartExecResults::Detached => bail!("docker start_exec unexpectedly detached"),
+    }
+}
+
+/// Resizes an exec session's pseudo-TTY — a no-op error from Docker's side
+/// if the session wasn't started with `tty: true`, so callers only need to
+/// call this when they know they allocated one.
+pub async fn exec_resize(docker: &Docker, exec_id: &str, cols: u16, rows: u16) -> Result<()> {
+    docker
+        .resize_exec(
+            exec_id,
+            ResizeExecOptions {
+                width: cols,
+                height: rows,
+            },
+        )
+        .await
+        .context("docker resize_exec failed")
+}
+
+/// The exec's exit code, once its process has finished. `-1` if Docker
+/// doesn't report one (shouldn't happen for a completed exec, but this is
+/// simpler than propagating a second failure mode this far into a stream's
+/// end for something purely informational).
+pub async fn exec_exit_code(docker: &Docker, exec_id: &str) -> Result<i64> {
+    let inspected = docker
+        .inspect_exec(exec_id)
+        .await
+        .context("docker inspect_exec failed")?;
+    Ok(inspected.exit_code.unwrap_or(-1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    /// A throwaway `busybox` container, torn down on drop — exists purely so
+    /// exec tests below have a real running container to attach to, without
+    /// pulling in the resolver/`RunOpts` machinery `run_container` needs.
+    struct TestContainer {
+        name: String,
+    }
+
+    impl TestContainer {
+        fn start() -> Self {
+            let name = format!(
+                "fghj-exec-test-{}",
+                std::process::id().wrapping_add(rand_suffix())
+            );
+            let status = Command::new("docker")
+                .args([
+                    "run", "-d", "--rm", "--name", &name, "busybox", "sleep", "60",
+                ])
+                .status()
+                .expect("failed to run `docker run` for exec test fixture");
+            assert!(status.success(), "docker run failed for exec test fixture");
+            Self { name }
+        }
+    }
+
+    impl Drop for TestContainer {
+        fn drop(&mut self) {
+            let _ = Command::new("docker")
+                .args(["rm", "-f", &self.name])
+                .status();
+        }
+    }
+
+    /// Cheap, dependency-free uniqueness for the container name — tests in
+    /// this module never run concurrently with each other in practice, but a
+    /// stale container from a previous crashed run shouldn't collide either.
+    fn rand_suffix() -> u32 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn exec_start_streams_output_and_reports_exit_code() {
+        let docker = crate::daemon::connect_docker().expect("docker client");
+        let container = TestContainer::start();
+
+        let mut session = exec_start(
+            &docker,
+            &container.name,
+            &["echo".to_string(), "hello from exec".to_string()],
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect("exec_start failed");
+
+        let mut collected = Vec::new();
+        while let Some(item) = session.output.next().await {
+            collected.extend_from_slice(&item.expect("exec output stream error").into_bytes());
+        }
+        let text = String::from_utf8_lossy(&collected);
+        assert!(
+            text.contains("hello from exec"),
+            "unexpected exec output: {text}"
+        );
+
+        let code = exec_exit_code(&docker, &session.id)
+            .await
+            .expect("exec_exit_code failed");
+        assert_eq!(code, 0);
+    }
+
+    #[tokio::test]
+    async fn exec_start_reports_nonzero_exit_code_and_accepts_stdin() {
+        let docker = crate::daemon::connect_docker().expect("docker client");
+        let container = TestContainer::start();
+
+        // `cat` echoes stdin back to stdout, then exits 0 once stdin closes —
+        // exercises the duplex `input` half, not just `output`.
+        let mut session = exec_start(
+            &docker,
+            &container.name,
+            &["cat".to_string()],
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect("exec_start failed");
+
+        session
+            .input
+            .write_all(b"round trip\n")
+            .await
+            .expect("failed to write exec stdin");
+        session
+            .input
+            .shutdown()
+            .await
+            .expect("failed to close exec stdin");
+
+        let mut collected = Vec::new();
+        while let Some(item) = session.output.next().await {
+            collected.extend_from_slice(&item.expect("exec output stream error").into_bytes());
+        }
+        assert_eq!(String::from_utf8_lossy(&collected), "round trip\n");
+        assert_eq!(
+            exec_exit_code(&docker, &session.id).await.unwrap(),
+            0,
+            "cat should exit 0 once stdin closes"
+        );
+
+        // A second exec against the same still-running container that exits
+        // nonzero — confirms exit codes aren't always trivially 0/-1.
+        let mut failing = exec_start(
+            &docker,
+            &container.name,
+            &["sh".to_string(), "-c".to_string(), "exit 7".to_string()],
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect("exec_start failed");
+        while (failing.output.next().await).is_some() {}
+        assert_eq!(exec_exit_code(&docker, &failing.id).await.unwrap(), 7);
+    }
 }

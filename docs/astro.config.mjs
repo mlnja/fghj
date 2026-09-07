@@ -43,6 +43,7 @@ export default defineConfig({
             { label: 'fghj validate', slug: 'cli/validate' },
             { label: 'fghj graph', slug: 'cli/graph' },
             { label: 'fghj wire', slug: 'cli/wire' },
+            { label: 'fghj exec', slug: 'cli/exec' },
             { label: 'fghj daemon', slug: 'cli/daemon' },
             { label: 'fghjd (superdaemon)', slug: 'cli/fghjd' },
           ],

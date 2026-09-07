@@ -1,6 +1,10 @@
 # fghj — Progress Tracker
 
-Last updated: 2026-09-07 (implemented `#Volume` — bind mounts and named
+Last updated: 2026-09-07 (added `fghj exec` — a full-duplex `docker compose
+exec`-equivalent proxied over a new WebSocket route on the control socket,
+closing the "No `docker compose exec`-equivalent" gap under "Real-world
+dry-run findings" below).
+Prior update, 2026-09-07 (implemented `#Volume` — bind mounts and named
 volumes on both `#Service` and `#BackingDependency`, closing the top two
 Compose-parity gaps below: live bind-mounts and Postgres-style data
 persistence. See "Docker Compose language-feature parity" and "Real-world
@@ -519,10 +523,22 @@ plans referenced above.
     now round-trips via `#BackingDependency.platform` into
     `create_container`'s platform query param, same fghj-doesn't-pull-images
     caveat noted above.
-  - **No `docker compose exec`-equivalent.** One-off admin tasks (DB seed
-    script, run via `docker compose exec mysql bash seed-database.sh`) need
-    a way to run a command inside an already-running container; the control
-    API has no such primitive.
+  - ~~**No `docker compose exec`-equivalent.**~~ **Done (2026-09-07)** —
+    `fghj exec <node> -- <cmd>...` (`docs/cli/exec.md`) proxies a real,
+    full-duplex `docker exec` over a new WebSocket route on the control
+    socket (`daemon.rs`'s `/runs/{run_id}/nodes/{node_id}/exec/ws`, built on
+    `docker::exec_start`/`exec_resize`/`exec_exit_code` wrapping bollard's
+    already-duplex `create_exec`/`start_exec`). Not just streamed output: a
+    real interactive shell works end to end (raw terminal mode, `Ctrl-C`
+    forwarded to the remote process instead of killing the local CLI,
+    `SIGWINCH` resize forwarding), and TTY allocation auto-detects the same
+    way `docker compose exec` does (off automatically when stdin/stdout
+    aren't real terminals, or forced off via `-T`) so piped/scripted
+    one-off commands work the same as an interactive session. stdout/stderr
+    are relayed as one combined byte stream in both modes — no per-stream
+    tagging, since none of the motivating use cases (`docker:seed`,
+    `docker:test-file`, `docker:php-errors` in the aikido-core dry-run
+    below) need them split.
   - **No cross-repo filesystem dependency, only network-service
     dependencies** — **largely closed as a side effect of the bind-mount
     work above (2026-09-07).** `php`'s container bind-mounts a *sibling
@@ -543,11 +559,11 @@ plans referenced above.
     cloneable (real `git@github.com:AikidoSec/*` remotes) and independently
     Dockerized — exactly fghj's target shape — and the project's own Readme
     maintains a 28-row manual port-allocation table by hand, precisely the
-    pain the flow/magic-DNS model exists to remove. With the bind-mount gap
-    now closed, only the host-process node kind and domain-migration gaps
-    above stand between this and a real dry run — this ecosystem is a
-    strong real-scale fghj candidate, arguably better proof than the toy
-    fixtures.
+    pain the flow/magic-DNS model exists to remove. With the bind-mount and
+    `docker compose exec`-equivalent gaps now closed, only the host-process
+    node kind gap above stands between this and a real dry run — this
+    ecosystem is a strong real-scale fghj candidate, arguably better proof
+    than the toy fixtures.
 
 ## Suggested next steps (not started, pick one to work on)
 
