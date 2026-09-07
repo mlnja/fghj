@@ -115,6 +115,10 @@ pub struct RunOpts<'a> {
     /// port (the default), `Some(p)` binds exactly `127.0.0.1:p`.
     pub ports: &'a [(String, Option<u16>)],
     pub image: &'a str,
+    /// Overrides the image's default `CMD` when non-empty — see `#Service`'s
+    /// and `#BackingDependency`'s `command` doc comments in
+    /// `schema/*.cue`. Empty leaves the image's own `CMD` untouched.
+    pub command: &'a [String],
     /// stack/project id — mirrors Docker Compose's `com.docker.compose.project`
     /// label so Docker Desktop (and `docker ps`/`compose ls` tooling) groups
     /// every container in a run together, even though we never call `docker compose`.
@@ -166,6 +170,11 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
 
     let body = ContainerCreateBody {
         image: Some(opts.image.to_string()),
+        cmd: if opts.command.is_empty() {
+            None
+        } else {
+            Some(opts.command.to_vec())
+        },
         env: Some(opts.env.to_vec()),
         labels: Some(labels),
         exposed_ports: Some(exposed_ports),

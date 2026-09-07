@@ -38,6 +38,7 @@ service:
   domain_scope: run
   environment:
     - PORT=8080
+  command: ["npm", "run", "dev"]
   dependencies:
     - kind: service
       repo: git@github.com:acme/auth-service.git
@@ -53,6 +54,7 @@ service:
 | `ports` | map of container-port→`#Port` | Declared container ports. The map key is the literal container port number (e.g. `"8080"`), published to Docker as-is — not a semantic label. See [Ports](#ports) below. |
 | `domain_scope` | `"run"` \| `"stable"` | Whether this service's derived domain includes the run id. Defaults to `"run"`. See [Node identity & domains](/concepts/node-identity-and-domains/#domain-derivation-one-formula-no-exceptions). |
 | `environment` | map or list | Either `{KEY: value}` or a list of `"KEY=value"` strings — mirrors Docker Compose's own `environment` shape. |
+| `command` | list of strings | Overrides the image's default `CMD`, Compose-`command`-style. Empty (the default) leaves the image's own `CMD`/`ENTRYPOINT` untouched. |
 | `volumes` | list of `#Volume` | Bind mounts and named volumes. See [Volumes](#volumes) below. |
 | `additional_hosts` | list of `#AdditionalHost` | Extra literal hostname aliases this service also answers on, alongside its derived domain. See [Additional hosts](#additional-hosts) below. |
 | `dependencies` | list of `#Dependency` | This service's baseline dependencies — always pulled in regardless of which flow is selected. See [Dependencies](#dependencies) below. |
@@ -244,6 +246,7 @@ bind to the same instance via `kind: shared-backing` below.
   environment:
     POSTGRES_PASSWORD: dev
   domain_scope: run
+  command: ["mysqld", "--sql_mode=NO_ENGINE_SUBSTITUTION"]
   volumes:
     - name: pgdata
       container: /var/lib/postgresql/data
@@ -256,6 +259,7 @@ bind to the same instance via `kind: shared-backing` below.
 | `ports` | List of container ports to publish. |
 | `environment` | Same shape as `service.environment`. |
 | `domain_scope` | `"run"` (default) or `"stable"` — same semantics as `service.domain_scope`. |
+| `command` | Same shape as `service.command` — overrides the image's default `CMD`, e.g. to pass extra startup flags to a stock database image. |
 | `volumes` | Same shape as `service.volumes` — see [Volumes](#volumes). A volume's own `scope` (default `"run"`) governs its lifecycle independently of this backing dependency's `domain_scope`; a named volume here (like `pgdata` above) is what makes the data survive a restart. |
 
 ### `kind: shared-backing`

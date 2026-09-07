@@ -403,9 +403,13 @@ plans referenced above.
     network only) — a `"run"`-scoped preview run that's stopped and never
     restarted leaks an orphaned Docker volume, with no `compose down -v`
     equivalent yet.
-  - **`command`/`entrypoint` override** — no way to run a service with a
-    dev-mode command (hot reload, a migration step before boot) without
-    baking it into the Dockerfile.
+  - ~~**`command`/`entrypoint` override**~~ **Done (2026-09-07)** — `command`
+    on `#Service` and `#BackingDependency` (see below) overrides the image's
+    default `CMD`, e.g. a dev-mode command or a database's startup flags,
+    without baking it into the Dockerfile. No separate `entrypoint` field:
+    Compose-style `command` alone is enough to express every real case found
+    so far (including mysql's `mysqld --sql_mode=...`), and it's easy to add
+    later if a real case needs it.
   - **`healthcheck` + real `depends_on` ordering** — `ensure_running` starts
     every node's container with no ordering or readiness gate; a service
     that can't tolerate its Postgres not being ready yet has no way to
@@ -465,9 +469,11 @@ plans referenced above.
     `app.local.aikido.io` no longer needs an app code change: reserved-TLD
     aliases (`.local`/`.test`/`.internal`/`.localhost`) get HTTPS via
     fghj's own CA, anything else is relayed over plain HTTP only.
-  - **No `command`/entrypoint override** on a service or `kind: backing`
-    dependency — mysql's `command: mysqld --sql_mode=...` flags have no
-    schema field to express.
+  - ~~**No `command`/entrypoint override** on a service or `kind: backing`
+    dependency~~ **closed (2026-09-07)** — mysql's
+    `command: mysqld --sql_mode=...` flags now round-trip via `#Service
+    .command`/`#BackingDependency.command` straight into `docker::RunOpts
+    .command` → `ContainerCreateBody.cmd`.
   - **No `platform` pin** on `kind: backing` — mysql declares `platform:
     linux/x86_64` for Apple Silicon image compatibility; no equivalent field.
   - **No `docker compose exec`-equivalent.** One-off admin tasks (DB seed

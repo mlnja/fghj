@@ -83,6 +83,10 @@ package fghj
 	// name from the host at a time, but it's the same name every time.
 	domain_scope: *"run" | "stable"
 	environment: #Environment | *[]
+	// Overrides the image's default `CMD`, Compose-`command`-style — e.g.
+	// passing extra flags to a database's entrypoint script. Empty (the
+	// default) leaves the image's own `CMD`/`ENTRYPOINT` untouched.
+	command: [...string] | *[]
 	volumes: [...#Volume] | *[]
 	// Extra literal hostnames this service also answers on, routed to its
 	// `primary` port — requires one to be set. See `#AdditionalHost`.

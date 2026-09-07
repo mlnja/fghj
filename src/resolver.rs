@@ -81,6 +81,8 @@ struct ServiceConfig {
     #[serde(default)]
     environment: Environment,
     #[serde(default)]
+    command: Vec<String>,
+    #[serde(default)]
     volumes: Vec<VolumeMount>,
     #[serde(default)]
     additional_hosts: Vec<String>,
@@ -150,6 +152,8 @@ enum Dependency {
         #[serde(default = "default_domain_scope")]
         domain_scope: String,
         #[serde(default)]
+        command: Vec<String>,
+        #[serde(default)]
         volumes: Vec<VolumeMount>,
     },
     #[serde(rename = "shared-backing")]
@@ -203,6 +207,11 @@ pub struct Node {
     pub ports: BTreeMap<String, PortConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub environment: Vec<String>,
+    /// Overrides the image's default `CMD` when non-empty — see `#Service`'s
+    /// and `#BackingDependency`'s `command` doc comments in
+    /// `schema/*.cue`. Passed straight to `docker::RunOpts::command`.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub command: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub volumes: Vec<VolumeMount>,
     /// Extra literal hostnames this service also answers on (`#Service`
@@ -445,6 +454,7 @@ impl<'a> ResolveCtx<'a> {
                 }),
                 ports: component.service.ports.clone(),
                 environment: component.service.environment.to_pairs(),
+                command: component.service.command.clone(),
                 volumes: component.service.volumes.clone(),
                 additional_hosts: component.service.additional_hosts.clone(),
             }
@@ -537,6 +547,7 @@ impl<'a> ResolveCtx<'a> {
                 build: None,
                 ports: BTreeMap::new(),
                 environment: Vec::new(),
+                command: Vec::new(),
                 volumes: Vec::new(),
                 additional_hosts: Vec::new(),
             });
@@ -568,6 +579,7 @@ impl<'a> ResolveCtx<'a> {
                 environment,
                 ports,
                 domain_scope,
+                command,
                 volumes,
             } => {
                 // Leaf-first, same convention as service ids and named
@@ -595,6 +607,7 @@ impl<'a> ResolveCtx<'a> {
                             .map(|p| (p, PortConfig::default()))
                             .collect(),
                         environment: environment.to_pairs(),
+                        command,
                         volumes,
                         additional_hosts: Vec::new(),
                     });
@@ -951,6 +964,42 @@ mod tests {
             VolumeMount::Named { name, scope, container, read_only }
                 if name == "pgdata" && scope == "run" && container == "/var/lib/postgresql/data" && !read_only
         ));
+    }
+
+    #[test]
+    fn command_round_trips_into_graph_node_for_service_and_backing() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  name: myservice\n\
+             \x20 command: [\"npm\", \"run\", \"dev\"]\n\
+             \x20 dependencies:\n\
+             \x20   - kind: backing\n\
+             \x20     name: mysql\n\
+             \x20     image: mysql:8.0.33\n\
+             \x20     ports: [\"3306\"]\n\
+             \x20     command: [\"mysqld\", \"--sql_mode=NO_ENGINE_SUBSTITUTION\"]\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        let service = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "myservice.myservice")
+            .unwrap();
+        assert_eq!(service.command, vec!["npm", "run", "dev"]);
+
+        let backing = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "mysql.myservice.myservice")
+            .unwrap();
+        assert_eq!(
+            backing.command,
+            vec!["mysqld", "--sql_mode=NO_ENGINE_SUBSTITUTION"]
+        );
     }
 
     #[test]

@@ -573,6 +573,7 @@ impl RunRegistry {
                 env: &node.environment,
                 ports: &port_list,
                 image: &image,
+                command: &node.command,
                 project: network,
                 service_name: &node.id,
                 binds: &binds,

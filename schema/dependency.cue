@@ -25,6 +25,10 @@ package fghj
 	name:        string & =~"^[a-z0-9][a-z0-9-]*$"
 	image:       string & =~"^[a-z0-9][a-z0-9._/-]*(:[a-zA-Z0-9._-]+)?$"
 	environment: #Environment | *[]
+	// Overrides the image's default `CMD` — e.g. `["mysqld", "--sql_mode=..."]`
+	// to customize a stock database image's startup flags without a custom
+	// Dockerfile. Empty (the default) leaves the image's own `CMD` untouched.
+	command: [...string] | *[]
 	ports: [...string]
 	// Every node's domain is derived by fghj, never author-declared (see
 	// #Service.name) — this just picks whether the derived name carries the
