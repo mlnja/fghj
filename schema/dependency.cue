@@ -35,6 +35,7 @@ package fghj
 	// shared across every run of this graph — only one run can own that name
 	// from the host at a time, but it's the same name every time.
 	domain_scope: *"run" | "stable"
+	volumes: [...#Volume] | *[]
 }
 
 // A reference to a #BackingDependency owned by another service already present

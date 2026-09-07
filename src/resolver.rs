@@ -81,7 +81,37 @@ struct ServiceConfig {
     #[serde(default)]
     environment: Environment,
     #[serde(default)]
+    volumes: Vec<VolumeMount>,
+    #[serde(default)]
+    additional_hosts: Vec<String>,
+    #[serde(default)]
     dependencies: Vec<Dependency>,
+}
+
+/// A bind mount or a named volume, on either a service or a backing
+/// dependency. Mirrors `#Volume` in `schema/component.cue` — the untagged
+/// shapes match its `{host,...}` vs `{name,scope,...}` disjunction directly.
+/// A named volume's real Docker name is derived (never author-declared),
+/// the same way a node's domain is — see `runs::derive_volume_name` — so
+/// two nodes anywhere in the graph declaring the same `name` + `scope`
+/// transparently share the same underlying storage.
+#[derive(Debug, Deserialize, Clone, Serialize)]
+#[serde(untagged)]
+pub enum VolumeMount {
+    Bind {
+        host: String,
+        container: String,
+        #[serde(default)]
+        read_only: bool,
+    },
+    Named {
+        name: String,
+        #[serde(default = "default_domain_scope")]
+        scope: String,
+        container: String,
+        #[serde(default)]
+        read_only: bool,
+    },
 }
 
 /// A declared container port and its role. `primary` (at most one per node)
@@ -119,6 +149,8 @@ enum Dependency {
         ports: Vec<String>,
         #[serde(default = "default_domain_scope")]
         domain_scope: String,
+        #[serde(default)]
+        volumes: Vec<VolumeMount>,
     },
     #[serde(rename = "shared-backing")]
     SharedBacking { repo: String, name: String },
@@ -171,6 +203,14 @@ pub struct Node {
     pub ports: BTreeMap<String, PortConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub environment: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub volumes: Vec<VolumeMount>,
+    /// Extra literal hostnames this service also answers on (`#Service`
+    /// only — see `schema/component.cue`'s `#AdditionalHost`), routed to its
+    /// `primary` port by `runs::start_node`. Always empty for backing and
+    /// stub nodes.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub additional_hosts: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -400,6 +440,8 @@ impl<'a> ResolveCtx<'a> {
                 }),
                 ports: component.service.ports.clone(),
                 environment: component.service.environment.to_pairs(),
+                volumes: component.service.volumes.clone(),
+                additional_hosts: component.service.additional_hosts.clone(),
                 }
             });
 
@@ -432,6 +474,11 @@ impl<'a> ResolveCtx<'a> {
             self.warnings.push(format!(
                 "'{service_id}' declares more than one primary port ({}); only one can sit at its own domain",
                 primaries.join(", ")
+            ));
+        }
+        if !service.additional_hosts.is_empty() && primaries.is_empty() {
+            self.warnings.push(format!(
+                "'{service_id}' declares additional_hosts but no primary port; those hosts won't be routed to anything"
             ));
         }
     }
@@ -480,6 +527,8 @@ impl<'a> ResolveCtx<'a> {
                 build: None,
                 ports: BTreeMap::new(),
                 environment: Vec::new(),
+                volumes: Vec::new(),
+                additional_hosts: Vec::new(),
             });
             stub_id
         };
@@ -509,6 +558,7 @@ impl<'a> ResolveCtx<'a> {
                 environment,
                 ports,
                 domain_scope,
+                volumes,
             } => {
                 // Leaf-first, same convention as service ids and named
                 // ports (`{port_name}.{node's domain}`): the specific thing
@@ -530,6 +580,8 @@ impl<'a> ResolveCtx<'a> {
                     build: None,
                     ports: ports.into_iter().map(|p| (p, PortConfig::default())).collect(),
                     environment: environment.to_pairs(),
+                    volumes,
+                    additional_hosts: Vec::new(),
                 });
                 self.edges.push(Edge {
                     from: owner_id.to_string(),
@@ -799,5 +851,102 @@ mod tests {
         let graph = resolve_universe(tmp.path()).unwrap();
 
         assert!(graph.warnings.iter().any(|w| w.contains("myservice") && w.contains("8080") && w.contains("9090")));
+    }
+
+    #[test]
+    fn service_bind_mount_round_trips_into_graph_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  name: myservice\n\
+             \x20 volumes:\n\
+             \x20   - host: ./src\n\
+             \x20     container: /app/src\n\
+             \x20   - host: ../intel\n\
+             \x20     container: /app/intel\n\
+             \x20     read_only: true\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        let node = graph.nodes.iter().find(|n| n.id == "myservice.myservice").unwrap();
+        assert_eq!(node.volumes.len(), 2);
+        assert!(matches!(
+            &node.volumes[0],
+            VolumeMount::Bind { host, container, read_only }
+                if host == "./src" && container == "/app/src" && !read_only
+        ));
+        assert!(matches!(
+            &node.volumes[1],
+            VolumeMount::Bind { host, container, read_only }
+                if host == "../intel" && container == "/app/intel" && *read_only
+        ));
+    }
+
+    #[test]
+    fn named_volume_round_trips_into_graph_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  name: myservice\n\
+             \x20 dependencies:\n\
+             \x20   - kind: backing\n\
+             \x20     name: postgres\n\
+             \x20     image: postgres:16\n\
+             \x20     ports: [\"5432\"]\n\
+             \x20     volumes:\n\
+             \x20       - name: pgdata\n\
+             \x20         container: /var/lib/postgresql/data\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        let node = graph.nodes.iter().find(|n| n.id == "postgres.myservice.myservice").unwrap();
+        assert_eq!(node.volumes.len(), 1);
+        assert!(matches!(
+            &node.volumes[0],
+            VolumeMount::Named { name, scope, container, read_only }
+                if name == "pgdata" && scope == "run" && container == "/var/lib/postgresql/data" && !read_only
+        ));
+    }
+
+    #[test]
+    fn additional_hosts_round_trip_into_graph_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  name: myservice\n\
+             \x20 ports:\n\
+             \x20   \"8080\":\n\
+             \x20     primary: true\n\
+             \x20 additional_hosts:\n\
+             \x20   - aikido.local\n\
+             \x20   - demo.example.com\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        let node = graph.nodes.iter().find(|n| n.id == "myservice.myservice").unwrap();
+        assert_eq!(node.additional_hosts, vec!["aikido.local", "demo.example.com"]);
+        assert!(graph.warnings.is_empty());
+    }
+
+    #[test]
+    fn warns_when_additional_hosts_declared_without_a_primary_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  name: myservice\n\
+             \x20 additional_hosts:\n\
+             \x20   - aikido.local\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        assert!(graph.warnings.iter().any(|w| w.contains("myservice") && w.contains("additional_hosts")));
     }
 }

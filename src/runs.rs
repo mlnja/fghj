@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::docker;
-use crate::resolver::{Graph, Node};
+use crate::resolver::{Graph, Node, VolumeMount};
 use crate::store::WorkspaceDb;
 
 pub const DEFAULT_RUN_ID: &str = "default";
@@ -54,6 +55,16 @@ pub fn derive_domain(node_id: &str, domain_scope: &str, workspace_name: &str, ru
     }
 }
 
+/// Derives the real Docker volume name for a `VolumeMount::Named` entry —
+/// reuses `derive_domain`'s exact run/stable folding logic (a named
+/// volume's `scope` is the same knob as `domain_scope`), keyed by the
+/// volume's own declared `name` instead of a node id. Two nodes anywhere in
+/// the graph that declare the same `name` + `scope` therefore land on the
+/// same derived value here and transparently share one Docker volume.
+fn derive_volume_name(name: &str, scope: &str, workspace_name: &str, run_id: &str) -> String {
+    format!("fghj-vol-{}", sanitize_label(&derive_domain(name, scope, workspace_name, run_id)))
+}
+
 /// A `*.fghj.internal` name this container answers to, and the `127.0.0.1`
 /// port Docker actually published its backing container-side port on — the
 /// SNI -> backend lookup `proxy::serve_https` dispatches real per-service
@@ -72,6 +83,15 @@ pub struct ContainerInfo {
     pub published_port: Option<u16>,
     pub domain: String,
     pub routes: Vec<PortRoute>,
+    /// The subset of `Node.additional_hosts` that actually got a route (i.e.
+    /// the node has a `primary` port) — kept separate from `routes` (which
+    /// also carries the node's own derived-domain and named-port routes)
+    /// because `daemon::WorkspaceRegistry::active_additional_hosts` needs
+    /// exactly this list, and only this list, to sync `/etc/hosts`: a
+    /// `*.fghj.internal` route is already served by fghjd's own DNS, and
+    /// would be actively wrong to also pin as a static `/etc/hosts` entry.
+    #[serde(default)]
+    pub additional_hosts: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -358,6 +378,13 @@ impl RunRegistry {
         // (fghjd's DNS server, which answers any name in the zone).
         let domain = derive_domain(&node.id, &node.domain_scope, &graph.workspace_name, run_id);
 
+        // Where a service's relative bind-mount `host` paths resolve against
+        // — the repo's checkout root, not `build.context` (Compose resolves
+        // bind-mount sources relative to the compose file's directory; this
+        // is the fghj equivalent). Never read for a backing node, which can
+        // only declare `Named` volumes (see `resolver::VolumeMount`).
+        let mut volume_base: Option<PathBuf> = None;
+
         let image = match node.kind.as_str() {
             "backing" => match node.image.clone() {
                 Some(img) => img,
@@ -396,9 +423,10 @@ impl RunRegistry {
                             sanitize_label(&node.id),
                             sanitize_label(branch)
                         ));
-                        let build_dir =
-                            docker::materialize_checkout(&mirror, branch, &checkout).await?
-                                .join(&build.context);
+                        let checkout_root =
+                            docker::materialize_checkout(&mirror, branch, &checkout).await?;
+                        volume_base = Some(checkout_root.clone());
+                        let build_dir = checkout_root.join(&build.context);
                         docker::build_image(&self.docker, &build_dir, &build.dockerfile, &tag).await?;
                         tag
                     }
@@ -415,7 +443,9 @@ impl RunRegistry {
                             sanitize_label(&node.id),
                             sanitize_label(&branch)
                         );
-                        let build_dir = self.workspace.join(&local_path).join(&build.context);
+                        let repo_root = self.workspace.join(&local_path);
+                        volume_base = Some(repo_root.clone());
+                        let build_dir = repo_root.join(&build.context);
                         docker::build_image(&self.docker, &build_dir, &build.dockerfile, &tag).await?;
                         tag
                     }
@@ -435,6 +465,28 @@ impl RunRegistry {
         let port_list: Vec<(String, Option<u16>)> =
             node.ports.iter().map(|(port, cfg)| (port.clone(), cfg.host_port)).collect();
 
+        let binds: Vec<String> = node
+            .volumes
+            .iter()
+            .map(|v| match v {
+                VolumeMount::Bind { host, container, read_only } => {
+                    let host_path = if Path::new(host).is_absolute() {
+                        PathBuf::from(host)
+                    } else {
+                        volume_base
+                            .as_ref()
+                            .expect("service node with volumes has a resolved checkout root")
+                            .join(host)
+                    };
+                    format!("{}:{container}{}", host_path.display(), if *read_only { ":ro" } else { "" })
+                }
+                VolumeMount::Named { name, scope, container, read_only } => {
+                    let volume_name = derive_volume_name(name, scope, &graph.workspace_name, run_id);
+                    format!("{volume_name}:{container}{}", if *read_only { ":ro" } else { "" })
+                }
+            })
+            .collect();
+
         docker::run_container(
             &self.docker,
             &docker::RunOpts {
@@ -446,6 +498,7 @@ impl RunRegistry {
                 image: &image,
                 project: network,
                 service_name: &node.id,
+                binds: &binds,
             },
         )
         .await?;
@@ -502,6 +555,21 @@ impl RunRegistry {
             }
         }
 
+        // `#AdditionalHost` aliases route to the same host port as the
+        // node's own primary domain — same "multiple names, one backend
+        // port" pattern as a named port, just keyed off a literal
+        // author-declared hostname instead of a derived one. Silently
+        // dropped (not an error) if there's no primary-port route to attach
+        // to — `resolver::check_ports` already warns about exactly this at
+        // graph-resolution time.
+        let mut additional_hosts_active = Vec::new();
+        if let Some(host_port) = routes.iter().find(|r| r.domain == domain).map(|r| r.host_port) {
+            for host in &node.additional_hosts {
+                routes.push(PortRoute { domain: host.clone(), host_port });
+                additional_hosts_active.push(host.clone());
+            }
+        }
+
         Ok(ContainerInfo {
             node_id: node.id.clone(),
             container_name,
@@ -509,6 +577,7 @@ impl RunRegistry {
             published_port,
             domain,
             routes,
+            additional_hosts: additional_hosts_active,
         })
     }
 }
@@ -540,5 +609,24 @@ mod tests {
         assert_eq!(sanitize_label("Feature/JIRA-123 Fix"), "feature-jira-123-fix");
         assert_eq!(sanitize_label("already-clean"), "already-clean");
         assert_eq!(sanitize_label("__leading__"), "leading");
+    }
+
+    #[test]
+    fn two_nodes_sharing_a_named_volume_derive_the_same_docker_name() {
+        // Keyed by the declared `name`, not any node id — two unrelated
+        // nodes (service or backing) that declare the same `name` + `scope`
+        // land on the same derived value and therefore the same Docker volume.
+        let a = derive_volume_name("cache", "run", "shop", "preview-1");
+        let b = derive_volume_name("cache", "run", "shop", "preview-1");
+        assert_eq!(a, b);
+
+        // "stable" never folds in the run id, so it must differ from a
+        // "run"-scoped name for the same non-default run.
+        let stable = derive_volume_name("cache", "stable", "shop", "preview-1");
+        assert_ne!(a, stable);
+
+        // A different named run gets its own fresh "run"-scoped volume.
+        let other_run = derive_volume_name("cache", "run", "shop", "preview-2");
+        assert_ne!(a, other_run);
     }
 }

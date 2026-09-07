@@ -166,13 +166,20 @@ fn daemon_stop() -> Result<()> {
             let pidfile = fghj::daemon::pid_path();
             let resolver_file = fghj::dns::macos_resolver_path();
             let port_file = fghj::daemon::port_path();
+            let hosts_file = fghj::hosts_file::hosts_path();
             // `rm -f` is a no-op if a file doesn't exist (e.g. the resolver
             // file on non-macOS), so this is safe to run unconditionally.
+            // The `sed` range-delete strips fghj's managed block (if any) from
+            // `/etc/hosts` so a stopped daemon doesn't leave stale additional-
+            // host entries pointing at nothing.
             let cmd = format!(
-                "kill {pid} && rm -f {} {} {}",
+                "kill {pid} && rm -f {} {} {} && sed -i '' '/^{}$/,/^{}$/d' {}",
                 pidfile.display(),
                 resolver_file.display(),
-                port_file.display()
+                port_file.display(),
+                fghj::hosts_file::BEGIN_MARKER,
+                fghj::hosts_file::END_MARKER,
+                hosts_file.display(),
             );
             let status = Command::new("sudo")
                 .args(["sh", "-c", &cmd])

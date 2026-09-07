@@ -29,10 +29,52 @@ package fghj
 	host_port?: uint & >0 & <=65535
 }
 
+// A bind mount (host path) or a named volume (Docker-managed storage), on
+// either a #Service or a #BackingDependency.
+#Volume: {
+	container: string
+	read_only: bool | *false
+} & ({
+	// Bind mount: a host path, resolved against the declaring repo's
+	// checkout root if relative. Not sandboxed — an absolute or
+	// `..`-escaping path passes straight through to Docker, same as Compose.
+	host: string
+} | {
+	// Named volume: a bare label, like `#Port.name` — the real Docker
+	// volume name is derived (never author-declared), folding in
+	// workspace/run the same way a node's domain is. Two nodes anywhere in
+	// the graph (service or backing, related or not) that declare the same
+	// `name` + `scope` share the same underlying storage.
+	name: string & =~"^[a-z0-9][a-z0-9-]*$"
+	// Same semantics as `domain_scope` below: "run" (the default) folds the
+	// run id into the derived volume name, so a preview run gets its own
+	// fresh empty storage. "stable" drops it, giving the volume one fixed
+	// identity shared across every run.
+	scope: *"run" | "stable"
+})
+
+// A literal hostname alias for a service, alongside its derived
+// `*.fghj.internal` domain — e.g. a pre-existing OAuth callback hostname a
+// third party already has on file. Must be an ordinary multi-label hostname,
+// and can never sit inside fghj's own zone (that domain is always *derived*,
+// never author-declared — see `#Port`'s doc comment for the same rule).
+// Whether it gets HTTPS via fghj's local CA depends on whether it's under an
+// IANA reserved special-use TLD (`.local`, `.test`, `.internal`,
+// `.localhost`) — see `dns::is_reserved_alias`. Anything else is treated as
+// a real, potentially internet-routable hostname: proxied over plain HTTP
+// only, never certified, so fghj's system-trusted CA can never mint a cert
+// for a domain it doesn't actually own.
+#AdditionalHost: string &
+	=~"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$" &
+	!~"(^|\\.)fghj\\.internal$"
+
 #Service: {
 	name:  string & =~"^[a-z0-9][a-z0-9-]*$"
 	build: #Build
-	ports: [string]: #Port
+	// Keyed by the literal container port number (e.g. "8080"), published to
+	// Docker as-is — not a semantic label. `#Port.name` is where a label
+	// belongs.
+	ports: [=~"^[0-9]+$"]: #Port
 	// "run" (the default) scopes this service's domain to the run that
 	// started it, same as every other node — two runs of this service never
 	// collide. "stable" drops the run id, giving it one fixed identity
@@ -41,6 +83,10 @@ package fghj
 	// name from the host at a time, but it's the same name every time.
 	domain_scope: *"run" | "stable"
 	environment: #Environment | *[]
+	volumes: [...#Volume] | *[]
+	// Extra literal hostnames this service also answers on, routed to its
+	// `primary` port — requires one to be set. See `#AdditionalHost`.
+	additional_hosts: [...#AdditionalHost] | *[]
 	dependencies: [...#Dependency]
 }
 

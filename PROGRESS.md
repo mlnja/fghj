@@ -1,6 +1,14 @@
 # fghj — Progress Tracker
 
-Last updated: 2026-08-26 (leaf-first, repo-qualified node ids session; found
+Last updated: 2026-09-07 (implemented `#Volume` — bind mounts and named
+volumes on both `#Service` and `#BackingDependency`, closing the top two
+Compose-parity gaps below: live bind-mounts and Postgres-style data
+persistence. See "Docker Compose language-feature parity" and "Real-world
+dry-run findings" below for what's now closed vs. still open).
+Prior update, 2026-09-06 (manually re-verified real per-service HTTPS routing
+end-to-end against the fixtures; found and fixed a `ports:` docs/schema bug
+and an error-message-swallowing bug along the way — see "Known gaps" below).
+Prior update, 2026-08-26 (leaf-first, repo-qualified node ids session; found
 and fixed a dead `Node.domain` UI wire-up while writing `concepts/` docs).
 `concepts/` now also has a full set of 8 Phoenix-guide-style subsystem
 guides (`node-identity-and-domains`, `local-ca-and-tls-proxy`, `split-dns`,
@@ -288,17 +296,36 @@ plans referenced above.
   is true before treating SPEC.md as ground truth for CLI behavior.
 - `cue` binary is a runtime dependency of `fghj validate` with no vendoring
   or bundled fallback — validate fails hard if it's missing from PATH.
-- Real per-service HTTPS routing (see the Subsystem C entry above) hasn't
-  been manually re-verified end-to-end since it landed — the existing manual
-  test fixtures (`/Users/virviil/mlnja/fghj-fixtures/`) predate the
-  flat-workspace/CUE-schema refactor (`kind: "infra"`, a plain `ports` list,
-  `internal_domain`) and won't deserialize against the current
-  `#ComponentConfig`, so they'd need updating to the current schema
-  (`kind: "backing"`, `ports: {"8080": {primary: true}}`, no
-  `internal_domain`) before they're usable for that. Also worth then also
-  filtering `resolve_route` (or its `RunState.containers`) so a route to a
-  *removed* container (not just a non-`"running"` one, already handled) can't
-  briefly outlive it between `refresh()` ticks.
+- **Real per-service HTTPS routing has now been manually re-verified
+  end-to-end** (2026-09-06 session) — updated the five fixtures
+  (`/Users/virviil/mlnja/fghj-fixtures/`) to the current schema (`kind:
+  "backing"`, port-number-keyed `ports:` map, no `internal_domain`), gave
+  `cart-service`'s fixture Dockerfile a real `python3 -m http.server` so
+  there was something to actually curl, `sudo fghjd` + `fghj wire` +
+  `POST /pull-all` + `POST /runs` (all via the real HTTP control API, not a
+  mock), then `curl --cacert <persisted CA> https://cart-service.cart-service.fghj-fixtures.fghj.internal/`
+  and got a real `200 OK` from the container, with a dynamically-issued
+  per-SNI leaf cert chaining to the local CA. Also confirmed
+  `kind: shared-backing` actually dedupes (notification-service and
+  payment-service's shared `redis` produced exactly one container, not two).
+  **Found and fixed two real bugs in the process**, both now shipped:
+  1. `docs/reference/fghj-yaml.md`'s own `ports:` examples used semantic
+     labels as map keys (`http:`, `admin:`) — but `runs.rs`/`docker.rs` treat
+     the map key as the literal container port number to expose to Docker, so
+     following the docs literally builds fine but fails at `docker run` with
+     an opaque error. Fixed the docs examples, **and** added a CUE
+     constraint (`ports: [=~"^[0-9]+$"]: #Port` in `schema/component.cue`) so
+     this now fails fast at `fghj validate` with a clear message instead of
+     as a confusing runtime Docker error.
+  2. `daemon::err_response` serialized `anyhow::Error` via `.to_string()`
+     (`Display`), which only prints the outermost `.context(...)` layer —
+     e.g. just `"docker run <name> failed"` with the actual Docker Engine API
+     error message discarded. Every API error was effectively undiagnosable
+     from outside the daemon's own stdout. Fixed to use `{e:?}` (`Debug`),
+     which includes the full "Caused by:" chain.
+  Still worth doing: filtering `resolve_route` (or its `RunState.containers`)
+  so a route to a *removed* container (not just a non-`"running"` one,
+  already handled) can't briefly outlive it between `refresh()` ticks.
 - Subsystem B's OS integration is macOS-only (`/etc/resolver`); Linux
   (`systemd-resolved`) and Windows (NRPT) are unimplemented, per SPEC.md §5.
 - `install_macos_trust`/`install_macos_resolver` have no uninstall path wired
@@ -307,14 +334,148 @@ plans referenced above.
   daemon-stop, by design (so a later `fghjd` restart doesn't need
   re-approval), but there's no explicit "purge everything" command yet.
 
+## Future implementation ideas (not designed yet, just ideas)
+
+- **Shared "internal" backing resources (Postgres, rustfs/S3).** Today
+  `kind: backing` gives every declaration its own container, and
+  `kind: shared-backing` only reuses an instance when a repo explicitly
+  points at another repo's declared backing dependency (see
+  [[node-identity-and-domains]]). For common cases (Postgres, S3-compatible
+  storage) that means a flow with N services can end up with N idle DB/
+  object-store containers. Idea: a new dependency kind (e.g.
+  `kind: internal-postgres` / `kind: internal-s3`) that provisions a logical
+  database/bucket inside one workspace-level, daemon-managed singleton
+  container instead of a dedicated one per service — `kind: backing` stays
+  as the escape hatch for anything needing a specific version, extension, or
+  full isolation. Main open design cost: lifecycle (a shared instance can't
+  be torn down when just one node/flow stops) and cross-service isolation
+  (schema/version/extension conflicts, noisy-neighbor contention). Start
+  with Postgres only if this gets picked up; rustfs/S3 is lower-risk
+  (bucket-per-service, no schema versioning) and easy to add once the
+  daemon-owned-singleton pattern is proven.
+
+- **Docker Compose language-feature parity (or deliberate scope decisions
+  against it).** `#Service`/`#BackingDependency` today cover: build
+  context/dockerfile/args, a port map, environment (map or list, mirroring
+  Compose's own shape), and the three dependency kinds. Real Compose files
+  lean on several things `fghj.yaml` has no equivalent for yet. Roughly in
+  order of "will actually block someone from using this for a real service":
+  - ~~**Volumes / persistent data — the big one.**~~ **Done (2026-09-07).**
+    `#Service.volumes` / `#BackingDependency.volumes` (`schema/component.cue`,
+    `schema/dependency.cue`) now support both a bind mount (`host:`) and a
+    Docker-managed named volume (`name:` + `scope: "run" | "stable"`,
+    mirroring `domain_scope`'s run/stable semantics) — see
+    `resolver::VolumeMount`, `runs::derive_volume_name`, and
+    `docker::RunOpts.binds`. A `kind: backing` Postgres with a `volumes:
+    [{name: pgdata, container: /var/lib/postgresql/data}]` entry now
+    survives an `ensure_running` re-create. Still shared-internal-Postgres
+    idea above should land after this, not before, per the original
+    reasoning — that's now safe to revisit. **Known follow-up gap:** named
+    volumes are never pruned (`RunRegistry::stop` tears down containers +
+    network only) — a `"run"`-scoped preview run that's stopped and never
+    restarted leaks an orphaned Docker volume, with no `compose down -v`
+    equivalent yet.
+  - **`command`/`entrypoint` override** — no way to run a service with a
+    dev-mode command (hot reload, a migration step before boot) without
+    baking it into the Dockerfile.
+  - **`healthcheck` + real `depends_on` ordering** — `ensure_running` starts
+    every node's container with no ordering or readiness gate; a service
+    that can't tolerate its Postgres not being ready yet has no way to
+    express that today (apps that retry their own DB connection happen to
+    work by accident).
+  - **Restart policy** — nothing currently restarts a container that crashes
+    after `ensure_running` returns; it just sits `exited` until the next
+    manual "run flow" click's reconciler pass, if that even restarts it (not
+    verified this session).
+  - `env_file`, resource limits (`cpus`/`mem_limit`), `user`/`working_dir`,
+    `cap_add`/`security_opt`, `labels` — lower-priority, "eventually" items.
+  - Compose features that probably *shouldn't* be copied: `extends`/multiple
+    compose files with override layering exist because Compose has one
+    monolithic file per stack — fghj's federated per-repo `fghj.yaml` +
+    `flows:` model sidesteps that problem structurally, and `flows` already
+    covers most of what Compose `profiles` are for (selectively including
+    services). Copying override-file layering back in would reintroduce the
+    exact monolith problem fghj's federated model exists to avoid.
+  - Where fghj already *exceeds* Compose, worth remembering when scoping
+    this so the framing isn't purely "catch up": magic per-service HTTPS
+    domains with a real local CA (Compose has nothing like
+    [[local-ca-and-tls-proxy]]), and cross-repo Git dependency resolution
+    with flow-scoped graphs (Compose has no multi-repo story at all).
+
+- **Real-world dry-run findings (2026-09-06, against `~/aikido/aikido-core`,
+  not attempted — analysis only).** A large real multi-repo PHP/Vue/Node
+  ecosystem (mysql + PHP/Apache + phpMyAdmin in Docker, a Vite dev server run
+  directly on the host, and ~15 sibling "lambda-*"/service repos each with
+  their own Dockerfile, all currently glued together with Compose + a
+  hand-maintained port table in the README + a manual `/etc/hosts` entry).
+  Surfaced gaps beyond the volumes-for-persistence one above, roughly in
+  order of how hard they'd block adoption:
+  - ~~**Live bind-mounting source into a build container is the single most
+    load-bearing pattern in this whole ecosystem**~~ **Done (2026-09-07)**
+    — `#Service.volumes` (see above) covers this directly: `{host: ".",
+    container: "/app"}` bind-mounts the whole live repo over a slim built
+    image, host paths resolve against the repo's own checkout root, and per
+    the explicit design decision here, `host` paths are *not* sandboxed to
+    the declaring repo — an absolute or `..`-escaping path (needed for the
+    cross-repo case below) passes straight through to Docker, same as
+    Compose.
+  - **No "run on the host, not in a container" node kind.** The Vite dev
+    server runs as a bare host process (not Dockerized) bound to port 80 —
+    and fghj's own reverse proxy also wants host ports 80/443, a direct
+    conflict. Two options, neither built today: teach fghj to manage a
+    non-Docker host process as a graph node, or containerize the dev server
+    (which then also needs the bind-mount gap above solved to not regress
+    the hot-reload loop).
+  - **No way to keep a pre-existing, hardcoded hostname.** — **closed
+    (2026-09-07)** via `#Service.additional_hosts`: a service can now
+    declare extra literal hostname aliases alongside its derived domain
+    (see the "Additional hosts" section of `docs/reference/fghj-yaml.md`
+    and [[local-ca-and-tls-proxy]]). The raw-domain-declaration invariant
+    itself is untouched — an alias still can't sit inside `fghj.internal`
+    — but a brownfield app's existing `vite.config.js` `allowedHosts` entry
+    or a third-party OAuth callback already registered against
+    `app.local.aikido.io` no longer needs an app code change: reserved-TLD
+    aliases (`.local`/`.test`/`.internal`/`.localhost`) get HTTPS via
+    fghj's own CA, anything else is relayed over plain HTTP only.
+  - **No `command`/entrypoint override** on a service or `kind: backing`
+    dependency — mysql's `command: mysqld --sql_mode=...` flags have no
+    schema field to express.
+  - **No `platform` pin** on `kind: backing` — mysql declares `platform:
+    linux/x86_64` for Apple Silicon image compatibility; no equivalent field.
+  - **No `docker compose exec`-equivalent.** One-off admin tasks (DB seed
+    script, run via `docker compose exec mysql bash seed-database.sh`) need
+    a way to run a command inside an already-running container; the control
+    API has no such primitive.
+  - **No cross-repo filesystem dependency, only network-service
+    dependencies** — **largely closed as a side effect of the bind-mount
+    work above (2026-09-07).** `php`'s container bind-mounts a *sibling
+    repo* (`../intel`) directly onto `/intel` as vendored source, not as a
+    running network service. Since `#Volume.host` isn't sandboxed to the
+    declaring repo, `{host: "../intel", container: "/intel"}` on `php`'s own
+    `fghj.yaml` now expresses this directly — no third dependency kind
+    needed. What's still missing: fghj doesn't *clone* `intel` on `php`'s
+    behalf the way `kind: service` would (the sibling repo has to already be
+    checked out at the right relative path by some other means), so this is
+    a bind-mount onto an assumed-present path, not a managed dependency with
+    its own branch/pull lifecycle. Good enough to unblock this ecosystem;
+    a real "filesystem dependency" kind (clone + mount, with its own
+    `default_branch`) would still be a nicer, more correct fit if this
+    pattern turns out to be common elsewhere.
+  - **The upside**: the ~15 sibling repos (`lambda-*`, `autofix`,
+    `package-repository-proxy`, etc.) are each already independently
+    cloneable (real `git@github.com:AikidoSec/*` remotes) and independently
+    Dockerized — exactly fghj's target shape — and the project's own Readme
+    maintains a 28-row manual port-allocation table by hand, precisely the
+    pain the flow/magic-DNS model exists to remove. With the bind-mount gap
+    now closed, only the host-process node kind and domain-migration gaps
+    above stand between this and a real dry run — this ecosystem is a
+    strong real-scale fghj candidate, arguably better proof than the toy
+    fixtures.
+
 ## Suggested next steps (not started, pick one to work on)
 
-1. Manually re-verify real per-service routing end-to-end against the
-   fixtures once they're updated to the current schema (see "Known gaps"
-   above) — `sudo fghjd`, `fghj wire`, start a run, `curl` (or a browser at)
-   a non-apex `*.fghj.internal` domain for a service whose `fghj.yaml`
-   declares a `primary` port, and confirm it actually reaches that
-   container instead of the old fancy-404 placeholder.
+1. ~~Manually re-verify real per-service routing end-to-end~~ — done, see
+   "Known gaps" above (2026-09-06 session).
 2. Linux support for Subsystem B (`systemd-resolved`) and Subsystem C (the
    CA trust-store install is macOS-only via `security add-trusted-cert`;
    Linux would need a distro-specific CA bundle update, e.g.

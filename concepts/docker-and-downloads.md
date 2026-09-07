@@ -33,6 +33,47 @@ is lower-level than `docker build`/`docker run`:
   route-building pass in `start_node`, `ensure_running`'s liveness check)
   treats "doesn't exist" as ordinary control flow, not an error path.
 
+## Volumes: two shapes, one Docker primitive
+
+`#Volume` (`schema/component.cue`) is a CUE disjunction: a bind mount
+(`{host, container, read_only}`) or a named volume (`{name, scope,
+container, read_only}`), never both — `resolver::VolumeMount` mirrors this
+directly as an untagged serde enum (`Bind` / `Named`), same pattern as
+`Environment`'s map-or-list. Both variants land in the exact same place at
+the Docker layer: `HostConfig.binds` accepts `"host/path:container/path"`
+*or* `"volume-name:container/path"` in the same string list — Docker
+disambiguates by whether the left side contains a `/` — so `RunOpts.binds:
+&[String]` carries both, formatted by `start_node` before the container is
+created.
+
+A `Bind`'s `host`, if relative, resolves against the checkout root
+`start_node` already has in hand for the build (`volume_base` — the
+branch-override checkout dir or the live workspace path, whichever the
+image was actually built from). It is **not** sandboxed to that repo — an
+absolute or `..`-escaping path passes straight through, a deliberate
+choice (see PROGRESS.md's real-world dry-run findings) to support the
+pattern of bind-mounting a sibling repo's checkout directly (e.g.
+`aikido-core`'s `php` service mounting `../intel`).
+
+A `Named` volume's real Docker name is *derived*, never author-declared —
+same invariant as a node's domain (see [[node-identity-and-domains]]).
+`runs::derive_volume_name` reuses `derive_domain` itself, keyed by the
+volume's own `name` instead of a node id: `scope: "run"` (default) folds
+in the run id exactly like `domain_scope: "run"` does, `"stable"` doesn't.
+Because the key is the author-chosen `name`, not any node id, two
+unrelated nodes — two services, or a service and a `kind: backing` — that
+declare the same `name` + `scope` derive the same value and transparently
+share one Docker volume. This is what makes `kind: shared-backing` refs
+automatically get a backing dependency's persisted volume for free too:
+there's only ever one owning container regardless of how many
+`shared-backing` refs point at it, so nothing extra needed to plumb.
+
+Volumes are never removed by `fghj` — `RunRegistry::stop` tears down
+containers and the network only, by design (that's what makes a `"stable"`
+or same-run `"run"`-scoped volume survive a restart). Known gap: a
+`"run"`-scoped preview run that's stopped and never restarted leaks an
+orphaned volume with no pruning path yet.
+
 ## Two log-reading modes
 
 `logs_tail` is one-shot: fetch the last N lines, return them as a string —

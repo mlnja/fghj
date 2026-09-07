@@ -64,13 +64,18 @@ fn build_redirect_response(host: &str, path: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Serves forever on `listener` (port 80): reads just enough of each plain
-/// HTTP request to learn its `Host` and path, then redirects to the same
-/// URL over HTTPS. A small hand-rolled reader is enough here — same spirit
-/// as `dns::parse_query` — since all this needs is the request line and one
-/// header, not a general-purpose HTTP implementation.
-pub async fn serve_http_redirect(listener: TcpListener) {
-    println!("fghjd: HTTP listener on 127.0.0.1:{HTTP_PORT}, redirecting everything to https://");
+/// Serves forever on `listener` (port 80). For any in-zone or reserved-TLD
+/// `#AdditionalHost` name (`dns::is_reserved_alias`), reads just enough of
+/// the request to learn its `Host` and path, then redirects to the same URL
+/// over HTTPS — a small hand-rolled reader is enough here — same spirit as
+/// `dns::parse_query` — since all this needs is the request line and one
+/// header, not a general-purpose HTTP implementation. A non-reserved
+/// `#AdditionalHost` that `routes` recognizes is different: it never gets a
+/// certificate (see `ca::DynamicCertResolver::resolve_for`), so this is the
+/// *only* way it's ever reachable — relayed here in plain HTTP instead of
+/// redirected.
+pub async fn serve_http_redirect(listener: TcpListener, routes: Arc<dyn RouteResolver>) {
+    println!("fghjd: HTTP listener on 127.0.0.1:{HTTP_PORT}, redirecting everything to https:// except routed non-reserved additional hosts");
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(v) => v,
@@ -79,25 +84,32 @@ pub async fn serve_http_redirect(listener: TcpListener) {
                 continue;
             }
         };
+        let routes = routes.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_http_redirect(stream).await {
-                eprintln!("fghjd: HTTP redirect handler error: {e}");
+            if let Err(e) = handle_http_connection(stream, routes).await {
+                eprintln!("fghjd: HTTP handler error: {e}");
             }
         });
     }
 }
 
-async fn handle_http_redirect(stream: TcpStream) -> Result<()> {
+async fn handle_http_connection(stream: TcpStream, routes: Arc<dyn RouteResolver>) -> Result<()> {
     let mut reader = BufReader::new(stream);
+    // Bytes consumed from `reader` so far — replayed to the backend verbatim
+    // if this request ends up being relayed rather than redirected, since
+    // reading them here (to learn `Host`) already took them off the socket.
+    let mut prefix = Vec::new();
 
     let mut request_line = String::new();
     read_bounded_line(&mut reader, &mut request_line).await?;
+    prefix.extend_from_slice(request_line.as_bytes());
     let path = parse_request_path(&request_line).unwrap_or("/").to_string();
 
     let mut host = String::new();
     loop {
         let mut line = String::new();
         let n = read_bounded_line(&mut reader, &mut line).await?;
+        prefix.extend_from_slice(line.as_bytes());
         if n == 0 || line == "\r\n" || line == "\n" {
             break;
         }
@@ -106,10 +118,21 @@ async fn handle_http_redirect(stream: TcpStream) -> Result<()> {
         }
     }
 
-    let response = build_redirect_response(&host, &path);
-    let mut stream = reader.into_inner();
-    stream.write_all(&response).await?;
-    Ok(())
+    // Only a non-reserved, actually-routed `#AdditionalHost` gets relayed in
+    // plain HTTP — everything else (in-zone, reserved-TLD, or simply
+    // unrecognized) keeps today's behavior of redirecting to HTTPS.
+    let plain_backend =
+        (!dns::in_zone(&host) && !dns::is_reserved_alias(&host)).then(|| routes.resolve(&host)).flatten();
+
+    match plain_backend {
+        Some(port) => relay_to_backend(&mut reader, port, &prefix).await,
+        None => {
+            let response = build_redirect_response(&host, &path);
+            let mut stream = reader.into_inner();
+            stream.write_all(&response).await?;
+            Ok(())
+        }
+    }
 }
 
 /// `read_line`, but bailing out instead of growing `buf` without bound if
@@ -206,7 +229,7 @@ async fn handle_https_connection(mut tls_stream: TlsStream<TcpStream>, control_p
 
     match backend_port {
         Some(port) => {
-            if let Err(e) = relay_to_backend(&mut tls_stream, port).await {
+            if let Err(e) = relay_to_backend(&mut tls_stream, port, &[]).await {
                 eprintln!("fghjd: backend proxy error ({name}): {e}");
             }
         }
@@ -221,13 +244,27 @@ async fn handle_https_connection(mut tls_stream: TlsStream<TcpStream>, control_p
     }
 }
 
-/// Relays `tls_stream` to whatever is listening on `127.0.0.1:port` — the
-/// control API for the zone apex, or a running container's published port
-/// for everything else `routes` recognizes.
-async fn relay_to_backend(tls_stream: &mut TlsStream<TcpStream>, port: u16) -> Result<()> {
+/// Relays `client_stream` to whatever is listening on `127.0.0.1:port` — the
+/// control API for the zone apex, a running container's published port for
+/// everything else `routes` recognizes over HTTPS, or (via
+/// `handle_http_connection`) a non-reserved `#AdditionalHost` over plain
+/// HTTP. Generic over the client-side stream type so both the TLS path
+/// (`TlsStream<TcpStream>`) and the plain-HTTP path
+/// (`BufReader<TcpStream>`, which still needs to write to the client) share
+/// one implementation. `prefix` is written to the backend before the
+/// bidirectional copy starts — empty for HTTPS, and for HTTP the bytes
+/// `handle_http_connection` already consumed off the socket to read `Host`,
+/// which the backend still needs to see.
+async fn relay_to_backend<S>(client_stream: &mut S, port: u16, prefix: &[u8]) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let mut backend = TcpStream::connect(("127.0.0.1", port))
         .await
         .with_context(|| format!("failed to connect to backend on 127.0.0.1:{port}"))?;
+    if !prefix.is_empty() {
+        backend.write_all(prefix).await.context("failed to replay buffered request bytes to backend")?;
+    }
 
     // Split into two independently-tracked copy directions (instead of one
     // `copy_bidirectional`) so an error can be attributed to a side: the
@@ -238,7 +275,7 @@ async fn relay_to_backend(tls_stream: &mut TlsStream<TcpStream>, port: u16) -> R
     // precise (a client disappearing mid-download still surfaces as a write
     // error on the backend -> client leg) but it's a much better signal than
     // treating every reset/broken-pipe/EOF the same regardless of cause.
-    let (mut client_read, mut client_write) = tokio::io::split(tls_stream);
+    let (mut client_read, mut client_write) = tokio::io::split(client_stream);
     let (mut backend_read, mut backend_write) = backend.split();
 
     let client_to_backend = async {
@@ -333,7 +370,7 @@ mod tests {
     async fn apex_sni_proxies_to_the_control_backend() {
         let ca = ca::generate_ca_for_tests();
         let ca_der = ca.cert_der_for_tests();
-        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider()));
+        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider(), no_routes()));
 
         let backend = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let backend_port = backend.local_addr().unwrap().port();
@@ -365,7 +402,7 @@ mod tests {
     async fn unknown_in_zone_sni_gets_fancy_404() {
         let ca = ca::generate_ca_for_tests();
         let ca_der = ca.cert_der_for_tests();
-        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider()));
+        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider(), no_routes()));
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -392,7 +429,7 @@ mod tests {
     async fn routed_in_zone_sni_proxies_to_its_registered_backend() {
         let ca = ca::generate_ca_for_tests();
         let ca_der = ca.cert_der_for_tests();
-        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider()));
+        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider(), no_routes()));
 
         let backend = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let backend_port = backend.local_addr().unwrap().port();
@@ -428,7 +465,7 @@ mod tests {
     #[tokio::test]
     async fn client_that_does_not_trust_our_ca_fails_the_handshake() {
         let ca = ca::generate_ca_for_tests();
-        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider()));
+        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider(), no_routes()));
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -490,7 +527,7 @@ mod tests {
     async fn client_side_reset_is_not_reported_as_a_relay_failure() {
         let ca = ca::generate_ca_for_tests();
         let ca_der = ca.cert_der_for_tests();
-        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider()));
+        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider(), no_routes()));
         let (mut server_tls, client_tls) = handshake_pair(resolver, ca_der).await;
 
         // Force a hard reset (RST) instead of a graceful close, mirroring a
@@ -510,7 +547,7 @@ mod tests {
             drop(sock);
         });
 
-        let result = relay_to_backend(&mut server_tls, backend_port).await;
+        let result = relay_to_backend(&mut server_tls, backend_port, &[]).await;
         assert!(result.is_ok(), "a client-side reset must not be reported as a relay failure: {result:?}");
     }
 
@@ -518,7 +555,7 @@ mod tests {
     async fn backend_side_reset_is_reported_as_a_relay_failure() {
         let ca = ca::generate_ca_for_tests();
         let ca_der = ca.cert_der_for_tests();
-        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider()));
+        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider(), no_routes()));
         let (mut server_tls, client_tls) = handshake_pair(resolver, ca_der).await;
 
         // Clean close on the client side, so the client -> backend leg sees
@@ -537,7 +574,7 @@ mod tests {
             drop(sock);
         });
 
-        let result = relay_to_backend(&mut server_tls, backend_port).await;
+        let result = relay_to_backend(&mut server_tls, backend_port, &[]).await;
         assert!(result.is_err(), "a backend-side reset must be reported as a relay failure, not silently swallowed");
     }
 }

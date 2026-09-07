@@ -33,6 +33,19 @@ pub(crate) fn in_zone(qname: &str) -> bool {
     qname == ZONE || qname.ends_with(ZONE_SUFFIX)
 }
 
+/// IANA reserved special-use TLDs (RFC 2606 / 6762) — never delegated on the
+/// real internet, so a hostname under one of these can't collide with a real
+/// production domain. This is the eligibility gate for an `#AdditionalHost`
+/// to get a certificate from fghj's local CA at all (see
+/// `ca::DynamicCertResolver::resolve_for`); anything else is treated as
+/// potentially real and only ever gets proxied over plain HTTP, never
+/// certified.
+const RESERVED_ALIAS_TLDS: &[&str] = &["local", "test", "internal", "localhost"];
+
+pub fn is_reserved_alias(host: &str) -> bool {
+    RESERVED_ALIAS_TLDS.iter().any(|tld| host == *tld || host.ends_with(&format!(".{tld}")))
+}
+
 struct Query {
     id: u16,
     opcode: u8,
@@ -241,6 +254,18 @@ mod tests {
 
     fn header_flags(resp: &[u8]) -> (u8, u8) {
         (resp[2], resp[3])
+    }
+
+    #[test]
+    fn is_reserved_alias_matches_special_use_tlds_only() {
+        assert!(is_reserved_alias("aikido.local"));
+        assert!(is_reserved_alias("deep.sub.aikido.local"));
+        assert!(is_reserved_alias("demo.test"));
+        assert!(is_reserved_alias("demo.internal"));
+        assert!(is_reserved_alias("demo.localhost"));
+        assert!(!is_reserved_alias("app.local.aikido.io"), "the TLD is .io, not .local — the last label is what counts");
+        assert!(!is_reserved_alias("aikido.io"));
+        assert!(!is_reserved_alias("example.com"));
     }
 
     #[test]

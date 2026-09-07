@@ -178,6 +178,7 @@ impl WorkspaceDb {
             "ALTER TABLE meta ADD COLUMN owner_home TEXT",
             "ALTER TABLE meta ADD COLUMN owner_ssh_auth_sock TEXT",
             "ALTER TABLE containers ADD COLUMN routes_json TEXT",
+            "ALTER TABLE containers ADD COLUMN additional_hosts_json TEXT",
         ] {
             let _ = conn.execute(stmt, []);
         }
@@ -256,8 +257,8 @@ impl WorkspaceDb {
             tx.execute("DELETE FROM containers WHERE run_id = ?1", rusqlite::params![state.run_id])?;
             for c in &state.containers {
                 tx.execute(
-                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     rusqlite::params![
                         state.run_id,
                         c.node_id,
@@ -265,7 +266,8 @@ impl WorkspaceDb {
                         c.status,
                         c.published_port,
                         c.domain,
-                        serde_json::to_string(&c.routes)?
+                        serde_json::to_string(&c.routes)?,
+                        serde_json::to_string(&c.additional_hosts)?
                     ],
                 )?;
             }
@@ -303,11 +305,15 @@ impl WorkspaceDb {
             drop(stmt);
 
             let mut stmt = conn.prepare(
-                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json FROM containers",
+                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json FROM containers",
             )?;
             let rows = stmt.query_map([], |row| {
                 let routes_json: Option<String> = row.get(6)?;
                 let routes = routes_json
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+                let additional_hosts_json: Option<String> = row.get(7)?;
+                let additional_hosts = additional_hosts_json
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default();
                 Ok((
@@ -319,6 +325,7 @@ impl WorkspaceDb {
                         published_port: row.get::<_, Option<i64>>(4)?.map(|p| p as u16),
                         domain: row.get(5)?,
                         routes,
+                        additional_hosts,
                     },
                 ))
             })?;
@@ -381,6 +388,7 @@ mod tests {
                 published_port: Some(8080),
                 domain: "svc-a.demo.fghj".to_string(),
                 routes: vec![crate::runs::PortRoute { domain: "svc-a.demo.fghj".to_string(), host_port: 8080 }],
+                additional_hosts: Vec::new(),
             }],
         };
         db.clone().save_run(state).await.unwrap();

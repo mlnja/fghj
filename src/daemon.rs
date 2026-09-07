@@ -17,7 +17,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 
 use crate::server::{self, WorkspaceState};
-use crate::{ca, dns, docker, downloads, proxy, resolver, runs, store};
+use crate::{ca, dns, docker, downloads, hosts_file, proxy, resolver, runs, store};
 
 /// How often the background reconciler re-inspects live containers. Kept in
 /// step with the frontend's `/runs` poll interval (see `App.svelte`) so the
@@ -219,6 +219,28 @@ impl WorkspaceRegistry {
         })
     }
 
+    /// Every `#AdditionalHost` alias currently claimed by a `"running"`
+    /// container in any wired workspace, sorted and deduplicated — the input
+    /// to `hosts_file::sync`. Recomputed from scratch on every call (mirrors
+    /// `resolve_route`'s own linear scan) rather than tracked incrementally,
+    /// since it's only ever called once per reconciler tick.
+    pub fn active_additional_hosts(&self) -> Vec<String> {
+        let states: Vec<Arc<WorkspaceState>> = self.by_id.lock().unwrap().values().cloned().collect();
+        let mut hosts: Vec<String> = states
+            .iter()
+            .flat_map(|state| {
+                state
+                    .runs
+                    .list()
+                    .into_iter()
+                    .flat_map(|run| run.containers.into_iter().filter(|c| c.status == "running").flat_map(|c| c.additional_hosts))
+            })
+            .collect();
+        hosts.sort();
+        hosts.dedup();
+        hosts
+    }
+
     pub fn list(&self) -> Vec<(String, PathBuf)> {
         self.by_id.lock().unwrap().iter().map(|(id, s)| (id.clone(), s.path.clone())).collect()
     }
@@ -263,7 +285,12 @@ struct StopRequest {
 }
 
 fn err_response(e: anyhow::Error) -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+    // `e.to_string()` (anyhow's `Display`) only prints the outermost
+    // `.context(...)` layer — e.g. just "docker run <name> failed" with the
+    // actual Docker Engine API error message it wraps discarded. `{e:?}`
+    // (anyhow's `Debug`) prints the full "Caused by:" chain instead, which is
+    // the only version that's actually diagnosable from the API response.
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("{e:?}") }))).into_response()
 }
 
 fn bad_request(e: impl std::fmt::Display) -> Response {
@@ -484,11 +511,16 @@ fn build_router(registry: Arc<WorkspaceRegistry>) -> Router {
 }
 
 /// Background loop, analogous to a Kubernetes controller's reconcile loop
-/// but read-only: on each tick it re-inspects every workspace's live
-/// containers and updates their recorded status (see `RunRegistry::refresh`)
-/// so drift caused by someone `docker stop`/`rm`-ing a container by hand
-/// shows up in the UI on its own, without a `fghjd` restart. It never
-/// recreates or restarts anything — no self-healing, purely observational.
+/// but read-only with respect to Docker: on each tick it re-inspects every
+/// workspace's live containers and updates their recorded status (see
+/// `RunRegistry::refresh`) so drift caused by someone `docker stop`/`rm`-ing
+/// a container by hand shows up in the UI on its own, without a `fghjd`
+/// restart. It never recreates or restarts a container — no self-healing
+/// there. It does own one side effect outside Docker, though: re-syncing
+/// `/etc/hosts` (`hosts_file::sync`) to exactly the `#AdditionalHost`
+/// aliases of whatever's currently `"running"`, so a container dying
+/// out-of-band (same drift this loop already detects) also drops its alias
+/// within one tick, not just its status.
 fn spawn_reconciler(registry: Arc<WorkspaceRegistry>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
@@ -498,6 +530,9 @@ fn spawn_reconciler(registry: Arc<WorkspaceRegistry>) {
                 if let Some(state) = registry.get(&id) {
                     state.runs.refresh().await;
                 }
+            }
+            if let Err(e) = hosts_file::sync(&hosts_file::hosts_path(), &registry.active_additional_hosts()) {
+                eprintln!("fghjd: failed to sync /etc/hosts: {e}");
             }
         }
     });
@@ -574,21 +609,24 @@ pub async fn run_control_api() -> Result<()> {
         .context("CA trust install task panicked")??;
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let cert_resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider.clone()));
 
-    // Loaded before the HTTPS proxy is spawned (but the ports below are
-    // still bound first — see the comment there) since `serve_https` needs
-    // it for real per-service SNI -> container routing, not just the zone
-    // apex.
+    // Loaded before the cert resolver and the HTTPS proxy are spawned: the
+    // cert resolver needs it too now, to gate certificate issuance for a
+    // reserved-TLD `#AdditionalHost` alias on "is some running container
+    // actually claiming this name as a route" (see
+    // `ca::DynamicCertResolver::resolve_for`), not just "is this in our own
+    // zone".
     let registry = Arc::new(WorkspaceRegistry::load(docker).await);
     spawn_reconciler(Arc::clone(&registry));
+
+    let cert_resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider.clone(), registry.clone()));
 
     // Occupied before the control API is reachable at all, so a bind
     // failure on 80/443 ("something else is already listening there") is
     // reported clearly instead of leaving `fghjd` half-started.
     let http_listener = proxy::bind_http().await?;
     let https_listener = proxy::bind_https().await?;
-    tokio::spawn(proxy::serve_http_redirect(http_listener));
+    tokio::spawn(proxy::serve_http_redirect(http_listener, registry.clone()));
     tokio::spawn(proxy::serve_https(https_listener, cert_resolver, control_port, provider, registry.clone()));
 
     let app = build_router(registry);

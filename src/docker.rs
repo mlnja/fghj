@@ -104,6 +104,12 @@ pub struct RunOpts<'a> {
     /// every container in a run together, even though we never call `docker compose`.
     pub project: &'a str,
     pub service_name: &'a str,
+    /// Pre-formatted `HostConfig.binds` entries — either a bind mount
+    /// (`host/path:container/path[:ro]`) or a named volume
+    /// (`volume-name:container/path[:ro]`). Docker itself disambiguates the
+    /// two by whether the left side contains a `/`, so both forms share this
+    /// one field.
+    pub binds: &'a [String],
 }
 
 pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
@@ -140,6 +146,7 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
         exposed_ports: Some(exposed_ports),
         host_config: Some(HostConfig {
             port_bindings: Some(port_bindings),
+            binds: if opts.binds.is_empty() { None } else { Some(opts.binds.to_vec()) },
             ..Default::default()
         }),
         networking_config: Some(NetworkingConfig { endpoints_config: Some(endpoints_config) }),

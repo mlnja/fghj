@@ -9,6 +9,7 @@ pub mod daemon;
 pub mod dns;
 pub mod docker;
 pub mod downloads;
+pub mod hosts_file;
 pub mod proxy;
 pub mod resolver;
 pub mod runs;

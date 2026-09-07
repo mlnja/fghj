@@ -14,7 +14,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 
-use crate::dns;
+use crate::{dns, proxy};
 
 const CA_CERT_FILE: &str = "ca-cert.pem";
 const CA_KEY_FILE: &str = "ca-key.pem";
@@ -176,17 +176,31 @@ pub fn install_macos_trust(ca_cert_path: &Path) -> Result<()> {
 /// X.509 wildcards only match one leftmost label (RFC 6125), so
 /// `*.fghj.internal` wouldn't match a multi-label name like
 /// `deep.sub.fghj.internal` — and the schema allows exactly those.
-#[derive(Debug)]
+///
+/// Also the eligibility gate for an `#AdditionalHost` alias: `routes` (the
+/// same `RouteResolver` `proxy::serve_https` dispatches through) is
+/// consulted so a reserved-TLD alias (`dns::is_reserved_alias`) only ever
+/// gets a certificate while some running container actually claims it as a
+/// route — never a blanket "any `.local`-shaped SNI gets a cert," which
+/// would let a browser mint trust for a name nothing in this workspace
+/// declared.
 pub struct DynamicCertResolver {
     ca_key_pair: KeyPair,
     ca_cert_der: CertificateDer<'static>,
     provider: Arc<CryptoProvider>,
+    routes: Arc<dyn proxy::RouteResolver>,
     cache: Mutex<HashMap<String, Arc<CertifiedKey>>>,
 }
 
+impl std::fmt::Debug for DynamicCertResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DynamicCertResolver").field("cache", &self.cache).finish_non_exhaustive()
+    }
+}
+
 impl DynamicCertResolver {
-    pub fn new(ca: LoadedCa, provider: Arc<CryptoProvider>) -> Self {
-        Self { ca_key_pair: ca.key_pair, ca_cert_der: ca.cert_der, provider, cache: Mutex::new(HashMap::new()) }
+    pub fn new(ca: LoadedCa, provider: Arc<CryptoProvider>, routes: Arc<dyn proxy::RouteResolver>) -> Self {
+        Self { ca_key_pair: ca.key_pair, ca_cert_der: ca.cert_der, provider, routes, cache: Mutex::new(HashMap::new()) }
     }
 
     fn issue(&self, name: &str) -> Result<Arc<CertifiedKey>> {
@@ -212,7 +226,8 @@ impl DynamicCertResolver {
     /// no public constructor, so exercising `resolve()` itself would require
     /// driving a full handshake for what is otherwise a plain lookup.
     fn resolve_for(&self, name: &str) -> Option<Arc<CertifiedKey>> {
-        if !dns::in_zone(name) {
+        let eligible = dns::in_zone(name) || (dns::is_reserved_alias(name) && self.routes.resolve(name).is_some());
+        if !eligible {
             return None;
         }
 
@@ -240,6 +255,22 @@ mod tests {
         Arc::new(rustls::crypto::ring::default_provider())
     }
 
+    /// A `RouteResolver` backed by a plain in-memory map — same role as
+    /// `proxy::tests::StaticRoutes`, duplicated here (rather than exposed
+    /// from `proxy`) since it's only ever needed to exercise the
+    /// reserved-alias eligibility gate in isolation.
+    struct StaticRoutes(std::collections::HashMap<&'static str, u16>);
+
+    impl proxy::RouteResolver for StaticRoutes {
+        fn resolve(&self, host: &str) -> Option<u16> {
+            self.0.get(host).copied()
+        }
+    }
+
+    fn no_routes() -> Arc<dyn proxy::RouteResolver> {
+        Arc::new(StaticRoutes(std::collections::HashMap::new()))
+    }
+
     #[test]
     fn generates_and_reloads_a_ca_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
@@ -257,16 +288,46 @@ mod tests {
     #[test]
     fn resolver_issues_cert_for_in_zone_name_and_rejects_out_of_zone() {
         let ca = generate_ca().unwrap();
-        let resolver = DynamicCertResolver::new(ca, provider());
+        let resolver = DynamicCertResolver::new(ca, provider(), no_routes());
 
         assert!(resolver.resolve_for("cart.fghj.internal").is_some());
         assert!(resolver.resolve_for("evil.com").is_none());
     }
 
     #[test]
+    fn resolver_issues_cert_for_a_routed_reserved_alias_but_not_an_unrouted_one() {
+        let ca = generate_ca().unwrap();
+        let routes: Arc<dyn proxy::RouteResolver> =
+            Arc::new(StaticRoutes(std::collections::HashMap::from([("aikido.local", 8080)])));
+        let resolver = DynamicCertResolver::new(ca, provider(), routes);
+
+        assert!(
+            resolver.resolve_for("aikido.local").is_some(),
+            "a reserved-TLD alias that's actually routed must get a cert"
+        );
+        assert!(
+            resolver.resolve_for("other.local").is_none(),
+            "a reserved-TLD-shaped name nothing declared/routed must never get a cert"
+        );
+    }
+
+    #[test]
+    fn resolver_never_issues_a_cert_for_a_non_reserved_alias_even_if_routed() {
+        let ca = generate_ca().unwrap();
+        let routes: Arc<dyn proxy::RouteResolver> =
+            Arc::new(StaticRoutes(std::collections::HashMap::from([("demo.example.com", 8080)])));
+        let resolver = DynamicCertResolver::new(ca, provider(), routes);
+
+        assert!(
+            resolver.resolve_for("demo.example.com").is_none(),
+            "a real, non-reserved-TLD hostname must never get a cert from fghj's local CA, routed or not"
+        );
+    }
+
+    #[test]
     fn resolver_caches_repeated_lookups_for_the_same_name() {
         let ca = generate_ca().unwrap();
-        let resolver = DynamicCertResolver::new(ca, provider());
+        let resolver = DynamicCertResolver::new(ca, provider(), no_routes());
 
         let a = resolver.resolve_for("cart.fghj.internal").unwrap();
         let b = resolver.resolve_for("cart.fghj.internal").unwrap();
@@ -277,7 +338,7 @@ mod tests {
     fn issued_leaf_cert_chains_to_the_ca() {
         let ca = generate_ca().unwrap();
         let ca_cert_der = ca.cert_der.clone();
-        let resolver = DynamicCertResolver::new(ca, provider());
+        let resolver = DynamicCertResolver::new(ca, provider(), no_routes());
 
         let certified = resolver.resolve_for("cart.fghj.internal").unwrap();
         let leaf_der = certified.cert[0].clone();

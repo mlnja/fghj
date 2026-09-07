@@ -31,6 +31,41 @@ shelling out to `docker build`/`docker run`:
   reconciler, route-building, a run's liveness check — can all treat
   "doesn't exist" as ordinary control flow, not an error path.
 
+## Volumes: two shapes, one Docker primitive
+
+A volume declaration is either a bind mount or a named volume, never both
+— see [fghj.yaml reference: Volumes](/reference/fghj-yaml/#volumes) for how
+to write each. Both shapes end up in the exact same place at the Docker
+layer: a bind mount is `"host/path:container/path"`, a named volume is
+`"volume-name:container/path"` — Docker itself tells them apart by
+whether the left side contains a `/`, so both are just formatted strings
+in the same list handed to the container create call.
+
+A bind mount's host path, if relative, resolves against the checkout
+`fghjd` actually built the image from — the branch-override checkout
+directory for a review run, or the live workspace path otherwise. It is
+**not** sandboxed to that repo: an absolute path, or one that walks up
+with `..`, passes straight through to Docker unchanged. That's a
+deliberate choice, not an oversight — it's what lets a service bind-mount
+a sibling repo's checkout directly, the same way Docker Compose would.
+
+A named volume's real Docker name is *derived*, never the literal string
+you write — the same principle as a node's `*.fghj.internal` domain (see
+[Node identity & domains](/concepts/node-identity-and-domains/)). It's
+built from the volume's own `name`, folding in the run id unless `scope`
+is `"stable"`. Because the derivation is keyed by that author-chosen
+`name` rather than by any node id, two unrelated nodes — two services, or
+a service and a backing dependency — that declare the same `name` and
+`scope` land on the same derived value and transparently share one Docker
+volume. This is also why a `kind: shared-backing` reference automatically
+gets the backing dependency's persisted data for free: there's only ever
+one container that owns it, no matter how many services reference it.
+
+Volumes are never deleted by `fghj` — stopping a run tears down its
+containers and network only, which is what lets a volume survive a
+restart in the first place. A `"run"`-scoped preview run that's stopped
+and never restarted leaves its volume behind, with no cleanup command yet.
+
 ## Two log-reading modes
 
 Fetching the last N lines of a container's logs backs the log drawer's

@@ -54,25 +54,54 @@ local CA and caches it. This is what makes an arbitrarily deep
 `*.fghj.internal` name always "just work" over HTTPS without any
 pre-generation step.
 
+The same eligibility check also covers a service's declared
+[additional hosts](/reference/fghj-yaml/#additional-hosts): a literal
+alias under an IANA reserved special-use TLD (`.local`, `.test`,
+`.internal`, `.localhost`) is treated the same as an in-zone name — but
+only while some running container's routes actually claim it. This keeps
+the CA's blast radius bounded: it never issues a cert just because a
+hostname *looks* reserved, only when it's both reserved-shaped and
+currently backed by a real route. A non-reserved alias (anything that
+could be a real, internet-routable domain) never gets a certificate at
+all — see below.
+
 ## The reverse proxy
 
 `fghjd` occupies ports 80 and 443, localhost-only:
 
-- **Port 80** does one thing: redirects everything to the same path on
-  `https://`. There is no plaintext serving.
+- **Port 80** redirects to the same path on `https://` for anything
+  in-zone or under a reserved alias TLD. The one exception is a declared,
+  currently-routed *non-reserved* additional host (e.g.
+  `app.local.aikido.io`) — since that alias can never get a certificate,
+  redirecting it to HTTPS would be a dead end, so it's relayed over plain
+  HTTP instead. This is the only path that ever serves plaintext.
 - **Port 443** terminates TLS, then dispatches the decrypted request based
   on the SNI name it was negotiated for:
   - The zone apex (`fghj.internal` itself) relays to the control API —
     this is what makes `https://fghj.internal` serve the daemon's own API
     and the embedded UI.
-  - Any other in-zone name is looked up against the currently running
-    containers and, if found, relayed to the real backend. An
-    unrecognized in-zone name gets a friendly 404 instead of a raw
-    connection failure — the daemon is definitely listening for that
-    zone, it just doesn't know that specific host yet.
-  - Anything not in the zone at all: the TLS handshake simply isn't
-    attempted — there's no cert to offer for a name `fghj` doesn't
-    recognize.
+  - Any other in-zone name, or a routed reserved-alias additional host, is
+    looked up against the currently running containers and, if found,
+    relayed to the real backend. An unrecognized in-zone name gets a
+    friendly 404 instead of a raw connection failure — the daemon is
+    definitely listening for that zone, it just doesn't know that specific
+    host yet.
+  - Anything else: the TLS handshake simply isn't attempted — there's no
+    cert to offer for a name `fghj` doesn't recognize or isn't allowed to
+    certify.
+
+## Resolving additional hosts
+
+An in-zone `*.fghj.internal` name resolves through `fghjd`'s own DNS
+server, covered in [Split DNS](/concepts/split-dns/). A literal
+additional host like `aikido.local` is a real hostname that already means
+something else on the network (or nothing at all) — delegating a whole
+suffix like `.local` to `fghjd`'s DNS would hijack every other lookup
+under it, including mDNS device discovery. Instead, `fghjd` manages a
+marked block inside `/etc/hosts`, pinning only the exact hostnames
+currently declared by a running node to `127.0.0.1` — every other name
+under the same suffix is left alone. That block is kept in sync as
+containers start and stop, and cleared entirely on `fghj daemon stop`.
 
 Routing a hostname to a backend is decoupled from Docker behind a small
 one-method interface, so the proxy's own test suite can exercise real TLS
