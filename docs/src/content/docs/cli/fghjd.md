@@ -39,13 +39,17 @@ the web UI.
 ## Startup order
 
 Steps run in a specific, fail-fast order so problems surface immediately
-instead of leaving `fghjd` half-up: Docker connectivity → DNS server bind
-and OS resolver config → control API listener bind → CA setup (generate
-or load, then install trust) → bind ports 80/443 → start serving. See
-[Control API](/concepts/control-api/) for why this exact order matters.
+instead of leaving `fghjd` half-up: Docker connectivity → control API
+listener bind (TCP, internal) and control socket bind (Unix, for the CLI)
+→ CA setup (generate or load, then install trust) → activation (DNS
+server bind and OS resolver config, bind ports 80/443, sync
+`/etc/hosts`) → start serving. See [Control API](/concepts/control-api/)
+for why this exact order matters.
 
-## Stopping it
+## Going idle without stopping it
 
-Use [`fghj daemon stop`](/cli/daemon-stop/) rather than killing the
-process directly — it also cleans up the pidfile, port file, and (on
-macOS) the resolver config `fghjd` installed.
+`fghjd` is meant to run for the life of the machine — use
+[`fghj daemon stop`](/cli/daemon/) to release ports 80/443, DNS, and
+`/etc/hosts` without killing the process. A real termination signal
+(SIGTERM/SIGINT — service stop/restart, system shutdown) runs the same
+cleanup before the process actually exits.

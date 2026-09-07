@@ -1,17 +1,21 @@
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 const SCHEMA_DEPENDENCY: &str = include_str!("../schema/dependency.cue");
 const SCHEMA_COMPONENT: &str = include_str!("../schema/component.cue");
 
 #[derive(Parser)]
-#[command(name = "fghj", about = "Local development orchestration for user flows")]
+#[command(
+    name = "fghj",
+    version,
+    about = "Local development orchestration for user flows"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -49,8 +53,15 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum DaemonAction {
-    /// Stop fghjd and every workspace it was serving
+    /// Reconcile fghjd back into the active state (occupy 80/443 and DNS,
+    /// resync /etc/hosts)
+    Start,
+    /// Release 80/443, DNS, and /etc/hosts without stopping fghjd itself
     Stop,
+    /// Equivalent to `stop` followed by `start`
+    Restart,
+    /// Report whether fghjd is running and whether it's active or idle
+    Status,
 }
 
 fn validate(path: &Path) -> Result<()> {
@@ -89,21 +100,28 @@ fn graph(entry: String, workspace: Option<PathBuf>) -> Result<()> {
 }
 
 fn probe_daemon() -> bool {
-    fghj::daemon::read_port().is_some_and(|port| TcpStream::connect(("127.0.0.1", port)).is_ok())
+    UnixStream::connect(fghj::daemon::socket_path()).is_ok()
 }
 
-/// Sends a JSON POST over a raw TCP connection and parses the JSON response
-/// body. `fghjd`'s control API is localhost-only with tiny bodies, so a
-/// hand-rolled request avoids pulling in an HTTP client crate for this one
-/// call site.
-fn http_post_json(path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
-    let port = fghj::daemon::read_port()
-        .context("fghjd's control API port file wasn't found — is fghjd running? (`sudo fghjd`)")?;
-    let body = body.to_string();
-    let mut stream = TcpStream::connect(("127.0.0.1", port))
-        .with_context(|| format!("failed to connect to fghjd control API on port {port}"))?;
+/// Sends a bare-bones HTTP request (no body for `GET`) over `fghjd`'s Unix
+/// control socket and parses the JSON response body. The API has tiny
+/// bodies and no need for keep-alive, so a hand-rolled request avoids
+/// pulling in an HTTP client crate for these few call sites.
+fn http_request_json(
+    method: &str,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let socket_path = fghj::daemon::socket_path();
+    let body = body.map(|b| b.to_string()).unwrap_or_default();
+    let mut stream = UnixStream::connect(&socket_path).with_context(|| {
+        format!(
+            "failed to connect to fghjd's control socket at {} — is fghjd running? (`sudo fghjd`)",
+            socket_path.display()
+        )
+    })?;
     let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "{method} {path} HTTP/1.1\r\nHost: fghjd\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     );
@@ -113,7 +131,16 @@ fn http_post_json(path: &str, body: &serde_json::Value) -> Result<serde_json::Va
     let text = String::from_utf8_lossy(&raw);
     let body_start = text.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
     let json_str = &text[body_start..];
-    serde_json::from_str(json_str).with_context(|| format!("invalid response from fghjd: {json_str}"))
+    serde_json::from_str(json_str)
+        .with_context(|| format!("invalid response from fghjd: {json_str}"))
+}
+
+fn http_post_json(path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
+    http_request_json("POST", path, Some(body))
+}
+
+fn http_get_json(path: &str) -> Result<serde_json::Value> {
+    http_request_json("GET", path, None)
 }
 
 fn wire(entry: String, workspace: Option<PathBuf>) -> Result<()> {
@@ -152,46 +179,64 @@ fn wire(entry: String, workspace: Option<PathBuf>) -> Result<()> {
     if let Some(err) = resp.get("error") {
         bail!("fghjd rejected workspace: {err}");
     }
-    let id = resp["id"].as_str().context("fghjd response missing workspace id")?;
+    let id = resp["id"]
+        .as_str()
+        .context("fghjd response missing workspace id")?;
 
     println!("data is wired — open the UI to see it: https://fghj.internal/?workspace={id}");
 
     Ok(())
 }
 
-fn daemon_stop() -> Result<()> {
-    match fghj::daemon::read_pid() {
-        Some(pid) if fghj::daemon::pid_alive(pid) => {
-            println!("stopping fghjd (pid {pid}, requires sudo)...");
-            let pidfile = fghj::daemon::pid_path();
-            let resolver_file = fghj::dns::macos_resolver_path();
-            let port_file = fghj::daemon::port_path();
-            let hosts_file = fghj::hosts_file::hosts_path();
-            // `rm -f` is a no-op if a file doesn't exist (e.g. the resolver
-            // file on non-macOS), so this is safe to run unconditionally.
-            // The `sed` range-delete strips fghj's managed block (if any) from
-            // `/etc/hosts` so a stopped daemon doesn't leave stale additional-
-            // host entries pointing at nothing.
-            let cmd = format!(
-                "kill {pid} && rm -f {} {} {} && sed -i '' '/^{}$/,/^{}$/d' {}",
-                pidfile.display(),
-                resolver_file.display(),
-                port_file.display(),
-                fghj::hosts_file::BEGIN_MARKER,
-                fghj::hosts_file::END_MARKER,
-                hosts_file.display(),
-            );
-            let status = Command::new("sudo")
-                .args(["sh", "-c", &cmd])
-                .status()
-                .context("failed to run sudo to stop fghjd")?;
-            if !status.success() {
-                bail!("failed to stop fghjd (pid {pid})");
-            }
-            println!("fghjd stopped");
-        }
-        _ => println!("fghjd is not running"),
+/// `fghjd` itself is meant to run for the life of the machine, supervised by
+/// launchd/systemd — these commands never touch that process's lifecycle.
+/// They talk to its always-on control API to toggle whether it's actively
+/// occupying 80/443, `*.fghj.internal` DNS, and `/etc/hosts`, or sitting
+/// idle out of the way (see `fghj::daemon::DaemonControl`).
+fn daemon_start() -> Result<()> {
+    if !probe_daemon() {
+        bail!(
+            "fghjd isn't running — start the service first (e.g. `sudo brew services start fghj`, \
+             or `sudo fghjd` in the foreground for local dev)"
+        );
     }
+    let resp = http_post_json("/daemon/start", &serde_json::json!({}))?;
+    if let Some(err) = resp.get("error") {
+        bail!("fghjd failed to activate: {err}");
+    }
+    println!("fghjd is active — occupying 80/443 and *.fghj.internal DNS");
+    Ok(())
+}
+
+fn daemon_stop() -> Result<()> {
+    if !probe_daemon() {
+        println!("fghjd is not running");
+        return Ok(());
+    }
+    http_post_json("/daemon/stop", &serde_json::json!({}))?;
+    println!(
+        "fghjd is now idle — 80/443, DNS, and /etc/hosts released (fghjd itself is still running; \
+         `fghj daemon start` to reconcile again)"
+    );
+    Ok(())
+}
+
+fn daemon_restart() -> Result<()> {
+    daemon_stop()?;
+    daemon_start()
+}
+
+fn daemon_status() -> Result<()> {
+    if !probe_daemon() {
+        println!("fghjd is not running");
+        return Ok(());
+    }
+    let resp = http_get_json("/daemon/status")?;
+    let active = resp["active"].as_bool().unwrap_or(false);
+    println!(
+        "fghjd is running and {}",
+        if active { "active" } else { "idle" }
+    );
     Ok(())
 }
 
@@ -202,6 +247,11 @@ fn main() -> Result<()> {
         Commands::Validate { path } => validate(&path),
         Commands::Graph { entry, workspace } => graph(entry, workspace),
         Commands::Wire { entry, workspace } => wire(entry, workspace),
-        Commands::Daemon { action: DaemonAction::Stop } => daemon_stop(),
+        Commands::Daemon { action } => match action {
+            DaemonAction::Start => daemon_start(),
+            DaemonAction::Stop => daemon_stop(),
+            DaemonAction::Restart => daemon_restart(),
+            DaemonAction::Status => daemon_status(),
+        },
     }
 }

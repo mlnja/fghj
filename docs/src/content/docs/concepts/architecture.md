@@ -33,9 +33,10 @@ description: How fghj's pieces — the CLI, the superdaemon, the resolver, the p
   and Docker access. See [Local CA & TLS proxy](/concepts/local-ca-and-tls-proxy/),
   [Split DNS](/concepts/split-dns/), and [Docker & downloads](/concepts/docker-and-downloads/).
 - **`fghj`** is the CLI a developer runs directly — `validate`, `graph`,
-  `wire`, `daemon stop`. It's unprivileged and never touches Docker or ports
-  80/443 itself; everything that needs root goes through `fghjd`'s HTTP
-  control API. See [Control API](/concepts/control-api/).
+  `wire`, `daemon start`/`stop`/`restart`/`status`. It's unprivileged and
+  never touches Docker or ports 80/443 itself; everything that needs root
+  goes through `fghjd`'s HTTP control API. See
+  [Control API](/concepts/control-api/).
 - **The resolver** (`src/resolver.rs`) turns a workspace of sibling repo
   checkouts, each with its own `fghj.yaml`, into one resolved graph of
   nodes and edges — assigning stable ids, `*.fghj.internal` domains, and

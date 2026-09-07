@@ -6,9 +6,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use rcgen::{
-    BasicConstraints, CertificateParams, DnType, Issuer, IsCa, KeyPair, KeyUsagePurpose,
-};
+use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose};
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
@@ -66,9 +64,11 @@ pub fn ensure_ca(dir: &Path) -> Result<LoadedCa> {
     fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let ca = generate_ca()?;
 
-    fs::write(&cert_path, &ca.cert_pem).with_context(|| format!("failed to write {}", cert_path.display()))?;
+    fs::write(&cert_path, &ca.cert_pem)
+        .with_context(|| format!("failed to write {}", cert_path.display()))?;
     let key_pem = ca.key_pair.serialize_pem();
-    fs::write(&key_path, &key_pem).with_context(|| format!("failed to write {}", key_path.display()))?;
+    fs::write(&key_path, &key_pem)
+        .with_context(|| format!("failed to write {}", key_path.display()))?;
     // Root-only-readable: this key can mint a certificate for any hostname
     // that a browser trusting our CA will accept without warning.
     fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))
@@ -85,28 +85,44 @@ pub fn ca_cert_path(dir: &Path) -> PathBuf {
 }
 
 fn load_ca(cert_path: &Path, key_path: &Path) -> Result<LoadedCa> {
-    let cert_pem =
-        fs::read_to_string(cert_path).with_context(|| format!("failed to read {}", cert_path.display()))?;
-    let key_pem =
-        fs::read_to_string(key_path).with_context(|| format!("failed to read {}", key_path.display()))?;
-    let key_pair = KeyPair::from_pem(&key_pem).context("failed to parse persisted CA private key")?;
+    let cert_pem = fs::read_to_string(cert_path)
+        .with_context(|| format!("failed to read {}", cert_path.display()))?;
+    let key_pem = fs::read_to_string(key_path)
+        .with_context(|| format!("failed to read {}", key_path.display()))?;
+    let key_pair =
+        KeyPair::from_pem(&key_pem).context("failed to parse persisted CA private key")?;
     let cert_der = pem_to_der(&cert_pem).context("failed to parse persisted CA certificate")?;
-    Ok(LoadedCa { key_pair, cert_pem, cert_der })
+    Ok(LoadedCa {
+        key_pair,
+        cert_pem,
+        cert_der,
+    })
 }
 
 fn generate_ca() -> Result<LoadedCa> {
     let key_pair = KeyPair::generate().context("failed to generate CA key pair")?;
-    let mut params = CertificateParams::new(Vec::new()).context("failed to construct CA cert params")?;
-    params.distinguished_name.push(DnType::CommonName, "fghj local CA");
-    params.distinguished_name.push(DnType::OrganizationName, "fghj");
+    let mut params =
+        CertificateParams::new(Vec::new()).context("failed to construct CA cert params")?;
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "fghj local CA");
+    params
+        .distinguished_name
+        .push(DnType::OrganizationName, "fghj");
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
 
-    let cert = params.self_signed(&key_pair).context("failed to self-sign CA certificate")?;
+    let cert = params
+        .self_signed(&key_pair)
+        .context("failed to self-sign CA certificate")?;
     let cert_pem = cert.pem();
     let cert_der = cert.der().clone();
 
-    Ok(LoadedCa { key_pair, cert_pem, cert_der })
+    Ok(LoadedCa {
+        key_pair,
+        cert_pem,
+        cert_der,
+    })
 }
 
 fn pem_to_der(pem: &str) -> Result<CertificateDer<'static>> {
@@ -159,12 +175,22 @@ pub fn install_macos_trust(ca_cert_path: &Path) -> Result<()> {
     }
 
     let status = Command::new("security")
-        .args(["add-trusted-cert", "-d", "-r", "trustRoot", "-k", "/Library/Keychains/System.keychain"])
+        .args([
+            "add-trusted-cert",
+            "-d",
+            "-r",
+            "trustRoot",
+            "-k",
+            "/Library/Keychains/System.keychain",
+        ])
         .arg(ca_cert_path)
         .status()
         .context("failed to run `security add-trusted-cert`")?;
     if !status.success() {
-        anyhow::bail!("`security add-trusted-cert` failed for {}", ca_cert_path.display());
+        anyhow::bail!(
+            "`security add-trusted-cert` failed for {}",
+            ca_cert_path.display()
+        );
     }
     println!("fghjd: installed the fghj local CA into the System trust store");
     Ok(())
@@ -194,13 +220,25 @@ pub struct DynamicCertResolver {
 
 impl std::fmt::Debug for DynamicCertResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DynamicCertResolver").field("cache", &self.cache).finish_non_exhaustive()
+        f.debug_struct("DynamicCertResolver")
+            .field("cache", &self.cache)
+            .finish_non_exhaustive()
     }
 }
 
 impl DynamicCertResolver {
-    pub fn new(ca: LoadedCa, provider: Arc<CryptoProvider>, routes: Arc<dyn proxy::RouteResolver>) -> Self {
-        Self { ca_key_pair: ca.key_pair, ca_cert_der: ca.cert_der, provider, routes, cache: Mutex::new(HashMap::new()) }
+    pub fn new(
+        ca: LoadedCa,
+        provider: Arc<CryptoProvider>,
+        routes: Arc<dyn proxy::RouteResolver>,
+    ) -> Self {
+        Self {
+            ca_key_pair: ca.key_pair,
+            ca_cert_der: ca.cert_der,
+            provider,
+            routes,
+            cache: Mutex::new(HashMap::new()),
+        }
     }
 
     fn issue(&self, name: &str) -> Result<Arc<CertifiedKey>> {
@@ -208,11 +246,13 @@ impl DynamicCertResolver {
             .context("failed to build issuer from CA certificate")?;
 
         let leaf_key = KeyPair::generate().context("failed to generate leaf key pair")?;
-        let mut params =
-            CertificateParams::new(vec![name.to_string()]).context("failed to construct leaf cert params")?;
+        let mut params = CertificateParams::new(vec![name.to_string()])
+            .context("failed to construct leaf cert params")?;
         params.distinguished_name.push(DnType::CommonName, name);
 
-        let cert = params.signed_by(&leaf_key, &issuer).context("failed to sign leaf certificate")?;
+        let cert = params
+            .signed_by(&leaf_key, &issuer)
+            .context("failed to sign leaf certificate")?;
 
         let cert_chain = vec![cert.der().clone()];
         let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
@@ -226,7 +266,8 @@ impl DynamicCertResolver {
     /// no public constructor, so exercising `resolve()` itself would require
     /// driving a full handshake for what is otherwise a plain lookup.
     fn resolve_for(&self, name: &str) -> Option<Arc<CertifiedKey>> {
-        let eligible = dns::in_zone(name) || (dns::is_reserved_alias(name) && self.routes.resolve(name).is_some());
+        let eligible = dns::in_zone(name)
+            || (dns::is_reserved_alias(name) && self.routes.resolve(name).is_some());
         if !eligible {
             return None;
         }
@@ -235,8 +276,14 @@ impl DynamicCertResolver {
             return Some(cached.clone());
         }
 
-        let certified = self.issue(name).map_err(|e| eprintln!("fghjd: failed to issue cert for {name}: {e}")).ok()?;
-        self.cache.lock().unwrap().insert(name.to_string(), certified.clone());
+        let certified = self
+            .issue(name)
+            .map_err(|e| eprintln!("fghjd: failed to issue cert for {name}: {e}"))
+            .ok()?;
+        self.cache
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), certified.clone());
         Some(certified)
     }
 }
@@ -297,8 +344,9 @@ mod tests {
     #[test]
     fn resolver_issues_cert_for_a_routed_reserved_alias_but_not_an_unrouted_one() {
         let ca = generate_ca().unwrap();
-        let routes: Arc<dyn proxy::RouteResolver> =
-            Arc::new(StaticRoutes(std::collections::HashMap::from([("aikido.local", 8080)])));
+        let routes: Arc<dyn proxy::RouteResolver> = Arc::new(StaticRoutes(
+            std::collections::HashMap::from([("aikido.local", 8080)]),
+        ));
         let resolver = DynamicCertResolver::new(ca, provider(), routes);
 
         assert!(
@@ -314,8 +362,9 @@ mod tests {
     #[test]
     fn resolver_never_issues_a_cert_for_a_non_reserved_alias_even_if_routed() {
         let ca = generate_ca().unwrap();
-        let routes: Arc<dyn proxy::RouteResolver> =
-            Arc::new(StaticRoutes(std::collections::HashMap::from([("demo.example.com", 8080)])));
+        let routes: Arc<dyn proxy::RouteResolver> = Arc::new(StaticRoutes(
+            std::collections::HashMap::from([("demo.example.com", 8080)]),
+        ));
         let resolver = DynamicCertResolver::new(ca, provider(), routes);
 
         assert!(
@@ -331,7 +380,10 @@ mod tests {
 
         let a = resolver.resolve_for("cart.fghj.internal").unwrap();
         let b = resolver.resolve_for("cart.fghj.internal").unwrap();
-        assert!(Arc::ptr_eq(&a, &b), "second lookup should hit the cache, not mint a new cert");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "second lookup should hit the cache, not mint a new cert"
+        );
     }
 
     #[test]

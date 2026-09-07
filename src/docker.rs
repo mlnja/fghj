@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
+use bollard::Docker;
 use bollard::body_full;
 use bollard::models::{
     ContainerCreateBody, EndpointSettings, HostConfig, NetworkCreateRequest, NetworkingConfig,
@@ -12,9 +13,8 @@ use bollard::query_parameters::{
     BuildImageOptionsBuilder, CreateContainerOptionsBuilder, InspectContainerOptionsBuilder,
     LogsOptionsBuilder, RemoveContainerOptionsBuilder,
 };
-use bollard::Docker;
-use futures_util::stream::Stream;
 use futures_util::StreamExt;
+use futures_util::stream::Stream;
 
 pub async fn ensure_network(docker: &Docker, name: &str) -> Result<()> {
     let result = docker
@@ -27,7 +27,9 @@ pub async fn ensure_network(docker: &Docker, name: &str) -> Result<()> {
         Ok(_) => Ok(()),
         // a network by this name already existing is fine — that's the point
         // of "ensure"; any other failure is real.
-        Err(bollard::errors::Error::DockerResponseServerError { status_code: 409, .. }) => Ok(()),
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 409, ..
+        }) => Ok(()),
         Err(e) => Err(e).context("docker create_network failed"),
     }
 }
@@ -38,7 +40,11 @@ pub async fn remove_network(docker: &Docker, name: &str) {
 
 /// `docker build` needs a real working tree, not a bare mirror — clone the
 /// branch out of the local mirror into `dest` so it can be used as a build context.
-pub async fn materialize_checkout(mirror_path: &Path, branch: &str, dest: &Path) -> Result<PathBuf> {
+pub async fn materialize_checkout(
+    mirror_path: &Path,
+    branch: &str,
+    dest: &Path,
+) -> Result<PathBuf> {
     let mirror_path = mirror_path.to_path_buf();
     let branch = branch.to_string();
     let dest = dest.to_path_buf();
@@ -61,14 +67,21 @@ pub async fn materialize_checkout(mirror_path: &Path, branch: &str, dest: &Path)
     .context("materialize_checkout task panicked")?
 }
 
-pub async fn build_image(docker: &Docker, context_dir: &Path, dockerfile: &str, tag: &str) -> Result<()> {
+pub async fn build_image(
+    docker: &Docker,
+    context_dir: &Path,
+    dockerfile: &str,
+    tag: &str,
+) -> Result<()> {
     let context_dir = context_dir.to_path_buf();
     let tar_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
         let mut builder = tar::Builder::new(Vec::new());
         builder
             .append_dir_all("", &context_dir)
             .with_context(|| format!("failed to tar build context {}", context_dir.display()))?;
-        builder.into_inner().context("failed to finalize build context tar")
+        builder
+            .into_inner()
+            .context("failed to finalize build context tar")
     })
     .await
     .context("tar task panicked")??;
@@ -83,7 +96,10 @@ pub async fn build_image(docker: &Docker, context_dir: &Path, dockerfile: &str, 
     while let Some(item) = stream.next().await {
         let info = item.context("docker build_image stream error")?;
         if let Some(detail) = info.error_detail {
-            bail!("docker build -t {tag} failed: {}", detail.message.unwrap_or_default());
+            bail!(
+                "docker build -t {tag} failed: {}",
+                detail.message.unwrap_or_default()
+            );
         }
     }
     Ok(())
@@ -114,8 +130,14 @@ pub struct RunOpts<'a> {
 
 pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
     let mut labels = HashMap::new();
-    labels.insert("com.docker.compose.project".to_string(), opts.project.to_string());
-    labels.insert("com.docker.compose.service".to_string(), opts.service_name.to_string());
+    labels.insert(
+        "com.docker.compose.project".to_string(),
+        opts.project.to_string(),
+    );
+    labels.insert(
+        "com.docker.compose.service".to_string(),
+        opts.service_name.to_string(),
+    );
     labels.insert("com.docker.compose.oneoff".to_string(), "False".to_string());
 
     let mut exposed_ports = Vec::new();
@@ -136,7 +158,10 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
     let mut endpoints_config = HashMap::new();
     endpoints_config.insert(
         opts.network.to_string(),
-        EndpointSettings { aliases: Some(opts.aliases.to_vec()), ..Default::default() },
+        EndpointSettings {
+            aliases: Some(opts.aliases.to_vec()),
+            ..Default::default()
+        },
     );
 
     let body = ContainerCreateBody {
@@ -146,14 +171,22 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
         exposed_ports: Some(exposed_ports),
         host_config: Some(HostConfig {
             port_bindings: Some(port_bindings),
-            binds: if opts.binds.is_empty() { None } else { Some(opts.binds.to_vec()) },
+            binds: if opts.binds.is_empty() {
+                None
+            } else {
+                Some(opts.binds.to_vec())
+            },
             ..Default::default()
         }),
-        networking_config: Some(NetworkingConfig { endpoints_config: Some(endpoints_config) }),
+        networking_config: Some(NetworkingConfig {
+            endpoints_config: Some(endpoints_config),
+        }),
         ..Default::default()
     };
 
-    let create_opts = CreateContainerOptionsBuilder::default().name(opts.name).build();
+    let create_opts = CreateContainerOptionsBuilder::default()
+        .name(opts.name)
+        .build();
     let result = async {
         docker.create_container(Some(create_opts), body).await?;
         docker.start_container(opts.name, None).await?;
@@ -166,7 +199,10 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
         // fails post-create (e.g. network attach failure) — best-effort clean
         // it up so callers never leak a dangling container blocking retries.
         let _ = docker
-            .remove_container(opts.name, Some(RemoveContainerOptionsBuilder::default().force(true).build()))
+            .remove_container(
+                opts.name,
+                Some(RemoveContainerOptionsBuilder::default().force(true).build()),
+            )
             .await;
         return Err(e).with_context(|| format!("docker run {} failed", opts.name));
     }
@@ -175,7 +211,10 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
 
 pub async fn stop_and_remove(docker: &Docker, name: &str) {
     let _ = docker
-        .remove_container(name, Some(RemoveContainerOptionsBuilder::default().force(true).build()))
+        .remove_container(
+            name,
+            Some(RemoveContainerOptionsBuilder::default().force(true).build()),
+        )
         .await;
 }
 
@@ -188,10 +227,22 @@ pub struct ContainerStatus {
 /// `container_port` (e.g. "8080" or "8080/tcp"), if published. Returns
 /// `Ok(None)` if the container doesn't exist, rather than erroring — this is
 /// used as the "does it exist" check everywhere.
-pub async fn inspect_status(docker: &Docker, name: &str, container_port: &str) -> Result<Option<ContainerStatus>> {
-    let inspected = match docker.inspect_container(name, Some(InspectContainerOptionsBuilder::default().build())).await {
+pub async fn inspect_status(
+    docker: &Docker,
+    name: &str,
+    container_port: &str,
+) -> Result<Option<ContainerStatus>> {
+    let inspected = match docker
+        .inspect_container(
+            name,
+            Some(InspectContainerOptionsBuilder::default().build()),
+        )
+        .await
+    {
         Ok(entry) => entry,
-        Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. }) => return Ok(None),
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => return Ok(None),
         Err(e) => return Err(e).context("docker inspect_container failed"),
     };
 
@@ -214,7 +265,10 @@ pub async fn inspect_status(docker: &Docker, name: &str, container_port: &str) -
         .and_then(|b| b.host_port)
         .and_then(|p| p.parse::<u16>().ok());
 
-    Ok(Some(ContainerStatus { status, published_port }))
+    Ok(Some(ContainerStatus {
+        status,
+        published_port,
+    }))
 }
 
 /// One-shot: fetches the last `tail` lines and returns them as a string.
@@ -245,7 +299,10 @@ pub async fn logs_tail(docker: &Docker, name: &str, tail: usize) -> Result<Strin
 /// returning (see its `process_request`), so the returned stream owns
 /// everything it needs and isn't tied to `docker`'s or `name`'s lifetime —
 /// safe to return from a handler after `docker`/`name` go out of scope.
-pub fn logs_follow(docker: &Docker, name: &str) -> impl Stream<Item = Result<bollard::container::LogOutput, bollard::errors::Error>> + use<> {
+pub fn logs_follow(
+    docker: &Docker,
+    name: &str,
+) -> impl Stream<Item = Result<bollard::container::LogOutput, bollard::errors::Error>> + use<> {
     let options = LogsOptionsBuilder::default()
         .follow(true)
         .stdout(true)

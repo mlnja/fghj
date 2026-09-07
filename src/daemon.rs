@@ -5,10 +5,10 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::body::Bytes;
 use axum::extract::{FromRequestParts, Path as AxumPath, Query, State};
-use axum::http::{header, request::Parts, StatusCode, Uri};
+use axum::http::{StatusCode, Uri, header, request::Parts};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -24,55 +24,41 @@ use crate::{ca, dns, docker, downloads, hosts_file, proxy, resolver, runs, store
 /// UI is essentially never stale.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 
-pub fn pid_path() -> PathBuf {
-    PathBuf::from("/var/run/fghjd.pid")
+/// Where `fghjd`'s control API listens — a Unix socket rather than a TCP
+/// port, dockerd-style: it's local-machine-only by nature (no port to pick,
+/// collide with, or scan) and access control is a filesystem permission
+/// (see `run_control_api`'s `chmod` after bind) instead of "trust anything
+/// that can reach 127.0.0.1". Only meaningful while `fghjd` is alive, so
+/// `/var/run` (not the durable `/var/lib/fghjd` the CA lives under) is the
+/// right place.
+pub fn socket_path() -> PathBuf {
+    PathBuf::from("/var/run/fghjd.sock")
 }
 
-pub fn write_pid(pid: u32) -> Result<()> {
-    std::fs::write(pid_path(), pid.to_string())
-        .with_context(|| format!("failed to write pidfile {}", pid_path().display()))
-}
-
-pub fn read_pid() -> Option<u32> {
-    std::fs::read_to_string(pid_path()).ok()?.trim().parse().ok()
-}
-
-pub fn remove_pid() {
-    let _ = std::fs::remove_file(pid_path());
-}
-
-/// Where the control API's actual (ephemeral) port is published, mirroring
-/// `pid_path` — only meaningful while `fghjd` is alive, so `/var/run` (not
-/// the durable `/var/lib/fghjd` the CA lives under) is the right place.
-pub fn port_path() -> PathBuf {
-    PathBuf::from("/var/run/fghjd.port")
-}
-
-pub fn write_port(port: u16) -> Result<()> {
-    std::fs::write(port_path(), port.to_string())
-        .with_context(|| format!("failed to write port file {}", port_path().display()))
-}
-
-pub fn read_port() -> Option<u16> {
-    std::fs::read_to_string(port_path()).ok()?.trim().parse().ok()
-}
-
-/// Durable storage for the local CA — must survive a reboot, unlike the
-/// pidfile/port file, or every `fghjd` restart would need the user to
-/// re-approve a brand new CA in Keychain Access.
+/// Durable storage for the local CA — must survive a reboot, or every
+/// `fghjd` restart would need the user to re-approve a brand new CA in
+/// Keychain Access.
 fn ca_dir() -> PathBuf {
     PathBuf::from("/var/lib/fghjd/ca")
 }
 
-/// Checks whether a process with the given pid is alive, via a signal-0 kill.
-/// `fghjd` runs as root while this is called from the unprivileged `fghj`
-/// client, so a live process shows up as `EPERM` (exists, not ours to
-/// signal), not `0` — only `ESRCH` means it's actually gone.
-pub fn pid_alive(pid: u32) -> bool {
-    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+/// Tracks that the operator's last explicit `fghj daemon` call was `stop`,
+/// not just that `fghjd` currently happens to be idle in memory. Backed by
+/// `store::DaemonState` at `store::default_state_path()` — next to the CA
+/// (durable, survives a reboot) rather than under `/var/run`: "I told it to
+/// stop" is a standing instruction that should hold until countermanded by
+/// `fghj daemon start`, not something a crash or a reboot should silently
+/// discard by reactivating anyway. `idle_requested` is read-modify-write
+/// against the whole state file, same as every other field it may grow.
+fn is_idle_requested() -> bool {
+    store::load_daemon_state(&store::default_state_path()).idle_requested
+}
+
+fn set_idle_requested(idle_requested: bool) -> Result<()> {
+    let path = store::default_state_path();
+    let mut state = store::load_daemon_state(&path);
+    state.idle_requested = idle_requested;
+    store::save_daemon_state(&path, &state)
 }
 
 /// Deterministic, URL-safe id for a canonicalized workspace path (FNV-1a of
@@ -86,10 +72,19 @@ fn workspace_id(path: &Path) -> String {
         hash ^= b as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("workspace");
+    let stem = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace");
     let slug: String = stem
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     format!("{slug}-{hash:012x}")
 }
@@ -125,17 +120,27 @@ impl WorkspaceRegistry {
         let mut by_id = HashMap::new();
         for (id, path) in store::load_index(&index_path) {
             if !path.exists() {
-                eprintln!("fghjd: skipping missing workspace {id} ({})", path.display());
+                eprintln!(
+                    "fghjd: skipping missing workspace {id} ({})",
+                    path.display()
+                );
                 continue;
             }
             match WorkspaceState::new(path.clone(), docker.clone()).await {
                 Ok(state) => {
                     by_id.insert(id, Arc::new(state));
                 }
-                Err(e) => eprintln!("fghjd: failed to load workspace {id} ({}): {e}", path.display()),
+                Err(e) => eprintln!(
+                    "fghjd: failed to load workspace {id} ({}): {e}",
+                    path.display()
+                ),
             }
         }
-        Self { by_id: Mutex::new(by_id), index_path, docker }
+        Self {
+            by_id: Mutex::new(by_id),
+            index_path,
+            docker,
+        }
     }
 
     /// Resolves (cloning `entry` if needed) and registers a workspace,
@@ -176,8 +181,13 @@ impl WorkspaceRegistry {
         let state = match existing {
             Some(state) => state,
             None => {
-                let state = Arc::new(WorkspaceState::new(canonical.clone(), self.docker.clone()).await?);
-                state.db.clone().record_meta(id.clone(), entry_for_meta).await?;
+                let state =
+                    Arc::new(WorkspaceState::new(canonical.clone(), self.docker.clone()).await?);
+                state
+                    .db
+                    .clone()
+                    .record_meta(id.clone(), entry_for_meta)
+                    .await?;
                 self.by_id.lock().unwrap().insert(id.clone(), state.clone());
 
                 let mut index = store::load_index(&self.index_path);
@@ -208,13 +218,19 @@ impl WorkspaceRegistry {
     /// a stopped-but-not-yet-reconciled container's stale route doesn't hand
     /// back a dead port.
     pub fn resolve_route(&self, host: &str) -> Option<u16> {
-        let states: Vec<Arc<WorkspaceState>> = self.by_id.lock().unwrap().values().cloned().collect();
+        let states: Vec<Arc<WorkspaceState>> =
+            self.by_id.lock().unwrap().values().cloned().collect();
         states.iter().find_map(|state| {
             state.runs.list().iter().find_map(|run| {
                 run.containers
                     .iter()
                     .filter(|c| c.status == "running")
-                    .find_map(|c| c.routes.iter().find(|r| r.domain == host).map(|r| r.host_port))
+                    .find_map(|c| {
+                        c.routes
+                            .iter()
+                            .find(|r| r.domain == host)
+                            .map(|r| r.host_port)
+                    })
             })
         })
     }
@@ -225,15 +241,17 @@ impl WorkspaceRegistry {
     /// `resolve_route`'s own linear scan) rather than tracked incrementally,
     /// since it's only ever called once per reconciler tick.
     pub fn active_additional_hosts(&self) -> Vec<String> {
-        let states: Vec<Arc<WorkspaceState>> = self.by_id.lock().unwrap().values().cloned().collect();
+        let states: Vec<Arc<WorkspaceState>> =
+            self.by_id.lock().unwrap().values().cloned().collect();
         let mut hosts: Vec<String> = states
             .iter()
             .flat_map(|state| {
-                state
-                    .runs
-                    .list()
-                    .into_iter()
-                    .flat_map(|run| run.containers.into_iter().filter(|c| c.status == "running").flat_map(|c| c.additional_hosts))
+                state.runs.list().into_iter().flat_map(|run| {
+                    run.containers
+                        .into_iter()
+                        .filter(|c| c.status == "running")
+                        .flat_map(|c| c.additional_hosts)
+                })
             })
             .collect();
         hosts.sort();
@@ -242,7 +260,12 @@ impl WorkspaceRegistry {
     }
 
     pub fn list(&self) -> Vec<(String, PathBuf)> {
-        self.by_id.lock().unwrap().iter().map(|(id, s)| (id.clone(), s.path.clone())).collect()
+        self.by_id
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, s)| (id.clone(), s.path.clone()))
+            .collect()
     }
 
     /// Stops every live run in the workspace, forgets it in memory, and
@@ -290,11 +313,19 @@ fn err_response(e: anyhow::Error) -> Response {
     // actual Docker Engine API error message it wraps discarded. `{e:?}`
     // (anyhow's `Debug`) prints the full "Caused by:" chain instead, which is
     // the only version that's actually diagnosable from the API response.
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("{e:?}") }))).into_response()
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": format!("{e:?}") })),
+    )
+        .into_response()
 }
 
 fn bad_request(e: impl std::fmt::Display) -> Response {
-    (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": e.to_string() })),
+    )
+        .into_response()
 }
 
 /// Extracts the workspace named by `?workspace=<id>` in the request's query
@@ -305,7 +336,10 @@ struct WorkspaceExtractor(Arc<WorkspaceState>);
 impl FromRequestParts<Arc<WorkspaceRegistry>> for WorkspaceExtractor {
     type Rejection = Response;
 
-    async fn from_request_parts(parts: &mut Parts, state: &Arc<WorkspaceRegistry>) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<WorkspaceRegistry>,
+    ) -> Result<Self, Self::Rejection> {
         let query = parts.uri.query().unwrap_or("");
         match query_param(query, "workspace").and_then(|id| state.get(id)) {
             Some(ws) => Ok(WorkspaceExtractor(ws)),
@@ -330,16 +364,23 @@ async fn get_workspaces(State(registry): State<Arc<WorkspaceRegistry>>) -> Respo
 async fn post_workspaces(State(registry): State<Arc<WorkspaceRegistry>>, body: Bytes) -> Response {
     match serde_json::from_slice::<StartRequest>(&body) {
         Ok(req) => match registry.resolve(req.entry, req.workspace, req.owner).await {
-            Ok((id, workspace)) => Json(serde_json::json!({ "id": id, "workspace": workspace })).into_response(),
+            Ok((id, workspace)) => {
+                Json(serde_json::json!({ "id": id, "workspace": workspace })).into_response()
+            }
             Err(e) => err_response(e),
         },
         Err(e) => bad_request(e),
     }
 }
 
-async fn post_workspaces_stop(State(registry): State<Arc<WorkspaceRegistry>>, body: Bytes) -> Response {
+async fn post_workspaces_stop(
+    State(registry): State<Arc<WorkspaceRegistry>>,
+    body: Bytes,
+) -> Response {
     match serde_json::from_slice::<StopRequest>(&body) {
-        Ok(req) => Json(serde_json::json!({ "stopped": registry.stop(&req.id).await })).into_response(),
+        Ok(req) => {
+            Json(serde_json::json!({ "stopped": registry.stop(&req.id).await })).into_response()
+        }
         Err(e) => bad_request(e),
     }
 }
@@ -358,30 +399,54 @@ struct FlowQuery {
     flow: Option<String>,
 }
 
-async fn post_pull_all(Query(q): Query<FlowQuery>, WorkspaceExtractor(state): WorkspaceExtractor) -> Response {
+async fn post_pull_all(
+    Query(q): Query<FlowQuery>,
+    WorkspaceExtractor(state): WorkspaceExtractor,
+) -> Response {
     let owner = state.db.clone().load_owner().await.ok().flatten();
-    let s = state.downloads.start_pull_all(state.path.clone(), owner, q.flow);
+    let s = state
+        .downloads
+        .start_pull_all(state.path.clone(), owner, q.flow);
     Json(serde_json::json!(s)).into_response()
 }
 
-async fn get_pull_all_status(Query(q): Query<FlowQuery>, WorkspaceExtractor(state): WorkspaceExtractor) -> Response {
+async fn get_pull_all_status(
+    Query(q): Query<FlowQuery>,
+    WorkspaceExtractor(state): WorkspaceExtractor,
+) -> Response {
     let key = downloads::pull_all_key(q.flow.as_deref());
     match state.downloads.status(&key) {
         Some(s) => Json(serde_json::json!(s)).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "no pull-all job has been started" }))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "no pull-all job has been started" })),
+        )
+            .into_response(),
     }
 }
 
-async fn post_pull_node(AxumPath(node_id): AxumPath<String>, WorkspaceExtractor(state): WorkspaceExtractor) -> Response {
+async fn post_pull_node(
+    AxumPath(node_id): AxumPath<String>,
+    WorkspaceExtractor(state): WorkspaceExtractor,
+) -> Response {
     let owner = state.db.clone().load_owner().await.ok().flatten();
-    let s = state.downloads.start_node(state.path.clone(), node_id, owner);
+    let s = state
+        .downloads
+        .start_node(state.path.clone(), node_id, owner);
     Json(serde_json::json!(s)).into_response()
 }
 
-async fn get_pull_node_status(AxumPath(node_id): AxumPath<String>, WorkspaceExtractor(state): WorkspaceExtractor) -> Response {
+async fn get_pull_node_status(
+    AxumPath(node_id): AxumPath<String>,
+    WorkspaceExtractor(state): WorkspaceExtractor,
+) -> Response {
     match state.downloads.status(&format!("node:{node_id}")) {
         Some(s) => Json(serde_json::json!(s)).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": format!("no download job for {node_id}") }))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("no download job for {node_id}") })),
+        )
+            .into_response(),
     }
 }
 
@@ -397,7 +462,11 @@ async fn get_runs(WorkspaceExtractor(state): WorkspaceExtractor) -> Response {
 
 async fn post_runs(WorkspaceExtractor(state): WorkspaceExtractor, body: Bytes) -> Response {
     let spec: runs::RunSpec = if body.is_empty() {
-        runs::RunSpec { run_id: None, overrides: Default::default(), flow: None }
+        runs::RunSpec {
+            run_id: None,
+            overrides: Default::default(),
+            flow: None,
+        }
     } else {
         match serde_json::from_slice(&body) {
             Ok(s) => s,
@@ -420,7 +489,10 @@ async fn post_runs(WorkspaceExtractor(state): WorkspaceExtractor, body: Bytes) -
     let result = if spec.run_id.is_some() {
         state.runs.start(&graph, spec).await
     } else {
-        state.runs.ensure_running(&graph, spec.flow.as_deref()).await
+        state
+            .runs
+            .ensure_running(&graph, spec.flow.as_deref())
+            .await
     };
 
     match result {
@@ -429,7 +501,10 @@ async fn post_runs(WorkspaceExtractor(state): WorkspaceExtractor, body: Bytes) -
     }
 }
 
-async fn post_run_stop(AxumPath(run_id): AxumPath<String>, WorkspaceExtractor(state): WorkspaceExtractor) -> Response {
+async fn post_run_stop(
+    AxumPath(run_id): AxumPath<String>,
+    WorkspaceExtractor(state): WorkspaceExtractor,
+) -> Response {
     match state.runs.stop(&run_id).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => err_response(e),
@@ -452,7 +527,11 @@ async fn get_run_logs(
             Ok(text) => Json(serde_json::json!({ "logs": text })).into_response(),
             Err(e) => err_response(e),
         },
-        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": format!("no such run: {run_id}") }))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("no such run: {run_id}") })),
+        )
+            .into_response(),
     }
 }
 
@@ -463,7 +542,11 @@ async fn get_run_logs_stream(
     let run_state = match state.runs.get(&run_id) {
         Some(s) => s,
         None => {
-            return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": format!("no such run: {run_id}") }))).into_response()
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("no such run: {run_id}") })),
+            )
+                .into_response();
         }
     };
     let container_name = match runs::container_name_for(&run_state, &node_id) {
@@ -479,7 +562,9 @@ async fn get_run_logs_stream(
         Ok::<Event, Infallible>(event)
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 async fn static_handler(uri: Uri) -> Response {
@@ -492,8 +577,8 @@ async fn static_handler(uri: Uri) -> Response {
         .into_response()
 }
 
-fn build_router(registry: Arc<WorkspaceRegistry>) -> Router {
-    Router::new()
+fn build_router(registry: Arc<WorkspaceRegistry>, daemon: Arc<DaemonControl>) -> Router {
+    let api = Router::new()
         .route("/workspaces", get(get_workspaces).post(post_workspaces))
         .route("/workspaces/stop", post(post_workspaces_stop))
         .route("/universe.json", get(get_universe))
@@ -505,9 +590,154 @@ fn build_router(registry: Arc<WorkspaceRegistry>) -> Router {
         .route("/runs", get(get_runs).post(post_runs))
         .route("/runs/{run_id}/stop", post(post_run_stop))
         .route("/runs/{run_id}/nodes/{node_id}/logs", get(get_run_logs))
-        .route("/runs/{run_id}/nodes/{node_id}/logs/stream", get(get_run_logs_stream))
-        .fallback(static_handler)
-        .with_state(registry)
+        .route(
+            "/runs/{run_id}/nodes/{node_id}/logs/stream",
+            get(get_run_logs_stream),
+        )
+        .with_state(registry);
+
+    let daemon_api = Router::new()
+        .route("/daemon/start", post(post_daemon_start))
+        .route("/daemon/stop", post(post_daemon_stop))
+        .route("/daemon/status", get(get_daemon_status))
+        .with_state(daemon);
+
+    api.merge(daemon_api).fallback(static_handler)
+}
+
+/// `fghj daemon start` — reconciles `fghjd` back into the active state
+/// (rebinds DNS/80/443, resyncs `/etc/hosts`). Idempotent: calling it while
+/// already active just reports the current state back. Clears the
+/// `idle_requested` flag in `store::DaemonState` on success so a later
+/// crash/reboot restart comes back active too, instead of silently
+/// reverting to idle.
+async fn post_daemon_start(State(daemon): State<Arc<DaemonControl>>) -> Response {
+    match daemon.activate().await {
+        Ok(()) => {
+            if let Err(e) = set_idle_requested(false) {
+                eprintln!("fghjd: failed to persist daemon state: {e}");
+            }
+            Json(serde_json::json!({ "active": true })).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// `fghj daemon stop` — releases 80/443/DNS and clears `/etc/hosts` without
+/// touching the `fghjd` process itself (it keeps serving this control API so
+/// a later `fghj daemon start` can reach it). Docker containers already
+/// running are left alone. Also persists `idle_requested` in
+/// `store::DaemonState` so a crash or reboot before the next `start` doesn't
+/// silently reactivate `fghjd` against the operator's wishes.
+async fn post_daemon_stop(State(daemon): State<Arc<DaemonControl>>) -> Response {
+    daemon.deactivate();
+    if let Err(e) = set_idle_requested(true) {
+        eprintln!("fghjd: failed to persist daemon state: {e}");
+    }
+    Json(serde_json::json!({ "active": false })).into_response()
+}
+
+async fn get_daemon_status(State(daemon): State<Arc<DaemonControl>>) -> Response {
+    Json(serde_json::json!({ "active": daemon.is_active() })).into_response()
+}
+
+/// The pieces of `fghjd` that only exist while it's in the "active" state:
+/// the DNS server, and the HTTP/HTTPS reverse proxy occupying 80/443.
+/// Dropping (aborting) these tasks frees the ports/socket they held.
+struct ActiveResources {
+    dns_task: tokio::task::JoinHandle<()>,
+    http_task: tokio::task::JoinHandle<()>,
+    https_task: tokio::task::JoinHandle<()>,
+}
+
+/// `fghjd` itself is meant to run forever — started at boot and restarted on
+/// crash by the OS service manager (launchd/systemd) — but the user still
+/// needs a way to tell it to get out of the way without stopping the whole
+/// process: release ports 80/443, stop answering `*.fghj.internal` DNS
+/// queries, and drop every `#AdditionalHost` entry from `/etc/hosts`, while
+/// staying alive and reachable so a later `fghj daemon start` can reconcile
+/// everything back. `DaemonControl` is that on/off switch: the control API
+/// (always up) holds one of these and toggles `active` in response to
+/// `/daemon/start` and `/daemon/stop`.
+pub struct DaemonControl {
+    registry: Arc<WorkspaceRegistry>,
+    cert_resolver: Arc<ca::DynamicCertResolver>,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    control_port: u16,
+    active: Mutex<Option<ActiveResources>>,
+}
+
+impl DaemonControl {
+    pub fn is_active(&self) -> bool {
+        self.active.lock().unwrap().is_some()
+    }
+
+    /// Binds the DNS server and the HTTP/HTTPS proxy, installs the OS
+    /// resolver config, and syncs `/etc/hosts` — i.e. makes `fghjd` actually
+    /// reachable at `*.fghj.internal` (and any declared additional hosts).
+    /// A no-op if already active, so it's safe to call from `fghj daemon
+    /// start` unconditionally without checking status first.
+    pub async fn activate(&self) -> Result<()> {
+        if self.is_active() {
+            return Ok(());
+        }
+
+        let dns_socket = dns::bind().await?;
+        let dns_port = dns_socket
+            .local_addr()
+            .context("DNS socket has no local address")?
+            .port();
+        let dns_task = tokio::spawn(dns::serve(dns_socket));
+        dns::install_os_resolver_config(dns_port)?;
+
+        let http_listener = proxy::bind_http().await?;
+        let https_listener = proxy::bind_https().await?;
+        let http_task = tokio::spawn(proxy::serve_http_redirect(
+            http_listener,
+            self.registry.clone(),
+        ));
+        let https_task = tokio::spawn(proxy::serve_https(
+            https_listener,
+            self.cert_resolver.clone(),
+            self.control_port,
+            self.provider.clone(),
+            self.registry.clone(),
+        ));
+
+        hosts_file::sync(
+            &hosts_file::hosts_path(),
+            &self.registry.active_additional_hosts(),
+        )?;
+
+        *self.active.lock().unwrap() = Some(ActiveResources {
+            dns_task,
+            http_task,
+            https_task,
+        });
+        Ok(())
+    }
+
+    /// Reverses `activate`: aborts the DNS/HTTP/HTTPS tasks (freeing the
+    /// ports/socket they held) and clears fghj's managed entries from the OS
+    /// resolver config and `/etc/hosts`. Docker containers already running
+    /// are untouched — they keep running under Docker's own supervision and
+    /// are simply unreachable until the next `activate`. A no-op if already
+    /// idle.
+    pub fn deactivate(&self) {
+        if let Some(resources) = self.active.lock().unwrap().take() {
+            resources.dns_task.abort();
+            resources.http_task.abort();
+            resources.https_task.abort();
+        }
+        let _ = std::fs::remove_file(dns::macos_resolver_path());
+        if let Err(e) = hosts_file::sync(&hosts_file::hosts_path(), &[]) {
+            eprintln!("fghjd: failed to clear /etc/hosts on deactivate: {e}");
+        }
+    }
 }
 
 /// Background loop, analogous to a Kubernetes controller's reconcile loop
@@ -520,18 +750,26 @@ fn build_router(registry: Arc<WorkspaceRegistry>) -> Router {
 /// `/etc/hosts` (`hosts_file::sync`) to exactly the `#AdditionalHost`
 /// aliases of whatever's currently `"running"`, so a container dying
 /// out-of-band (same drift this loop already detects) also drops its alias
-/// within one tick, not just its status.
-fn spawn_reconciler(registry: Arc<WorkspaceRegistry>) {
+/// within one tick, not just its status. Skipped entirely while `fghjd` is
+/// idle (`daemon.is_active()` is false) so it doesn't fight `fghj daemon
+/// stop`'s clean-up by re-adding entries `deactivate` just removed.
+fn spawn_reconciler(daemon: Arc<DaemonControl>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
         loop {
             interval.tick().await;
-            for (id, _) in registry.list() {
-                if let Some(state) = registry.get(&id) {
+            for (id, _) in daemon.registry.list() {
+                if let Some(state) = daemon.registry.get(&id) {
                     state.runs.refresh().await;
                 }
             }
-            if let Err(e) = hosts_file::sync(&hosts_file::hosts_path(), &registry.active_additional_hosts()) {
+            if !daemon.is_active() {
+                continue;
+            }
+            if let Err(e) = hosts_file::sync(
+                &hosts_file::hosts_path(),
+                &daemon.registry.active_additional_hosts(),
+            ) {
                 eprintln!("fghjd: failed to sync /etc/hosts: {e}");
             }
         }
@@ -550,15 +788,24 @@ fn connect_docker() -> Result<bollard::Docker> {
         Ok(docker) => Ok(docker),
         Err(default_err) => {
             let context_host = Command::new("docker")
-                .args(["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"])
+                .args([
+                    "context",
+                    "inspect",
+                    "--format",
+                    "{{.Endpoints.docker.Host}}",
+                ])
                 .output()
                 .ok()
                 .filter(|o| o.status.success())
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .filter(|h| !h.is_empty());
             match context_host {
-                Some(host) => bollard::Docker::connect_with_socket(&host, 120, bollard::API_DEFAULT_VERSION)
-                    .with_context(|| format!("failed to connect to the docker context's socket ({host})")),
+                Some(host) => {
+                    bollard::Docker::connect_with_socket(&host, 120, bollard::API_DEFAULT_VERSION)
+                        .with_context(|| {
+                            format!("failed to connect to the docker context's socket ({host})")
+                        })
+                }
                 None => Err(default_err).context("failed to construct a Docker client"),
             }
         }
@@ -571,6 +818,16 @@ fn connect_docker() -> Result<bollard::Docker> {
 /// isn't reachable or any of the fixed/privileged ports (80, 443) or the
 /// system trust store can't be bound/installed, rather than letting that
 /// surface confusingly on the first request.
+///
+/// `fghjd` itself never exits on its own after this point except via a
+/// terminating signal (SIGTERM/SIGINT) — the intent is that it's started at
+/// boot and supervised (launchd/systemd), restarting on crash, for the life
+/// of the machine. `fghj daemon stop`/`start` (see `DaemonControl`) toggle
+/// whether it's actively occupying ports/DNS/`/etc/hosts` without touching
+/// this process's lifecycle at all; a real signal is reserved for an actual
+/// shutdown (service uninstall/restart, system shutdown), at which point we
+/// still deactivate first so we don't leave stale ports/hosts entries behind
+/// for whatever comes next.
 pub async fn run_control_api() -> Result<()> {
     let docker = connect_docker()?;
     docker
@@ -579,30 +836,42 @@ pub async fn run_control_api() -> Result<()> {
         .context("failed to reach the Docker daemon over its socket — is Docker running?")?;
     let docker = Arc::new(docker);
 
-    // Bound (and OS-routed) before the control API comes up, so `fghjd`
-    // fails fast on a bind error instead of silently serving the UI/API
-    // without any *.fghj.internal resolution. The port is whatever the OS
-    // handed out (see `dns::bind`), so `install_os_resolver_config` needs it
-    // explicitly rather than assuming a fixed well-known one.
-    let dns_socket = dns::bind().await?;
-    let dns_port = dns_socket.local_addr().context("DNS socket has no local address")?.port();
-    tokio::spawn(dns::serve(dns_socket));
-    dns::install_os_resolver_config(dns_port)?;
-
-    // The control API itself now binds an OS-assigned port too (see
-    // `port_path`/`write_port`) — the CLI has no fixed port to hardcode
-    // anymore, since it's fghj's own TLS proxy on 443 that owns the
-    // well-known address (`https://fghj.internal`), not this listener.
+    // The control API's OS-assigned TCP port is what the HTTPS proxy relays
+    // `https://fghj.internal` to internally (see `proxy::serve_https`'s
+    // `control_port` param) — never dialed directly by anything else, so it
+    // doesn't need to be fixed or discoverable. Bound before anything else so
+    // there's something for the proxy to relay to even if activation below
+    // fails partway.
     let control_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .context("failed to bind control API")?;
-    let control_port = control_listener.local_addr().context("control API socket has no local address")?.port();
-    write_port(control_port)?;
+    let control_port = control_listener
+        .local_addr()
+        .context("control API socket has no local address")?
+        .port();
+
+    // The `fghj` CLI talks to the same control API over a Unix socket
+    // instead — dockerd-style: no port to pick or discover, and access is a
+    // filesystem permission rather than "anything that can reach
+    // 127.0.0.1". `fghjd` runs as root while `fghj` runs as the invoking
+    // user, so the socket needs opening up beyond its default root-only
+    // permissions for the CLI to reach it at all.
+    let socket_path = socket_path();
+    let _ = std::fs::remove_file(&socket_path);
+    let cli_listener = tokio::net::UnixListener::bind(&socket_path)
+        .with_context(|| format!("failed to bind control socket {}", socket_path.display()))?;
+    std::fs::set_permissions(
+        &socket_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o666),
+    )
+    .with_context(|| format!("failed to set permissions on {}", socket_path.display()))?;
 
     let cert_path = ca::ca_cert_path(&ca_dir());
     let ca = {
         let dir = ca_dir();
-        tokio::task::spawn_blocking(move || ca::ensure_ca(&dir)).await.context("CA setup task panicked")??
+        tokio::task::spawn_blocking(move || ca::ensure_ca(&dir))
+            .await
+            .context("CA setup task panicked")??
     };
     tokio::task::spawn_blocking(move || ca::install_macos_trust(&cert_path))
         .await
@@ -610,29 +879,85 @@ pub async fn run_control_api() -> Result<()> {
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());
 
-    // Loaded before the cert resolver and the HTTPS proxy are spawned: the
-    // cert resolver needs it too now, to gate certificate issuance for a
-    // reserved-TLD `#AdditionalHost` alias on "is some running container
-    // actually claiming this name as a route" (see
-    // `ca::DynamicCertResolver::resolve_for`), not just "is this in our own
-    // zone".
+    // Loaded before the cert resolver: the cert resolver needs it too, to
+    // gate certificate issuance for a reserved-TLD `#AdditionalHost` alias on
+    // "is some running container actually claiming this name as a route"
+    // (see `ca::DynamicCertResolver::resolve_for`), not just "is this in our
+    // own zone".
     let registry = Arc::new(WorkspaceRegistry::load(docker).await);
-    spawn_reconciler(Arc::clone(&registry));
 
-    let cert_resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider.clone(), registry.clone()));
+    let cert_resolver = Arc::new(ca::DynamicCertResolver::new(
+        ca,
+        provider.clone(),
+        registry.clone(),
+    ));
 
-    // Occupied before the control API is reachable at all, so a bind
-    // failure on 80/443 ("something else is already listening there") is
-    // reported clearly instead of leaving `fghjd` half-started.
-    let http_listener = proxy::bind_http().await?;
-    let https_listener = proxy::bind_https().await?;
-    tokio::spawn(proxy::serve_http_redirect(http_listener, registry.clone()));
-    tokio::spawn(proxy::serve_https(https_listener, cert_resolver, control_port, provider, registry.clone()));
+    let daemon = Arc::new(DaemonControl {
+        registry: registry.clone(),
+        cert_resolver,
+        provider,
+        control_port,
+        active: Mutex::new(None),
+    });
+    spawn_reconciler(Arc::clone(&daemon));
 
-    let app = build_router(registry);
-    println!("fghjd: control API listening on 127.0.0.1:{control_port} (reachable via https://{})", dns::ZONE);
-    axum::serve(control_listener, app).await.context("control API server error")?;
+    // `fghjd` starts active by default: it's meant to occupy 80/443 and
+    // *.fghj.internal DNS from the moment the system boots. The one
+    // exception is `is_idle_requested()` — if the operator's last explicit
+    // `fghj daemon` call was `stop`, a crash or reboot in between must not
+    // silently override that by reactivating anyway; staying idle here is
+    // what makes `fghj daemon stop` a durable instruction rather than a
+    // one-shot action that a flaky Docker daemon or a reboot can undo behind
+    // the operator's back. A bind failure during activation (e.g.
+    // "something else is already listening on 80/443") still fails startup
+    // fast, before the control API ever serves a request.
+    if is_idle_requested() {
+        println!(
+            "fghjd: starting idle — last `fghj daemon` action was `stop`; run `fghj daemon start` to reconcile"
+        );
+    } else {
+        daemon.activate().await?;
+    }
 
+    let app = build_router(registry, Arc::clone(&daemon));
+    println!(
+        "fghjd: control API listening on {} (CLI) and reachable via https://{}",
+        socket_path.display(),
+        dns::ZONE
+    );
+
+    // Same router, two listeners: the Unix socket is the CLI's channel, the
+    // TCP one is only ever dialed internally by the HTTPS proxy's apex-name
+    // relay (see above) — `Router` is cheap to clone (an `Arc` internally).
+    let cli_app = app.clone();
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(cli_listener, cli_app).await {
+            eprintln!("fghjd: control socket server error: {e}");
+        }
+    });
+
+    let shutdown_signal = async {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .expect("failed to install SIGINT handler");
+        tokio::select! {
+            _ = sigterm.recv() => {}
+            _ = sigint.recv() => {}
+        }
+    };
+
+    tokio::select! {
+        result = axum::serve(control_listener, app) => {
+            result.context("control API server error")?;
+        }
+        _ = shutdown_signal => {
+            println!("fghjd: received shutdown signal, releasing ports and cleaning up...");
+            daemon.deactivate();
+        }
+    }
+
+    let _ = std::fs::remove_file(&socket_path);
     Ok(())
 }
 
@@ -651,32 +976,29 @@ mod tests {
         let c = workspace_id(Path::new("/tmp/fixtures/bar"));
         assert_eq!(a, b, "same path must hash to the same id");
         assert_ne!(a, c, "different paths must not collide");
-        assert!(a.starts_with("foo-"), "id should carry a readable slug: {a}");
-    }
-
-    #[test]
-    fn pid_alive_recognizes_self_and_init() {
-        assert!(pid_alive(std::process::id()), "the current process must report as alive");
-        // pid 1 (init/launchd) is root-owned; signaling it as a non-root
-        // process exercises the EPERM-means-alive branch specifically.
-        assert!(pid_alive(1), "pid 1 always exists and should count as alive via EPERM");
-    }
-
-    #[test]
-    fn pid_alive_reports_missing_pid_as_dead() {
-        assert!(!pid_alive(999_999_999), "an implausibly large pid should not exist");
+        assert!(
+            a.starts_with("foo-"),
+            "id should carry a readable slug: {a}"
+        );
     }
 
     #[tokio::test]
     async fn resolve_is_idempotent_and_rejects_nested_workspaces() {
         let tmp = tempfile::tempdir().unwrap();
-        let registry = WorkspaceRegistry::load_from(tmp.path().join("workspaces.json"), test_docker()).await;
+        let registry =
+            WorkspaceRegistry::load_from(tmp.path().join("workspaces.json"), test_docker()).await;
 
         let root = tmp.path().join("root");
-        let (id1, canonical) = registry.resolve(None, Some(root.clone()), None).await.unwrap();
+        let (id1, canonical) = registry
+            .resolve(None, Some(root.clone()), None)
+            .await
+            .unwrap();
 
         // re-wiring the same path returns the same id, not a duplicate
-        let (id2, _) = registry.resolve(None, Some(root.clone()), None).await.unwrap();
+        let (id2, _) = registry
+            .resolve(None, Some(root.clone()), None)
+            .await
+            .unwrap();
         assert_eq!(id1, id2);
         assert_eq!(registry.list().len(), 1);
 
@@ -686,9 +1008,13 @@ mod tests {
 
         // registering a path inside an already-wired workspace must error
         let nested = root.join("nested-service");
-        let err = registry.resolve(None, Some(nested), None).await.unwrap_err();
+        let err = registry
+            .resolve(None, Some(nested), None)
+            .await
+            .unwrap_err();
         assert!(
-            err.to_string().contains("is inside the already-wired workspace"),
+            err.to_string()
+                .contains("is inside the already-wired workspace"),
             "unexpected error message: {err}"
         );
     }
@@ -696,12 +1022,16 @@ mod tests {
     #[tokio::test]
     async fn stop_removes_workspace_from_registry_and_index() {
         let tmp = tempfile::tempdir().unwrap();
-        let registry = WorkspaceRegistry::load_from(tmp.path().join("workspaces.json"), test_docker()).await;
-        let (id, _) = registry.resolve(None, Some(tmp.path().join("root")), None).await.unwrap();
+        let registry =
+            WorkspaceRegistry::load_from(tmp.path().join("workspaces.json"), test_docker()).await;
+        let (id, _) = registry
+            .resolve(None, Some(tmp.path().join("root")), None)
+            .await
+            .unwrap();
 
         assert!(registry.stop(&id).await);
         assert!(registry.get(&id).is_none());
-        assert!(store::load_index(&tmp.path().join("workspaces.json")).get(&id).is_none());
+        assert!(!store::load_index(&tmp.path().join("workspaces.json")).contains_key(&id));
         // stopping an unknown id is reported, not a panic
         assert!(!registry.stop(&id).await);
     }

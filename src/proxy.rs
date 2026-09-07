@@ -2,12 +2,12 @@ use std::io;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rustls::crypto::CryptoProvider;
 use rustls::ServerConfig;
+use rustls::crypto::CryptoProvider;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
+use tokio_rustls::server::TlsStream;
 
 use crate::{ca, dns};
 
@@ -53,7 +53,9 @@ fn parse_request_path(request_line: &str) -> Option<&str> {
 }
 
 fn parse_host_header(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("Host:").or_else(|| line.strip_prefix("host:"))?;
+    let rest = line
+        .strip_prefix("Host:")
+        .or_else(|| line.strip_prefix("host:"))?;
     Some(rest.trim())
 }
 
@@ -75,7 +77,9 @@ fn build_redirect_response(host: &str, path: &str) -> Vec<u8> {
 /// *only* way it's ever reachable — relayed here in plain HTTP instead of
 /// redirected.
 pub async fn serve_http_redirect(listener: TcpListener, routes: Arc<dyn RouteResolver>) {
-    println!("fghjd: HTTP listener on 127.0.0.1:{HTTP_PORT}, redirecting everything to https:// except routed non-reserved additional hosts");
+    println!(
+        "fghjd: HTTP listener on 127.0.0.1:{HTTP_PORT}, redirecting everything to https:// except routed non-reserved additional hosts"
+    );
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(v) => v,
@@ -121,8 +125,9 @@ async fn handle_http_connection(stream: TcpStream, routes: Arc<dyn RouteResolver
     // Only a non-reserved, actually-routed `#AdditionalHost` gets relayed in
     // plain HTTP — everything else (in-zone, reserved-TLD, or simply
     // unrecognized) keeps today's behavior of redirecting to HTTPS.
-    let plain_backend =
-        (!dns::in_zone(&host) && !dns::is_reserved_alias(&host)).then(|| routes.resolve(&host)).flatten();
+    let plain_backend = (!dns::in_zone(&host) && !dns::is_reserved_alias(&host))
+        .then(|| routes.resolve(&host))
+        .flatten();
 
     match plain_backend {
         Some(port) => relay_to_backend(&mut reader, port, &prefix).await,
@@ -137,8 +142,14 @@ async fn handle_http_connection(stream: TcpStream, routes: Arc<dyn RouteResolver
 
 /// `read_line`, but bailing out instead of growing `buf` without bound if
 /// the peer never sends a newline.
-async fn read_bounded_line<R: AsyncBufReadExt + Unpin>(reader: &mut R, buf: &mut String) -> Result<usize> {
-    let n = reader.read_line(buf).await.context("failed to read from client")?;
+async fn read_bounded_line<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+    buf: &mut String,
+) -> Result<usize> {
+    let n = reader
+        .read_line(buf)
+        .await
+        .context("failed to read from client")?;
     if buf.len() > MAX_LINE_LEN {
         anyhow::bail!("client sent a line longer than {MAX_LINE_LEN} bytes");
     }
@@ -190,7 +201,10 @@ pub async fn serve_https(
         .with_cert_resolver(cert_resolver);
     let acceptor = TlsAcceptor::from(Arc::new(config));
 
-    println!("fghjd: HTTPS listener on 127.0.0.1:{HTTPS_PORT}, routing https://{} to the control API", dns::ZONE);
+    println!(
+        "fghjd: HTTPS listener on 127.0.0.1:{HTTPS_PORT}, routing https://{} to the control API",
+        dns::ZONE
+    );
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(v) => v,
@@ -212,7 +226,11 @@ pub async fn serve_https(
     }
 }
 
-async fn handle_https_connection(mut tls_stream: TlsStream<TcpStream>, control_port: u16, routes: Arc<dyn RouteResolver>) {
+async fn handle_https_connection(
+    mut tls_stream: TlsStream<TcpStream>,
+    control_port: u16,
+    routes: Arc<dyn RouteResolver>,
+) {
     let server_name = {
         let (_, conn) = tls_stream.get_ref();
         conn.server_name().map(|s| s.to_string())
@@ -225,7 +243,11 @@ async fn handle_https_connection(mut tls_stream: TlsStream<TcpStream>, control_p
         return;
     };
 
-    let backend_port = if name == dns::ZONE { Some(control_port) } else { routes.resolve(&name) };
+    let backend_port = if name == dns::ZONE {
+        Some(control_port)
+    } else {
+        routes.resolve(&name)
+    };
 
     match backend_port {
         Some(port) => {
@@ -263,7 +285,10 @@ where
         .await
         .with_context(|| format!("failed to connect to backend on 127.0.0.1:{port}"))?;
     if !prefix.is_empty() {
-        backend.write_all(prefix).await.context("failed to replay buffered request bytes to backend")?;
+        backend
+            .write_all(prefix)
+            .await
+            .context("failed to replay buffered request bytes to backend")?;
     }
 
     // Split into two independently-tracked copy directions (instead of one
@@ -306,7 +331,10 @@ where
 /// by resetting a spare/speculative connection or closing a tab mid-request —
 /// not a sign of an actual proxy or backend problem.
 fn is_benign_disconnect(e: &io::Error) -> bool {
-    matches!(e.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe | io::ErrorKind::UnexpectedEof)
+    matches!(
+        e.kind(),
+        io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe | io::ErrorKind::UnexpectedEof
+    )
 }
 
 #[cfg(test)]
@@ -320,8 +348,14 @@ mod tests {
     fn parses_request_line_and_host_header() {
         assert_eq!(parse_request_path("GET /cart HTTP/1.1\r\n"), Some("/cart"));
         assert_eq!(parse_request_path("GET / HTTP/1.1\r\n"), Some("/"));
-        assert_eq!(parse_host_header("Host: cart.fghj.internal\r\n"), Some("cart.fghj.internal"));
-        assert_eq!(parse_host_header("host: cart.fghj.internal\r\n"), Some("cart.fghj.internal"));
+        assert_eq!(
+            parse_host_header("Host: cart.fghj.internal\r\n"),
+            Some("cart.fghj.internal")
+        );
+        assert_eq!(
+            parse_host_header("host: cart.fghj.internal\r\n"),
+            Some("cart.fghj.internal")
+        );
         assert_eq!(parse_host_header("Content-Type: text/html\r\n"), None);
     }
 
@@ -351,7 +385,10 @@ mod tests {
         Arc::new(StaticRoutes(std::collections::HashMap::new()))
     }
 
-    fn trusting_client_config(ca_der: rustls::pki_types::CertificateDer<'static>, provider: Arc<CryptoProvider>) -> Arc<ClientConfig> {
+    fn trusting_client_config(
+        ca_der: rustls::pki_types::CertificateDer<'static>,
+        provider: Arc<CryptoProvider>,
+    ) -> Arc<ClientConfig> {
         let mut roots = RootCertStore::empty();
         roots.add(ca_der).unwrap();
         Arc::new(
@@ -384,13 +421,22 @@ mod tests {
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve_https(listener, resolver, backend_port, provider(), no_routes()));
+        tokio::spawn(serve_https(
+            listener,
+            resolver,
+            backend_port,
+            provider(),
+            no_routes(),
+        ));
 
         let client_config = trusting_client_config(ca_der, provider());
         let connector = tokio_rustls::TlsConnector::from(client_config);
         let tcp = TcpStream::connect(addr).await.unwrap();
         let server_name = ServerName::try_from(dns::ZONE.to_string()).unwrap();
-        let mut tls = connector.connect(server_name, tcp).await.expect("handshake with trusted CA must succeed");
+        let mut tls = connector
+            .connect(server_name, tcp)
+            .await
+            .expect("handshake with trusted CA must succeed");
 
         tls.write_all(b"hello").await.unwrap();
         let mut buf = [0u8; 5];
@@ -413,7 +459,10 @@ mod tests {
         let connector = tokio_rustls::TlsConnector::from(client_config);
         let tcp = TcpStream::connect(addr).await.unwrap();
         let server_name = ServerName::try_from("nonsense.fghj.internal".to_string()).unwrap();
-        let mut tls = connector.connect(server_name, tcp).await.expect("in-zone name must still get a certificate");
+        let mut tls = connector
+            .connect(server_name, tcp)
+            .await
+            .expect("in-zone name must still get a certificate");
 
         let mut buf = Vec::new();
         tls.read_to_end(&mut buf).await.unwrap();
@@ -453,8 +502,12 @@ mod tests {
         let client_config = trusting_client_config(ca_der, provider());
         let connector = tokio_rustls::TlsConnector::from(client_config);
         let tcp = TcpStream::connect(addr).await.unwrap();
-        let server_name = ServerName::try_from("cart.default.shop.fghj.internal".to_string()).unwrap();
-        let mut tls = connector.connect(server_name, tcp).await.expect("handshake with trusted CA must succeed");
+        let server_name =
+            ServerName::try_from("cart.default.shop.fghj.internal".to_string()).unwrap();
+        let mut tls = connector
+            .connect(server_name, tcp)
+            .await
+            .expect("handshake with trusted CA must succeed");
 
         tls.write_all(b"hello").await.unwrap();
         let mut buf = [0u8; 5];
@@ -480,23 +533,42 @@ mod tests {
         let tcp = TcpStream::connect(addr).await.unwrap();
         let server_name = ServerName::try_from(dns::ZONE.to_string()).unwrap();
         let result = connector.connect(server_name, tcp).await;
-        assert!(result.is_err(), "a client trusting an unrelated CA must not accept this handshake");
+        assert!(
+            result.is_err(),
+            "a client trusting an unrelated CA must not accept this handshake"
+        );
     }
 
     #[test]
     fn benign_disconnect_kinds_are_recognized() {
-        assert!(is_benign_disconnect(&io::Error::from(io::ErrorKind::ConnectionReset)));
-        assert!(is_benign_disconnect(&io::Error::from(io::ErrorKind::BrokenPipe)));
-        assert!(is_benign_disconnect(&io::Error::from(io::ErrorKind::UnexpectedEof)));
-        assert!(!is_benign_disconnect(&io::Error::from(io::ErrorKind::TimedOut)));
-        assert!(!is_benign_disconnect(&io::Error::from(io::ErrorKind::PermissionDenied)));
+        assert!(is_benign_disconnect(&io::Error::from(
+            io::ErrorKind::ConnectionReset
+        )));
+        assert!(is_benign_disconnect(&io::Error::from(
+            io::ErrorKind::BrokenPipe
+        )));
+        assert!(is_benign_disconnect(&io::Error::from(
+            io::ErrorKind::UnexpectedEof
+        )));
+        assert!(!is_benign_disconnect(&io::Error::from(
+            io::ErrorKind::TimedOut
+        )));
+        assert!(!is_benign_disconnect(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
     }
 
     /// Sets up a real TLS handshake over a loopback socket and hands back
     /// both ends: the server-side stream `relay_to_backend` operates on, and
     /// the client-side stream the test uses to simulate a well-behaved or
     /// abruptly-reset browser connection.
-    async fn handshake_pair(resolver: Arc<ca::DynamicCertResolver>, ca_der: rustls::pki_types::CertificateDer<'static>) -> (TlsStream<TcpStream>, tokio_rustls::client::TlsStream<TcpStream>) {
+    async fn handshake_pair(
+        resolver: Arc<ca::DynamicCertResolver>,
+        ca_der: rustls::pki_types::CertificateDer<'static>,
+    ) -> (
+        TlsStream<TcpStream>,
+        tokio_rustls::client::TlsStream<TcpStream>,
+    ) {
         let server_config = Arc::new(
             ServerConfig::builder_with_provider(provider())
                 .with_safe_default_protocol_versions()
@@ -537,7 +609,9 @@ mod tests {
         // immediately (that's precisely what forces the RST).
         let (client_tcp, _) = client_tls.get_ref();
         #[allow(deprecated)]
-        client_tcp.set_linger(Some(std::time::Duration::ZERO)).unwrap();
+        client_tcp
+            .set_linger(Some(std::time::Duration::ZERO))
+            .unwrap();
         drop(client_tls);
 
         let backend = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -548,7 +622,10 @@ mod tests {
         });
 
         let result = relay_to_backend(&mut server_tls, backend_port, &[]).await;
-        assert!(result.is_ok(), "a client-side reset must not be reported as a relay failure: {result:?}");
+        assert!(
+            result.is_ok(),
+            "a client-side reset must not be reported as a relay failure: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -575,6 +652,9 @@ mod tests {
         });
 
         let result = relay_to_backend(&mut server_tls, backend_port, &[]).await;
-        assert!(result.is_err(), "a backend-side reset must be reported as a relay failure, not silently swallowed");
+        assert!(
+            result.is_err(),
+            "a backend-side reset must be reported as a relay failure, not silently swallowed"
+        );
     }
 }

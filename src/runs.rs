@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::docker;
@@ -46,7 +46,12 @@ pub struct RunSpec {
 /// (see `resolver::visit_local_service`/`visit_dependency`), and `run_id` is
 /// folded in for every run except the default one (see `start_node`'s own
 /// comment for why).
-pub fn derive_domain(node_id: &str, domain_scope: &str, workspace_name: &str, run_id: &str) -> String {
+pub fn derive_domain(
+    node_id: &str,
+    domain_scope: &str,
+    workspace_name: &str,
+    run_id: &str,
+) -> String {
     let workspace = sanitize_label(workspace_name);
     if domain_scope == "stable" || run_id == DEFAULT_RUN_ID {
         format!("{node_id}.{workspace}.fghj.internal")
@@ -62,7 +67,10 @@ pub fn derive_domain(node_id: &str, domain_scope: &str, workspace_name: &str, ru
 /// the graph that declare the same `name` + `scope` therefore land on the
 /// same derived value here and transparently share one Docker volume.
 fn derive_volume_name(name: &str, scope: &str, workspace_name: &str, run_id: &str) -> String {
-    format!("fghj-vol-{}", sanitize_label(&derive_domain(name, scope, workspace_name, run_id)))
+    format!(
+        "fghj-vol-{}",
+        sanitize_label(&derive_domain(name, scope, workspace_name, run_id))
+    )
 }
 
 /// A `*.fghj.internal` name this container answers to, and the `127.0.0.1`
@@ -167,7 +175,14 @@ impl RunRegistry {
             let runs = self.runs.lock().unwrap();
             runs.iter()
                 .map(|(run_id, state)| {
-                    (run_id.clone(), state.containers.iter().map(|c| c.container_name.clone()).collect())
+                    (
+                        run_id.clone(),
+                        state
+                            .containers
+                            .iter()
+                            .map(|c| c.container_name.clone())
+                            .collect(),
+                    )
                 })
                 .collect()
         };
@@ -252,12 +267,22 @@ impl RunRegistry {
             if node.kind == "flow" {
                 continue;
             }
-            if let Some(flow) = &spec.flow {
-                if !node.flows.iter().any(|f| f == flow) {
-                    continue;
-                }
+            if let Some(flow) = &spec.flow
+                && !node.flows.iter().any(|f| f == flow)
+            {
+                continue;
             }
-            match self.start_node(graph, node, &run_id, &network, &spec.overrides, owner.as_ref()).await {
+            match self
+                .start_node(
+                    graph,
+                    node,
+                    &run_id,
+                    &network,
+                    &spec.overrides,
+                    owner.as_ref(),
+                )
+                .await
+            {
                 Ok(info) => containers.push(info),
                 Err(e) => {
                     for c in &containers {
@@ -295,12 +320,18 @@ impl RunRegistry {
         let network = format!("fghj-{}-{}", sanitize_label(&graph.workspace_name), run_id);
         docker::ensure_network(&self.docker, &network).await?;
 
-        let mut state = self.runs.lock().unwrap().get(&run_id).cloned().unwrap_or_else(|| RunState {
-            run_id: run_id.clone(),
-            overrides: BTreeMap::new(),
-            network: network.clone(),
-            containers: Vec::new(),
-        });
+        let mut state = self
+            .runs
+            .lock()
+            .unwrap()
+            .get(&run_id)
+            .cloned()
+            .unwrap_or_else(|| RunState {
+                run_id: run_id.clone(),
+                overrides: BTreeMap::new(),
+                network: network.clone(),
+                containers: Vec::new(),
+            });
 
         let owner = self.db.clone().load_owner().await.ok().flatten();
 
@@ -312,7 +343,12 @@ impl RunRegistry {
             .collect();
 
         for node in targets {
-            let container_name = format!("fghj-{}-{}-{}", sanitize_label(&graph.workspace_name), run_id, sanitize_label(&node.id));
+            let container_name = format!(
+                "fghj-{}-{}-{}",
+                sanitize_label(&graph.workspace_name),
+                run_id,
+                sanitize_label(&node.id)
+            );
             let alive = matches!(
                 docker::inspect_status(&self.docker, &container_name, "").await,
                 Ok(Some(s)) if s.status == "running"
@@ -325,7 +361,14 @@ impl RunRegistry {
             docker::stop_and_remove(&self.docker, &container_name).await;
 
             let info = self
-                .start_node(graph, node, &run_id, &network, &BTreeMap::new(), owner.as_ref())
+                .start_node(
+                    graph,
+                    node,
+                    &run_id,
+                    &network,
+                    &BTreeMap::new(),
+                    owner.as_ref(),
+                )
                 .await?;
             state.containers.retain(|c| c.node_id != info.node_id);
             state.containers.push(info);
@@ -333,7 +376,10 @@ impl RunRegistry {
             // failure in this same call doesn't lose track of containers
             // that did start successfully.
             self.db.clone().save_run(state.clone()).await?;
-            self.runs.lock().unwrap().insert(run_id.clone(), state.clone());
+            self.runs
+                .lock()
+                .unwrap()
+                .insert(run_id.clone(), state.clone());
         }
 
         Ok(state)
@@ -414,7 +460,11 @@ impl RunRegistry {
                         let mirror_dir = internal_dir.clone();
                         let owner_for_mirror = owner.cloned();
                         let mirror = tokio::task::spawn_blocking(move || {
-                            crate::resolver::ensure_mirror(&repo, &mirror_dir, owner_for_mirror.as_ref())
+                            crate::resolver::ensure_mirror(
+                                &repo,
+                                &mirror_dir,
+                                owner_for_mirror.as_ref(),
+                            )
                         })
                         .await
                         .context("ensure_mirror task panicked")??;
@@ -427,7 +477,8 @@ impl RunRegistry {
                             docker::materialize_checkout(&mirror, branch, &checkout).await?;
                         volume_base = Some(checkout_root.clone());
                         let build_dir = checkout_root.join(&build.context);
-                        docker::build_image(&self.docker, &build_dir, &build.dockerfile, &tag).await?;
+                        docker::build_image(&self.docker, &build_dir, &build.dockerfile, &tag)
+                            .await?;
                         tag
                     }
                     // Default: build straight from the live workspace checkout,
@@ -446,7 +497,8 @@ impl RunRegistry {
                         let repo_root = self.workspace.join(&local_path);
                         volume_base = Some(repo_root.clone());
                         let build_dir = repo_root.join(&build.context);
-                        docker::build_image(&self.docker, &build_dir, &build.dockerfile, &tag).await?;
+                        docker::build_image(&self.docker, &build_dir, &build.dockerfile, &tag)
+                            .await?;
                         tag
                     }
                 }
@@ -460,16 +512,28 @@ impl RunRegistry {
         // breaking the same inside/outside consistency the primary domain
         // relies on.
         let mut aliases = vec![domain.clone()];
-        aliases.extend(node.ports.values().filter_map(|p| p.name.as_ref()).map(|name| format!("{name}.{domain}")));
+        aliases.extend(
+            node.ports
+                .values()
+                .filter_map(|p| p.name.as_ref())
+                .map(|name| format!("{name}.{domain}")),
+        );
 
-        let port_list: Vec<(String, Option<u16>)> =
-            node.ports.iter().map(|(port, cfg)| (port.clone(), cfg.host_port)).collect();
+        let port_list: Vec<(String, Option<u16>)> = node
+            .ports
+            .iter()
+            .map(|(port, cfg)| (port.clone(), cfg.host_port))
+            .collect();
 
         let binds: Vec<String> = node
             .volumes
             .iter()
             .map(|v| match v {
-                VolumeMount::Bind { host, container, read_only } => {
+                VolumeMount::Bind {
+                    host,
+                    container,
+                    read_only,
+                } => {
                     let host_path = if Path::new(host).is_absolute() {
                         PathBuf::from(host)
                     } else {
@@ -478,11 +542,24 @@ impl RunRegistry {
                             .expect("service node with volumes has a resolved checkout root")
                             .join(host)
                     };
-                    format!("{}:{container}{}", host_path.display(), if *read_only { ":ro" } else { "" })
+                    format!(
+                        "{}:{container}{}",
+                        host_path.display(),
+                        if *read_only { ":ro" } else { "" }
+                    )
                 }
-                VolumeMount::Named { name, scope, container, read_only } => {
-                    let volume_name = derive_volume_name(name, scope, &graph.workspace_name, run_id);
-                    format!("{volume_name}:{container}{}", if *read_only { ":ro" } else { "" })
+                VolumeMount::Named {
+                    name,
+                    scope,
+                    container,
+                    read_only,
+                } => {
+                    let volume_name =
+                        derive_volume_name(name, scope, &graph.workspace_name, run_id);
+                    format!(
+                        "{volume_name}:{container}{}",
+                        if *read_only { ":ro" } else { "" }
+                    )
                 }
             })
             .collect();
@@ -548,10 +625,16 @@ impl RunRegistry {
             };
             let Some(host_port) = host_port else { continue };
             if cfg.primary {
-                routes.push(PortRoute { domain: domain.clone(), host_port });
+                routes.push(PortRoute {
+                    domain: domain.clone(),
+                    host_port,
+                });
             }
             if let Some(name) = &cfg.name {
-                routes.push(PortRoute { domain: format!("{name}.{domain}"), host_port });
+                routes.push(PortRoute {
+                    domain: format!("{name}.{domain}"),
+                    host_port,
+                });
             }
         }
 
@@ -563,9 +646,16 @@ impl RunRegistry {
         // to — `resolver::check_ports` already warns about exactly this at
         // graph-resolution time.
         let mut additional_hosts_active = Vec::new();
-        if let Some(host_port) = routes.iter().find(|r| r.domain == domain).map(|r| r.host_port) {
+        if let Some(host_port) = routes
+            .iter()
+            .find(|r| r.domain == domain)
+            .map(|r| r.host_port)
+        {
             for host in &node.additional_hosts {
-                routes.push(PortRoute { domain: host.clone(), host_port });
+                routes.push(PortRoute {
+                    domain: host.clone(),
+                    host_port,
+                });
                 additional_hosts_active.push(host.clone());
             }
         }
@@ -582,7 +672,12 @@ impl RunRegistry {
     }
 }
 
-pub async fn logs_for_tail(docker: &bollard::Docker, state: &RunState, node_id: &str, tail: usize) -> Result<String> {
+pub async fn logs_for_tail(
+    docker: &bollard::Docker,
+    state: &RunState,
+    node_id: &str,
+    tail: usize,
+) -> Result<String> {
     let Some(c) = state.containers.iter().find(|c| c.node_id == node_id) else {
         bail!("no such node in run: {node_id}");
     };
@@ -606,7 +701,10 @@ mod tests {
 
     #[test]
     fn sanitize_label_lowercases_and_collapses_separators() {
-        assert_eq!(sanitize_label("Feature/JIRA-123 Fix"), "feature-jira-123-fix");
+        assert_eq!(
+            sanitize_label("Feature/JIRA-123 Fix"),
+            "feature-jira-123-fix"
+        );
         assert_eq!(sanitize_label("already-clean"), "already-clean");
         assert_eq!(sanitize_label("__leading__"), "leading");
     }

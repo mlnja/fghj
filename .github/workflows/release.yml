@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── fghj + fghjd: macOS only (fghjd shells out to macOS's `security` CLI
+  # and writes macOS-specific paths for CA/trust-store management) ─────────
+  build:
+    name: Build (${{ matrix.suffix }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            suffix: darwin-arm64
+          - os: macos-15-intel
+            suffix: darwin-amd64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build fghj and fghjd
+        run: cargo build --release --bin fghj --bin fghjd
+
+      - name: Strip and package
+        run: |
+          strip target/release/fghj target/release/fghjd
+          mkdir -p dist
+          cp target/release/fghj dist/fghj-${{ matrix.suffix }}
+          cp target/release/fghjd dist/fghjd-${{ matrix.suffix }}
+          cd dist
+          tar czf fghj-${{ matrix.suffix }}.tar.gz fghj-${{ matrix.suffix }} fghjd-${{ matrix.suffix }}
+          sha256sum fghj-${{ matrix.suffix }}.tar.gz > fghj-${{ matrix.suffix }}.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fghj-${{ matrix.suffix }}
+          path: dist/
+
+  # ── GitHub Release ────────────────────────────────────────────────────────
+  create-release:
+    name: Create Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release assets
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" \) \
+            -exec cp {} release-assets/ \;
+          ls -lh release-assets/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

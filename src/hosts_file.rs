@@ -75,15 +75,24 @@ mod tests {
         let path = tmp.path().join("hosts");
         fs::write(&path, "127.0.0.1 localhost\n::1 localhost\n").unwrap();
 
-        sync(&path, &["aikido.local".to_string(), "demo.example.com".to_string()]).unwrap();
+        sync(
+            &path,
+            &["aikido.local".to_string(), "demo.example.com".to_string()],
+        )
+        .unwrap();
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.starts_with("127.0.0.1 localhost\n::1 localhost\n"));
-        assert!(contents.contains(&format!("{BEGIN_MARKER}\n127.0.0.1 aikido.local\n127.0.0.1 demo.example.com\n{END_MARKER}\n")));
+        assert!(contents.contains(&format!(
+            "{BEGIN_MARKER}\n127.0.0.1 aikido.local\n127.0.0.1 demo.example.com\n{END_MARKER}\n"
+        )));
 
         // Removing every host must drop the block entirely, leaving the
         // original untouched lines exactly as they were.
         sync(&path, &[]).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "127.0.0.1 localhost\n::1 localhost\n");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "127.0.0.1 localhost\n::1 localhost\n"
+        );
     }
 
     #[test]
@@ -92,9 +101,20 @@ mod tests {
         let path = tmp.path().join("hosts");
         fs::write(&path, "").unwrap();
 
-        sync(&path, &["b.local".to_string(), "a.local".to_string(), "a.local".to_string()]).unwrap();
+        sync(
+            &path,
+            &[
+                "b.local".to_string(),
+                "a.local".to_string(),
+                "a.local".to_string(),
+            ],
+        )
+        .unwrap();
         let first = fs::read_to_string(&path).unwrap();
-        assert_eq!(first, format!("{BEGIN_MARKER}\n127.0.0.1 a.local\n127.0.0.1 b.local\n{END_MARKER}\n"));
+        assert_eq!(
+            first,
+            format!("{BEGIN_MARKER}\n127.0.0.1 a.local\n127.0.0.1 b.local\n{END_MARKER}\n")
+        );
 
         // Re-syncing with the same logical set (different input order) must
         // not touch the file's mtime-worthy content a second time.
@@ -106,7 +126,11 @@ mod tests {
     fn sync_replaces_a_stale_block_in_place() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("hosts");
-        fs::write(&path, format!("before\n{BEGIN_MARKER}\n127.0.0.1 stale.local\n{END_MARKER}\nafter\n")).unwrap();
+        fs::write(
+            &path,
+            format!("before\n{BEGIN_MARKER}\n127.0.0.1 stale.local\n{END_MARKER}\nafter\n"),
+        )
+        .unwrap();
 
         sync(&path, &["fresh.local".to_string()]).unwrap();
         assert_eq!(

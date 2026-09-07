@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Clone)]
@@ -247,7 +247,11 @@ pub struct Graph {
 /// workspace (see [`crate::store::WorkspaceOwner`]) — `fghjd` runs as root
 /// and has no SSH credentials of its own for a private remote. Pass `None`
 /// when already running as the correct user.
-pub fn ensure_mirror(repo: &str, workdir: &Path, owner: Option<&crate::store::WorkspaceOwner>) -> Result<PathBuf> {
+pub fn ensure_mirror(
+    repo: &str,
+    workdir: &Path,
+    owner: Option<&crate::store::WorkspaceOwner>,
+) -> Result<PathBuf> {
     let dir_name = repo
         .rsplit('/')
         .next()
@@ -258,7 +262,8 @@ pub fn ensure_mirror(repo: &str, workdir: &Path, owner: Option<&crate::store::Wo
 
     if !mirror_path.exists() {
         let mut cmd = Command::new("git");
-        cmd.args(["clone", "--quiet", "--mirror", repo]).arg(&mirror_path);
+        cmd.args(["clone", "--quiet", "--mirror", repo])
+            .arg(&mirror_path);
         if let Some(owner) = owner {
             owner.apply_to_command(&mut cmd);
         }
@@ -303,12 +308,14 @@ fn normalize_repo_url(repo: &str) -> String {
     if let Some(rest) = u.strip_prefix("git@") {
         u = rest.replacen(':', "/", 1);
     }
-    u.trim_end_matches(".git").trim_end_matches('/').to_lowercase()
+    u.trim_end_matches(".git")
+        .trim_end_matches('/')
+        .to_lowercase()
 }
 
 fn read_component_file(path: &Path) -> Result<ComponentConfig> {
-    let contents = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     serde_yaml::from_str(&contents)
         .with_context(|| format!("failed to parse {} as a component config", path.display()))
 }
@@ -414,13 +421,11 @@ impl<'a> ResolveCtx<'a> {
         // existing one's domain out from under it.
         let service_id = format!("{}.{local_path}", component.service.name);
 
-        self.nodes
-            .entry(service_id.clone())
-            .or_insert_with(|| {
-                let dir = self.workspace.join(local_path);
-                let (repo, branch) = git_remote_and_branch(&dir);
-                let dirty = git_status_dirty(&dir);
-                Node {
+        self.nodes.entry(service_id.clone()).or_insert_with(|| {
+            let dir = self.workspace.join(local_path);
+            let (repo, branch) = git_remote_and_branch(&dir);
+            let dirty = git_status_dirty(&dir);
+            Node {
                 id: service_id.clone(),
                 label: component.service.name.clone(),
                 kind: "service".into(),
@@ -442,8 +447,8 @@ impl<'a> ResolveCtx<'a> {
                 environment: component.service.environment.to_pairs(),
                 volumes: component.service.volumes.clone(),
                 additional_hosts: component.service.additional_hosts.clone(),
-                }
-            });
+            }
+        });
 
         if !self.visited.insert(local_path.to_string()) {
             return service_id;
@@ -486,7 +491,12 @@ impl<'a> ResolveCtx<'a> {
     /// Resolves a `Dependency::Service` reference to its conventional local
     /// path, then either recurses into it (if already on disk) or registers a
     /// `downloaded: false` stub node (if not) — never clones.
-    fn visit_service_dependency(&mut self, owner_id: &str, repo: &str, default_branch: &str) -> String {
+    fn visit_service_dependency(
+        &mut self,
+        owner_id: &str,
+        repo: &str,
+        default_branch: &str,
+    ) -> String {
         let norm = normalize_repo_url(repo);
 
         // An on-disk match by the repo's real git remote wins over the plain
@@ -564,25 +574,30 @@ impl<'a> ResolveCtx<'a> {
                 // ports (`{port_name}.{node's domain}`): the specific thing
                 // comes first, its owning scope after.
                 let backing_id = format!("{name}.{owner_id}");
-                self.nodes.entry(backing_id.clone()).or_insert_with(|| Node {
-                    id: backing_id.clone(),
-                    label: name.clone(),
-                    kind: "backing".into(),
-                    image: Some(image),
-                    branch: None,
-                    repo: None,
-                    domain_scope,
-                    local_path: None,
-                    domain: String::new(),
-                    downloaded: true,
-                    dirty: false,
-                    flows: Vec::new(),
-                    build: None,
-                    ports: ports.into_iter().map(|p| (p, PortConfig::default())).collect(),
-                    environment: environment.to_pairs(),
-                    volumes,
-                    additional_hosts: Vec::new(),
-                });
+                self.nodes
+                    .entry(backing_id.clone())
+                    .or_insert_with(|| Node {
+                        id: backing_id.clone(),
+                        label: name.clone(),
+                        kind: "backing".into(),
+                        image: Some(image),
+                        branch: None,
+                        repo: None,
+                        domain_scope,
+                        local_path: None,
+                        domain: String::new(),
+                        downloaded: true,
+                        dirty: false,
+                        flows: Vec::new(),
+                        build: None,
+                        ports: ports
+                            .into_iter()
+                            .map(|p| (p, PortConfig::default()))
+                            .collect(),
+                        environment: environment.to_pairs(),
+                        volumes,
+                        additional_hosts: Vec::new(),
+                    });
                 self.edges.push(Edge {
                     from: owner_id.to_string(),
                     to: backing_id,
@@ -731,10 +746,10 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     // shared-backing edges are cross-references, not structural edges, so they were
     // excluded from the BFS above — inherit flow membership from their `from` node instead.
     for (edge, flows) in ctx.edges.iter().zip(edge_flows.iter_mut()) {
-        if edge.kind == "shared-backing" {
-            if let Some(fl) = node_flows.get(&edge.from) {
-                flows.extend(fl.iter().cloned());
-            }
+        if edge.kind == "shared-backing"
+            && let Some(fl) = node_flows.get(&edge.from)
+        {
+            flows.extend(fl.iter().cloned());
         }
     }
 
@@ -760,7 +775,12 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
         // Default-run domain, always known once a node's id and
         // domain_scope are — see the field's own doc comment for why this
         // isn't just set at construction time.
-        node.domain = crate::runs::derive_domain(&node.id, &node.domain_scope, &workspace_name, crate::runs::DEFAULT_RUN_ID);
+        node.domain = crate::runs::derive_domain(
+            &node.id,
+            &node.domain_scope,
+            &workspace_name,
+            crate::runs::DEFAULT_RUN_ID,
+        );
     }
 
     let mut edges = ctx.edges;
@@ -801,7 +821,11 @@ mod tests {
     fn service_domain_scope_defaults_to_run_and_can_opt_into_stable() {
         let tmp = tempfile::tempdir().unwrap();
         write_component(tmp.path(), "svc-a", "  name: svc-a\n");
-        write_component(tmp.path(), "svc-b", "  name: svc-b\n\x20 domain_scope: stable\n");
+        write_component(
+            tmp.path(),
+            "svc-b",
+            "  name: svc-b\n\x20 domain_scope: stable\n",
+        );
 
         let graph = resolve_universe(tmp.path()).unwrap();
 
@@ -827,7 +851,11 @@ mod tests {
 
         let graph = resolve_universe(tmp.path()).unwrap();
 
-        let node = graph.nodes.iter().find(|n| n.id == "myservice.myservice").unwrap();
+        let node = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "myservice.myservice")
+            .unwrap();
         assert_eq!(node.ports.len(), 2);
         assert!(node.ports["8080"].primary);
         assert_eq!(node.ports["9090"].name.as_deref(), Some("metrics"));
@@ -850,7 +878,12 @@ mod tests {
 
         let graph = resolve_universe(tmp.path()).unwrap();
 
-        assert!(graph.warnings.iter().any(|w| w.contains("myservice") && w.contains("8080") && w.contains("9090")));
+        assert!(
+            graph
+                .warnings
+                .iter()
+                .any(|w| w.contains("myservice") && w.contains("8080") && w.contains("9090"))
+        );
     }
 
     #[test]
@@ -870,7 +903,11 @@ mod tests {
 
         let graph = resolve_universe(tmp.path()).unwrap();
 
-        let node = graph.nodes.iter().find(|n| n.id == "myservice.myservice").unwrap();
+        let node = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "myservice.myservice")
+            .unwrap();
         assert_eq!(node.volumes.len(), 2);
         assert!(matches!(
             &node.volumes[0],
@@ -903,7 +940,11 @@ mod tests {
 
         let graph = resolve_universe(tmp.path()).unwrap();
 
-        let node = graph.nodes.iter().find(|n| n.id == "postgres.myservice.myservice").unwrap();
+        let node = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "postgres.myservice.myservice")
+            .unwrap();
         assert_eq!(node.volumes.len(), 1);
         assert!(matches!(
             &node.volumes[0],
@@ -929,8 +970,15 @@ mod tests {
 
         let graph = resolve_universe(tmp.path()).unwrap();
 
-        let node = graph.nodes.iter().find(|n| n.id == "myservice.myservice").unwrap();
-        assert_eq!(node.additional_hosts, vec!["aikido.local", "demo.example.com"]);
+        let node = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "myservice.myservice")
+            .unwrap();
+        assert_eq!(
+            node.additional_hosts,
+            vec!["aikido.local", "demo.example.com"]
+        );
         assert!(graph.warnings.is_empty());
     }
 
@@ -947,6 +995,11 @@ mod tests {
 
         let graph = resolve_universe(tmp.path()).unwrap();
 
-        assert!(graph.warnings.iter().any(|w| w.contains("myservice") && w.contains("additional_hosts")));
+        assert!(
+            graph
+                .warnings
+                .iter()
+                .any(|w| w.contains("myservice") && w.contains("additional_hosts"))
+        );
     }
 }

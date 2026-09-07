@@ -329,10 +329,38 @@ plans referenced above.
 - Subsystem B's OS integration is macOS-only (`/etc/resolver`); Linux
   (`systemd-resolved`) and Windows (NRPT) are unimplemented, per SPEC.md §5.
 - `install_macos_trust`/`install_macos_resolver` have no uninstall path wired
-  into `fghj daemon stop` beyond removing the DNS resolver file and port/pid
-  files — the CA stays installed in the system Keychain across a full
-  daemon-stop, by design (so a later `fghjd` restart doesn't need
-  re-approval), but there's no explicit "purge everything" command yet.
+  into `fghj daemon stop` beyond removing the DNS resolver file — the CA
+  stays installed in the system Keychain across a full daemon-stop, by
+  design (so a later `fghjd` reactivation doesn't need re-approval), but
+  there's no explicit "purge everything" command yet.
+- **Closed (2026-09-07): daemon lifecycle redesign.** `fghjd` had zero signal
+  handling — its only cleanup path was `fghj daemon stop`'s external
+  `sudo kill <pid> && rm -f <pidfile/portfile> && sed ...`, bypassed entirely
+  by `brew services stop`, `launchctl bootout`, a raw `kill`, or Ctrl-C.
+  Redesigned around the realization that `fghjd` should run for the life of
+  the machine (started at boot, restarted on crash by launchd/systemd) while
+  `fghj daemon start`/`stop`/`restart`/`status` toggle an in-process
+  active/idle state instead of the process's lifecycle: `daemon::
+  DaemonControl` now owns the DNS server, the 80/443 proxy, and `/etc/hosts`
+  as a unit that can be torn down (`deactivate`) and rebuilt (`activate`)
+  independently of the always-on control API, exposed as `/daemon/start`,
+  `/daemon/stop`, `/daemon/status`. `fghjd` also gained a real SIGTERM/SIGINT
+  handler (`tokio::select!` around `axum::serve`) that deactivates before the
+  process actually exits, for the one case that does terminate it (service
+  stop/restart, system shutdown). The pidfile/port-file mechanism
+  (`pid_path`/`write_pid`/`read_pid`/`pid_alive`) is gone entirely, replaced
+  by a fixed Unix control socket (`/var/run/fghjd.sock`, `chmod 0666` since
+  `fghjd` runs as root and `fghj` doesn't) — dockerd-style, no port to pick
+  or discover. The control API's TCP loopback listener still exists but is
+  now purely internal, dialed only by the HTTPS proxy's apex-domain relay;
+  both listeners serve the same `axum::Router` (cloned, not duplicated).
+  Active/idle also needed to survive `fghjd` restarting on its own (crash,
+  reboot) without silently overriding an explicit `daemon stop` — closed via
+  `store::DaemonState`, a small durable JSON file
+  (`/var/lib/fghjd/daemon-state.json`) following the same pattern as the
+  workspace index rather than SQLite, deliberately structured to grow more
+  fields beyond today's single `idle_requested` bool. See [[control-api]],
+  [[local-ca-and-tls-proxy]], `docs/cli/daemon.md`.
 
 ## Future implementation ideas (not designed yet, just ideas)
 

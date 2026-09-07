@@ -21,7 +21,7 @@ serde_json = "1.0.151"
 serde_yaml = "0.9.34"
 tar = "0.4.46"
 tempfile = "3.27.0"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "net", "fs", "io-util"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "net", "fs", "io-util", "signal"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "logging", "tls12"] }
 
 [dev-dependencies]

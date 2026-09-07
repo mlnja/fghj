@@ -43,7 +43,9 @@ pub(crate) fn in_zone(qname: &str) -> bool {
 const RESERVED_ALIAS_TLDS: &[&str] = &["local", "test", "internal", "localhost"];
 
 pub fn is_reserved_alias(host: &str) -> bool {
-    RESERVED_ALIAS_TLDS.iter().any(|tld| host == *tld || host.ends_with(&format!(".{tld}")))
+    RESERVED_ALIAS_TLDS
+        .iter()
+        .any(|tld| host == *tld || host.ends_with(&format!(".{tld}")))
 }
 
 struct Query {
@@ -99,7 +101,15 @@ fn parse_query(buf: &[u8]) -> Option<Query> {
     let question_end = pos + 4;
     let question_bytes = buf.get(12..question_end)?.to_vec();
 
-    Some(Query { id, opcode, rd, qname, qtype, qclass, question_bytes })
+    Some(Query {
+        id,
+        opcode,
+        rd,
+        qname,
+        qtype,
+        qclass,
+        question_bytes,
+    })
 }
 
 /// Builds a response for `query`. Names inside the `fghj.internal` zone
@@ -220,8 +230,12 @@ fn install_macos_resolver(resolver_dir: &Path, port: u16) -> Result<()> {
     let path = resolver_dir.join(ZONE);
     let desired = format!("nameserver 127.0.0.1\nport {port}\n");
     if fs::read_to_string(&path).ok().as_deref() != Some(desired.as_str()) {
-        fs::write(&path, &desired).with_context(|| format!("failed to write {}", path.display()))?;
-        println!("fghjd: wrote {} — *.{ZONE} lookups now route to this DNS server", path.display());
+        fs::write(&path, &desired)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        println!(
+            "fghjd: wrote {} — *.{ZONE} lookups now route to this DNS server",
+            path.display()
+        );
     }
     Ok(())
 }
@@ -263,7 +277,10 @@ mod tests {
         assert!(is_reserved_alias("demo.test"));
         assert!(is_reserved_alias("demo.internal"));
         assert!(is_reserved_alias("demo.localhost"));
-        assert!(!is_reserved_alias("app.local.aikido.io"), "the TLD is .io, not .local — the last label is what counts");
+        assert!(
+            !is_reserved_alias("app.local.aikido.io"),
+            "the TLD is .io, not .local — the last label is what counts"
+        );
         assert!(!is_reserved_alias("aikido.io"));
         assert!(!is_reserved_alias("example.com"));
     }
@@ -310,7 +327,11 @@ mod tests {
         let query = parse_query(&raw).unwrap();
         let resp = build_response(&query);
         let (_, flags1) = header_flags(&resp);
-        assert_eq!(flags1 & 0x0F, 0, "name exists, so RCODE should still be NOERROR");
+        assert_eq!(
+            flags1 & 0x0F,
+            0,
+            "name exists, so RCODE should still be NOERROR"
+        );
         let ancount = u16::from_be_bytes([resp[6], resp[7]]);
         assert_eq!(ancount, 0, "no AAAA record exists for this zone");
     }
@@ -321,7 +342,11 @@ mod tests {
         let query = parse_query(&raw).unwrap();
         let resp = build_response(&query);
         let (flags0, flags1) = header_flags(&resp);
-        assert_eq!(flags0 & 0x04, 0, "must not claim authority outside our zone");
+        assert_eq!(
+            flags0 & 0x04,
+            0,
+            "must not claim authority outside our zone"
+        );
         assert_eq!(flags1 & 0x0F, 3, "RCODE must be NXDOMAIN");
         let ancount = u16::from_be_bytes([resp[6], resp[7]]);
         assert_eq!(ancount, 0);
@@ -333,7 +358,10 @@ mod tests {
         let query = parse_query(&raw).unwrap();
         let resp = build_response(&query);
         assert_eq!(u16::from_be_bytes([resp[0], resp[1]]), 0xBEEF);
-        assert_eq!(&resp[12..12 + query.question_bytes.len()], &query.question_bytes[..]);
+        assert_eq!(
+            &resp[12..12 + query.question_bytes.len()],
+            &query.question_bytes[..]
+        );
     }
 
     #[test]
@@ -353,7 +381,10 @@ mod tests {
 
         let a = bind().await.unwrap();
         let b = bind().await.unwrap();
-        assert_ne!(a.local_addr().unwrap().port(), b.local_addr().unwrap().port());
+        assert_ne!(
+            a.local_addr().unwrap().port(),
+            b.local_addr().unwrap().port()
+        );
     }
 
     /// End-to-end check over a real loopback socket, exercising `serve`
@@ -370,11 +401,13 @@ mod tests {
         client.send_to(&query, server_addr).await.unwrap();
 
         let mut buf = [0u8; 512];
-        let (len, _) =
-            tokio::time::timeout(std::time::Duration::from_secs(2), client.recv_from(&mut buf))
-                .await
-                .expect("server should respond within 2s")
-                .unwrap();
+        let (len, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.recv_from(&mut buf),
+        )
+        .await
+        .expect("server should respond within 2s")
+        .unwrap();
         let resp = &buf[..len];
 
         assert_eq!(u16::from_be_bytes([resp[0], resp[1]]), 0xABCD);

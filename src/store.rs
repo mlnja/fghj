@@ -60,16 +60,20 @@ fn live_ssh_auth_sock(uid: u32, hint: Option<&str>) -> Option<String> {
             .unwrap_or(false)
     };
 
-    if let Some(hint) = hint {
-        if is_live_socket_for_uid(Path::new(hint)) {
-            return Some(hint.to_string());
-        }
+    if let Some(hint) = hint
+        && is_live_socket_for_uid(Path::new(hint))
+    {
+        return Some(hint.to_string());
     }
 
     if cfg!(target_os = "macos") {
         let entries = std::fs::read_dir("/private/tmp").ok()?;
         for entry in entries.flatten() {
-            if !entry.file_name().to_string_lossy().starts_with("com.apple.launchd.") {
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("com.apple.launchd.")
+            {
                 continue;
             }
             let candidate = entry.path().join("Listeners");
@@ -90,7 +94,10 @@ fn live_ssh_auth_sock(uid: u32, hint: Option<&str>) -> Option<String> {
 /// Worth applying even when also running as the real owner via
 /// [`WorkspaceOwner::apply_to_command`], as a second line of defense.
 pub fn harden_git_ssh(cmd: &mut std::process::Command) {
-    cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new");
+    cmd.env(
+        "GIT_SSH_COMMAND",
+        "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+    );
 }
 
 /// `fghjd` owns many workspaces, each of which owns its own durable state
@@ -119,9 +126,50 @@ pub fn load_index(path: &Path) -> HashMap<String, PathBuf> {
 
 pub fn save_index(path: &Path, index: &HashMap<String, PathBuf>) -> Result<()> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create {}", dir.display()))?;
     }
     std::fs::write(path, serde_json::to_string_pretty(index)?)
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+/// A small, single-writer bag of daemon-level settings that need to survive
+/// `fghjd` restarting on its own (crash, reboot) — today just whether the
+/// operator last asked for `daemon stop`, but expected to grow more fields
+/// over time (see `DaemonControl` in `daemon.rs`). Plain JSON with
+/// `#[serde(default)]` fields, same as `load_index`/`save_index` above:
+/// there's only ever one writer and no relational structure here, so a new
+/// field is just a new struct field, no migration machinery needed.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct DaemonState {
+    /// Set by `fghj daemon stop`, cleared by `fghj daemon start`. Checked at
+    /// `fghjd` startup so a crash/reboot restart comes back idle instead of
+    /// silently reactivating behind the operator's back.
+    #[serde(default)]
+    pub idle_requested: bool,
+}
+
+/// Alongside the CA and the workspace index, not `/var/run`, for the same
+/// reason as `default_index_path`: this needs to survive a reboot.
+pub fn default_state_path() -> PathBuf {
+    PathBuf::from("/var/lib/fghjd/daemon-state.json")
+}
+
+/// A missing or corrupt file just means "defaults" — there's nothing to
+/// reconcile against, unlike the workspace index.
+pub fn load_daemon_state(path: &Path) -> DaemonState {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_daemon_state(path: &Path, state: &DaemonState) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create {}", dir.display()))?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(state)?)
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
@@ -137,7 +185,8 @@ pub struct WorkspaceDb {
 impl WorkspaceDb {
     pub fn open(workspace: &Path) -> Result<Self> {
         let dir = workspace.join(".fghj");
-        std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create {}", dir.display()))?;
         let db_path = dir.join("fghj.db");
         let conn = Connection::open(&db_path)
             .with_context(|| format!("failed to open {}", db_path.display()))?;
@@ -182,7 +231,9 @@ impl WorkspaceDb {
         ] {
             let _ = conn.execute(stmt, []);
         }
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Records the workspace's identity the first time it's wired; a no-op
@@ -281,8 +332,14 @@ impl WorkspaceDb {
     pub async fn delete_run(self: Arc<Self>, run_id: String) -> Result<()> {
         tokio::task::spawn_blocking(move || {
             let conn = self.conn.lock().unwrap();
-            conn.execute("DELETE FROM containers WHERE run_id = ?1", rusqlite::params![run_id])?;
-            conn.execute("DELETE FROM runs WHERE run_id = ?1", rusqlite::params![run_id])?;
+            conn.execute(
+                "DELETE FROM containers WHERE run_id = ?1",
+                rusqlite::params![run_id],
+            )?;
+            conn.execute(
+                "DELETE FROM runs WHERE run_id = ?1",
+                rusqlite::params![run_id],
+            )?;
             Ok(())
         })
         .await
@@ -359,7 +416,46 @@ mod tests {
         save_index(&path, &index).unwrap();
 
         let loaded = load_index(&path);
-        assert_eq!(loaded.get("ws-abc"), Some(&PathBuf::from("/some/workspace")));
+        assert_eq!(
+            loaded.get("ws-abc"),
+            Some(&PathBuf::from("/some/workspace"))
+        );
+    }
+
+    #[test]
+    fn daemon_state_round_trips_and_defaults_to_active() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("daemon-state.json");
+
+        let defaulted = load_daemon_state(&path);
+        assert!(
+            !defaulted.idle_requested,
+            "a freshly-started fghjd with no prior `daemon stop` must default to active"
+        );
+
+        save_daemon_state(
+            &path,
+            &DaemonState {
+                idle_requested: true,
+            },
+        )
+        .unwrap();
+        assert!(
+            load_daemon_state(&path).idle_requested,
+            "`daemon stop` must persist so a crash/reboot restart doesn't silently reactivate"
+        );
+
+        save_daemon_state(
+            &path,
+            &DaemonState {
+                idle_requested: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            !load_daemon_state(&path).idle_requested,
+            "`daemon start` must clear the flag so future restarts come back active"
+        );
     }
 
     #[tokio::test]
@@ -368,12 +464,18 @@ mod tests {
         let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
 
         db.clone()
-            .record_meta("ws-abc123".to_string(), Some("https://example.com/repo.git".to_string()))
+            .record_meta(
+                "ws-abc123".to_string(),
+                Some("https://example.com/repo.git".to_string()),
+            )
             .await
             .unwrap();
         // second call must be a no-op (INSERT OR IGNORE), not an error
         db.clone()
-            .record_meta("ws-abc123".to_string(), Some("https://example.com/repo.git".to_string()))
+            .record_meta(
+                "ws-abc123".to_string(),
+                Some("https://example.com/repo.git".to_string()),
+            )
             .await
             .unwrap();
 
@@ -387,7 +489,10 @@ mod tests {
                 status: "running".to_string(),
                 published_port: Some(8080),
                 domain: "svc-a.demo.fghj".to_string(),
-                routes: vec![crate::runs::PortRoute { domain: "svc-a.demo.fghj".to_string(), host_port: 8080 }],
+                routes: vec![crate::runs::PortRoute {
+                    domain: "svc-a.demo.fghj".to_string(),
+                    host_port: 8080,
+                }],
                 additional_hosts: Vec::new(),
             }],
         };
@@ -401,7 +506,10 @@ mod tests {
         assert_eq!(restored.containers[0].published_port, Some(8080));
         assert_eq!(restored.containers[0].routes.len(), 1);
         assert_eq!(restored.containers[0].routes[0].host_port, 8080);
-        assert_eq!(restored.overrides.get("svc-a"), Some(&"feature-x".to_string()));
+        assert_eq!(
+            restored.overrides.get("svc-a"),
+            Some(&"feature-x".to_string())
+        );
 
         db.clone().delete_run("default".to_string()).await.unwrap();
         assert!(db.load_runs().await.unwrap().is_empty());

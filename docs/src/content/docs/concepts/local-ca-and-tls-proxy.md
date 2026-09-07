@@ -101,7 +101,8 @@ under it, including mDNS device discovery. Instead, `fghjd` manages a
 marked block inside `/etc/hosts`, pinning only the exact hostnames
 currently declared by a running node to `127.0.0.1` — every other name
 under the same suffix is left alone. That block is kept in sync as
-containers start and stop, and cleared entirely on `fghj daemon stop`.
+containers start and stop, and cleared entirely whenever `fghjd` goes
+idle — via `fghj daemon stop` or the process shutting down outright.
 
 Routing a hostname to a backend is decoupled from Docker behind a small
 one-method interface, so the proxy's own test suite can exercise real TLS

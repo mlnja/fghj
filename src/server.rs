@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 
 use crate::{downloads, runs, store};
 
@@ -55,7 +55,11 @@ pub fn content_type_for(path: &str) -> &'static str {
 /// unmatched routes (SPA-style).
 pub fn static_response(route: &str) -> (Vec<u8>, &'static str, u16) {
     let trimmed = route.trim_start_matches('/');
-    let file_path = if trimmed.is_empty() { "index.html" } else { trimmed };
+    let file_path = if trimmed.is_empty() {
+        "index.html"
+    } else {
+        trimmed
+    };
     match UI_DIST.get_file(file_path) {
         Some(f) => (f.contents().to_vec(), content_type_for(file_path), 200),
         None => match UI_DIST.get_file("index.html") {
@@ -72,7 +76,10 @@ mod tests {
     #[test]
     fn content_type_matches_extension() {
         assert_eq!(content_type_for("index.html"), "text/html; charset=utf-8");
-        assert_eq!(content_type_for("app.js"), "application/javascript; charset=utf-8");
+        assert_eq!(
+            content_type_for("app.js"),
+            "application/javascript; charset=utf-8"
+        );
         assert_eq!(content_type_for("styles.css"), "text/css; charset=utf-8");
         assert_eq!(content_type_for("universe.json"), "application/json");
         assert_eq!(content_type_for("logo.svg"), "image/svg+xml");

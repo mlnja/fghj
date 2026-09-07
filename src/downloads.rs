@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::resolver::{self, Node};
@@ -59,7 +59,11 @@ impl DownloadRegistry {
             .rev()
             .map(|(key, s)| {
                 let snapshot = s.lock().unwrap();
-                DownloadJob { key: key.clone(), status: snapshot.status.clone(), log: snapshot.log.clone() }
+                DownloadJob {
+                    key: key.clone(),
+                    status: snapshot.status.clone(),
+                    log: snapshot.log.clone(),
+                }
             })
             .collect()
     }
@@ -93,7 +97,12 @@ impl DownloadRegistry {
         snapshot
     }
 
-    pub fn start_node(&self, workspace: PathBuf, node_id: String, owner: Option<WorkspaceOwner>) -> DownloadState {
+    pub fn start_node(
+        &self,
+        workspace: PathBuf,
+        node_id: String,
+        owner: Option<WorkspaceOwner>,
+    ) -> DownloadState {
         let key = format!("node:{node_id}");
         self.spawn(key, move |state| {
             let result = clone_node_logged(&workspace, &node_id, owner.as_ref(), &state);
@@ -105,7 +114,12 @@ impl DownloadRegistry {
     /// (see `Node::flows`) instead of the whole graph, and tracks it under
     /// its own queue entry (`pull-flow:<flow>`) so a flow-scoped pull and the
     /// whole-graph "Pull all" can run and be polled independently.
-    pub fn start_pull_all(&self, workspace: PathBuf, owner: Option<WorkspaceOwner>, flow: Option<String>) -> DownloadState {
+    pub fn start_pull_all(
+        &self,
+        workspace: PathBuf,
+        owner: Option<WorkspaceOwner>,
+        flow: Option<String>,
+    ) -> DownloadState {
         let key = pull_all_key(flow.as_deref());
         self.spawn(key, move |state| {
             let result = pull_all_logged(&workspace, owner.as_ref(), flow.as_deref(), &state);
@@ -168,7 +182,10 @@ fn run_git_clone_logged(
         return Ok(());
     }
 
-    append_log(state, &format!("$ git clone --branch {branch} {repo} {local_path}\n"));
+    append_log(
+        state,
+        &format!("$ git clone --branch {branch} {repo} {local_path}\n"),
+    );
 
     let mut cmd = Command::new("git");
     cmd.args(["clone", "--progress", "--branch", branch, "--single-branch"])
@@ -189,7 +206,9 @@ fn run_git_clone_logged(
     }
     crate::store::harden_git_ssh(&mut cmd);
 
-    let mut child = cmd.spawn().with_context(|| format!("failed to spawn git clone for {repo}"))?;
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("failed to spawn git clone for {repo}"))?;
 
     // git clone writes its progress meter to stderr, not stdout.
     let stderr = child.stderr.take().expect("piped stderr");
