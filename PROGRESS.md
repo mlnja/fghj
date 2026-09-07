@@ -410,17 +410,57 @@ plans referenced above.
     Compose-style `command` alone is enough to express every real case found
     so far (including mysql's `mysqld --sql_mode=...`), and it's easy to add
     later if a real case needs it.
-  - **`healthcheck` + real `depends_on` ordering** — `ensure_running` starts
-    every node's container with no ordering or readiness gate; a service
-    that can't tolerate its Postgres not being ready yet has no way to
-    express that today (apps that retry their own DB connection happen to
-    work by accident).
-  - **Restart policy** — nothing currently restarts a container that crashes
-    after `ensure_running` returns; it just sits `exited` until the next
-    manual "run flow" click's reconciler pass, if that even restarts it (not
-    verified this session).
-  - `env_file`, resource limits (`cpus`/`mem_limit`), `user`/`working_dir`,
-    `cap_add`/`security_opt`, `labels` — lower-priority, "eventually" items.
+  - ~~**`healthcheck` + real `depends_on` ordering**~~ **Done (2026-09-07)**
+    — `#Healthcheck` (`schema/dependency.cue`, shared by `#Service` and
+    `#BackingDependency` via `#RunOptions`) mirrors Docker's own
+    `HEALTHCHECK`; `runs::topological_start_order` now starts every node in
+    dependency order (`depends-on`/`owns` edges) instead of workspace-scan
+    order, in both `start` and `ensure_running`, and `runs::wait_for_healthy`
+    (polling `docker::inspect_health`) blocks a dependency's dependents from
+    starting until it reports `healthy` — but only for a node that actually
+    declares a `healthcheck`; one that doesn't behaves exactly as before. No
+    separate `depends_on: {condition: ...}` field needed: gating on the
+    *dependency's own* declared healthcheck covers the same real case with
+    no new schema surface on the consumer side.
+  - ~~**Restart policy**~~ **Done (2026-09-07)** — `restart` (`"no"` |
+    `"always"` | `"on-failure"` | `"unless-stopped"`) on `#RunOptions`, wired
+    straight to Docker's own `HostConfig.RestartPolicy`, so a crashed
+    container can now be told to come back on its own instead of needing a
+    manual "run flow" click.
+  - ~~`env_file`~~ **Done (2026-09-07)**, on `#RunOptions` — shared by both
+    `#Service` and `#BackingDependency`, same as Compose supporting
+    `env_file` on any service regardless of `build` vs `image`. Loaded
+    before `environment`, same precedence as Compose. Resolves against this
+    repo's own checkout root for `#Service`; for `#BackingDependency`, which
+    has no checkout of its own, against the *declaring* service's checkout
+    root instead (found via the graph's `owns` edge), mirroring Compose
+    resolving `env_file` against the compose file's own directory either
+    way.
+  - ~~`user`/`working_dir`, `cap_add`/`cap_drop`/`privileged`, `labels`,
+    `extra_hosts`~~ **Done (2026-09-07)**, all on `#RunOptions` (shared by
+    both `#Service` and `#BackingDependency`) and wired straight to their
+    Docker `ContainerCreateBody`/`HostConfig` equivalents. `labels` are
+    merged under fghj's own `com.docker.compose.*` labels, which always win
+    on a key conflict. `extra_hosts` (container-internal `/etc/hosts`
+    entries) is distinct from the pre-existing `#Service.additional_hosts`
+    (host-side routing to the container) — genuinely different mechanisms,
+    kept as separately-named fields.
+  - ~~**No `platform` pin**~~ **Done (2026-09-07)**, on `#RunOptions` —
+    shared by both `#Service` and `#BackingDependency`. For a service, wired
+    into `docker build --platform` (cross-compiling the service's own image
+    to a specific architecture — a real, standalone use case independent of
+    pulling anything). For a backing dependency, pins `os[/arch[/variant]]`
+    for `create_container`'s platform-aware image lookup. **Known
+    follow-up gap (backing only):** fghj doesn't pull images itself anywhere
+    today, so the backing-side pin only helps once the requested platform's
+    image is already present locally — a real fix needs an explicit `docker
+    pull` step, out of scope here. The service-side build pin has no such
+    caveat, since building doesn't require a pre-existing local image.
+  - Resource limits (`cpus`/`mem_limit`), `security_opt`, `dns`/`dns_search`,
+    `tmpfs`/`ulimits`, `stop_signal`/`stop_grace_period`, `shm_size`,
+    `stdin_open`/`tty`, logging-driver options — still open, lower-priority,
+    "eventually" items; not attempted this pass to avoid unbounded scope
+    creep on marginal-value Docker knobs.
   - Compose features that probably *shouldn't* be copied: `extends`/multiple
     compose files with override layering exist because Compose has one
     monolithic file per stack — fghj's federated per-repo `fghj.yaml` +
@@ -474,8 +514,11 @@ plans referenced above.
     `command: mysqld --sql_mode=...` flags now round-trip via `#Service
     .command`/`#BackingDependency.command` straight into `docker::RunOpts
     .command` → `ContainerCreateBody.cmd`.
-  - **No `platform` pin** on `kind: backing` — mysql declares `platform:
-    linux/x86_64` for Apple Silicon image compatibility; no equivalent field.
+  - ~~**No `platform` pin** on `kind: backing`~~ **closed (2026-09-07)** —
+    mysql's `platform: linux/x86_64` (for Apple Silicon image compatibility)
+    now round-trips via `#BackingDependency.platform` into
+    `create_container`'s platform query param, same fghj-doesn't-pull-images
+    caveat noted above.
   - **No `docker compose exec`-equivalent.** One-off admin tasks (DB seed
     script, run via `docker compose exec mysql bash seed-database.sh`) need
     a way to run a command inside an already-running container; the control

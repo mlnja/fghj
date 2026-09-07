@@ -69,6 +69,7 @@ package fghj
 	!~"(^|\\.)fghj\\.internal$"
 
 #Service: {
+	#RunOptions
 	name:  string & =~"^[a-z0-9][a-z0-9-]*$"
 	build: #Build
 	// Keyed by the literal container port number (e.g. "8080"), published to

@@ -1,12 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::docker;
-use crate::resolver::{Graph, Node, VolumeMount};
+use crate::resolver::{Edge, Graph, Node, VolumeMount};
 use crate::store::WorkspaceDb;
 
 pub const DEFAULT_RUN_ID: &str = "default";
@@ -71,6 +72,106 @@ fn derive_volume_name(name: &str, scope: &str, workspace_name: &str, run_id: &st
         "fghj-vol-{}",
         sanitize_label(&derive_domain(name, scope, workspace_name, run_id))
     )
+}
+
+/// Orders `node_ids` so that every node's dependencies — an edge's `to` (see
+/// `resolver::Edge`'s own doc comment: `to` is always the dependency, `from`
+/// always the dependent, for every edge kind) — are started before it. Used
+/// by both `start` and `ensure_running` so containers come up in dependency
+/// order instead of whatever order `graph.nodes` happens to iterate in.
+/// Edges pointing outside `node_ids` (e.g. a flow-filtered run that excludes
+/// a node's dependency) are ignored — nothing to order against.
+///
+/// A cycle can't make progress by definition; rather than fail the whole
+/// run over a cyclic `fghj.yaml` (resolution here is independent of `fghj
+/// validate` — see the module doc on that split), whatever's left over is
+/// appended in stable sorted order so a run still starts *something*.
+pub fn topological_start_order(node_ids: &[String], edges: &[Edge]) -> Vec<String> {
+    let ids: HashSet<&str> = node_ids.iter().map(|s| s.as_str()).collect();
+    let mut deps: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for id in node_ids {
+        deps.entry(id.as_str()).or_default();
+    }
+    for edge in edges {
+        if ids.contains(edge.from.as_str()) && ids.contains(edge.to.as_str()) {
+            deps.entry(edge.from.as_str())
+                .or_default()
+                .insert(edge.to.as_str());
+        }
+    }
+
+    let mut ordered: Vec<String> = Vec::new();
+    let mut placed: HashSet<&str> = HashSet::new();
+    // Sorted, not hashmap-iteration-order, so ties (and the cycle fallback
+    // below) are stable across calls.
+    let mut remaining: Vec<&str> = node_ids.iter().map(|s| s.as_str()).collect();
+    remaining.sort_unstable();
+
+    while !remaining.is_empty() {
+        let mut next_remaining = Vec::new();
+        let mut progressed = false;
+        for id in &remaining {
+            if deps[id].iter().all(|d| placed.contains(d)) {
+                ordered.push(id.to_string());
+                placed.insert(id);
+                progressed = true;
+            } else {
+                next_remaining.push(*id);
+            }
+        }
+        remaining = next_remaining;
+        if !progressed {
+            ordered.extend(remaining.into_iter().map(str::to_string));
+            break;
+        }
+    }
+    ordered
+}
+
+/// Polls a container's declared healthcheck (if any) until it reports
+/// "healthy", for up to two minutes — long enough for a real database's own
+/// startup healthcheck, short enough that a genuinely broken one doesn't
+/// hang a run forever. Returns as soon as there's nothing more to wait for:
+/// no declared healthcheck, a terminal "unhealthy" report (best-effort —
+/// fghj proceeds rather than blocking the run indefinitely), or the
+/// container having vanished. Callers only call this at all when
+/// `node.healthcheck.is_some()`, but it's written to be a safe no-op
+/// otherwise too.
+async fn wait_for_healthy(docker: &bollard::Docker, container_name: &str) {
+    for _ in 0..60 {
+        match docker::inspect_health(docker, container_name).await {
+            Ok(Some(status)) if status == "healthy" || status == "unhealthy" => return,
+            Ok(None) => return,
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// Parses a `.env`-style file's contents into "KEY=value" pairs — blank
+/// lines and `#`-comments are skipped, and matching surrounding quotes on
+/// the value are stripped (the common `.env` convention). No multi-line
+/// values or `export` prefixes: real `.env` files in the wild are simple
+/// enough that this covers the practical cases, same scope Compose's own
+/// `env_file` support covers.
+fn parse_env_file(contents: &str) -> Vec<String> {
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            let key = key.trim();
+            let mut value = value.trim();
+            if value.len() >= 2
+                && ((value.starts_with('"') && value.ends_with('"'))
+                    || (value.starts_with('\'') && value.ends_with('\'')))
+            {
+                value = &value[1..value.len() - 1];
+            }
+            Some(format!("{key}={value}"))
+        })
+        .collect()
 }
 
 /// A `*.fghj.internal` name this container answers to, and the `127.0.0.1`
@@ -262,16 +363,24 @@ impl RunRegistry {
 
         let owner = self.db.clone().load_owner().await.ok().flatten();
 
+        let node_map: HashMap<&str, &Node> =
+            graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+        let target_ids: Vec<String> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind != "flow")
+            .filter(|n| {
+                spec.flow
+                    .as_deref()
+                    .is_none_or(|flow| n.flows.iter().any(|f| f == flow))
+            })
+            .map(|n| n.id.clone())
+            .collect();
+        let ordered_ids = topological_start_order(&target_ids, &graph.edges);
+
         let mut containers = Vec::new();
-        for node in &graph.nodes {
-            if node.kind == "flow" {
-                continue;
-            }
-            if let Some(flow) = &spec.flow
-                && !node.flows.iter().any(|f| f == flow)
-            {
-                continue;
-            }
+        for node_id in &ordered_ids {
+            let node = node_map[node_id.as_str()];
             match self
                 .start_node(
                     graph,
@@ -283,7 +392,12 @@ impl RunRegistry {
                 )
                 .await
             {
-                Ok(info) => containers.push(info),
+                Ok(info) => {
+                    if node.healthcheck.is_some() {
+                        wait_for_healthy(&self.docker, &info.container_name).await;
+                    }
+                    containers.push(info);
+                }
                 Err(e) => {
                     for c in &containers {
                         docker::stop_and_remove(&self.docker, &c.container_name).await;
@@ -335,14 +449,19 @@ impl RunRegistry {
 
         let owner = self.db.clone().load_owner().await.ok().flatten();
 
-        let targets: Vec<&Node> = graph
+        let node_map: HashMap<&str, &Node> =
+            graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+        let target_ids: Vec<String> = graph
             .nodes
             .iter()
             .filter(|n| n.kind != "flow")
             .filter(|n| flow.is_none_or(|flow| n.flows.iter().any(|f| f == flow)))
+            .map(|n| n.id.clone())
             .collect();
+        let ordered_ids = topological_start_order(&target_ids, &graph.edges);
 
-        for node in targets {
+        for node_id in &ordered_ids {
+            let node = node_map[node_id.as_str()];
             let container_name = format!(
                 "fghj-{}-{}-{}",
                 sanitize_label(&graph.workspace_name),
@@ -370,6 +489,9 @@ impl RunRegistry {
                     owner.as_ref(),
                 )
                 .await?;
+            if node.healthcheck.is_some() {
+                wait_for_healthy(&self.docker, &info.container_name).await;
+            }
             state.containers.retain(|c| c.node_id != info.node_id);
             state.containers.push(info);
             // Saved after every node, not just at the end, so a later
@@ -424,18 +546,40 @@ impl RunRegistry {
         // (fghjd's DNS server, which answers any name in the zone).
         let domain = derive_domain(&node.id, &node.domain_scope, &graph.workspace_name, run_id);
 
-        // Where a service's relative bind-mount `host` paths resolve against
-        // — the repo's checkout root, not `build.context` (Compose resolves
-        // bind-mount sources relative to the compose file's directory; this
-        // is the fghj equivalent). Never read for a backing node, which can
-        // only declare `Named` volumes (see `resolver::VolumeMount`).
+        // Where a node's relative bind-mount `host` / `env_file` paths
+        // resolve against — the repo's checkout root, not `build.context`
+        // (Compose resolves both relative to the compose file's directory;
+        // this is the fghj equivalent). For a service, its own checkout
+        // root; for a backing dependency, which has no checkout of its own,
+        // the *owning* service's checkout root (set below, via the graph's
+        // "owns" edge).
         let mut volume_base: Option<PathBuf> = None;
 
         let image = match node.kind.as_str() {
-            "backing" => match node.image.clone() {
-                Some(img) => img,
-                None => bail!("backing node {} has no image", node.id),
-            },
+            "backing" => {
+                // A backing dependency has no checkout of its own to resolve
+                // a relative `env_file` (or bind-mount `host`) path against —
+                // same rule Compose uses, resolving `env_file` against the
+                // compose file's own directory regardless of `build` vs
+                // `image`. Its equivalent of "the compose file's directory"
+                // is the *owning* service's checkout root: the service whose
+                // fghj.yaml declares this dependency inline, found via the
+                // graph's "owns" edge (`resolver::visit_dependency` always
+                // pushes owner -> backing).
+                let owner_local_path = graph
+                    .edges
+                    .iter()
+                    .find(|e| e.kind == "owns" && e.to == node.id)
+                    .and_then(|e| graph.nodes.iter().find(|n| n.id == e.from))
+                    .and_then(|n| n.local_path.as_ref());
+                if let Some(owner_local_path) = owner_local_path {
+                    volume_base = Some(self.workspace.join(owner_local_path));
+                }
+                match node.image.clone() {
+                    Some(img) => img,
+                    None => bail!("backing node {} has no image", node.id),
+                }
+            }
             _ => {
                 let build = node.build.clone().unwrap_or(crate::resolver::NodeBuild {
                     context: ".".to_string(),
@@ -477,8 +621,14 @@ impl RunRegistry {
                             docker::materialize_checkout(&mirror, branch, &checkout).await?;
                         volume_base = Some(checkout_root.clone());
                         let build_dir = checkout_root.join(&build.context);
-                        docker::build_image(&self.docker, &build_dir, &build.dockerfile, &tag)
-                            .await?;
+                        docker::build_image(
+                            &self.docker,
+                            &build_dir,
+                            &build.dockerfile,
+                            &tag,
+                            node.platform.as_deref(),
+                        )
+                        .await?;
                         tag
                     }
                     // Default: build straight from the live workspace checkout,
@@ -497,8 +647,14 @@ impl RunRegistry {
                         let repo_root = self.workspace.join(&local_path);
                         volume_base = Some(repo_root.clone());
                         let build_dir = repo_root.join(&build.context);
-                        docker::build_image(&self.docker, &build_dir, &build.dockerfile, &tag)
-                            .await?;
+                        docker::build_image(
+                            &self.docker,
+                            &build_dir,
+                            &build.dockerfile,
+                            &tag,
+                            node.platform.as_deref(),
+                        )
+                        .await?;
                         tag
                     }
                 }
@@ -539,7 +695,7 @@ impl RunRegistry {
                     } else {
                         volume_base
                             .as_ref()
-                            .expect("service node with volumes has a resolved checkout root")
+                            .expect("node with volumes has a resolved checkout root")
                             .join(host)
                     };
                     format!(
@@ -564,19 +720,51 @@ impl RunRegistry {
             })
             .collect();
 
+        // `env_file` entries load first, in declared order, then
+        // `environment` is applied on top — same precedence as Compose,
+        // relying on Docker's own last-value-wins behavior for a flat `-e`
+        // list rather than de-duping keys here. Relative paths resolve
+        // against `volume_base` — this node's own checkout root for a
+        // service, or the owning service's for a backing dependency.
+        let mut env: Vec<String> = Vec::new();
+        for path in &node.env_file {
+            let file_path = if Path::new(path).is_absolute() {
+                PathBuf::from(path)
+            } else {
+                volume_base
+                    .as_ref()
+                    .expect("node with env_file has a resolved checkout root")
+                    .join(path)
+            };
+            let contents = std::fs::read_to_string(&file_path)
+                .with_context(|| format!("failed to read env_file {}", file_path.display()))?;
+            env.extend(parse_env_file(&contents));
+        }
+        env.extend(node.environment.iter().cloned());
+
         docker::run_container(
             &self.docker,
             &docker::RunOpts {
                 name: &container_name,
                 network,
                 aliases: &aliases,
-                env: &node.environment,
+                env: &env,
                 ports: &port_list,
                 image: &image,
                 command: &node.command,
                 project: network,
                 service_name: &node.id,
                 binds: &binds,
+                restart_policy: &node.restart,
+                user: node.user.as_deref(),
+                working_dir: node.working_dir.as_deref(),
+                labels: &node.labels,
+                cap_add: &node.cap_add,
+                cap_drop: &node.cap_drop,
+                privileged: node.privileged,
+                extra_hosts: &node.extra_hosts,
+                healthcheck: node.healthcheck.as_ref(),
+                platform: node.platform.as_deref(),
             },
         )
         .await?;
@@ -708,6 +896,62 @@ mod tests {
         );
         assert_eq!(sanitize_label("already-clean"), "already-clean");
         assert_eq!(sanitize_label("__leading__"), "leading");
+    }
+
+    fn edge(from: &str, to: &str, kind: &str) -> Edge {
+        Edge {
+            from: from.to_string(),
+            to: to.to_string(),
+            kind: kind.to_string(),
+            branch: None,
+            flows: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn topological_start_order_places_dependencies_before_dependents() {
+        let ids = vec!["app".to_string(), "db".to_string()];
+        let edges = vec![edge("app", "db", "owns")];
+        let order = topological_start_order(&ids, &edges);
+        let db_pos = order.iter().position(|id| id == "db").unwrap();
+        let app_pos = order.iter().position(|id| id == "app").unwrap();
+        assert!(db_pos < app_pos);
+    }
+
+    #[test]
+    fn topological_start_order_ignores_edges_outside_the_target_set() {
+        // A flow-filtered run can exclude a node's dependency entirely —
+        // that edge should just be ignored, not panic on a missing id.
+        let ids = vec!["app".to_string()];
+        let edges = vec![edge("app", "not-in-this-run", "depends-on")];
+        let order = topological_start_order(&ids, &edges);
+        assert_eq!(order, vec!["app".to_string()]);
+    }
+
+    #[test]
+    fn topological_start_order_breaks_cycles_instead_of_looping_forever() {
+        let ids = vec!["a".to_string(), "b".to_string()];
+        let edges = vec![edge("a", "b", "depends-on"), edge("b", "a", "depends-on")];
+        let order = topological_start_order(&ids, &edges);
+        let mut sorted = order.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn parse_env_file_skips_blanks_and_comments_and_strips_matching_quotes() {
+        let contents =
+            "# a comment\n\nFOO=bar\nBAZ=\"quoted value\"\nSINGLE='hi'\nMISMATCHED=\"oops'\n";
+        let pairs = parse_env_file(contents);
+        assert_eq!(
+            pairs,
+            vec![
+                "FOO=bar",
+                "BAZ=quoted value",
+                "SINGLE=hi",
+                "MISMATCHED=\"oops'",
+            ]
+        );
     }
 
     #[test]

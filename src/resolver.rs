@@ -44,6 +44,26 @@ fn default_domain_scope() -> String {
     "run".to_string()
 }
 
+fn default_restart() -> String {
+    "no".to_string()
+}
+
+/// Mirrors `#Healthcheck` in `schema/dependency.cue`. `interval`/`timeout`/
+/// `start_period` are in seconds here — converted to the nanoseconds
+/// Docker's API wants at the `docker::run_container` boundary.
+#[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct Healthcheck {
+    pub test: Vec<String>,
+    #[serde(default)]
+    pub interval: Option<u64>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+    #[serde(default)]
+    pub start_period: Option<u64>,
+    #[serde(default)]
+    pub retries: Option<u64>,
+}
+
 /// Mirrors `#Environment` in `schema/dependency.cue`: Compose accepts `environment`
 /// as either a map of KEY: value or a list of "KEY=value" strings.
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -81,11 +101,33 @@ struct ServiceConfig {
     #[serde(default)]
     environment: Environment,
     #[serde(default)]
+    env_file: Vec<String>,
+    #[serde(default)]
     command: Vec<String>,
     #[serde(default)]
     volumes: Vec<VolumeMount>,
     #[serde(default)]
     additional_hosts: Vec<String>,
+    #[serde(default = "default_restart")]
+    restart: String,
+    #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
+    working_dir: Option<String>,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+    #[serde(default)]
+    cap_add: Vec<String>,
+    #[serde(default)]
+    cap_drop: Vec<String>,
+    #[serde(default)]
+    privileged: bool,
+    #[serde(default)]
+    extra_hosts: Vec<String>,
+    #[serde(default)]
+    healthcheck: Option<Healthcheck>,
+    #[serde(default)]
+    platform: Option<String>,
     #[serde(default)]
     dependencies: Vec<Dependency>,
 }
@@ -133,6 +175,49 @@ pub struct PortConfig {
     pub host_port: Option<u16>,
 }
 
+/// The fields of a `Dependency::Backing` — pulled out into its own struct
+/// (behind a `Box` at the use site) rather than inlined as a large struct
+/// variant, since `Dependency::Service`/`SharedBacking` are tiny by
+/// comparison and clippy's `large_enum_variant` flags the size gap
+/// otherwise.
+#[derive(Debug, Deserialize, Clone)]
+struct BackingDependencyConfig {
+    name: String,
+    image: String,
+    #[serde(default)]
+    environment: Environment,
+    #[serde(default)]
+    ports: Vec<String>,
+    #[serde(default = "default_domain_scope")]
+    domain_scope: String,
+    #[serde(default)]
+    command: Vec<String>,
+    #[serde(default)]
+    volumes: Vec<VolumeMount>,
+    #[serde(default)]
+    platform: Option<String>,
+    #[serde(default)]
+    env_file: Vec<String>,
+    #[serde(default = "default_restart")]
+    restart: String,
+    #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
+    working_dir: Option<String>,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+    #[serde(default)]
+    cap_add: Vec<String>,
+    #[serde(default)]
+    cap_drop: Vec<String>,
+    #[serde(default)]
+    privileged: bool,
+    #[serde(default)]
+    extra_hosts: Vec<String>,
+    #[serde(default)]
+    healthcheck: Option<Healthcheck>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "kind")]
 enum Dependency {
@@ -142,20 +227,7 @@ enum Dependency {
         default_branch: String,
     },
     #[serde(rename = "backing")]
-    Backing {
-        name: String,
-        image: String,
-        #[serde(default)]
-        environment: Environment,
-        #[serde(default)]
-        ports: Vec<String>,
-        #[serde(default = "default_domain_scope")]
-        domain_scope: String,
-        #[serde(default)]
-        command: Vec<String>,
-        #[serde(default)]
-        volumes: Vec<VolumeMount>,
-    },
+    Backing(Box<BackingDependencyConfig>),
     #[serde(rename = "shared-backing")]
     SharedBacking { repo: String, name: String },
 }
@@ -220,6 +292,39 @@ pub struct Node {
     /// stub nodes.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub additional_hosts: Vec<String>,
+    /// `.env`-style files to load before `environment` — see
+    /// `#RunOptions.env_file`'s doc comment. Resolved and merged into
+    /// `environment` by `runs::start_node`, not here — resolving a relative
+    /// path needs a checkout root (this node's own for a service, the owning
+    /// service's for a backing dependency), which isn't known until
+    /// `start_node` runs.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub env_file: Vec<String>,
+    /// Compose-equivalent restart policy — see `#RunOptions.restart`.
+    #[serde(default = "default_restart")]
+    pub restart: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub working_dir: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub labels: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub cap_add: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub cap_drop: Vec<String>,
+    #[serde(default)]
+    pub privileged: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub extra_hosts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub healthcheck: Option<Healthcheck>,
+    /// Pins the platform — see `#RunOptions.platform`'s doc comment. For a
+    /// service, wired into the build step (`docker::build_image`); for a
+    /// backing dependency, into `create_container`'s platform-aware image
+    /// lookup. Always `None` for stub nodes.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub platform: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -457,6 +562,17 @@ impl<'a> ResolveCtx<'a> {
                 command: component.service.command.clone(),
                 volumes: component.service.volumes.clone(),
                 additional_hosts: component.service.additional_hosts.clone(),
+                env_file: component.service.env_file.clone(),
+                restart: component.service.restart.clone(),
+                user: component.service.user.clone(),
+                working_dir: component.service.working_dir.clone(),
+                labels: component.service.labels.clone(),
+                cap_add: component.service.cap_add.clone(),
+                cap_drop: component.service.cap_drop.clone(),
+                privileged: component.service.privileged,
+                extra_hosts: component.service.extra_hosts.clone(),
+                healthcheck: component.service.healthcheck.clone(),
+                platform: component.service.platform.clone(),
             }
         });
 
@@ -550,6 +666,17 @@ impl<'a> ResolveCtx<'a> {
                 command: Vec::new(),
                 volumes: Vec::new(),
                 additional_hosts: Vec::new(),
+                env_file: Vec::new(),
+                restart: default_restart(),
+                user: None,
+                working_dir: None,
+                labels: BTreeMap::new(),
+                cap_add: Vec::new(),
+                cap_drop: Vec::new(),
+                privileged: false,
+                extra_hosts: Vec::new(),
+                healthcheck: None,
+                platform: None,
             });
             stub_id
         };
@@ -573,15 +700,27 @@ impl<'a> ResolveCtx<'a> {
             } => {
                 self.visit_service_dependency(owner_id, &repo, &default_branch);
             }
-            Dependency::Backing {
-                name,
-                image,
-                environment,
-                ports,
-                domain_scope,
-                command,
-                volumes,
-            } => {
+            Dependency::Backing(backing) => {
+                let BackingDependencyConfig {
+                    name,
+                    image,
+                    environment,
+                    ports,
+                    domain_scope,
+                    command,
+                    volumes,
+                    platform,
+                    env_file,
+                    restart,
+                    user,
+                    working_dir,
+                    labels,
+                    cap_add,
+                    cap_drop,
+                    privileged,
+                    extra_hosts,
+                    healthcheck,
+                } = *backing;
                 // Leaf-first, same convention as service ids and named
                 // ports (`{port_name}.{node's domain}`): the specific thing
                 // comes first, its owning scope after.
@@ -610,6 +749,17 @@ impl<'a> ResolveCtx<'a> {
                         command,
                         volumes,
                         additional_hosts: Vec::new(),
+                        env_file,
+                        restart,
+                        user,
+                        working_dir,
+                        labels,
+                        cap_add,
+                        cap_drop,
+                        privileged,
+                        extra_hosts,
+                        healthcheck,
+                        platform,
                     });
                 self.edges.push(Edge {
                     from: owner_id.to_string(),
@@ -1000,6 +1150,94 @@ mod tests {
             backing.command,
             vec!["mysqld", "--sql_mode=NO_ENGINE_SUBSTITUTION"]
         );
+    }
+
+    #[test]
+    fn run_options_round_trip_into_graph_node_for_service_and_backing() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  name: myservice\n\
+             \x20 env_file:\n\
+             \x20   - .env\n\
+             \x20 platform: linux/arm64\n\
+             \x20 restart: always\n\
+             \x20 user: \"1000:1000\"\n\
+             \x20 working_dir: /app\n\
+             \x20 labels:\n\
+             \x20   team: platform\n\
+             \x20 cap_add: [\"NET_ADMIN\"]\n\
+             \x20 cap_drop: [\"ALL\"]\n\
+             \x20 privileged: true\n\
+             \x20 extra_hosts:\n\
+             \x20   - \"metadata:169.254.169.254\"\n\
+             \x20 dependencies:\n\
+             \x20   - kind: backing\n\
+             \x20     name: postgres\n\
+             \x20     image: postgres:16\n\
+             \x20     ports: [\"5432\"]\n\
+             \x20     platform: linux/amd64\n\
+             \x20     env_file:\n\
+             \x20       - .env.postgres\n\
+             \x20     restart: unless-stopped\n\
+             \x20     healthcheck:\n\
+             \x20       test: [\"CMD\", \"pg_isready\"]\n\
+             \x20       interval: 5\n\
+             \x20       retries: 3\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        let service = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "myservice.myservice")
+            .unwrap();
+        assert_eq!(service.env_file, vec![".env"]);
+        assert_eq!(service.restart, "always");
+        assert_eq!(service.user.as_deref(), Some("1000:1000"));
+        assert_eq!(service.working_dir.as_deref(), Some("/app"));
+        assert_eq!(
+            service.labels.get("team").map(String::as_str),
+            Some("platform")
+        );
+        assert_eq!(service.cap_add, vec!["NET_ADMIN"]);
+        assert_eq!(service.cap_drop, vec!["ALL"]);
+        assert!(service.privileged);
+        assert_eq!(service.extra_hosts, vec!["metadata:169.254.169.254"]);
+        assert_eq!(service.platform.as_deref(), Some("linux/arm64"));
+
+        let backing = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "postgres.myservice.myservice")
+            .unwrap();
+        assert_eq!(backing.platform.as_deref(), Some("linux/amd64"));
+        assert_eq!(backing.env_file, vec![".env.postgres"]);
+        assert_eq!(backing.restart, "unless-stopped");
+        let hc = backing.healthcheck.as_ref().unwrap();
+        assert_eq!(hc.test, vec!["CMD", "pg_isready"]);
+        assert_eq!(hc.interval, Some(5));
+        assert_eq!(hc.retries, Some(3));
+    }
+
+    #[test]
+    fn run_options_default_to_compose_equivalent_no_ops() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(tmp.path(), "myservice", "  name: myservice\n");
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+        let service = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "myservice.myservice")
+            .unwrap();
+        assert_eq!(service.restart, "no");
+        assert!(service.user.is_none());
+        assert!(service.labels.is_empty());
+        assert!(!service.privileged);
+        assert!(service.healthcheck.is_none());
     }
 
     #[test]

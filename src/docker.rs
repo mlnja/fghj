@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -6,8 +6,8 @@ use anyhow::{Context, Result, bail};
 use bollard::Docker;
 use bollard::body_full;
 use bollard::models::{
-    ContainerCreateBody, EndpointSettings, HostConfig, NetworkCreateRequest, NetworkingConfig,
-    PortBinding,
+    ContainerCreateBody, EndpointSettings, HealthConfig, HostConfig, NetworkCreateRequest,
+    NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     BuildImageOptionsBuilder, CreateContainerOptionsBuilder, InspectContainerOptionsBuilder,
@@ -15,6 +15,21 @@ use bollard::query_parameters::{
 };
 use futures_util::StreamExt;
 use futures_util::stream::Stream;
+
+use crate::resolver::Healthcheck;
+
+/// Maps `#RunOptions.restart`'s CUE-side spelling to bollard's enum — an
+/// unrecognized value (shouldn't happen once `fghj validate` has run, but
+/// `resolver.rs` parses YAML independently of CUE, see its module doc) falls
+/// back to `"no"` rather than erroring, matching the CUE default.
+fn restart_policy_name(restart: &str) -> RestartPolicyNameEnum {
+    match restart {
+        "always" => RestartPolicyNameEnum::ALWAYS,
+        "on-failure" => RestartPolicyNameEnum::ON_FAILURE,
+        "unless-stopped" => RestartPolicyNameEnum::UNLESS_STOPPED,
+        _ => RestartPolicyNameEnum::NO,
+    }
+}
 
 pub async fn ensure_network(docker: &Docker, name: &str) -> Result<()> {
     let result = docker
@@ -72,6 +87,7 @@ pub async fn build_image(
     context_dir: &Path,
     dockerfile: &str,
     tag: &str,
+    platform: Option<&str>,
 ) -> Result<()> {
     let context_dir = context_dir.to_path_buf();
     let tar_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
@@ -86,11 +102,14 @@ pub async fn build_image(
     .await
     .context("tar task panicked")??;
 
-    let options = BuildImageOptionsBuilder::default()
+    let mut options_builder = BuildImageOptionsBuilder::default()
         .dockerfile(dockerfile)
         .t(tag)
-        .rm(true)
-        .build();
+        .rm(true);
+    if let Some(platform) = platform {
+        options_builder = options_builder.platform(platform);
+    }
+    let options = options_builder.build();
 
     let mut stream = docker.build_image(options, None, Some(body_full(tar_bytes.into())));
     while let Some(item) = stream.next().await {
@@ -130,10 +149,34 @@ pub struct RunOpts<'a> {
     /// two by whether the left side contains a `/`, so both forms share this
     /// one field.
     pub binds: &'a [String],
+    /// `#RunOptions.restart` — see `docker::restart_policy_name`.
+    pub restart_policy: &'a str,
+    pub user: Option<&'a str>,
+    pub working_dir: Option<&'a str>,
+    /// User-declared labels — merged under fghj's own `com.docker.compose.*`
+    /// labels below, which always win on key conflict.
+    pub labels: &'a BTreeMap<String, String>,
+    pub cap_add: &'a [String],
+    pub cap_drop: &'a [String],
+    pub privileged: bool,
+    /// Pre-formatted `HostConfig.extra_hosts` entries (`"hostname:ip"`).
+    pub extra_hosts: &'a [String],
+    pub healthcheck: Option<&'a Healthcheck>,
+    /// Pins the image's platform for `create_container`'s platform-aware
+    /// image lookup (`os[/arch[/variant]]`, e.g. "linux/amd64"). fghj doesn't
+    /// pull images itself today, so this only helps when the requested
+    /// platform's image is already present locally.
+    pub platform: Option<&'a str>,
 }
 
 pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
-    let mut labels = HashMap::new();
+    // User-declared labels first, so fghj's own bookkeeping labels below
+    // always win on a key conflict — see `RunOpts.labels`'s doc comment.
+    let mut labels: HashMap<String, String> = opts
+        .labels
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     labels.insert(
         "com.docker.compose.project".to_string(),
         opts.project.to_string(),
@@ -178,12 +221,42 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
         env: Some(opts.env.to_vec()),
         labels: Some(labels),
         exposed_ports: Some(exposed_ports),
+        user: opts.user.map(|s| s.to_string()),
+        working_dir: opts.working_dir.map(|s| s.to_string()),
+        healthcheck: opts.healthcheck.map(|hc| HealthConfig {
+            test: Some(hc.test.clone()),
+            interval: hc.interval.map(|s| (s * 1_000_000_000) as i64),
+            timeout: hc.timeout.map(|s| (s * 1_000_000_000) as i64),
+            start_period: hc.start_period.map(|s| (s * 1_000_000_000) as i64),
+            retries: hc.retries.map(|r| r as i64),
+            ..Default::default()
+        }),
         host_config: Some(HostConfig {
             port_bindings: Some(port_bindings),
             binds: if opts.binds.is_empty() {
                 None
             } else {
                 Some(opts.binds.to_vec())
+            },
+            restart_policy: Some(RestartPolicy {
+                name: Some(restart_policy_name(opts.restart_policy)),
+                maximum_retry_count: None,
+            }),
+            cap_add: if opts.cap_add.is_empty() {
+                None
+            } else {
+                Some(opts.cap_add.to_vec())
+            },
+            cap_drop: if opts.cap_drop.is_empty() {
+                None
+            } else {
+                Some(opts.cap_drop.to_vec())
+            },
+            privileged: Some(opts.privileged),
+            extra_hosts: if opts.extra_hosts.is_empty() {
+                None
+            } else {
+                Some(opts.extra_hosts.to_vec())
             },
             ..Default::default()
         }),
@@ -193,9 +266,11 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
         ..Default::default()
     };
 
-    let create_opts = CreateContainerOptionsBuilder::default()
-        .name(opts.name)
-        .build();
+    let mut create_opts_builder = CreateContainerOptionsBuilder::default().name(opts.name);
+    if let Some(platform) = opts.platform {
+        create_opts_builder = create_opts_builder.platform(platform);
+    }
+    let create_opts = create_opts_builder.build();
     let result = async {
         docker.create_container(Some(create_opts), body).await?;
         docker.start_container(opts.name, None).await?;
@@ -278,6 +353,33 @@ pub async fn inspect_status(
         status,
         published_port,
     }))
+}
+
+/// Inspects a container's declared `HEALTHCHECK` status ("starting",
+/// "healthy", "unhealthy"), if it has one. Returns `Ok(None)` both when the
+/// container doesn't exist (404, same convention as `inspect_status`) and
+/// when it exists but declares no healthcheck at all — callers that need to
+/// tell those two cases apart should call `inspect_status` too.
+pub async fn inspect_health(docker: &Docker, name: &str) -> Result<Option<String>> {
+    let inspected = match docker
+        .inspect_container(
+            name,
+            Some(InspectContainerOptionsBuilder::default().build()),
+        )
+        .await
+    {
+        Ok(entry) => entry,
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => return Ok(None),
+        Err(e) => return Err(e).context("docker inspect_container failed"),
+    };
+
+    Ok(inspected
+        .state
+        .and_then(|s| s.health)
+        .and_then(|h| h.status)
+        .map(|s| s.to_string()))
 }
 
 /// One-shot: fetches the last `tail` lines and returns them as a string.

@@ -38,7 +38,22 @@ service:
   domain_scope: run
   environment:
     - PORT=8080
+  env_file:
+    - .env
+  platform: linux/arm64
   command: ["npm", "run", "dev"]
+  restart: unless-stopped
+  user: "1000:1000"
+  working_dir: /app
+  labels:
+    team: platform
+  cap_add: ["NET_ADMIN"]
+  extra_hosts:
+    - "metadata:169.254.169.254"
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+    interval: 10
+    retries: 3
   dependencies:
     - kind: service
       repo: git@github.com:acme/auth-service.git
@@ -54,7 +69,17 @@ service:
 | `ports` | map of container-port→`#Port` | Declared container ports. The map key is the literal container port number (e.g. `"8080"`), published to Docker as-is — not a semantic label. See [Ports](#ports) below. |
 | `domain_scope` | `"run"` \| `"stable"` | Whether this service's derived domain includes the run id. Defaults to `"run"`. See [Node identity & domains](/concepts/node-identity-and-domains/#domain-derivation-one-formula-no-exceptions). |
 | `environment` | map or list | Either `{KEY: value}` or a list of `"KEY=value"` strings — mirrors Docker Compose's own `environment` shape. |
+| `env_file` | list of strings | `.env`-style files loaded *before* `environment` — Compose's `env_file`. Each path resolves against this repo's own checkout root, same rule as `#Volume.host`. An explicit `environment` entry always wins over one loaded from a file. Also available on `kind: backing` — see its own field table below for how the path resolves there. |
+| `platform` | string, optional | Pins the platform (`os[/arch[/variant]]`, e.g. `linux/arm64`) passed to `docker build --platform`, for cross-compiling this service's image to a specific architecture. Unset (the default) builds for the host's own platform. |
 | `command` | list of strings | Overrides the image's default `CMD`, Compose-`command`-style. Empty (the default) leaves the image's own `CMD`/`ENTRYPOINT` untouched. |
+| `restart` | `"no"` \| `"always"` \| `"on-failure"` \| `"unless-stopped"` | Compose-equivalent restart policy. Defaults to `"no"` — a stopped container stays stopped; `fghj daemon`'s own `ensure_running` is the usual way a container comes back, not Docker's own restart machinery. |
+| `user` | string, optional | Overrides the image's default container user, e.g. `"1000:1000"` or `"postgres"`. |
+| `working_dir` | string, optional | Overrides the image's default working directory. |
+| `labels` | map of string→string | Extra container labels, merged under fghj's own `com.docker.compose.*` labels — fghj's own always win on a key conflict. |
+| `cap_add` / `cap_drop` | list of strings | Linux capabilities to add/drop — Compose's `cap_add`/`cap_drop`. |
+| `privileged` | bool | Runs the container with extended, near-host-equivalent privileges. Defaults to `false` — only set this for a real, specific need. |
+| `extra_hosts` | list of `"hostname:ip"` strings | Extra literal entries written into *this container's own* `/etc/hosts` — Compose's `extra_hosts`. Distinct from `additional_hosts` below: this is the container resolving something else, not the host resolving this container. |
+| `healthcheck` | `#Healthcheck`, optional | A Docker `HEALTHCHECK`. See [Healthcheck & start order](#healthcheck--start-order) below. |
 | `volumes` | list of `#Volume` | Bind mounts and named volumes. See [Volumes](#volumes) below. |
 | `additional_hosts` | list of `#AdditionalHost` | Extra literal hostname aliases this service also answers on, alongside its derived domain. See [Additional hosts](#additional-hosts) below. |
 | `dependencies` | list of `#Dependency` | This service's baseline dependencies — always pulled in regardless of which flow is selected. See [Dependencies](#dependencies) below. |
@@ -210,6 +235,34 @@ An alias can never sit inside `fghj.internal` itself — that domain is
 always *derived*, never author-declared, the same rule `ports`' `name`
 field follows.
 
+## Healthcheck & start order
+
+```yaml
+service:
+  name: api
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+    interval: 10
+    timeout: 5
+    start_period: 30
+    retries: 3
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `test` | list of strings | The command Docker runs to check health, e.g. `["CMD", "pg_isready"]` — same shape as Docker's own `HEALTHCHECK CMD`. |
+| `interval` / `timeout` / `start_period` | seconds, optional | Same semantics as Docker's `HEALTHCHECK` options of the same name (given in seconds here, not nanoseconds). |
+| `retries` | integer, optional | Consecutive failures before Docker marks the container `unhealthy`. |
+
+There's no separate `depends_on: {condition: ...}` field — a node that
+declares `healthcheck` is automatically waited on: any run that starts it
+blocks (up to two minutes) until Docker reports it `healthy` before moving
+on to the nodes that depend on it. A node with no `healthcheck` behaves
+exactly as before — dependents proceed as soon as it's started, not
+waiting on anything. This applies to both `fghj run` (starting a fresh run)
+and picking a flow (`ensure_running`); containers within a run always start
+in dependency order (`depends-on`/`owns` edges), not workspace-scan order.
+
 ## Dependencies
 
 Three kinds, distinguished by `kind`:
@@ -247,6 +300,14 @@ bind to the same instance via `kind: shared-backing` below.
     POSTGRES_PASSWORD: dev
   domain_scope: run
   command: ["mysqld", "--sql_mode=NO_ENGINE_SUBSTITUTION"]
+  platform: linux/amd64
+  env_file:
+    - .env.postgres
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "pg_isready"]
+    interval: 5
+    retries: 5
   volumes:
     - name: pgdata
       container: /var/lib/postgresql/data
@@ -260,6 +321,9 @@ bind to the same instance via `kind: shared-backing` below.
 | `environment` | Same shape as `service.environment`. |
 | `domain_scope` | `"run"` (default) or `"stable"` — same semantics as `service.domain_scope`. |
 | `command` | Same shape as `service.command` — overrides the image's default `CMD`, e.g. to pass extra startup flags to a stock database image. |
+| `platform` | Pins the image's platform (`os[/arch[/variant]]`, e.g. `linux/amd64`) — for a backing image only published for one architecture, so Docker's platform-aware pull/lookup gets the right one. |
+| `env_file` | Same shape as `service.env_file`, but resolved differently: since a backing dependency has no checkout of its own, each path resolves against the *declaring* service's checkout root instead — the same rule Compose uses, resolving `env_file` against the compose file's own directory regardless of `build` vs `image`. |
+| `restart` / `user` / `working_dir` / `labels` / `cap_add` / `cap_drop` / `privileged` / `extra_hosts` / `healthcheck` | Same shape and meaning as the equally-named `service.*` fields above. |
 | `volumes` | Same shape as `service.volumes` — see [Volumes](#volumes). A volume's own `scope` (default `"run"`) governs its lifecycle independently of this backing dependency's `domain_scope`; a named volume here (like `pgdata` above) is what makes the data survive a restart. |
 
 ### `kind: shared-backing`

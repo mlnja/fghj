@@ -15,12 +15,84 @@ package fghj
 	default_branch: string
 }
 
+// Mirrors Docker's own `HEALTHCHECK`/`HealthConfig`. `interval`/`timeout`/
+// `start_period` are given in seconds here (converted to the nanoseconds
+// Docker's API wants, at the `docker::run_container` boundary) so no CUE
+// author has to think in nanoseconds. When declared, any node that depends
+// on this one — a service depending on a backing dependency, or a service
+// depending on another service — waits for it to report "healthy" before
+// starting, instead of just "started"; see `runs::wait_for_healthy`.
+#Healthcheck: {
+	test: [...string] & [_, ...]
+	interval?:     uint & >0
+	timeout?:      uint & >0
+	start_period?: uint & >0
+	retries?:      uint & >0
+}
+
+// Docker Compose–parity knobs shared by both #Service and
+// #BackingDependency — embedded into each via `& #RunOptions` rather than
+// duplicated, since none of these differ between the two node kinds.
+#RunOptions: {
+	// Compose-equivalent restart policy, passed straight to Docker's
+	// `HostConfig.RestartPolicy`. "no" (the default) leaves a stopped
+	// container stopped — fghj's own `ensure_running` is the usual way a
+	// container comes back, not Docker's own restart machinery.
+	restart: *"no" | "always" | "on-failure" | "unless-stopped"
+	// Overrides the image's default container user — Compose's `user`,
+	// Docker's `ContainerCreateBody.User` (e.g. "1000:1000" or "postgres").
+	user?: string
+	// Overrides the image's default working directory — Compose's
+	// `working_dir`, Docker's `ContainerCreateBody.WorkingDir`.
+	working_dir?: string
+	// Extra container labels, merged under fghj's own `com.docker.compose.*`
+	// labels (see `docker::run_container`) — fghj's own labels always win on
+	// a key conflict, so a user can't accidentally break fghj's own
+	// container bookkeeping.
+	labels: {[string]: string} | *{}
+	// Linux capabilities to add/drop — Compose's `cap_add`/`cap_drop`,
+	// Docker's `HostConfig.CapAdd`/`CapDrop`.
+	cap_add: [...string] | *[]
+	cap_drop: [...string] | *[]
+	// Runs the container with extended (near-host-equivalent) privileges —
+	// Compose's `privileged`. Defaults to `false`; only set this for a real,
+	// specific need (e.g. a container that itself talks to the Docker
+	// daemon), same caution Compose's own docs give.
+	privileged: bool | *false
+	// Extra literal `hostname:IP` entries written into the container's own
+	// `/etc/hosts` — Compose's `extra_hosts`, Docker's
+	// `HostConfig.ExtraHosts`. Distinct from `#Service.additional_hosts`:
+	// this is the container resolving *something else*, not the host
+	// resolving *this* container.
+	extra_hosts: [...string & =~"^[^:]+:.+$"] | *[]
+	healthcheck?: #Healthcheck
+	// Pins the platform (Docker's `os[/arch[/variant]]`, e.g. "linux/amd64").
+	// On a #Service this targets `docker build --platform`, for cross-
+	// compiling the service's own image to a specific architecture. On a
+	// #BackingDependency it targets `create_container`'s platform-aware image
+	// lookup, for a backing image only published for one architecture. Unset
+	// (the default) lets Docker pick the host's own platform, same as today.
+	platform?: string
+	// `.env`-style files loaded before `environment`, Compose's `env_file`.
+	// On a #Service, each path resolves against this repo's own checkout
+	// root, same rule as `#Volume.host`. On a #BackingDependency, there's no
+	// checkout of its own, so each path resolves against the *owning*
+	// service's checkout root instead — the service whose fghj.yaml declares
+	// this dependency inline, same as Compose resolving `env_file` against
+	// the compose file's own directory regardless of `build` vs `image`.
+	// Declared entries are loaded in order, then `environment` is applied on
+	// top, so an explicit `environment` entry always wins over one loaded
+	// from a file.
+	env_file: [...string] | *[]
+}
+
 // A dependency on a backing service (a datastore, broker, etc. — the 12-Factor
 // App sense: any service consumed over the network that isn't code you own)
 // provisioned directly from an image — nothing to clone, no fghj.yaml of its
 // own. This service *owns* the resource: it's the one instance that
 // `#SharedBackingDependency` refs point at.
 #BackingDependency: {
+	#RunOptions
 	kind:        "backing"
 	name:        string & =~"^[a-z0-9][a-z0-9-]*$"
 	image:       string & =~"^[a-z0-9][a-z0-9._/-]*(:[a-zA-Z0-9._-]+)?$"
