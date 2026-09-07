@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 struct FlowConfig {
     #[allow(dead_code)]
     description: Option<String>,
+    #[serde(default)]
+    service: Option<String>,
     dependencies: Vec<Dependency>,
 }
 
@@ -17,7 +19,7 @@ struct FlowConfig {
 struct ComponentConfig {
     #[allow(dead_code)]
     version: String,
-    service: ServiceConfig,
+    services: BTreeMap<String, ServiceConfig>,
     #[serde(default)]
     flows: BTreeMap<String, FlowConfig>,
 }
@@ -91,7 +93,6 @@ impl Environment {
 
 #[derive(Debug, Deserialize, Clone)]
 struct ServiceConfig {
-    name: String,
     #[serde(default)]
     build: Option<Build>,
     #[serde(default)]
@@ -225,11 +226,18 @@ enum Dependency {
     Service {
         repo: String,
         default_branch: String,
+        #[serde(default)]
+        services: Vec<String>,
     },
     #[serde(rename = "backing")]
     Backing(Box<BackingDependencyConfig>),
     #[serde(rename = "shared-backing")]
-    SharedBacking { repo: String, name: String },
+    SharedBacking {
+        #[serde(default)]
+        repo: Option<String>,
+        service: String,
+        name: String,
+    },
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -521,72 +529,129 @@ struct ResolveCtx<'a> {
 }
 
 impl<'a> ResolveCtx<'a> {
-    /// Registers (and, unless already visited, recursively expands) the service
-    /// node for a repo already present on disk at `local_path`.
-    fn visit_local_service(&mut self, local_path: &str, component: &ComponentConfig) -> String {
-        // Leaf-first, qualified by the repo's own workspace folder name —
-        // `#Service.name` alone (e.g. "bff") is only a friendly label, not a
-        // unique id: two peer repos (no ownership relation between them, per
+    /// Registers (and, unless already visited, recursively expands) every
+    /// service node declared by a repo already present on disk at
+    /// `local_path`. Returns the id of each, keyed by its name in
+    /// `component.services` — cheap to call again for an already-visited
+    /// repo (just returns the same ids without re-walking dependencies).
+    fn visit_local_services(
+        &mut self,
+        local_path: &str,
+        component: &ComponentConfig,
+    ) -> BTreeMap<String, String> {
+        // Leaf-first, qualified by the repo's own workspace folder name — a
+        // service name (e.g. "bff") is only a friendly label, not a unique
+        // id: two peer repos (no ownership relation between them, per
         // [[flat-workspace-model]]) can legitimately declare the same one.
         // `local_path` is the one thing guaranteed unique per repo (it's a
         // real folder name — `scan_workspace` can't have two), so folding it
         // in always (not just when a collision is actually detected) means
         // adding a same-named peer repo later can never silently rehost an
         // existing one's domain out from under it.
-        let service_id = format!("{}.{local_path}", component.service.name);
+        let ids: BTreeMap<String, String> = component
+            .services
+            .keys()
+            .map(|name| (name.clone(), format!("{name}.{local_path}")))
+            .collect();
 
-        self.nodes.entry(service_id.clone()).or_insert_with(|| {
-            let dir = self.workspace.join(local_path);
-            let (repo, branch) = git_remote_and_branch(&dir);
-            let dirty = git_status_dirty(&dir);
-            Node {
-                id: service_id.clone(),
-                label: component.service.name.clone(),
-                kind: "service".into(),
-                image: None,
-                branch,
-                repo,
-                domain_scope: component.service.domain_scope.clone(),
-                local_path: Some(local_path.to_string()),
-                domain: String::new(),
-                downloaded: true,
-                dirty,
-                flows: Vec::new(),
-                build: component.service.build.as_ref().map(|b| NodeBuild {
-                    context: b.context.clone(),
-                    dockerfile: b.dockerfile.clone(),
-                    args: b.args.clone(),
-                }),
-                ports: component.service.ports.clone(),
-                environment: component.service.environment.to_pairs(),
-                command: component.service.command.clone(),
-                volumes: component.service.volumes.clone(),
-                additional_hosts: component.service.additional_hosts.clone(),
-                env_file: component.service.env_file.clone(),
-                restart: component.service.restart.clone(),
-                user: component.service.user.clone(),
-                working_dir: component.service.working_dir.clone(),
-                labels: component.service.labels.clone(),
-                cap_add: component.service.cap_add.clone(),
-                cap_drop: component.service.cap_drop.clone(),
-                privileged: component.service.privileged,
-                extra_hosts: component.service.extra_hosts.clone(),
-                healthcheck: component.service.healthcheck.clone(),
-                platform: component.service.platform.clone(),
-            }
-        });
+        for (name, service_id) in &ids {
+            let service = &component.services[name];
+            self.nodes.entry(service_id.clone()).or_insert_with(|| {
+                let dir = self.workspace.join(local_path);
+                let (repo, branch) = git_remote_and_branch(&dir);
+                let dirty = git_status_dirty(&dir);
+                Node {
+                    id: service_id.clone(),
+                    label: name.clone(),
+                    kind: "service".into(),
+                    image: None,
+                    branch,
+                    repo,
+                    domain_scope: service.domain_scope.clone(),
+                    local_path: Some(local_path.to_string()),
+                    domain: String::new(),
+                    downloaded: true,
+                    dirty,
+                    flows: Vec::new(),
+                    build: service.build.as_ref().map(|b| NodeBuild {
+                        context: b.context.clone(),
+                        dockerfile: b.dockerfile.clone(),
+                        args: b.args.clone(),
+                    }),
+                    ports: service.ports.clone(),
+                    environment: service.environment.to_pairs(),
+                    command: service.command.clone(),
+                    volumes: service.volumes.clone(),
+                    additional_hosts: service.additional_hosts.clone(),
+                    env_file: service.env_file.clone(),
+                    restart: service.restart.clone(),
+                    user: service.user.clone(),
+                    working_dir: service.working_dir.clone(),
+                    labels: service.labels.clone(),
+                    cap_add: service.cap_add.clone(),
+                    cap_drop: service.cap_drop.clone(),
+                    privileged: service.privileged,
+                    extra_hosts: service.extra_hosts.clone(),
+                    healthcheck: service.healthcheck.clone(),
+                    platform: service.platform.clone(),
+                }
+            });
+        }
 
         if !self.visited.insert(local_path.to_string()) {
-            return service_id;
+            return ids;
         }
 
-        self.check_ports(&service_id, &component.service);
-
-        for dep in component.service.dependencies.clone() {
-            self.visit_dependency(&service_id, dep);
+        for (name, service_id) in &ids {
+            let service = &component.services[name];
+            self.check_ports(service_id, service);
+            for dep in service.dependencies.clone() {
+                self.visit_dependency(service_id, local_path, dep);
+            }
         }
 
-        service_id
+        ids
+    }
+
+    /// Picks one service id out of `visit_local_services`' result: `wanted`
+    /// if given, or the sole entry if the repo declares exactly one and
+    /// `wanted` is `None`. Pushes a (non-fatal) warning and returns `None`
+    /// if that's ambiguous (multiple services, no `wanted`), the repo
+    /// declares none at all, or `wanted` names one that doesn't exist —
+    /// same "warn, don't panic" style as `check_ports`.
+    fn visit_local_service(
+        &mut self,
+        local_path: &str,
+        component: &ComponentConfig,
+        wanted: Option<&str>,
+    ) -> Option<String> {
+        let ids = self.visit_local_services(local_path, component);
+        let name = match wanted {
+            Some(name) => name.to_string(),
+            None => match ids.len() {
+                1 => return ids.into_values().next(),
+                0 => {
+                    self.warnings
+                        .push(format!("'{local_path}' declares no services"));
+                    return None;
+                }
+                _ => {
+                    self.warnings.push(format!(
+                        "'{local_path}' declares multiple services ({}); specify which one with `service:`",
+                        ids.keys().cloned().collect::<Vec<_>>().join(", ")
+                    ));
+                    return None;
+                }
+            },
+        };
+        match ids.get(&name) {
+            Some(id) => Some(id.clone()),
+            None => {
+                self.warnings
+                    .push(format!("'{local_path}' has no service named '{name}'"));
+                None
+            }
+        }
     }
 
     /// Warns (non-fatally) when a service declares more than one `primary`
@@ -616,13 +681,18 @@ impl<'a> ResolveCtx<'a> {
 
     /// Resolves a `Dependency::Service` reference to its conventional local
     /// path, then either recurses into it (if already on disk) or registers a
-    /// `downloaded: false` stub node (if not) — never clones.
+    /// `downloaded: false` stub node (if not) — never clones. `wanted_service`
+    /// picks which of the target repo's declared services this depends on
+    /// (see `visit_local_service`); returns `None` (after pushing a warning)
+    /// if that's ambiguous or unresolvable, without creating a `depends-on`
+    /// edge at all.
     fn visit_service_dependency(
         &mut self,
         owner_id: &str,
         repo: &str,
         default_branch: &str,
-    ) -> String {
+        wanted_service: Option<&str>,
+    ) -> Option<String> {
         let norm = normalize_repo_url(repo);
 
         // An on-disk match by the repo's real git remote wins over the plain
@@ -635,7 +705,7 @@ impl<'a> ResolveCtx<'a> {
             .unwrap_or_else(|| repo_name_from_url(repo));
 
         let child_id = if let Some(component) = self.scanned.get(&local_path) {
-            self.visit_local_service(&local_path, component)
+            self.visit_local_service(&local_path, component, wanted_service)?
         } else {
             // Not on disk yet: register a stub, deduped by repo url so the
             // same not-yet-pulled repo referenced with different local_path
@@ -689,16 +759,31 @@ impl<'a> ResolveCtx<'a> {
             flows: Vec::new(),
         });
 
-        child_id
+        Some(child_id)
     }
 
-    fn visit_dependency(&mut self, owner_id: &str, dep: Dependency) {
+    fn visit_dependency(&mut self, owner_id: &str, local_path: &str, dep: Dependency) {
         match dep {
             Dependency::Service {
                 repo,
                 default_branch,
+                services,
             } => {
-                self.visit_service_dependency(owner_id, &repo, &default_branch);
+                // One dependency block can name several of the target repo's
+                // services (see `#GitDependency.services`) — `repo` is
+                // resolved to a `local_path` once inside each call, and
+                // `visit_local_services` is itself idempotent per repo (see
+                // its `self.visited` guard), so repeating this per name costs
+                // nothing extra beyond the one `depends-on` edge each needs.
+                // No names given at all: same as before, depend on "the"
+                // service (the sole one, or a warning if that's ambiguous).
+                if services.is_empty() {
+                    self.visit_service_dependency(owner_id, &repo, &default_branch, None);
+                } else {
+                    for name in &services {
+                        self.visit_service_dependency(owner_id, &repo, &default_branch, Some(name));
+                    }
+                }
             }
             Dependency::Backing(backing) => {
                 let BackingDependencyConfig {
@@ -769,28 +854,31 @@ impl<'a> ResolveCtx<'a> {
                     flows: Vec::new(),
                 });
             }
-            Dependency::SharedBacking { repo, name } => {
-                // References the owning service by `repo` (like
-                // `#GitDependency`), not by its declared `#Service.name` —
-                // that name alone is no longer unique (see
-                // `visit_local_service`), and `repo` is the one identifier
-                // that's portable across workspaces, unlike a local_path
-                // folder-naming convention. Resolved the same way
-                // `visit_service_dependency` resolves an owner id, without
-                // registering a `depends-on` edge or recursing into it (this
-                // is a reference to an already-declared backing dependency,
-                // not a new one).
-                let norm = normalize_repo_url(&repo);
-                let local_path = self
-                    .repo_index
-                    .get(&norm)
-                    .cloned()
-                    .unwrap_or_else(|| repo_name_from_url(&repo));
-                let target_owner_id = self
-                    .scanned
-                    .get(&local_path)
-                    .map(|c| format!("{}.{local_path}", c.service.name))
-                    .unwrap_or(local_path);
+            Dependency::SharedBacking {
+                repo,
+                service,
+                name,
+            } => {
+                // References the owning service by `repo` (if given, like
+                // `#GitDependency`) + `service` — a bare service name alone
+                // isn't unique (two peer repos, or two services in the same
+                // repo, can share one), so both are needed to identify one
+                // unambiguous node. Omitting `repo` means "a sibling service
+                // in this same repo" (`local_path`, passed in by the caller).
+                // Resolved without registering a `depends-on` edge or
+                // recursing into it (this is a reference to an
+                // already-declared backing dependency, not a new one).
+                let target_local_path = match &repo {
+                    Some(repo) => {
+                        let norm = normalize_repo_url(repo);
+                        self.repo_index
+                            .get(&norm)
+                            .cloned()
+                            .unwrap_or_else(|| repo_name_from_url(repo))
+                    }
+                    None => local_path.to_string(),
+                };
+                let target_owner_id = format!("{service}.{target_local_path}");
                 let backing_id = format!("{name}.{target_owner_id}");
                 self.edges.push(Edge {
                     from: owner_id.to_string(),
@@ -840,11 +928,15 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     let mut flow_roots: Vec<(String, String)> = Vec::new();
     for (local_path, component) in &scanned {
         for (flow_name, flow) in &component.flows {
-            let owner_id = ctx.visit_local_service(local_path, component);
+            let Some(owner_id) =
+                ctx.visit_local_service(local_path, component, flow.service.as_deref())
+            else {
+                continue;
+            };
             flow_roots.push((flow_name.to_string(), owner_id.clone()));
 
             for dep in flow.dependencies.clone() {
-                ctx.visit_dependency(&owner_id, dep);
+                ctx.visit_dependency(&owner_id, local_path, dep);
             }
         }
     }
@@ -854,7 +946,7 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     // This is what makes an entry repo with no flows (or one nothing else
     // references) still show up, along with its own backing/service deps.
     for (local_path, component) in &scanned {
-        ctx.visit_local_service(local_path, component);
+        ctx.visit_local_services(local_path, component);
     }
 
     // Validate shared-backing references resolve to a real, resolved backing node.
@@ -970,12 +1062,27 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
 mod tests {
     use super::*;
 
+    /// Writes a component config with a single service named after
+    /// `local_path` (matching every test's own convention) — `service_yaml`
+    /// is the body that used to sit directly under a singular `service:`
+    /// field (no `name:` line; the map key is the name now), reindented one
+    /// level deeper to sit under `services:\n  {local_path}:`.
     fn write_component(workspace: &Path, local_path: &str, service_yaml: &str) {
         let dir = workspace.join(local_path);
         fs::create_dir_all(&dir).unwrap();
+        let indented: String = service_yaml
+            .lines()
+            .map(|line| format!("  {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = if indented.trim().is_empty() {
+            format!("  {local_path}: {{}}\n")
+        } else {
+            format!("  {local_path}:\n{indented}\n")
+        };
         fs::write(
             dir.join("fghj.yaml"),
-            format!("version: \"1.0\"\nservice:\n{service_yaml}\n"),
+            format!("version: \"1.0\"\nservices:\n{body}"),
         )
         .unwrap();
     }
@@ -983,12 +1090,8 @@ mod tests {
     #[test]
     fn service_domain_scope_defaults_to_run_and_can_opt_into_stable() {
         let tmp = tempfile::tempdir().unwrap();
-        write_component(tmp.path(), "svc-a", "  name: svc-a\n");
-        write_component(
-            tmp.path(),
-            "svc-b",
-            "  name: svc-b\n\x20 domain_scope: stable\n",
-        );
+        write_component(tmp.path(), "svc-a", "");
+        write_component(tmp.path(), "svc-b", "  domain_scope: stable\n");
 
         let graph = resolve_universe(tmp.path()).unwrap();
 
@@ -1004,8 +1107,7 @@ mod tests {
         write_component(
             tmp.path(),
             "myservice",
-            "  name: myservice\n\
-             \x20 ports:\n\
+            "  ports:\n\
              \x20   \"8080\":\n\
              \x20     primary: true\n\
              \x20   \"9090\":\n\
@@ -1031,8 +1133,7 @@ mod tests {
         write_component(
             tmp.path(),
             "myservice",
-            "  name: myservice\n\
-             \x20 ports:\n\
+            "  ports:\n\
              \x20   \"8080\":\n\
              \x20     primary: true\n\
              \x20   \"9090\":\n\
@@ -1055,8 +1156,7 @@ mod tests {
         write_component(
             tmp.path(),
             "myservice",
-            "  name: myservice\n\
-             \x20 volumes:\n\
+            "  volumes:\n\
              \x20   - host: ./src\n\
              \x20     container: /app/src\n\
              \x20   - host: ../intel\n\
@@ -1090,8 +1190,7 @@ mod tests {
         write_component(
             tmp.path(),
             "myservice",
-            "  name: myservice\n\
-             \x20 dependencies:\n\
+            "  dependencies:\n\
              \x20   - kind: backing\n\
              \x20     name: postgres\n\
              \x20     image: postgres:16\n\
@@ -1122,8 +1221,7 @@ mod tests {
         write_component(
             tmp.path(),
             "myservice",
-            "  name: myservice\n\
-             \x20 command: [\"npm\", \"run\", \"dev\"]\n\
+            "  command: [\"npm\", \"run\", \"dev\"]\n\
              \x20 dependencies:\n\
              \x20   - kind: backing\n\
              \x20     name: mysql\n\
@@ -1158,8 +1256,7 @@ mod tests {
         write_component(
             tmp.path(),
             "myservice",
-            "  name: myservice\n\
-             \x20 env_file:\n\
+            "  env_file:\n\
              \x20   - .env\n\
              \x20 platform: linux/arm64\n\
              \x20 restart: always\n\
@@ -1225,7 +1322,7 @@ mod tests {
     #[test]
     fn run_options_default_to_compose_equivalent_no_ops() {
         let tmp = tempfile::tempdir().unwrap();
-        write_component(tmp.path(), "myservice", "  name: myservice\n");
+        write_component(tmp.path(), "myservice", "");
 
         let graph = resolve_universe(tmp.path()).unwrap();
         let service = graph
@@ -1246,8 +1343,7 @@ mod tests {
         write_component(
             tmp.path(),
             "myservice",
-            "  name: myservice\n\
-             \x20 ports:\n\
+            "  ports:\n\
              \x20   \"8080\":\n\
              \x20     primary: true\n\
              \x20 additional_hosts:\n\
@@ -1275,8 +1371,7 @@ mod tests {
         write_component(
             tmp.path(),
             "myservice",
-            "  name: myservice\n\
-             \x20 additional_hosts:\n\
+            "  additional_hosts:\n\
              \x20   - aikido.local\n",
         );
 
@@ -1288,5 +1383,97 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("myservice") && w.contains("additional_hosts"))
         );
+    }
+
+    /// `kind: service`'s `services:` list lets one dependency block (one
+    /// `repo`/`default_branch`) name several services owned by the same
+    /// target repo — this is what replaces repeating a whole block per
+    /// service. Depends on `repo-b` declaring two services (`api`, `jobs`)
+    /// and asserts both get their own node and their own `depends-on` edge
+    /// from the single dependency block in `repo-a`.
+    #[test]
+    fn git_dependency_services_list_targets_multiple_services_in_one_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        fs::create_dir_all(tmp.path().join("repo-b")).unwrap();
+        fs::write(
+            tmp.path().join("repo-b/fghj.yaml"),
+            "version: \"1.0\"\n\
+             services:\n\
+             \x20 api:\n\
+             \x20   build:\n\
+             \x20     context: .\n\
+             \x20 jobs:\n\
+             \x20   build:\n\
+             \x20     context: .\n",
+        )
+        .unwrap();
+
+        fs::create_dir_all(tmp.path().join("repo-a")).unwrap();
+        fs::write(
+            tmp.path().join("repo-a/fghj.yaml"),
+            "version: \"1.0\"\n\
+             services:\n\
+             \x20 web:\n\
+             \x20   build:\n\
+             \x20     context: .\n\
+             \x20   dependencies:\n\
+             \x20     - kind: service\n\
+             \x20       repo: https://example.com/repo-b.git\n\
+             \x20       default_branch: main\n\
+             \x20       services: [api, jobs]\n",
+        )
+        .unwrap();
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        assert!(graph.nodes.iter().any(|n| n.id == "api.repo-b"));
+        assert!(graph.nodes.iter().any(|n| n.id == "jobs.repo-b"));
+
+        let depends_on: Vec<&str> = graph
+            .edges
+            .iter()
+            .filter(|e| e.from == "web.repo-a" && e.kind == "depends-on")
+            .map(|e| e.to.as_str())
+            .collect();
+        assert_eq!(depends_on.len(), 2);
+        assert!(depends_on.contains(&"api.repo-b"));
+        assert!(depends_on.contains(&"jobs.repo-b"));
+        assert!(graph.warnings.is_empty());
+    }
+
+    /// Omitting `services:` entirely on a `kind: service` dependency still
+    /// defaults to "the" service when the target repo declares exactly one
+    /// — unchanged behavior, kept as a regression check against the new
+    /// list-shaped field.
+    #[test]
+    fn git_dependency_without_services_defaults_to_the_sole_service() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(tmp.path(), "repo-b", "");
+
+        fs::create_dir_all(tmp.path().join("repo-a")).unwrap();
+        fs::write(
+            tmp.path().join("repo-a/fghj.yaml"),
+            "version: \"1.0\"\n\
+             services:\n\
+             \x20 web:\n\
+             \x20   build:\n\
+             \x20     context: .\n\
+             \x20   dependencies:\n\
+             \x20     - kind: service\n\
+             \x20       repo: https://example.com/repo-b.git\n\
+             \x20       default_branch: main\n",
+        )
+        .unwrap();
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|e| e.from == "web.repo-a" && e.to == "repo-b.repo-b")
+        );
+        assert!(graph.warnings.is_empty());
     }
 }

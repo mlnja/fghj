@@ -13,6 +13,14 @@ package fghj
 	kind:           "service"
 	repo:           string & =~"^(git@|https://|ssh://)"
 	default_branch: string
+	// Which of the target repo's #ComponentConfig.services this depends on —
+	// one entry per service wanted, so depending on several services from the
+	// same repo is still one dependency block (`repo`/`default_branch` stated
+	// once), not one block per service. Omit when that repo declares exactly
+	// one service (used automatically); required — and needs an entry per
+	// name — when it declares more than one, since `repo` alone no longer
+	// names a single unambiguous node.
+	services?: [...string & =~"^[a-z0-9][a-z0-9-]*$"]
 }
 
 // Mirrors Docker's own `HEALTHCHECK`/`HealthConfig`. `interval`/`timeout`/
@@ -116,15 +124,18 @@ package fghj
 
 // A reference to a #BackingDependency owned by another service already present
 // in the resolved flow graph — binds to that same running instance instead of
-// provisioning a second one. Identifies the owning service by `repo` (same as
-// #GitDependency), not by its declared #Service.name — that name alone isn't
-// unique across peer repos (see #Service.name), while `repo` is. `repo` +
-// `name` must match another service's declared #BackingDependency exactly;
-// the resolver rejects dangling references.
+// provisioning a second one. Identifies the owning service by `repo` + `service`
+// — a bare service name alone isn't unique (two peer repos, or two services in
+// the same repo, can share a name), so both are needed to pick one unambiguous
+// node. Omit `repo` to reference a sibling service declared in this same repo's
+// `services:` map (e.g. two independently-built services sharing one database).
+// `repo` (when given) + `service` + `name` must match another service's
+// declared #BackingDependency exactly; the resolver rejects dangling references.
 #SharedBackingDependency: {
-	kind: "shared-backing"
-	repo: string & =~"^(git@|https://|ssh://)"
-	name: string & =~"^[a-z0-9][a-z0-9-]*$"
+	kind:    "shared-backing"
+	repo?:   string & =~"^(git@|https://|ssh://)"
+	service: string & =~"^[a-z0-9][a-z0-9-]*$"
+	name:    string & =~"^[a-z0-9][a-z0-9-]*$"
 }
 
 #Dependency: #GitDependency | #BackingDependency | #SharedBackingDependency

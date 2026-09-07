@@ -13,56 +13,64 @@ and `schema/dependency.cue` in the fghj repo.
 
 ```yaml
 version: "1.0"
-service:
-  # ... see Service below
+services:
+  <service-name>:
+    # ... see Services below
 flows:
   <flow-name>:
     # ... see Flows below
 ```
 
-## `service`
+## `services`
+
+Keyed by service name — a repo can declare more than one independently
+buildable service, each with its own Dockerfile and dependencies (e.g. a
+dev-server process and a backend API process built from the same repo). The
+map key *is* the service's name (lowercase, `[a-z0-9][a-z0-9-]*`) — it's a
+human-readable label, not the node's internal id; see
+[Node identity & domains](/concepts/node-identity-and-domains/) for why
+those differ. Most repos declare exactly one.
 
 ```yaml
-service:
-  name: cart-service
-  build:
-    context: .
-    dockerfile: Dockerfile
-    args:
-      NODE_ENV: production
-  ports:
-    "8080":
-      primary: true
-    "9090":
-      name: admin
-  domain_scope: run
-  environment:
-    - PORT=8080
-  env_file:
-    - .env
-  platform: linux/arm64
-  command: ["npm", "run", "dev"]
-  restart: unless-stopped
-  user: "1000:1000"
-  working_dir: /app
-  labels:
-    team: platform
-  cap_add: ["NET_ADMIN"]
-  extra_hosts:
-    - "metadata:169.254.169.254"
-  healthcheck:
-    test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-    interval: 10
-    retries: 3
-  dependencies:
-    - kind: service
-      repo: git@github.com:acme/auth-service.git
-      default_branch: main
+services:
+  cart-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NODE_ENV: production
+    ports:
+      "8080":
+        primary: true
+      "9090":
+        name: admin
+    domain_scope: run
+    environment:
+      - PORT=8080
+    env_file:
+      - .env
+    platform: linux/arm64
+    command: ["npm", "run", "dev"]
+    restart: unless-stopped
+    user: "1000:1000"
+    working_dir: /app
+    labels:
+      team: platform
+    cap_add: ["NET_ADMIN"]
+    extra_hosts:
+      - "metadata:169.254.169.254"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10
+      retries: 3
+    dependencies:
+      - kind: service
+        repo: git@github.com:acme/auth-service.git
+        default_branch: main
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `name` | string | Lowercase, `[a-z0-9][a-z0-9-]*`. Human-readable label — not the node's internal id. See [Node identity & domains](/concepts/node-identity-and-domains/) for why those differ. |
 | `build.context` | string | Docker build context. Defaults to `.`. |
 | `build.dockerfile` | string | Dockerfile path, relative to `context`. Defaults to `Dockerfile`. |
 | `build.args` | map of string→string | Build-time `--build-arg` values. |
@@ -203,14 +211,14 @@ reconfiguring that third party just to fit fghj's own domain isn't
 practical.
 
 ```yaml
-service:
-  name: aikido-core
-  ports:
-    "3000":
-      primary: true
-  additional_hosts:
-    - aikido.local
-    - app.local.aikido.io
+services:
+  aikido-core:
+    ports:
+      "3000":
+        primary: true
+    additional_hosts:
+      - aikido.local
+      - app.local.aikido.io
 ```
 
 Requires the service to have a `primary` port — declaring `additional_hosts`
@@ -238,14 +246,14 @@ field follows.
 ## Healthcheck & start order
 
 ```yaml
-service:
-  name: api
-  healthcheck:
-    test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-    interval: 10
-    timeout: 5
-    start_period: 30
-    retries: 3
+services:
+  api:
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10
+      timeout: 5
+      start_period: 30
+      retries: 3
 ```
 
 | Field | Type | Description |
@@ -274,14 +282,22 @@ cloning it into the workspace (folder named after the repo URL's last
 path segment).
 
 ```yaml
+# target repo declares one service: omit `services`, it's used automatically
+- kind: service
+  repo: git@github.com:acme/notifications-service.git
+  default_branch: main
+
+# target repo declares several: one block per repo still, name each one you need
 - kind: service
   repo: git@github.com:acme/payments-service.git
   default_branch: main
+  services: [payments-api, payments-worker]
 ```
 
 | Field | Description |
 |---|---|
 | `repo` | Git URL — `git@…`, `https://…`, or `ssh://…`. |
+| `services` | Which of the target repo's `services` this depends on — a list, so depending on several from the same repo is still one block (`repo`/`default_branch` stated once), not one block per service. Omit when that repo declares exactly one service (used automatically); required when it declares more than one. Each name gets its own `depends-on` edge; a name that doesn't exist there is a warning, not a hard `fghj validate` failure. |
 | `default_branch` | The branch cloned by default. This is only ever a *default* — never a live pin; see [Branch ownership model](/concepts/branch-ownership-model/). |
 
 ### `kind: backing`
@@ -330,17 +346,30 @@ bind to the same instance via `kind: shared-backing` below.
 
 A reference to a `kind: backing` dependency already owned by another
 service in the resolved graph — binds to that same running instance
-instead of provisioning a second one.
+instead of provisioning a second one. The owning service can be in
+another repo, or a sibling service declared in this same repo's
+`services` map — e.g. a `vite` dev-server service and a `php` service
+built from the same repo, where `php` owns a `mysql` backing dependency
+that `vite` also needs to reach:
 
 ```yaml
+# cross-repo: omit `service` if the target repo only declares one
 - kind: shared-backing
   repo: git@github.com:acme/payments-service.git
+  service: payments-api
   name: postgres
+
+# same-repo: omit `repo` entirely — refers to a sibling service
+# declared in this repo's own `services` map
+- kind: shared-backing
+  service: php
+  name: mysql
 ```
 
 | Field | Description |
 |---|---|
-| `repo` | The Git URL of the service that owns the backing dependency — not that service's declared `name`, since names aren't unique across peer repos. |
+| `repo` | The Git URL of the repo that owns the backing dependency. Omit to reference a sibling service in this same repo instead. |
+| `service` | The name of the service (in `repo`, or in this repo if `repo` is omitted) that owns the backing dependency. |
 | `name` | Must match the owning service's declared backing dependency name exactly. A reference that doesn't resolve is flagged as a warning, not a hard failure — the owning repo might just not be cloned yet. |
 
 ## `flows`
@@ -349,6 +378,7 @@ instead of provisioning a second one.
 flows:
   checkout:
     description: End-to-end checkout journey
+    service: cart-service
     dependencies:
       - kind: service
         repo: git@github.com:acme/payments-service.git
@@ -360,6 +390,13 @@ repo; see [Flat workspace model](/concepts/flat-workspace-model/). Each
 flow is a named user journey: a description plus an additional list of
 dependencies (same three kinds as above) pulled in only when that flow is
 selected, on top of the service's own baseline `dependencies`.
+
+`service` says which of this repo's `services` the flow is rooted at.
+Omit it when the repo declares exactly one service (it's used
+automatically); required when it declares more than one, since there's
+no other way to tell which service's dependencies the flow is actually
+describing. An ambiguous or missing reference is a warning, not a hard
+`fghj validate` failure.
 
 A flow's `dependencies` list must be non-empty — a flow with zero extra
 dependencies isn't meaningfully different from the service's baseline

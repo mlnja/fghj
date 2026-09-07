@@ -70,7 +70,6 @@ package fghj
 
 #Service: {
 	#RunOptions
-	name:  string & =~"^[a-z0-9][a-z0-9-]*$"
 	build: #Build
 	// Keyed by the literal container port number (e.g. "8080"), published to
 	// Docker as-is — not a semantic label. `#Port.name` is where a label
@@ -99,11 +98,22 @@ package fghj
 // may declare zero or more of these — there is no distinguished "root" repo.
 #Flow: {
 	description: string
+	// Which of this repo's #services this flow is rooted at. Omit when the
+	// repo declares exactly one service (it's used automatically); required
+	// when it declares more than one, since there's no other way to tell
+	// which service's dependencies the flow is actually describing.
+	service?: string & =~"^[a-z0-9][a-z0-9-]*$"
 	dependencies: [...#Dependency] & [_, ...]
 }
 
 #ComponentConfig: {
 	version: "1.0"
-	service: #Service
+	// Keyed by service name (was a singular `service:` field) — a repo can
+	// build more than one independent container from its own source (e.g. a
+	// dev-server process and a backend API process, each with their own
+	// Dockerfile), each with its own dependencies. See #SharedBackingDependency
+	// for how two services in the same repo (or different repos) can share
+	// one `kind: backing` instance instead of each provisioning their own.
+	services: [Name=string & =~"^[a-z0-9][a-z0-9-]*$"]: #Service
 	flows: [string]: #Flow
 }

@@ -365,6 +365,31 @@ plans referenced above.
   workspace index rather than SQLite, deliberately structured to grow more
   fields beyond today's single `idle_requested` bool. See [[control-api]],
   [[local-ca-and-tls-proxy]], `docs/cli/daemon.md`.
+- **Closed (2026-09-08): only one buildable container per repo.** Adopting
+  `fghj` for `aikido-core` exposed a real schema limitation:
+  `#ComponentConfig.service` was a singular field, so a repo could declare
+  exactly one `#Service`. `aikido-core`'s dev setup needs two independently
+  built containers from its own source (`vite`, `php`, each with its own
+  Dockerfile) that both need to reach the same `mysql` backing instance —
+  the only workaround (flattening `php` into a `kind: backing` dependency on
+  a pre-built image) silently stops rebuilding it on Dockerfile changes.
+  Cross-repo dependency resolution (`kind: service`/`#GitDependency`) already
+  worked generically via the graph resolver and needed no redesign; the gap
+  was purely same-repo. Fixed by turning `#ComponentConfig.service` into
+  `services: [Name=...]: #Service` (a map, like `flows`), dropping the
+  now-redundant `#Service.name`, and adding an optional `service` field to
+  `#Flow` and `#GitDependency` (to say which of a multi-service repo's
+  services is meant, defaulting to the sole one when there's only one) and a
+  required `service` field to `#SharedBackingDependency` (whose `repo` is now
+  optional — omitted, it means "a sibling service in this same repo").
+  `src/resolver.rs`'s `visit_local_service` became `visit_local_services`
+  (builds a node per declared service) plus a thin `visit_local_service`
+  wrapper that picks one by name or warns (not panics) if the choice is
+  ambiguous or missing — same warn-don't-crash style as the existing
+  dangling-shared-backing-reference check. No changes needed in `runs.rs`,
+  `daemon.rs`, `server.rs`, `main.rs`, or the UI — they all consume the
+  already-resolved `Graph`/`Node`/`Edge` types, unaffected in shape. See
+  `docs/reference/fghj-yaml.md`.
 
 ## Future implementation ideas (not designed yet, just ideas)
 
@@ -495,13 +520,20 @@ plans referenced above.
     the declaring repo — an absolute or `..`-escaping path (needed for the
     cross-repo case below) passes straight through to Docker, same as
     Compose.
-  - **No "run on the host, not in a container" node kind.** The Vite dev
-    server runs as a bare host process (not Dockerized) bound to port 80 —
-    and fghj's own reverse proxy also wants host ports 80/443, a direct
-    conflict. Two options, neither built today: teach fghj to manage a
-    non-Docker host process as a graph node, or containerize the dev server
-    (which then also needs the bind-mount gap above solved to not regress
-    the hot-reload loop).
+  - ~~**No "run on the host, not in a container" node kind.**~~ **Resolved
+    as a scope decision (2026-09-07): fghj will not grow a host-process
+    node kind.** The Vite dev server ran as a bare host process bound to
+    port 80, which fghj's own reverse proxy also wants — a direct conflict
+    that a host-process node kind would only paper over (it doesn't fix the
+    port collision, and it'd add a whole parallel non-Docker lifecycle/
+    logging/routing path to a tool that's fundamentally container-shaped —
+    routing, domains, healthchecks, volumes are all Docker concepts today).
+    The chosen fix is the other option instead: containerize the dev
+    server, on the adopting repo's side, not fghj's — declare it as a
+    normal `#Service` with a Dockerfile. This was blocking before but isn't
+    anymore, since it only works cleanly with live bind-mounts to preserve
+    the hot-reload loop, and `#Service.volumes` (bind mounts) already
+    landed above. No fghj code change needed for this one.
   - **No way to keep a pre-existing, hardcoded hostname.** — **closed
     (2026-09-07)** via `#Service.additional_hosts`: a service can now
     declare extra literal hostname aliases alongside its derived domain
@@ -559,11 +591,13 @@ plans referenced above.
     cloneable (real `git@github.com:AikidoSec/*` remotes) and independently
     Dockerized — exactly fghj's target shape — and the project's own Readme
     maintains a 28-row manual port-allocation table by hand, precisely the
-    pain the flow/magic-DNS model exists to remove. With the bind-mount and
-    `docker compose exec`-equivalent gaps now closed, only the host-process
-    node kind gap above stands between this and a real dry run — this
-    ecosystem is a strong real-scale fghj candidate, arguably better proof
-    than the toy fixtures.
+    pain the flow/magic-DNS model exists to remove. With the bind-mount,
+    `docker compose exec`-equivalent, and host-process gaps all now closed
+    (the last as a scope decision, not new fghj code — see above), there
+    are no remaining fghj-side blockers identified for this ecosystem: a
+    real dry run just needs the Vite dev server actually containerized on
+    the aikido-core side. Strong real-scale fghj candidate, arguably better
+    proof than the toy fixtures.
 
 ## Suggested next steps (not started, pick one to work on)
 
