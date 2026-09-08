@@ -68,11 +68,20 @@ automatically get a backing dependency's persisted volume for free too:
 there's only ever one owning container regardless of how many
 `shared-backing` refs point at it, so nothing extra needed to plumb.
 
-Volumes are never removed by `fghj` — `RunRegistry::stop` tears down
-containers and the network only, by design (that's what makes a `"stable"`
-or same-run `"run"`-scoped volume survive a restart). Known gap: a
-`"run"`-scoped preview run that's stopped and never restarted leaks an
-orphaned volume with no pruning path yet.
+Named volumes are otherwise Docker-implicit — the daemon auto-creates one,
+unlabeled, the first time a container's `Binds` references a name that
+doesn't exist yet. `docker::ensure_volume` creates it explicitly instead,
+right before use in `RunRegistry::start_node`, attaching `fghj.scope`/
+`fghj.run` labels alongside the usual `com.docker.compose.project` one.
+`RunRegistry::stop` uses those labels to remove exactly the `scope: "run"`
+volumes belonging to the run being stopped, via
+`docker::remove_run_scoped_volumes` — but only when the run isn't the
+default run: Docker's `label` filter ANDs multiple values together, so this
+can only ever match a `"run"`-scoped volume, never a `"stable"` one, and the
+default run's own `"run"`-scoped volumes derive the exact same name on
+every start (the run id only gets folded in for a *named* run), so deleting
+them on stop would wipe data a subsequent default-run start expects to
+still be there.
 
 ## Two log-reading modes
 

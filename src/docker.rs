@@ -9,11 +9,12 @@ use bollard::body_full;
 use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::models::{
     ContainerCreateBody, EndpointSettings, HealthConfig, HostConfig, NetworkCreateRequest,
-    NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
+    NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum, VolumeCreateRequest,
 };
 use bollard::query_parameters::{
     BuildImageOptionsBuilder, CreateContainerOptionsBuilder, InspectContainerOptionsBuilder,
-    LogsOptionsBuilder, RemoveContainerOptionsBuilder,
+    ListVolumesOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
+    RemoveVolumeOptionsBuilder,
 };
 use futures_util::StreamExt;
 use futures_util::stream::Stream;
@@ -73,6 +74,81 @@ pub async fn ensure_network(docker: &Docker, name: &str, project: &str) -> Resul
 
 pub async fn remove_network(docker: &Docker, name: &str) {
     let _ = docker.remove_network(name).await;
+}
+
+/// A named volume is otherwise Docker-implicit — the daemon auto-creates
+/// one the first time a container's `Binds` references a name that
+/// doesn't exist yet, but never labels it. Calling this explicitly first
+/// (mirrors `ensure_network` above) attaches the same
+/// `com.docker.compose.project` bookkeeping label containers/networks
+/// already get, plus fghj's own `fghj.scope`/`fghj.run` — which is what
+/// lets `remove_run_scoped_volumes` below find and clean up a `scope:
+/// "run"` preview/named run's volumes once that run stops, closing the "no
+/// `docker compose down -v` equivalent" gap called out in the `#Volume`
+/// docs. Unlike `create_network`, creating a volume that already exists
+/// isn't an error — the API just returns the existing one — so there's no
+/// "already exists" case to special-case.
+pub async fn ensure_volume(
+    docker: &Docker,
+    name: &str,
+    project: &str,
+    scope: &str,
+    run_id: &str,
+) -> Result<()> {
+    let mut labels = HashMap::new();
+    labels.insert(
+        "com.docker.compose.project".to_string(),
+        project.to_string(),
+    );
+    labels.insert("fghj.scope".to_string(), scope.to_string());
+    labels.insert("fghj.run".to_string(), run_id.to_string());
+    docker
+        .create_volume(VolumeCreateRequest {
+            name: Some(name.to_string()),
+            labels: Some(labels),
+            ..Default::default()
+        })
+        .await
+        .context("docker create_volume failed")?;
+    Ok(())
+}
+
+/// Best-effort removal of every `scope: "run"` named volume `ensure_volume`
+/// labeled for `run_id` — the other half of closing the "no `docker
+/// compose down -v` equivalent" gap. Docker ANDs multiple `label=`
+/// filter values together (unlike most other filter types, which OR), so
+/// this only matches a volume carrying *both* labels — never a `scope:
+/// "stable"` volume, even one created under the same run, since that
+/// scope's entire point is to outlive any one run.
+///
+/// Deliberately never called for the *default* run (see
+/// `RunRegistry::stop`'s own call site) — a `"run"`-scoped volume there
+/// gets the exact same derived name on every start (`derive_domain`, which
+/// `derive_volume_name` reuses, only folds the run id in for a *named*
+/// run), so deleting it on stop would silently wipe data the next
+/// default-run start expects to still be there.
+pub async fn remove_run_scoped_volumes(docker: &Docker, run_id: &str) {
+    let mut filters: HashMap<&str, Vec<String>> = HashMap::new();
+    filters.insert(
+        "label",
+        vec![format!("fghj.run={run_id}"), "fghj.scope=run".to_string()],
+    );
+    let Ok(listed) = docker
+        .list_volumes(Some(
+            ListVolumesOptionsBuilder::new().filters(&filters).build(),
+        ))
+        .await
+    else {
+        return;
+    };
+    for volume in listed.volumes.unwrap_or_default() {
+        let _ = docker
+            .remove_volume(
+                &volume.name,
+                Some(RemoveVolumeOptionsBuilder::new().force(true).build()),
+            )
+            .await;
+    }
 }
 
 /// `docker build` needs a real working tree, not a bare mirror — clone the

@@ -118,7 +118,16 @@ package fghj
 	// to customize a stock database image's startup flags without a custom
 	// Dockerfile. Empty (the default) leaves the image's own `CMD` untouched.
 	command: [...string] | *[]
-	ports: [...string]
+	// A bare list of port numbers (each implicitly non-primary, unnamed —
+	// e.g. a plain postgres/mysql with nothing worth routing HTTP to) or a
+	// map of port number to `#Port` config, exactly like `#Service.ports` —
+	// for a backing dependency that itself exposes more than one port with
+	// different roles (e.g. minio's S3 API + web console, or
+	// grafana/prometheus/victoriametrics exposing both a UI and a
+	// scrape/write endpoint), so one can be `primary` and/or another `name`d
+	// instead of every port being an equally-anonymous published localhost
+	// port.
+	ports: [...string] | {[=~"^[0-9]+$"]: #Port}
 	// Every node's domain is derived by fghj, never author-declared (see
 	// #Service.name) — this just picks whether the derived name carries the
 	// run id. "run" (the default) scopes it to the run that started it —

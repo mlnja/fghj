@@ -128,6 +128,9 @@
         {#if n.ports?.length}<span class="ports">{n.ports.join(', ')}</span>{/if}
       </div>
       <div class="node-domain">{mode === 'containers' ? (n.domain || n.image || '') : shortRepo(n.repo)}</div>
+      {#if n.services?.length > 1}
+        <div class="node-meta">{n.services.join(', ')}</div>
+      {/if}
       {#if n.branch}
         <div class="node-meta branch-row">
           <span>{n.branch}</span>

@@ -1,6 +1,32 @@
 # fghj — Progress Tracker
 
-Last updated: 2026-09-08 (redesigned wildcard subdomain routing as a
+Last updated: 2026-09-08 (fixed named volumes never being cleaned up on
+`stop` — they were Docker-implicit, auto-created unlabeled on first bind
+reference, so there was nothing to filter on for removal. Added
+`docker::ensure_volume`, called from `RunRegistry::start_node` right before
+each named-volume bind, which labels the volume with
+`com.docker.compose.project`/`fghj.scope`/`fghj.run`; `RunRegistry::stop`
+now calls the new `docker::remove_run_scoped_volumes`, filtered on those
+labels, for every run *except* the default one — a default run's
+`scope: "run"` volumes derive the same name on every start regardless, so
+deleting them on stop would wipe data a restart expects to still be there.
+Closes the "no `docker compose down -v` equivalent" gap called out in
+`docs/src/content/docs/reference/fghj-yaml.md` and
+`concepts/docker-and-downloads.md`, both updated).
+Prior update, same day (added domain templating in `environment`/
+`env_file` values — `${FGHJ_SERVICE_FQDN}` for a node's own derived domain,
+`${FGHJ_SERVICE_FQDN:name}` for a sibling's (a `::`-separated, root-first
+path like `aikifactory::aikifactory::minio` disambiguates a leaf `name`
+that matches more than one sibling — the same segments a node's id is
+already built from leaf-first, just reversed), resolved by
+`runs::start_node` via `expand_service_fqdn_templates`/`sibling_domain` in
+`src/runs.rs` — so a CUE author no longer has to hand-compute
+`runs::derive_domain`'s formula into a literal string, closing the gap
+called out in every hardcoded `*_HOST`/`*_URL` value across
+`aikido-core`/`aikifactory`'s real `.fghj.yaml` files, now rewritten to use
+it. See "Domain templates in `environment`" in
+`docs/src/content/docs/reference/fghj-yaml.md`).
+Prior update, same day (redesigned wildcard subdomain routing as a
 per-host toggle: `#Service.wildcard_hosts` merged into
 `#Service.additional_hosts` — each entry is a bare hostname or
 `{host, wildcard: true}` — and `#Port` gained its own `wildcard` toggle so

@@ -61,6 +61,114 @@ pub fn derive_domain(
     }
 }
 
+/// Expands `${FGHJ_SERVICE_FQDN}` (this node's own derived domain) and
+/// `${FGHJ_SERVICE_FQDN:path}` (a sibling's domain — see `sibling_domain`
+/// for what `path` can look like) in a single `environment`/`env_file`
+/// value, so a CUE author can reference a `*.fghj.internal` address without
+/// hand-computing `derive_domain`'s formula into a literal string (the
+/// convention every hardcoded `*_HOST`/`*_URL` value in
+/// `aikido-core`/`aikifactory`'s `.fghj.yaml` followed before this
+/// existed). A manual scan rather than the `regex` crate (not otherwise a
+/// dependency) — the grammar is just those two forms, simple enough that a
+/// scanner is less code than pulling in a new crate. An unresolvable
+/// `:path` (no such sibling) or a token missing its closing `}` is left
+/// untouched in the output rather than erroring — a typo here shouldn't
+/// fail an entire run when the literal fallback is at least diagnosable in
+/// logs, the same tolerance `parse_env_file` extends to a malformed line.
+fn expand_service_fqdn_templates(
+    value: &str,
+    node: &Node,
+    own_domain: &str,
+    graph: &Graph,
+    run_id: &str,
+) -> String {
+    const TOKEN: &str = "${FGHJ_SERVICE_FQDN";
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find(TOKEN) {
+        out.push_str(&rest[..start]);
+        let Some(end_rel) = rest[start..].find('}') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let end = start + end_rel;
+        let inner = &rest[start + TOKEN.len()..end]; // "" or ":name"
+        let resolved = match inner.strip_prefix(':') {
+            None => Some(own_domain.to_string()),
+            Some(name) => sibling_domain(node, name, graph, run_id),
+        };
+        match resolved {
+            Some(domain) => out.push_str(&domain),
+            None => out.push_str(&rest[start..=end]),
+        }
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Finds the domain `${FGHJ_SERVICE_FQDN:path}` means from `node`'s own
+/// `environment`, in two ways (first match wins):
+///
+/// - A backing dependency matching `path` that shares an "owns" owner with
+///   `node` — the owner is whoever's "owns" edge points at `node` (a
+///   backing dependency looking for a sibling backing dependency), or
+///   `node.id` itself if nothing owns it (a service looking up one of its
+///   own directly-declared backing dependencies).
+/// - A service matching `path` that `node` directly depends on via a
+///   `kind: service` dependency (same-repo or cross-repo — both produce a
+///   "depends-on" edge from `node.id`, see `resolver::visit_dependency`).
+///   This is the only way to reach a sibling *service*: unlike backing
+///   dependencies, services aren't owned, so there's no shared-owner case
+///   to fall back on — only what `node` itself declares a dependency on.
+///
+/// `path` is one bare name (`mysql`) in the common case — matched against
+/// just the candidate's own leaf name — or `::`-separated segments
+/// (`aikifactory::aikifactory::minio`) for the rare case where that's
+/// ambiguous. A node's `id` is already the leaf-first chain the domain
+/// itself is built from (`{name}.{owner-id}`, see `resolver::visit_dependency`
+/// /`visit_local_services`) — root-first is just easier to read/write, so
+/// `path`'s segments are reversed and dot-joined into that same shape
+/// before matching, e.g. `aikifactory::aikifactory::minio` becomes
+/// `minio.aikifactory.aikifactory`, an exact prefix of the real id
+/// `minio.aikifactory.aikifactory` (before the workspace/`fghj.internal`
+/// suffix `derive_domain` appends). Fewer segments than the full id just
+/// means "match any id with this as a trailing-toward-the-root prefix" —
+/// as many as it takes to stop being ambiguous, no more.
+fn sibling_domain(node: &Node, path: &str, graph: &Graph, run_id: &str) -> Option<String> {
+    let mut segments: Vec<&str> = path.split("::").collect();
+    segments.reverse();
+    let id_prefix = segments.join(".");
+    let matches = |candidate: &Node| {
+        candidate.id == id_prefix || candidate.id.starts_with(&format!("{id_prefix}."))
+    };
+
+    let owner_id = graph
+        .edges
+        .iter()
+        .find(|e| e.kind == "owns" && e.to == node.id)
+        .map(|e| e.from.as_str())
+        .unwrap_or(node.id.as_str());
+    let sibling = graph
+        .edges
+        .iter()
+        .filter(|e| e.kind == "owns" && e.from == owner_id)
+        .find_map(|e| graph.nodes.iter().find(|n| n.id == e.to && matches(n)))
+        .or_else(|| {
+            graph
+                .edges
+                .iter()
+                .filter(|e| e.kind == "depends-on" && e.from == node.id)
+                .find_map(|e| graph.nodes.iter().find(|n| n.id == e.to && matches(n)))
+        })?;
+    Some(derive_domain(
+        &sibling.id,
+        &sibling.domain_scope,
+        &graph.workspace_name,
+        run_id,
+    ))
+}
+
 /// Derives the real Docker volume name for a `VolumeMount::Named` entry —
 /// reuses `derive_domain`'s exact run/stable folding logic (a named
 /// volume's `scope` is the same knob as `domain_scope`), keyed by the
@@ -208,6 +316,15 @@ pub struct ContainerInfo {
     /// would be actively wrong to also pin as a static `/etc/hosts` entry.
     #[serde(default)]
     pub additional_hosts: Vec<String>,
+    /// The host-published port for every one of this node's declared ports,
+    /// not just the routed (`primary`/`name`d) ones — lets the UI offer a
+    /// direct `127.0.0.1:<port>` connection string for a plain TCP backing
+    /// dependency (postgres, mysql) that has no HTTP surface to route at
+    /// all, alongside the `*.fghj.internal` links `routes` already covers.
+    /// `None` for a port Docker hasn't actually published (container not
+    /// running, or the port entry has no live binding yet).
+    #[serde(default)]
+    pub ports: BTreeMap<String, Option<u16>>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -347,6 +464,14 @@ impl RunRegistry {
             docker::stop_and_remove(&self.docker, &c.container_name).await;
         }
         docker::remove_network(&self.docker, &state.network).await;
+        // The default run's `scope: "run"` volumes get the exact same
+        // derived name on every start (`derive_volume_name` only folds the
+        // run id in for a *named* run) — deleting them here would silently
+        // wipe data a plain stop+restart expects to still be there. Only a
+        // named/preview run's volumes are safe to clean up.
+        if run_id != DEFAULT_RUN_ID {
+            docker::remove_run_scoped_volumes(&self.docker, run_id).await;
+        }
         self.db.clone().delete_run(run_id.to_string()).await?;
         Ok(())
     }
@@ -688,10 +813,14 @@ impl RunRegistry {
             .map(|(port, cfg)| (port.clone(), cfg.host_port))
             .collect();
 
-        let binds: Vec<String> = node
-            .volumes
-            .iter()
-            .map(|v| match v {
+        // A named volume's Docker-side existence is otherwise implicit (the
+        // daemon auto-creates one, unlabeled, the first time a bind
+        // references it) — `ensure_volume` here labels it so
+        // `docker::remove_run_scoped_volumes` can find it in `stop()`.
+        // `Iterator::map` can't `.await`, hence the explicit loop.
+        let mut binds: Vec<String> = Vec::with_capacity(node.volumes.len());
+        for v in &node.volumes {
+            match v {
                 VolumeMount::Bind {
                     host,
                     container,
@@ -705,11 +834,11 @@ impl RunRegistry {
                             .expect("node with volumes has a resolved checkout root")
                             .join(host)
                     };
-                    format!(
+                    binds.push(format!(
                         "{}:{container}{}",
                         host_path.display(),
                         if *read_only { ":ro" } else { "" }
-                    )
+                    ));
                 }
                 VolumeMount::Named {
                     name,
@@ -719,13 +848,21 @@ impl RunRegistry {
                 } => {
                     let volume_name =
                         derive_volume_name(name, scope, &graph.workspace_name, run_id);
-                    format!(
+                    docker::ensure_volume(
+                        &self.docker,
+                        &volume_name,
+                        &graph.workspace_name,
+                        scope,
+                        run_id,
+                    )
+                    .await?;
+                    binds.push(format!(
                         "{volume_name}:{container}{}",
                         if *read_only { ":ro" } else { "" }
-                    )
+                    ));
                 }
-            })
-            .collect();
+            }
+        }
 
         // `env_file` entries load first, in declared order, then
         // `environment` is applied on top — same precedence as Compose,
@@ -748,6 +885,9 @@ impl RunRegistry {
             env.extend(parse_env_file(&contents));
         }
         env.extend(node.environment.iter().cloned());
+        for entry in &mut env {
+            *entry = expand_service_fqdn_templates(entry, node, &domain, graph, run_id);
+        }
 
         docker::run_container(
             &self.docker,
@@ -795,21 +935,15 @@ impl RunRegistry {
             None => ("unknown".to_string(), None),
         };
 
-        // Every port with a domain — the `primary` one, at this node's own
-        // domain, and/or any `name`d one, at `{name}.{domain}` (a port can
-        // be both) — gets a route to the host port Docker actually
-        // published it on. `fghjd` runs on the host, not inside the docker
-        // network, so it can't resolve these names the way sibling
-        // containers do (via Docker's embedded per-network DNS, which only
-        // answers from inside that network) — this is what lets
-        // `proxy::serve_https` dispatch an incoming SNI straight to the
-        // right container instead. Reuses the inspect already done above
-        // for `status_port`'s own binding rather than re-inspecting it.
-        let mut routes = Vec::new();
-        for (port, cfg) in &node.ports {
-            if !cfg.primary && cfg.name.is_none() {
-                continue;
-            }
+        // Every declared port's actual host-published binding, not just the
+        // routed ones — a plain TCP backing dependency (postgres, mysql)
+        // has no `primary`/`name`d port to route at all, but the UI still
+        // wants a `127.0.0.1:<port>` connection string for it. Reuses the
+        // inspect already done above for `status_port`'s own binding rather
+        // than re-querying it; one more inspect per remaining port (there's
+        // rarely more than one or two per node).
+        let mut port_host_ports: BTreeMap<String, Option<u16>> = BTreeMap::new();
+        for port in node.ports.keys() {
             let host_port = if status_port.as_deref() == Some(port.as_str()) {
                 published_port
             } else {
@@ -819,7 +953,26 @@ impl RunRegistry {
                     .flatten()
                     .and_then(|s| s.published_port)
             };
-            let Some(host_port) = host_port else { continue };
+            port_host_ports.insert(port.clone(), host_port);
+        }
+
+        // Every port with a domain — the `primary` one, at this node's own
+        // domain, and/or any `name`d one, at `{name}.{domain}` (a port can
+        // be both) — gets a route to the host port Docker actually
+        // published it on. `fghjd` runs on the host, not inside the docker
+        // network, so it can't resolve these names the way sibling
+        // containers do (via Docker's embedded per-network DNS, which only
+        // answers from inside that network) — this is what lets
+        // `proxy::serve_https` dispatch an incoming SNI straight to the
+        // right container instead.
+        let mut routes = Vec::new();
+        for (port, cfg) in &node.ports {
+            if !cfg.primary && cfg.name.is_none() {
+                continue;
+            }
+            let Some(host_port) = port_host_ports.get(port).copied().flatten() else {
+                continue;
+            };
             if cfg.primary {
                 routes.push(PortRoute {
                     domain: domain.clone(),
@@ -874,6 +1027,7 @@ impl RunRegistry {
             domain,
             routes,
             additional_hosts: additional_hosts_active,
+            ports: port_host_ports,
         })
     }
 }
@@ -969,6 +1123,190 @@ mod tests {
                 "MISMATCHED=\"oops'",
             ]
         );
+    }
+
+    fn test_node(id: &str, label: &str, kind: &str) -> Node {
+        Node {
+            id: id.to_string(),
+            label: label.to_string(),
+            kind: kind.to_string(),
+            image: None,
+            branch: None,
+            repo: None,
+            domain_scope: "run".to_string(),
+            local_path: None,
+            domain: String::new(),
+            downloaded: true,
+            dirty: false,
+            flows: Vec::new(),
+            build: None,
+            ports: BTreeMap::new(),
+            environment: Vec::new(),
+            command: Vec::new(),
+            volumes: Vec::new(),
+            additional_hosts: Vec::new(),
+            wildcard_hosts: Vec::new(),
+            env_file: Vec::new(),
+            restart: "no".to_string(),
+            user: None,
+            working_dir: None,
+            labels: BTreeMap::new(),
+            cap_add: Vec::new(),
+            cap_drop: Vec::new(),
+            privileged: false,
+            extra_hosts: Vec::new(),
+            healthcheck: None,
+            platform: None,
+        }
+    }
+
+    fn test_graph(nodes: Vec<Node>, edges: Vec<Edge>) -> Graph {
+        Graph {
+            workspace_name: "shop".to_string(),
+            nodes,
+            edges,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn expand_service_fqdn_templates_resolves_self_reference() {
+        let php = test_node("php.app", "php", "service");
+        let graph = test_graph(vec![php.clone()], vec![]);
+        let out = expand_service_fqdn_templates(
+            "https://${FGHJ_SERVICE_FQDN}/",
+            &php,
+            "php.app.shop.fghj.internal",
+            &graph,
+            DEFAULT_RUN_ID,
+        );
+        assert_eq!(out, "https://php.app.shop.fghj.internal/");
+    }
+
+    #[test]
+    fn expand_service_fqdn_templates_resolves_sibling_owned_by_a_service() {
+        // php owns mysql; php's own environment references its sibling by name.
+        let php = test_node("php.app", "php", "service");
+        let mysql = test_node("mysql.php.app", "mysql", "backing");
+        let graph = test_graph(
+            vec![php.clone(), mysql],
+            vec![edge("php.app", "mysql.php.app", "owns")],
+        );
+        let out = expand_service_fqdn_templates(
+            "mysql://${FGHJ_SERVICE_FQDN:mysql}:3306/app",
+            &php,
+            "php.app.shop.fghj.internal",
+            &graph,
+            DEFAULT_RUN_ID,
+        );
+        assert_eq!(out, "mysql://mysql.php.app.shop.fghj.internal:3306/app");
+    }
+
+    #[test]
+    fn expand_service_fqdn_templates_resolves_sibling_owned_by_the_same_owner() {
+        // phpmyadmin and mysql are both owned by php; phpmyadmin references
+        // its sibling mysql, not anything it owns itself (it owns nothing).
+        let php_id = "php.app";
+        let mysql = test_node("mysql.php.app", "mysql", "backing");
+        let phpmyadmin = test_node("phpmyadmin.php.app", "phpmyadmin", "backing");
+        let graph = test_graph(
+            vec![mysql, phpmyadmin.clone()],
+            vec![
+                edge(php_id, "mysql.php.app", "owns"),
+                edge(php_id, "phpmyadmin.php.app", "owns"),
+            ],
+        );
+        let out = expand_service_fqdn_templates(
+            "${FGHJ_SERVICE_FQDN:mysql}",
+            &phpmyadmin,
+            "phpmyadmin.php.app.shop.fghj.internal",
+            &graph,
+            DEFAULT_RUN_ID,
+        );
+        assert_eq!(out, "mysql.php.app.shop.fghj.internal");
+    }
+
+    #[test]
+    fn expand_service_fqdn_templates_resolves_a_directly_depended_on_sibling_service() {
+        // vite depends on php (same-repo `kind: service`) — and the same
+        // "depends-on" edge shape covers a cross-repo flow dependency, so
+        // this also stands in for that case.
+        let vite = test_node("vite.app", "vite", "service");
+        let php = test_node("php.app", "php", "service");
+        let graph = test_graph(
+            vec![vite.clone(), php],
+            vec![edge("vite.app", "php.app", "depends-on")],
+        );
+        let out = expand_service_fqdn_templates(
+            "http://${FGHJ_SERVICE_FQDN:php}",
+            &vite,
+            "vite.app.shop.fghj.internal",
+            &graph,
+            DEFAULT_RUN_ID,
+        );
+        assert_eq!(out, "http://php.app.shop.fghj.internal");
+    }
+
+    #[test]
+    fn expand_service_fqdn_templates_disambiguates_a_colliding_leaf_name_with_a_path() {
+        // php owns a backing dependency named "mysql" *and* directly depends
+        // on a cross-repo service that also happens to be named "mysql" —
+        // the bare leaf name is ambiguous, so the backing dependency wins by
+        // default (declared via "owns", checked first), and the qualified
+        // root-first path (mirroring how the id itself, leaf-first, would
+        // read as `mysql.otherrepo`) is needed to reach the other one.
+        let php = test_node("php.app", "php", "service");
+        let mysql_backing = test_node("mysql.php.app", "mysql", "backing");
+        let mysql_service = test_node("mysql.otherrepo", "mysql", "service");
+        let graph = test_graph(
+            vec![php.clone(), mysql_backing, mysql_service],
+            vec![
+                edge("php.app", "mysql.php.app", "owns"),
+                edge("php.app", "mysql.otherrepo", "depends-on"),
+            ],
+        );
+
+        let bare = expand_service_fqdn_templates(
+            "${FGHJ_SERVICE_FQDN:mysql}",
+            &php,
+            "php.app.shop.fghj.internal",
+            &graph,
+            DEFAULT_RUN_ID,
+        );
+        assert_eq!(bare, "mysql.php.app.shop.fghj.internal");
+
+        let qualified = expand_service_fqdn_templates(
+            "${FGHJ_SERVICE_FQDN:otherrepo::mysql}",
+            &php,
+            "php.app.shop.fghj.internal",
+            &graph,
+            DEFAULT_RUN_ID,
+        );
+        assert_eq!(qualified, "mysql.otherrepo.shop.fghj.internal");
+    }
+
+    #[test]
+    fn expand_service_fqdn_templates_leaves_unknown_sibling_and_malformed_token_untouched() {
+        let php = test_node("php.app", "php", "service");
+        let graph = test_graph(vec![php.clone()], vec![]);
+
+        let unknown = expand_service_fqdn_templates(
+            "${FGHJ_SERVICE_FQDN:nope}",
+            &php,
+            "php.app.shop.fghj.internal",
+            &graph,
+            DEFAULT_RUN_ID,
+        );
+        assert_eq!(unknown, "${FGHJ_SERVICE_FQDN:nope}");
+
+        let unterminated = expand_service_fqdn_templates(
+            "prefix ${FGHJ_SERVICE_FQDN no closing brace",
+            &php,
+            "php.app.shop.fghj.internal",
+            &graph,
+            DEFAULT_RUN_ID,
+        );
+        assert_eq!(unterminated, "prefix ${FGHJ_SERVICE_FQDN no closing brace");
     }
 
     #[test]

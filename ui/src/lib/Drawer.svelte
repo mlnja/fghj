@@ -10,6 +10,15 @@
   let dlStatus = $state(null); // null | 'running' | 'done' | 'error'
   let dlLog = $state('');
   let pollTimer = null;
+  let copiedKey = $state(null);
+  let copiedTimer = null;
+
+  function copyText(text, key) {
+    navigator.clipboard?.writeText(text);
+    copiedKey = key;
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => (copiedKey = null), 1200);
+  }
 
   async function loadLogs() {
     if (!onFetchLogs) return;
@@ -47,6 +56,7 @@
   $effect(() => {
     return () => {
       if (pollTimer) clearInterval(pollTimer);
+      if (copiedTimer) clearTimeout(copiedTimer);
     };
   });
 
@@ -111,24 +121,54 @@
         {#if node.local_path}
           <div class="row"><span class="k">local path</span><span class="v">{node.local_path}</span></div>
         {/if}
-        {#if node.domain}
-          <div class="row"><span class="k">domain</span><span class="v">{node.domain}</span></div>
-        {/if}
         {#if node.image}
           <div class="row"><span class="k">image</span><span class="v">{node.image}</span></div>
         {/if}
-        {#if node.ports?.length}
-          <div class="row"><span class="k">ports</span><span class="v">{node.ports.join(', ')}</span></div>
-        {/if}
+        {#each Object.entries(node.ports ?? {}) as [port, cfg]}
+          {@const routeDomain = cfg.primary ? node.domain : cfg.name ? `${cfg.name}.${node.domain}` : null}
+          {@const isLive = routeDomain && liveInfo?.routes?.some((r) => r.domain === routeDomain)}
+          {@const label = cfg.primary ? 'main' : cfg.name ? `additional (${cfg.name})` : `port ${port}`}
+          <div class="row">
+            <span class="k">{label}</span>
+            <span class="v">
+              {#if routeDomain}
+                {#if isLive}
+                  <a href="https://{routeDomain}" target="_blank" rel="noopener">{routeDomain}</a>
+                {:else}
+                  {routeDomain}
+                {/if}
+              {:else if liveInfo?.ports?.[port]}
+                <button class="copy-btn" onclick={() => copyText(`127.0.0.1:${liveInfo.ports[port]}`, port)}>
+                  127.0.0.1:{liveInfo.ports[port]} {copiedKey === port ? '· copied' : '⧉'}
+                </button>
+              {:else}
+                <span class="muted">{port} (not running)</span>
+              {/if}
+            </span>
+          </div>
+        {/each}
+        {#each node.additional_hosts ?? [] as host}
+          {@const isLive = liveInfo?.routes?.some((r) => r.domain === host)}
+          <div class="row">
+            <span class="k">additional</span>
+            <span class="v">
+              {#if isLive}<a href="https://{host}" target="_blank" rel="noopener">{host}</a>{:else}{host}{/if}
+            </span>
+          </div>
+        {/each}
+        {#each node.wildcard_hosts ?? [] as host}
+          {@const isLive = liveInfo?.routes?.some((r) => r.domain === host)}
+          <div class="row">
+            <span class="k">additional (wildcard)</span>
+            <span class="v">
+              {#if isLive}<a href="https://{host}" target="_blank" rel="noopener">*.{host}</a>{:else}*.{host}{/if}
+            </span>
+          </div>
+        {/each}
         <div class="row"><span class="k">flows</span><span class="v">{node.flows?.join(', ') || '—'}</span></div>
         {#if liveInfo && node.downloaded !== false}
           <div class="row"><span class="k">container status</span><span class="v">{liveInfo.status}</span></div>
           <div class="row"><span class="k">container name</span><span class="v">{liveInfo.container_name}</span></div>
-          {#if liveInfo.routes?.some((r) => r.domain === node.domain)}
-            <div class="row"><span class="k">open</span><span class="v"><a href="https://{node.domain}" target="_blank">https://{node.domain}</a></span></div>
-          {:else if liveInfo.published_port}
-            <div class="row"><span class="k">open</span><span class="v"><a href="http://127.0.0.1:{liveInfo.published_port}" target="_blank">127.0.0.1:{liveInfo.published_port}</a></span></div>
-          {/if}
         {/if}
       </div>
     {:else if node.downloaded === false}
@@ -175,6 +215,12 @@
   .row { display: flex; flex-direction: column; gap: 3px; font: 500 12px var(--font-mono); }
   .row .k { color: var(--ink-faint); text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; }
   .row .v { color: var(--ink); word-break: break-all; }
+  .muted { color: var(--ink-faint); font-style: italic; }
+  .copy-btn {
+    background: none; border: none; padding: 0; margin: 0; font: 500 12px var(--font-mono);
+    color: var(--ink); cursor: pointer; word-break: break-all; text-align: left;
+  }
+  .copy-btn:hover { color: var(--accent); }
   .row.not-downloaded .v { color: var(--ink-faint); font-style: italic; }
   .logs { margin-top: 20px; display: flex; flex-direction: column; gap: 10px; }
   .logs .btn {

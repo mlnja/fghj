@@ -178,11 +178,63 @@
   // Repos tab: which repo requires which other repo. The currently selected
   // flow is highlighted (border/edge color), not filtered — every known repo
   // always renders, per the fog-of-war model.
+  //
+  // One box per *repo*, not per service: two services declared in the same
+  // repo (e.g. aikido-core's `php` and `vite`) share one checkout, one git
+  // branch/dirty state, and one clone/pull lifecycle, so they collapse into
+  // a single node here. `local_path` (present once a repo is actually on
+  // disk) is the grouping key, since it's the checkout identity — `repo`
+  // alone doesn't group already-downloaded siblings any better and stub
+  // (not-yet-downloaded) nodes have no `local_path` yet, so they fall back
+  // to their own `id` and stay their own single-member group.
   let reposGraph = $derived.by(() => {
     if (!universe) return null;
-    const nodes = universe.nodes.filter((n) => n.kind === 'service');
-    const ids = new Set(nodes.map((n) => n.id));
-    const edges = universe.edges.filter((e) => e.kind === 'depends-on' && ids.has(e.from) && ids.has(e.to));
+    const services = universe.nodes.filter((n) => n.kind === 'service');
+    const groupKey = (n) => n.local_path ?? n.id;
+
+    const groups = new Map();
+    for (const n of services) {
+      const key = groupKey(n);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(n);
+    }
+
+    const nodeToGroup = new Map();
+    const nodes = [];
+    for (const [key, members] of groups) {
+      for (const m of members) nodeToGroup.set(m.id, key);
+      const repr = members[0];
+      nodes.push({
+        id: key,
+        label: key,
+        kind: 'service',
+        repo: repr.repo,
+        branch: repr.branch,
+        dirty: members.some((m) => m.dirty),
+        downloaded: members.every((m) => m.downloaded),
+        domain_scope: repr.domain_scope,
+        local_path: repr.local_path,
+        domain: repr.domain,
+        flows: [...new Set(members.flatMap((m) => m.flows))],
+        services: members.map((m) => m.label).sort(),
+      });
+    }
+
+    // Cross-repo edges only — an edge between two services in the same
+    // group (e.g. vite -> php) is internal to that repo and has nothing to
+    // do with which *other* repos this one depends on.
+    const edgeMap = new Map();
+    for (const e of universe.edges) {
+      if (e.kind !== 'depends-on') continue;
+      const from = nodeToGroup.get(e.from);
+      const to = nodeToGroup.get(e.to);
+      if (!from || !to || from === to) continue;
+      const key = `${from}|${to}`;
+      if (!edgeMap.has(key)) edgeMap.set(key, { from, to, kind: 'depends-on', flows: new Set() });
+      e.flows.forEach((f) => edgeMap.get(key).flows.add(f));
+    }
+    const edges = [...edgeMap.values()].map((e) => ({ ...e, flows: [...e.flows] }));
+
     return { nodes, edges };
   });
 

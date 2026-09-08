@@ -208,6 +208,34 @@ pub struct PortConfig {
     pub wildcard: bool,
 }
 
+/// Mirrors `#BackingDependency.ports` in `schema/dependency.cue`: either a
+/// bare list of port numbers (each implicitly non-primary, unnamed) or a map
+/// of port number to `#Port` config, same shape `#Service.ports` always
+/// uses — a backing dependency exposing more than one port with different
+/// roles (minio's S3 API + console, grafana/prometheus's UI vs. write
+/// endpoint) needs the same `primary`/`name` split a service does.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+enum BackingPorts {
+    List(Vec<String>),
+    Map(BTreeMap<String, PortConfig>),
+}
+
+impl Default for BackingPorts {
+    fn default() -> Self {
+        BackingPorts::List(Vec::new())
+    }
+}
+
+impl BackingPorts {
+    fn into_map(self) -> BTreeMap<String, PortConfig> {
+        match self {
+            BackingPorts::List(l) => l.into_iter().map(|p| (p, PortConfig::default())).collect(),
+            BackingPorts::Map(m) => m,
+        }
+    }
+}
+
 /// The fields of a `Dependency::Backing` — pulled out into its own struct
 /// (behind a `Box` at the use site) rather than inlined as a large struct
 /// variant, since `Dependency::Service`/`SharedBacking` are tiny by
@@ -220,7 +248,7 @@ struct BackingDependencyConfig {
     #[serde(default)]
     environment: Environment,
     #[serde(default)]
-    ports: Vec<String>,
+    ports: BackingPorts,
     #[serde(default = "default_domain_scope")]
     domain_scope: String,
     #[serde(default)]
@@ -706,35 +734,42 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    /// Warns (non-fatally) when a service declares more than one `primary`
-    /// port — at most one port can sit at the service's own derived domain.
+    /// Warns (non-fatally) when a node declares more than one `primary` port
+    /// — at most one port can sit at the node's own derived domain — or a
+    /// `wildcard` port that's neither `primary` nor `name`d, so there's no
+    /// domain for the wildcard to apply to. Shared between services and
+    /// backing dependencies, since both use the same `ports` map shape.
     /// Everything `check_http_routes` used to check (a route naming a port
     /// the service never declared) is now structurally impossible: port and
     /// role are one `ports` map entry, not two lists to keep in sync.
-    fn check_ports(&mut self, service_id: &str, service: &ServiceConfig) {
-        let primaries: Vec<&str> = service
-            .ports
+    fn check_port_config(&mut self, id: &str, ports: &BTreeMap<String, PortConfig>) {
+        let primaries: Vec<&str> = ports
             .iter()
             .filter(|(_, cfg)| cfg.primary)
             .map(|(port, _)| port.as_str())
             .collect();
         if primaries.len() > 1 {
             self.warnings.push(format!(
-                "'{service_id}' declares more than one primary port ({}); only one can sit at its own domain",
+                "'{id}' declares more than one primary port ({}); only one can sit at its own domain",
                 primaries.join(", ")
             ));
         }
-        if !service.additional_hosts.is_empty() && primaries.is_empty() {
+        for (port, cfg) in ports {
+            if cfg.wildcard && !cfg.primary && cfg.name.is_none() {
+                self.warnings.push(format!(
+                    "'{id}' port {port} sets wildcard but is neither primary nor named; there's no domain to wildcard"
+                ));
+            }
+        }
+    }
+
+    fn check_ports(&mut self, service_id: &str, service: &ServiceConfig) {
+        self.check_port_config(service_id, &service.ports);
+        let has_primary = service.ports.values().any(|cfg| cfg.primary);
+        if !service.additional_hosts.is_empty() && !has_primary {
             self.warnings.push(format!(
                 "'{service_id}' declares additional_hosts but no primary port; those hosts won't be routed to anything"
             ));
-        }
-        for (port, cfg) in &service.ports {
-            if cfg.wildcard && !cfg.primary && cfg.name.is_none() {
-                self.warnings.push(format!(
-                    "'{service_id}' port {port} sets wildcard but is neither primary nor named; there's no domain to wildcard"
-                ));
-            }
         }
     }
 
@@ -918,6 +953,8 @@ impl<'a> ResolveCtx<'a> {
                 // ports (`{port_name}.{node's domain}`): the specific thing
                 // comes first, its owning scope after.
                 let backing_id = format!("{name}.{owner_id}");
+                let ports = ports.into_map();
+                self.check_port_config(&backing_id, &ports);
                 self.nodes
                     .entry(backing_id.clone())
                     .or_insert_with(|| Node {
@@ -934,10 +971,7 @@ impl<'a> ResolveCtx<'a> {
                         dirty: false,
                         flows: Vec::new(),
                         build: None,
-                        ports: ports
-                            .into_iter()
-                            .map(|p| (p, PortConfig::default()))
-                            .collect(),
+                        ports,
                         environment: environment.to_pairs(),
                         command,
                         volumes,
@@ -1069,15 +1103,28 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
         }
     }
 
-    // Per-flow reachability: BFS from each flow's root over depends-on/owns edges
+    // Per-flow reachability: walk each flow's root over depends-on/owns edges
     // (shared-backing is a cross-reference, not a structural membership edge).
+    // Both directions matter: `owner -> dep` (the normal "root needs this")
+    // direction, but also `dep -> owner` — e.g. a same-repo sibling service
+    // that depends on the flow's root (a dev-server proxying to it) isn't
+    // something the root needs, but it's still structurally part of the same
+    // component and should highlight with it rather than reading as
+    // unrelated. So this treats depends-on/owns as an undirected connectivity
+    // graph for membership purposes, while still recording each individual
+    // edge (regardless of which way it points) as belonging to the flow.
     let mut adjacency: HashMap<&str, Vec<(usize, &str)>> = HashMap::new();
+    let mut rev_adjacency: HashMap<&str, Vec<(usize, &str)>> = HashMap::new();
     for (idx, edge) in ctx.edges.iter().enumerate() {
         if edge.kind == "depends-on" || edge.kind == "owns" {
             adjacency
                 .entry(edge.from.as_str())
                 .or_default()
                 .push((idx, edge.to.as_str()));
+            rev_adjacency
+                .entry(edge.to.as_str())
+                .or_default()
+                .push((idx, edge.from.as_str()));
         }
     }
 
@@ -1094,7 +1141,9 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
             .push(flow_name.clone());
 
         while let Some(id) = queue.pop() {
-            for &(edge_idx, next) in adjacency.get(id).unwrap_or(&Vec::new()) {
+            let forward = adjacency.get(id).into_iter().flatten();
+            let backward = rev_adjacency.get(id).into_iter().flatten();
+            for &(edge_idx, next) in forward.chain(backward) {
                 edge_flows[edge_idx].insert(flow_name.clone());
                 if seen.insert(next) {
                     node_flows
@@ -1279,6 +1328,76 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|w| w.contains("myservice") && w.contains("8080") && w.contains("9090"))
+        );
+    }
+
+    #[test]
+    fn backing_dependency_ports_accepts_bare_list_or_port_map() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  dependencies:\n\
+             \x20   - kind: backing\n\
+             \x20     name: postgres\n\
+             \x20     image: postgres:16\n\
+             \x20     ports: [\"5432\"]\n\
+             \x20   - kind: backing\n\
+             \x20     name: minio\n\
+             \x20     image: minio/minio\n\
+             \x20     ports:\n\
+             \x20       \"9000\":\n\
+             \x20         primary: true\n\
+             \x20       \"9001\":\n\
+             \x20         name: console\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        let postgres = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "postgres.myservice.myservice")
+            .unwrap();
+        assert_eq!(postgres.ports.len(), 1);
+        assert!(!postgres.ports["5432"].primary);
+        assert!(postgres.ports["5432"].name.is_none());
+
+        let minio = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "minio.myservice.myservice")
+            .unwrap();
+        assert_eq!(minio.ports.len(), 2);
+        assert!(minio.ports["9000"].primary);
+        assert_eq!(minio.ports["9001"].name.as_deref(), Some("console"));
+        assert!(graph.warnings.is_empty());
+    }
+
+    #[test]
+    fn warns_when_backing_dependency_declares_more_than_one_primary_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  dependencies:\n\
+             \x20   - kind: backing\n\
+             \x20     name: grafana\n\
+             \x20     image: grafana/grafana\n\
+             \x20     ports:\n\
+             \x20       \"3000\":\n\
+             \x20         primary: true\n\
+             \x20       \"3100\":\n\
+             \x20         primary: true\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        assert!(
+            graph
+                .warnings
+                .iter()
+                .any(|w| w.contains("grafana") && w.contains("3000") && w.contains("3100"))
         );
     }
 
@@ -1802,6 +1921,66 @@ mod tests {
             && e.to == "php.shop-web"
             && e.kind == "depends-on"));
         assert!(graph.warnings.is_empty());
+    }
+
+    #[test]
+    fn flow_membership_includes_a_sibling_that_depends_on_the_flow_root() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        write_component(tmp.path(), "widget", "");
+
+        fs::create_dir_all(tmp.path().join("shop-web")).unwrap();
+        fs::write(
+            tmp.path().join("shop-web/.fghj.yaml"),
+            "version: \"1.0\"\n\
+             services:\n\
+             \x20 vite:\n\
+             \x20   build:\n\
+             \x20     context: .\n\
+             \x20   dependencies:\n\
+             \x20     - kind: service\n\
+             \x20       services: [php]\n\
+             \x20 php:\n\
+             \x20   build:\n\
+             \x20     context: .\n\
+             flows:\n\
+             \x20 demo:\n\
+             \x20   description: demo\n\
+             \x20   service: php\n\
+             \x20   dependencies:\n\
+             \x20     - kind: service\n\
+             \x20       repo: https://example.com/widget.git\n",
+        )
+        .unwrap();
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        let php = graph.nodes.iter().find(|n| n.id == "php.shop-web").unwrap();
+        assert!(php.flows.contains(&"demo".to_string()));
+
+        // vite depends ON php (the flow root) rather than the other way
+        // around — it must still be pulled into the flow's membership, not
+        // left looking unrelated just because its edge points backward.
+        let vite = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "vite.shop-web")
+            .unwrap();
+        assert!(vite.flows.contains(&"demo".to_string()));
+
+        let widget = graph
+            .nodes
+            .iter()
+            .find(|n| n.id.starts_with("widget."))
+            .unwrap();
+        assert!(widget.flows.contains(&"demo".to_string()));
+
+        let vite_edge = graph
+            .edges
+            .iter()
+            .find(|e| e.from == "vite.shop-web" && e.to == "php.shop-web")
+            .unwrap();
+        assert!(vite_edge.flows.contains(&"demo".to_string()));
     }
 
     #[test]

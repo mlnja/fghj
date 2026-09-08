@@ -76,8 +76,8 @@ services:
 | `build.args` | map of string→string | Build-time `--build-arg` values. |
 | `ports` | map of container-port→`#Port` | Declared container ports. The map key is the literal container port number (e.g. `"8080"`), published to Docker as-is — not a semantic label. See [Ports](#ports) below. |
 | `domain_scope` | `"run"` \| `"stable"` | Whether this service's derived domain includes the run id. Defaults to `"run"`. See [Node identity & domains](/concepts/node-identity-and-domains/#domain-derivation-one-formula-no-exceptions). |
-| `environment` | map or list | Either `{KEY: value}` or a list of `"KEY=value"` strings — mirrors Docker Compose's own `environment` shape. |
-| `env_file` | list of strings | `.env`-style files loaded *before* `environment` — Compose's `env_file`. Each path resolves against this repo's own checkout root, same rule as `#Volume.host`. An explicit `environment` entry always wins over one loaded from a file. Also available on `kind: backing` — see its own field table below for how the path resolves there. |
+| `environment` | map or list | Either `{KEY: value}` or a list of `"KEY=value"` strings — mirrors Docker Compose's own `environment` shape. Values can reference a `*.fghj.internal` domain with `${FGHJ_SERVICE_FQDN}`/`${FGHJ_SERVICE_FQDN:name}` — see [Domain templates in `environment`](#domain-templates-in-environment) below. |
+| `env_file` | list of strings | `.env`-style files loaded *before* `environment` — Compose's `env_file`. Each path resolves against this repo's own checkout root, same rule as `#Volume.host`. An explicit `environment` entry always wins over one loaded from a file. Also available on `kind: backing` — see its own field table below for how the path resolves there. Same `${FGHJ_SERVICE_FQDN}` templating as `environment` applies to loaded values too. |
 | `platform` | string, optional | Pins the platform (`os[/arch[/variant]]`, e.g. `linux/arm64`) passed to `docker build --platform`, for cross-compiling this service's image to a specific architecture. Unset (the default) builds for the host's own platform. |
 | `command` | list of strings | Overrides the image's default `CMD`, Compose-`command`-style. Empty (the default) leaves the image's own `CMD`/`ENTRYPOINT` untouched. |
 | `restart` | `"no"` \| `"always"` \| `"on-failure"` \| `"unless-stopped"` | Compose-equivalent restart policy. Defaults to `"no"` — a stopped container stays stopped; `fghj daemon`'s own `ensure_running` is the usual way a container comes back, not Docker's own restart machinery. |
@@ -117,6 +117,30 @@ ports:
 
 A port with neither `primary` nor `name` is still published to an
 ephemeral localhost port, just with no `*.fghj.internal` name.
+
+## Domain templates in `environment`
+
+`environment` (and `env_file`) values can reference a `*.fghj.internal`
+domain without hand-computing it:
+
+```yaml
+environment:
+  PMA_HOST: ${FGHJ_SERVICE_FQDN:mysql}
+  PMA_ABSOLUTE_URI: https://${FGHJ_SERVICE_FQDN}/
+```
+
+| Token | Resolves to |
+|---|---|
+| `${FGHJ_SERVICE_FQDN}` | This node's own derived domain. |
+| `${FGHJ_SERVICE_FQDN:name}` | The derived domain of whichever sibling is declared with that leaf `name`: a `kind: backing` dependency owned by the same service as the node whose `environment` this is (a backing dependency can reference another backing dependency this way too, not just the owning service), or — if no such backing dependency matches — a service this node directly depends on via `kind: service` (same-repo or cross-repo). |
+| `${FGHJ_SERVICE_FQDN:a::b::name}` | Same lookup, but disambiguates a leaf `name` that matches more than one sibling by also qualifying it with as many of its owning segments as needed, root-first — the same segments a node's id is built from leaf-first (`{name}.{owner-id}`), just written in the opposite, more-readable order. E.g. `aikifactory::aikifactory::minio` reaches the same node as the id `minio.aikifactory.aikifactory` (before the workspace suffix). |
+
+Can't reach a *named port* on a sibling — only its bare domain — and for
+the `kind: service` case, only a dependency this exact node declares
+itself, not a transitively-reached one. A malformed token (missing `}`) or
+a path that doesn't resolve to any sibling is left in the output as literal
+text rather than failing the run, so a typo is diagnosable from the
+container's own env instead of silently swallowed.
 
 ## Volumes
 
@@ -195,11 +219,15 @@ volumes:
 | `container` | string | Mount path inside the container. |
 | `read_only` | bool | Mounts read-only. Defaults to `false`. |
 
-Named volumes are never deleted by `fghj` — stopping a run tears down its
-containers and network but leaves the volume's data in place, which is
-what makes it "persistent" in the first place. A `"run"`-scoped preview
-run that you stop and never restart leaves its volume behind; there's no
-`docker compose down -v` equivalent yet to clean those up.
+Stopping a `"run"`-scoped volume's named/preview run deletes that volume
+along with its containers and network — since `scope: "run"` under a named
+run derives a run-specific volume name to begin with (folding the run id
+in), there's nothing else that could still be using it once the run
+stops. The default run and any `"stable"`-scoped volume are never deleted
+this way: a `"stable"` volume's entire point is to persist across every
+run, and the default run's own `"run"`-scoped volumes get the exact same
+derived name on every start, so stopping and restarting the default run
+must leave their data in place.
 
 ## Additional hosts
 
