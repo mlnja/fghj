@@ -1,8 +1,52 @@
 <script>
   import SideDrawer from './SideDrawer.svelte';
 
-  let { node, onClose, liveInfo, onFetchLogs, onLogStreamUrl, onDownload, onPullStatus, onDownloadComplete } = $props();
+  let {
+    node,
+    onClose,
+    liveInfo,
+    runId,
+    onFetchLogs,
+    onLogStreamUrl,
+    onDownload,
+    onPullStatus,
+    onDownloadComplete,
+    onStartNode,
+    onStopNode,
+    onDeleteNode,
+  } = $props();
   let activeTab = $state('general');
+  let nodeBusy = $state(false);
+
+  async function startNode() {
+    if (!onStartNode || nodeBusy) return;
+    nodeBusy = true;
+    try {
+      await onStartNode(node.id);
+    } finally {
+      nodeBusy = false;
+    }
+  }
+
+  async function stopNode() {
+    if (!onStopNode || nodeBusy) return;
+    nodeBusy = true;
+    try {
+      await onStopNode(node.id);
+    } finally {
+      nodeBusy = false;
+    }
+  }
+
+  async function deleteNode() {
+    if (!onDeleteNode || nodeBusy) return;
+    nodeBusy = true;
+    try {
+      await onDeleteNode(node.id);
+    } finally {
+      nodeBusy = false;
+    }
+  }
   let logs = $state('');
   let loadingLogs = $state(false);
   let streaming = $state(false);
@@ -91,6 +135,32 @@
     </div>
     <h3 class="stencil">{node.label}</h3>
 
+    {#if node.downloaded !== false}
+      <div class="controls">
+        <button
+          class="ctrl-btn"
+          onclick={startNode}
+          disabled={!runId || nodeBusy || liveInfo?.status === 'running'}
+        >
+          Start
+        </button>
+        <button
+          class="ctrl-btn"
+          onclick={stopNode}
+          disabled={!runId || nodeBusy || liveInfo?.status !== 'running'}
+        >
+          Stop
+        </button>
+        <button
+          class="ctrl-btn danger"
+          onclick={deleteNode}
+          disabled={!runId || nodeBusy || !liveInfo}
+        >
+          Delete
+        </button>
+      </div>
+    {/if}
+
     <div class="tabs">
       <div class="tab" class:active={activeTab === 'general'} onclick={() => (activeTab = 'general')}>General info</div>
       <div class="tab" class:active={activeTab === 'logs'} onclick={() => (activeTab = 'logs')}>Logs</div>
@@ -127,22 +197,27 @@
         {#each Object.entries(node.ports ?? {}) as [port, cfg]}
           {@const routeDomain = cfg.primary ? node.domain : cfg.name ? `${cfg.name}.${node.domain}` : null}
           {@const isLive = routeDomain && liveInfo?.routes?.some((r) => r.domain === routeDomain)}
-          {@const label = cfg.primary ? 'main' : cfg.name ? `additional (${cfg.name})` : `port ${port}`}
-          <div class="row">
-            <span class="k">{label}</span>
-            <span class="v">
+          {@const role = cfg.primary ? 'main' : cfg.name ? 'additional' : 'tcp'}
+          {@const displayDomain = cfg.wildcard ? `*.${routeDomain}` : routeDomain}
+          <div class="port-row">
+            <span class="port-chip">{port}</span>
+            <span class="port-badge role-{role}">{role}</span>
+            {#if cfg.wildcard}
+              <span class="port-badge wildcard">wildcard</span>
+            {/if}
+            <span class="port-target">
               {#if routeDomain}
                 {#if isLive}
-                  <a href="https://{routeDomain}" target="_blank" rel="noopener">{routeDomain}</a>
+                  <a href="https://{routeDomain}" target="_blank" rel="noopener">{displayDomain} ↗</a>
                 {:else}
-                  {routeDomain}
+                  <span class="muted">{displayDomain}</span>
                 {/if}
               {:else if liveInfo?.ports?.[port]}
                 <button class="copy-btn" onclick={() => copyText(`127.0.0.1:${liveInfo.ports[port]}`, port)}>
                   127.0.0.1:{liveInfo.ports[port]} {copiedKey === port ? '· copied' : '⧉'}
                 </button>
               {:else}
-                <span class="muted">{port} (not running)</span>
+                <span class="muted">not running</span>
               {/if}
             </span>
           </div>
@@ -204,6 +279,14 @@
   .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
   .close { width: 22px; height: 22px; border-radius: 50%; background: var(--panel-2); display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--ink-dim); font-size: 14px; }
   h3 { font-size: 20px; color: var(--ink); margin-bottom: 20px; word-break: break-all; }
+  .controls { display: flex; gap: 8px; margin-bottom: 16px; }
+  .ctrl-btn {
+    padding: 6px 12px; border-radius: 4px; background: var(--panel-2);
+    border: 1px solid var(--line-strong); color: var(--ink); font: 700 10px var(--font-mono);
+    text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer;
+  }
+  .ctrl-btn:disabled { opacity: 0.4; cursor: default; }
+  .ctrl-btn.danger:not(:disabled) { border-color: var(--danger); color: var(--danger); }
   .tabs { display: flex; gap: 2px; padding: 2px; background: var(--panel-2); border-radius: 6px; margin-bottom: 20px; width: fit-content; }
   .tab {
     padding: 6px 14px; border-radius: 4px; font: 700 11px var(--font-mono); text-transform: uppercase;
@@ -216,6 +299,20 @@
   .row .k { color: var(--ink-faint); text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; }
   .row .v { color: var(--ink); word-break: break-all; }
   .muted { color: var(--ink-faint); font-style: italic; }
+  .port-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font: 500 12px var(--font-mono); }
+  .port-chip {
+    padding: 1px 6px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--line-strong);
+    color: var(--ink-dim); font-weight: 700; font-size: 11px;
+  }
+  .port-badge {
+    padding: 1px 6px; border-radius: 3px; font: 700 9px var(--font-mono); text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .port-badge.role-main { background: var(--accent-bg); color: var(--accent); }
+  .port-badge.role-additional { background: var(--panel-2); color: var(--ink-dim); border: 1px solid var(--line-strong); }
+  .port-badge.role-tcp { background: var(--panel-2); color: var(--ink-faint); border: 1px solid var(--line-strong); }
+  .port-badge.wildcard { background: var(--warning-bg); color: var(--warning); }
+  .port-target { color: var(--ink); word-break: break-all; }
   .copy-btn {
     background: none; border: none; padding: 0; margin: 0; font: 500 12px var(--font-mono);
     color: var(--ink); cursor: pointer; word-break: break-all; text-align: left;

@@ -148,6 +148,24 @@
     return withWs(`/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/logs/stream`);
   }
 
+  async function startNode(nodeId) {
+    if (!selectedRunId) return;
+    await fetch(withWs(`/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/start`), { method: 'POST' });
+    await loadRuns();
+  }
+
+  async function stopNode(nodeId) {
+    if (!selectedRunId) return;
+    await fetch(withWs(`/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/stop`), { method: 'POST' });
+    await loadRuns();
+  }
+
+  async function deleteNode(nodeId) {
+    if (!selectedRunId) return;
+    await fetch(withWs(`/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/delete`), { method: 'POST' });
+    await loadRuns();
+  }
+
   $effect(() => {
     if (activeTab === 'containers') {
       loadRuns();
@@ -316,11 +334,15 @@
       node={selectedNode}
       onClose={() => (selectedNode = null)}
       {liveInfo}
+      runId={selectedRunId}
       onFetchLogs={fetchLogs}
       onLogStreamUrl={logStreamUrl}
       onDownload={downloadNode}
       onPullStatus={pullStatus}
       onDownloadComplete={onDownloadComplete}
+      onStartNode={startNode}
+      onStopNode={stopNode}
+      onDeleteNode={deleteNode}
     />
   {/if}
 

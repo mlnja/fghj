@@ -397,6 +397,20 @@ async fn exec_cmd(
     let mut failure: Option<String> = None;
 
     loop {
+        // `select!`'s `if` precondition only skips *polling* a branch — the
+        // async expression that builds its future is still evaluated even
+        // when disabled, so `resize_signal.as_mut().unwrap()` would panic
+        // here on every non-TTY `exec` the moment `resize_signal` is `None`.
+        // Routing through a future that resolves to `pending()` in that case
+        // sidesteps the unwrap entirely and needs no precondition.
+        let resize_wait = async {
+            match resize_signal.as_mut() {
+                Some(sig) => {
+                    sig.recv().await;
+                }
+                None => std::future::pending::<()>().await,
+            }
+        };
         tokio::select! {
             n = stdin.read(&mut buf), if !stdin_eof => {
                 match n {
@@ -416,7 +430,7 @@ async fn exec_cmd(
                     Err(_) => break,
                 }
             }
-            _ = resize_signal.as_mut().unwrap().recv(), if resize_signal.is_some() => {
+            _ = resize_wait => {
                 let (cols, rows) = terminal_size();
                 let _ = write
                     .send(WsMessage::Text(

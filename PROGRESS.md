@@ -1,6 +1,27 @@
 # fghj — Progress Tracker
 
-Last updated: 2026-09-08 (fixed named volumes never being cleaned up on
+Last updated: 2026-09-09 (redesigned the Drawer's port rows — each is now a
+port-number chip, a role badge (MAIN/ADDITIONAL/TCP), a separate WILDCARD
+badge when `#Port.wildcard` is set, and the resolved URL (or a copy button
+for a non-HTTP raw TCP port) — closing the gap where a wildcarded port
+(e.g. package-repository-proxy's `9009`) showed no indication it was
+wildcarded at all; `Node.ports[port].wildcard` was already serialized to
+the UI, just never read by `Drawer.svelte`).
+Prior update, same day (added per-node Start/Stop/Delete controls in the
+Drawer — the first lifecycle granularity below "whole run", where every
+control used to live. Backend: `RunRegistry::restart_container` (stop +
+recreate one node's container in an already-running run, picking up
+`.fghj.yaml` changes since it last started — Start),
+`RunRegistry::stop_container` (real `docker stop`, container and its
+volumes survive — Stop), and `RunRegistry::remove_container` (stop +
+remove, dropped from `RunState.containers` — Delete), routed at
+`POST /runs/{run_id}/nodes/{node_id}/{start,stop,delete}` in `src/daemon.rs`.
+Frontend: three buttons above the tabs in `Drawer.svelte`, disabled when no
+run is selected or when the action doesn't apply to the node's current
+`liveInfo.status`. Deliberately scoped down from the fuller "desired vs.
+actual state / reconciliation" feature discussed but not yet designed — see
+"Known gaps" below).
+Prior update, same day (fixed named volumes never being cleaned up on
 `stop` — they were Docker-implicit, auto-created unlabeled on first bind
 reference, so there was nothing to filter on for removal. Added
 `docker::ensure_volume`, called from `RunRegistry::start_node` right before
@@ -366,6 +387,26 @@ plans referenced above.
 
 ## Known gaps / open questions
 
+- **No desired-vs-actual-state reconciliation yet** (discussed 2026-09-09,
+  scoped down to the simpler per-node Start/Stop/Delete buttons above for
+  now). The ask: an Argo-Workflows-style synced/not-synced indicator per
+  node, comparing "desired" (freshly-resolved `.fghj.yaml`) against "actual"
+  (live Docker state) against "recorded" (what's in `store.rs`'s `runs`/
+  `containers` tables) — since env vars, ports, volumes, command, etc.
+  aren't recoverable from a running container via `docker inspect` alone.
+  Confirmed via survey: `store.rs`'s `containers` table only persists
+  live-observed fields (status/ports/routes/domain), not the resolved
+  config that produced a container (image/env/volumes/command/healthcheck/
+  etc.) — so detecting "container is running a stale config relative to
+  `.fghj.yaml`" needs a new persisted snapshot (e.g. a hash or JSON blob of
+  the resolved `Node` + overrides at start time) to diff against, which
+  doesn't exist today. `RunRegistry::refresh()` (the existing background
+  reconciler, ticking every `RECONCILE_INTERVAL` in `daemon.rs`) is
+  explicitly read-only today — it updates observed status, including
+  flagging a vanished container `"removed"`, but never recreates or
+  restarts anything. `ensure_running` is the closest thing to a
+  desired-state check that exists, but only compares container liveness
+  (running or not), never configuration.
 - SPEC.md's CLI surface (`fghj setup`, `fghj branch`, `fghj branch set`) does
   not match the implemented CLI (`validate`, `graph`, `wire`, `daemon stop` in
   `src/main.rs`, plus the root-owned `fghjd` daemon binary) — SPEC.md may be

@@ -476,6 +476,105 @@ impl RunRegistry {
         Ok(())
     }
 
+    /// (Re)starts a single node's container within an already-running run —
+    /// the per-node counterpart to `start`/`ensure_running`'s whole-run
+    /// granularity, backing the Drawer's "Start" button. Always recreates
+    /// from scratch (mirrors `ensure_running`'s stop-then-start dance) so a
+    /// `.fghj.yaml` change since the container last started is actually
+    /// picked up, rather than silently no-op'ing on an already-running one.
+    pub async fn restart_container(
+        &self,
+        graph: &Graph,
+        run_id: &str,
+        node_id: &str,
+    ) -> Result<ContainerInfo> {
+        let mut state = {
+            let runs = self.runs.lock().unwrap();
+            let Some(state) = runs.get(run_id) else {
+                bail!("no such run: {run_id}");
+            };
+            state.clone()
+        };
+        let Some(node) = graph.nodes.iter().find(|n| n.id == node_id) else {
+            bail!("no such node: {node_id}");
+        };
+        let owner = self.db.clone().load_owner().await.ok().flatten();
+        let container_name = format!(
+            "fghj-{}-{}-{}",
+            sanitize_label(&graph.workspace_name),
+            run_id,
+            sanitize_label(&node.id)
+        );
+        docker::stop_and_remove(&self.docker, &container_name).await;
+
+        let info = self
+            .start_node(
+                graph,
+                node,
+                run_id,
+                &state.network,
+                &state.overrides,
+                owner.as_ref(),
+            )
+            .await?;
+        if node.healthcheck.is_some() {
+            wait_for_healthy(&self.docker, &info.container_name).await;
+        }
+        state.containers.retain(|c| c.node_id != info.node_id);
+        state.containers.push(info.clone());
+        self.db.clone().save_run(state.clone()).await?;
+        self.runs.lock().unwrap().insert(run_id.to_string(), state);
+        Ok(info)
+    }
+
+    /// Stops a single node's container without removing it or touching the
+    /// rest of the run — the Drawer's "Stop" button. Unlike `stop` (whole
+    /// run), this leaves the container itself and its named volumes in
+    /// place; a subsequent "Start" click just recreates it.
+    pub async fn stop_container(&self, run_id: &str, node_id: &str) -> Result<()> {
+        let mut state = {
+            let runs = self.runs.lock().unwrap();
+            let Some(state) = runs.get(run_id) else {
+                bail!("no such run: {run_id}");
+            };
+            state.clone()
+        };
+        let Some(c) = state.containers.iter_mut().find(|c| c.node_id == node_id) else {
+            bail!("no such node in run {run_id}: {node_id}");
+        };
+        docker::stop_container(&self.docker, &c.container_name).await;
+        c.status = match docker::inspect_status(&self.docker, &c.container_name, "").await {
+            Ok(Some(s)) => s.status,
+            _ => "exited".to_string(),
+        };
+        self.db.clone().save_run(state.clone()).await?;
+        self.runs.lock().unwrap().insert(run_id.to_string(), state);
+        Ok(())
+    }
+
+    /// Stops and removes a single node's container, dropping it from the
+    /// run entirely — the Drawer's "Delete" button. Named volumes survive
+    /// (same reasoning as `stop`'s default-run carve-out: a volume's whole
+    /// point is to outlive any one container), so a later "Start" click
+    /// picks the data back up in a fresh container.
+    pub async fn remove_container(&self, run_id: &str, node_id: &str) -> Result<()> {
+        let mut state = {
+            let runs = self.runs.lock().unwrap();
+            let Some(state) = runs.get(run_id) else {
+                bail!("no such run: {run_id}");
+            };
+            state.clone()
+        };
+        let Some(pos) = state.containers.iter().position(|c| c.node_id == node_id) else {
+            bail!("no such node in run {run_id}: {node_id}");
+        };
+        let c = state.containers.remove(pos);
+        docker::stop_and_remove(&self.docker, &c.container_name).await;
+        self.db.clone().save_run(state.clone()).await?;
+        self.runs.lock().unwrap().insert(run_id.to_string(), state);
+        Ok(())
+    }
+
     pub async fn start(&self, graph: &Graph, spec: RunSpec) -> Result<RunState> {
         let run_id = spec
             .run_id

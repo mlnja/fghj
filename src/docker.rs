@@ -391,6 +391,14 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Stops a container without removing it — the counterpart to
+/// `stop_and_remove` below, used by `RunRegistry::stop_container` so a
+/// single node can be paused without losing the container (its logs, its
+/// exact identity for a later plain restart) the way a full remove would.
+pub async fn stop_container(docker: &Docker, name: &str) {
+    let _ = docker.stop_container(name, None).await;
+}
+
 pub async fn stop_and_remove(docker: &Docker, name: &str) {
     let _ = docker
         .remove_container(

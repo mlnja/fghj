@@ -572,6 +572,46 @@ async fn post_run_stop(
     }
 }
 
+async fn post_run_node_start(
+    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    WorkspaceExtractor(state): WorkspaceExtractor,
+) -> Response {
+    let path = state.path.clone();
+    let graph = match tokio::task::spawn_blocking(move || resolver::resolve_universe(&path)).await {
+        Ok(Ok(g)) => g,
+        Ok(Err(e)) => return err_response(e),
+        Err(e) => return err_response(anyhow::anyhow!("resolve_universe task panicked: {e}")),
+    };
+    match state
+        .runs
+        .restart_container(&graph, &run_id, &node_id)
+        .await
+    {
+        Ok(info) => Json(serde_json::json!(info)).into_response(),
+        Err(e) => err_response(e),
+    }
+}
+
+async fn post_run_node_stop(
+    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    WorkspaceExtractor(state): WorkspaceExtractor,
+) -> Response {
+    match state.runs.stop_container(&run_id, &node_id).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => err_response(e),
+    }
+}
+
+async fn post_run_node_delete(
+    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    WorkspaceExtractor(state): WorkspaceExtractor,
+) -> Response {
+    match state.runs.remove_container(&run_id, &node_id).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => err_response(e),
+    }
+}
+
 #[derive(Deserialize)]
 struct TailQuery {
     tail: Option<usize>,
@@ -812,6 +852,18 @@ fn build_router(registry: Arc<WorkspaceRegistry>, daemon: Arc<DaemonControl>) ->
         .route("/pull-jobs", get(get_pull_jobs))
         .route("/runs", get(get_runs).post(post_runs))
         .route("/runs/{run_id}/stop", post(post_run_stop))
+        .route(
+            "/runs/{run_id}/nodes/{node_id}/start",
+            post(post_run_node_start),
+        )
+        .route(
+            "/runs/{run_id}/nodes/{node_id}/stop",
+            post(post_run_node_stop),
+        )
+        .route(
+            "/runs/{run_id}/nodes/{node_id}/delete",
+            post(post_run_node_delete),
+        )
         .route("/runs/{run_id}/nodes/{node_id}/logs", get(get_run_logs))
         .route(
             "/runs/{run_id}/nodes/{node_id}/logs/stream",
