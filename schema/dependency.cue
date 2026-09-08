@@ -94,7 +94,7 @@ package fghj
 	// On a #Service, each path resolves against this repo's own checkout
 	// root, same rule as `#Volume.host`. On a #BackingDependency, there's no
 	// checkout of its own, so each path resolves against the *owning*
-	// service's checkout root instead — the service whose fghj.yaml declares
+	// service's checkout root instead — the service whose .fghj.yaml declares
 	// this dependency inline, same as Compose resolving `env_file` against
 	// the compose file's own directory regardless of `build` vs `image`.
 	// Declared entries are loaded in order, then `environment` is applied on
@@ -105,7 +105,7 @@ package fghj
 
 // A dependency on a backing service (a datastore, broker, etc. — the 12-Factor
 // App sense: any service consumed over the network that isn't code you own)
-// provisioned directly from an image — nothing to clone, no fghj.yaml of its
+// provisioned directly from an image — nothing to clone, no .fghj.yaml of its
 // own. This service *owns* the resource: it's the one instance that
 // `#SharedBackingDependency` refs point at.
 #BackingDependency: {

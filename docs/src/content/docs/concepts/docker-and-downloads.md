@@ -34,7 +34,7 @@ shelling out to `docker build`/`docker run`:
 ## Volumes: two shapes, one Docker primitive
 
 A volume declaration is either a bind mount or a named volume, never both
-— see [fghj.yaml reference: Volumes](/reference/fghj-yaml/#volumes) for how
+— see [.fghj.yaml reference: Volumes](/reference/fghj-yaml/#volumes) for how
 to write each. Both shapes end up in the exact same place at the Docker
 layer: a bind mount is `"host/path:container/path"`, a named volume is
 `"volume-name:container/path"` — Docker itself tells them apart by

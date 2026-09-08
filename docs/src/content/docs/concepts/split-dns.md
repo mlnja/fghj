@@ -9,18 +9,19 @@ For `https://cart.myworkspace.fghj.internal` to work in a browser,
 something has to answer that DNS query with `127.0.0.1` — your normal
 resolver has never heard of `fghj.internal` and would just return
 NXDOMAIN. `fghj` needs its own authoritative answer for that zone, plus
-any `wildcard_hosts` suffix a running service has claimed (see
-[Wildcard hosts](/reference/fghj-yaml/#wildcard-hosts)), without touching
-resolution for anything else on the machine.
+any wildcarded suffix a running service has claimed (see
+[Wildcarding an alias](/reference/fghj-yaml/#wildcarding-an-alias)),
+without touching resolution for anything else on the machine.
 
 ## A hand-rolled server, on purpose
 
 `fghjd` implements the DNS wire format directly rather than pulling in a
 general-purpose DNS server library. `fghj.internal` is always in-zone; on
 top of that, the server answers a *dynamic* set of zones — one per
-`wildcard_hosts` suffix currently claimed by a running container,
-re-checked on every query so a zone starts or stops answering within one
-query of its owning container starting or stopping. The answer is always
+wildcarded `additional_hosts` suffix (or wildcarded default domain)
+currently claimed by a running container, re-checked on every query so a
+zone starts or stops answering within one query of its owning container
+starting or stopping. The answer is always
 the same (`127.0.0.1`, with a short 5-second TTL so a container restart's
 new route is picked up quickly instead of being cached stale on the
 client), and every in-zone query gets that answer while everything
@@ -42,7 +43,7 @@ whoever configures the OS resolver to point at it.
 ## Wiring into the OS resolver
 
 On macOS, `fghjd` writes one `/etc/resolver/<zone>` file per active
-zone — `fghj.internal` plus one per currently-claimed `wildcard_hosts`
+zone — `fghj.internal` plus one per currently-claimed wildcarded
 suffix — a config file the system's resolver subsystem reads to route any
 query under that specific domain to a given nameserver/port, with no
 changes needed to `/etc/hosts` or the system-wide DNS configuration.

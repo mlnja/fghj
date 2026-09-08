@@ -83,7 +83,7 @@ fn derive_volume_name(name: &str, scope: &str, workspace_name: &str, run_id: &st
 /// a node's dependency) are ignored — nothing to order against.
 ///
 /// A cycle can't make progress by definition; rather than fail the whole
-/// run over a cyclic `fghj.yaml` (resolution here is independent of `fghj
+/// run over a cyclic `.fghj.yaml` (resolution here is independent of `fghj
 /// validate` — see the module doc on that split), whatever's left over is
 /// appended in stable sorted order so a run still starts *something*.
 pub fn topological_start_order(node_ids: &[String], edges: &[Edge]) -> Vec<String> {
@@ -366,7 +366,7 @@ impl RunRegistry {
         }
 
         let network = format!("fghj-{}-{}", sanitize_label(&graph.workspace_name), run_id);
-        docker::ensure_network(&self.docker, &network).await?;
+        docker::ensure_network(&self.docker, &network, &network).await?;
 
         let owner = self.db.clone().load_owner().await.ok().flatten();
 
@@ -439,7 +439,7 @@ impl RunRegistry {
     pub async fn ensure_running(&self, graph: &Graph, flow: Option<&str>) -> Result<RunState> {
         let run_id = DEFAULT_RUN_ID.to_string();
         let network = format!("fghj-{}-{}", sanitize_label(&graph.workspace_name), run_id);
-        docker::ensure_network(&self.docker, &network).await?;
+        docker::ensure_network(&self.docker, &network, &network).await?;
 
         let mut state = self
             .runs
@@ -570,7 +570,7 @@ impl RunRegistry {
                 // compose file's own directory regardless of `build` vs
                 // `image`. Its equivalent of "the compose file's directory"
                 // is the *owning* service's checkout root: the service whose
-                // fghj.yaml declares this dependency inline, found via the
+                // .fghj.yaml declares this dependency inline, found via the
                 // graph's "owns" edge (`resolver::visit_dependency` always
                 // pushes owner -> backing).
                 let owner_local_path = graph
@@ -824,14 +824,14 @@ impl RunRegistry {
                 routes.push(PortRoute {
                     domain: domain.clone(),
                     host_port,
-                    wildcard: false,
+                    wildcard: cfg.wildcard,
                 });
             }
             if let Some(name) = &cfg.name {
                 routes.push(PortRoute {
                     domain: format!("{name}.{domain}"),
                     host_port,
-                    wildcard: false,
+                    wildcard: cfg.wildcard,
                 });
             }
         }

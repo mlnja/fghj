@@ -34,10 +34,29 @@ fn restart_policy_name(restart: &str) -> RestartPolicyNameEnum {
     }
 }
 
-pub async fn ensure_network(docker: &Docker, name: &str) -> Result<()> {
+/// `project` mirrors Docker Compose's own network labels
+/// (`com.docker.compose.network`/`.project`) — without them, Docker
+/// Desktop/OrbStack can group this network's containers under `project` (by
+/// their own container-level labels, set in `run_container` below) but can't
+/// tell this network belongs to that same project, since name alone isn't a
+/// recognized grouping signal. That breaks "delete group" in those UIs: it
+/// can find and remove the containers, but can't identify the network as
+/// part of the same atomic delete, so the whole group action fails instead
+/// of leaving an orphaned network behind.
+pub async fn ensure_network(docker: &Docker, name: &str, project: &str) -> Result<()> {
+    let mut labels = HashMap::new();
+    labels.insert(
+        "com.docker.compose.network".to_string(),
+        "default".to_string(),
+    );
+    labels.insert(
+        "com.docker.compose.project".to_string(),
+        project.to_string(),
+    );
     let result = docker
         .create_network(NetworkCreateRequest {
             name: name.to_string(),
+            labels: Some(labels),
             ..Default::default()
         })
         .await;

@@ -6,7 +6,7 @@ Three distinct things get confused if you're not careful, so they get three
 distinct owners:
 
 1. **Flow membership** — *which repos* are in scope for a user journey. This
-   is repo-owned, versioned config: whichever repo's `fghj.yaml` declares the
+   is repo-owned, versioned config: whichever repo's `.fghj.yaml` declares the
    flow owns its `dependencies` list, per [[flat-workspace-model]]. A
    dependency's `default_branch` lives here too, but it is only ever a
    *default* — the initial `pull_all` clone target, and the fallback label

@@ -18,10 +18,10 @@ it's easy to accidentally conflate them:
    another container reaches it at. Must be derivable without any author
    input, or two independent authors could hand-pick the same one.
 
-`fghj.yaml` only ever declares the label (`service.name`,
+`.fghj.yaml` only ever declares the label (`service.name`,
 `dependency.name`). The id and the domain are both derived by `fghj`
 itself — never author-declared, never something you can override with a
-raw string in `fghj.yaml`.
+raw string in `.fghj.yaml`.
 
 ## Why the id can't just be the label
 
@@ -45,7 +45,7 @@ owning scope after:
   retroactively change the *first* one's id and silently rehost its
   domain, which is worse than always paying the slightly longer id. A
   single repo's `services:` map can declare more than one service (see
-  [fghj.yaml](/reference/fghj-yaml/#services)) — e.g. a `vite` dev-server
+  [.fghj.yaml](/reference/fghj-yaml/#services)) — e.g. a `vite` dev-server
   and a `php` backend built from the same checkout — and this same rule is
   what keeps `vite.shop-web` and `php.shop-web` distinct: the map key
   (unique per repo, by construction) is the leaf, the folder name is the
@@ -160,7 +160,7 @@ the service never declared.
 This is what lets a service with more than one HTTP surface — a
 Prometheus instance's scrape port plus its admin UI, say — expose both
 under sensible names without any extra schema. See
-[fghj.yaml](/reference/fghj-yaml/) for the full `#Port` shape.
+[.fghj.yaml](/reference/fghj-yaml/) for the full `#Port` shape.
 
 ## Domain derivation: one formula, no exceptions
 

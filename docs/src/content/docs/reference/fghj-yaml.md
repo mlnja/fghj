@@ -1,9 +1,9 @@
 ---
-title: fghj.yaml
-description: Full reference for the fghj.yaml file every repo declares — services, ports, dependencies, and flows.
+title: .fghj.yaml
+description: Full reference for the .fghj.yaml file every repo declares — services, ports, dependencies, and flows.
 ---
 
-Every repo that participates in `fghj` carries its own `fghj.yaml` at its
+Every repo that participates in `fghj` carries its own `.fghj.yaml` at its
 root. There's no shared/root config — each file is self-contained and
 validated independently against fghj's CUE schema; see
 [fghj validate](/cli/validate/). The full grammar lives in `schema/component.cue`
@@ -89,8 +89,7 @@ services:
 | `extra_hosts` | list of `"hostname:ip"` strings | Extra literal entries written into *this container's own* `/etc/hosts` — Compose's `extra_hosts`. Distinct from `additional_hosts` below: this is the container resolving something else, not the host resolving this container. |
 | `healthcheck` | `#Healthcheck`, optional | A Docker `HEALTHCHECK`. See [Healthcheck & start order](#healthcheck--start-order) below. |
 | `volumes` | list of `#Volume` | Bind mounts and named volumes. See [Volumes](#volumes) below. |
-| `additional_hosts` | list of `#AdditionalHost` | Extra literal hostname aliases this service also answers on, alongside its derived domain. See [Additional hosts](#additional-hosts) below. |
-| `wildcard_hosts` | list of `#AdditionalHost` | Extra hostname suffixes this service answers on, along with *any* subdomain of them — not just pre-listed ones. See [Wildcard hosts](#wildcard-hosts) below. |
+| `additional_hosts` | list of `#HostAlias` | Extra literal hostname aliases this service also answers on, alongside its derived domain — each one optionally wildcarded to also match every subdomain of it. See [Additional hosts](#additional-hosts) below. |
 | `dependencies` | list of `#Dependency` | This service's baseline dependencies — always pulled in regardless of which flow is selected. See [Dependencies](#dependencies) below. |
 
 ## Ports
@@ -114,6 +113,7 @@ ports:
 | `primary` | bool | At most one port per service should set this. Puts the port at the service's own domain (`cart.myworkspace.fghj.internal`). Defaults to `false`. |
 | `name` | string, optional | Gives the port an *additional* nested domain: `{name}.{service's domain}`. Can be combined with `primary`. |
 | `host_port` | 1–65535, optional | Pin the host-side published port instead of letting Docker assign a random ephemeral one — for protocols whose clients hardcode a port and can't go through name-based routing at all. Only one run can hold this exact host port at a time. |
+| `wildcard` | bool | When `primary` and/or `name` is set, also match every subdomain of this port's derived domain, not just the exact name — e.g. a `primary` port gets `*.cart.myworkspace.fghj.internal` too, not just `cart.myworkspace.fghj.internal` itself. No effect otherwise (a warning, not a hard failure, if set on a port that's neither). Defaults to `false`. |
 
 A port with neither `primary` nor `name` is still published to an
 ephemeral localhost port, just with no `*.fghj.internal` name.
@@ -177,12 +177,12 @@ therefore shares the same underlying storage, with no ownership
 relationship required:
 
 ```yaml
-# service A's fghj.yaml
+# service A's .fghj.yaml
 volumes:
   - name: shared-cache
     container: /app/.cache
 
-# service B's fghj.yaml — same name, same scope, same volume
+# service B's .fghj.yaml — same name, same scope, same volume
 volumes:
   - name: shared-cache
     container: /var/cache/app
@@ -209,7 +209,8 @@ domain (see [Node identity & domains](/concepts/node-identity-and-domains/)).
 hostnames — useful when something outside fghj already has a hostname on
 file, like a third-party OAuth callback pointing at `aikido.local`, and
 reconfiguring that third party just to fit fghj's own domain isn't
-practical.
+practical. Each entry is a bare hostname (exact match only) or an object
+with an explicit `wildcard` toggle:
 
 ```yaml
 services:
@@ -220,6 +221,8 @@ services:
     additional_hosts:
       - aikido.local
       - app.local.aikido.io
+      - host: myservice.local
+        wildcard: true
 ```
 
 Requires the service to have a `primary` port — declaring `additional_hosts`
@@ -244,14 +247,15 @@ An alias can never sit inside `fghj.internal` itself — that domain is
 always *derived*, never author-declared, the same rule `ports`' `name`
 field follows.
 
-## Wildcard hosts
+### Wildcarding an alias
 
-`additional_hosts` only ever matches the exact names you list — it can't
-help with a service that does tenant-per-subdomain routing in production
-(`acme.myservice.org`, `microsoft.myservice.org`, ..., arbitrarily many,
-not enumerable up front). `wildcard_hosts` claims a whole DNS subtree
-instead: each entry matches its own apex *and* any subdomain of it,
-however deep, including ones you never listed:
+A bare entry (or `wildcard: false`, the default) only ever matches the
+exact name you list — it can't help with a service that does
+tenant-per-subdomain routing in production (`acme.myservice.org`,
+`microsoft.myservice.org`, ..., arbitrarily many, not enumerable up front).
+`wildcard: true` claims a whole DNS subtree instead: the entry matches its
+own apex *and* any subdomain of it, however deep, including ones you never
+listed:
 
 ```yaml
 services:
@@ -259,8 +263,9 @@ services:
     ports:
       "8080":
         primary: true
-    wildcard_hosts:
-      - myservice.local
+    additional_hosts:
+      - host: myservice.local
+        wildcard: true
 ```
 
 With this, `acme.myservice.local`, `microsoft.myservice.local`, and any
@@ -268,21 +273,26 @@ other `*.myservice.local` all route to `myservice`'s primary port — the
 proxy forwards the raw `Host` header/SNI untouched, so the app's own
 tenant-resolution logic runs exactly as it does in production.
 
-Same requirements and rules as `additional_hosts`: needs the service to
-have a `primary` port (a warning, not a hard failure, if not), the
-reserved-TLD rule for HTTPS applies per-name (a real cert is minted lazily
-for each exact subdomain actually requested, never a literal X.509
-wildcard cert), and an entry can never sit inside `fghj.internal` itself.
-`fghj validate` also warns if two different nodes declare the same
-`wildcard_hosts` suffix — unlike a plain `additional_hosts` collision,
+The reserved-TLD rule for HTTPS still applies per-name (a real cert is
+minted lazily for each exact subdomain actually requested, never a literal
+X.509 wildcard cert). `fghj validate` also warns if two different nodes
+declare the same wildcarded suffix — unlike a plain exact-match collision,
 this claims traffic for a whole subtree of names, not just one, and is
 otherwise only discoverable by noticing traffic silently going to the
 wrong container.
 
-Unlike `additional_hosts`, which works by writing entries into
-`/etc/hosts`, a wildcard suffix is resolved by fghjd's own DNS server
+Unlike an exact-match alias, which works by writing an entry into
+`/etc/hosts`, a wildcarded one is resolved by fghjd's own DNS server
 (`/etc/hosts` has no wildcard syntax) — see
 [Split DNS](/concepts/split-dns/).
+
+### Wildcarding the default domain
+
+`additional_hosts` can't name anything inside `fghj.internal` — that
+domain is always derived, never author-declared. To wildcard a node's own
+default domain instead (so it, too, matches every subdomain of itself, not
+just the exact name), set `wildcard: true` on the `#Port` that's `primary`
+and/or `name`d — see [Ports](#ports) above.
 
 ## Healthcheck & start order
 
@@ -344,7 +354,7 @@ path segment).
 ### `kind: backing`
 
 A dependency on a backing service — a datastore, broker, or similar —
-provisioned directly from an image. Nothing to clone, no `fghj.yaml` of
+provisioned directly from an image. Nothing to clone, no `.fghj.yaml` of
 its own. The declaring service *owns* this instance; other services can
 bind to the same instance via `kind: shared-backing` below.
 

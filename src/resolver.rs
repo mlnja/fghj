@@ -108,9 +108,7 @@ struct ServiceConfig {
     #[serde(default)]
     volumes: Vec<VolumeMount>,
     #[serde(default)]
-    additional_hosts: Vec<String>,
-    #[serde(default)]
-    wildcard_hosts: Vec<String>,
+    additional_hosts: Vec<HostAliasConfig>,
     #[serde(default = "default_restart")]
     restart: String,
     #[serde(default)]
@@ -161,6 +159,33 @@ pub enum VolumeMount {
     },
 }
 
+/// One `#HostAlias` entry: a bare hostname (exact match) or a hostname with
+/// an explicit wildcard toggle (also matches every subdomain of it). Mirrors
+/// `#HostAlias` in `schema/component.cue` — see its doc comment.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+enum HostAliasConfig {
+    Bare(String),
+    Detailed {
+        host: String,
+        #[serde(default)]
+        wildcard: bool,
+    },
+}
+
+impl HostAliasConfig {
+    fn host(&self) -> &str {
+        match self {
+            HostAliasConfig::Bare(host) => host,
+            HostAliasConfig::Detailed { host, .. } => host,
+        }
+    }
+
+    fn wildcard(&self) -> bool {
+        matches!(self, HostAliasConfig::Detailed { wildcard: true, .. })
+    }
+}
+
 /// A declared container port and its role. `primary` (at most one per node)
 /// puts it at the node's own derived domain; `name` gives it an additional
 /// nested domain `{name}.{node's domain}` — `runs::start_node` derives both
@@ -176,6 +201,11 @@ pub struct PortConfig {
     pub name: Option<String>,
     #[serde(default)]
     pub host_port: Option<u16>,
+    /// When `primary` and/or `name` is set, also match every subdomain of
+    /// this port's derived domain, not just the exact name — mirrors
+    /// `#Port.wildcard` in `schema/component.cue`. No effect otherwise.
+    #[serde(default)]
+    pub wildcard: bool,
 }
 
 /// The fields of a `Dependency::Backing` — pulled out into its own struct
@@ -264,7 +294,7 @@ pub struct Node {
     /// deliberately wants one fixed identity shared across every run — only
     /// one run can own that name from the host at a time. Stub (not-yet-
     /// pulled) nodes are always "run": the real value is unknown until the
-    /// repo is actually pulled and its `fghj.yaml` read.
+    /// repo is actually pulled and its `.fghj.yaml` read.
     pub domain_scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_path: Option<String>,
@@ -299,15 +329,16 @@ pub struct Node {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub volumes: Vec<VolumeMount>,
     /// Extra literal hostnames this service also answers on (`#Service`
-    /// only — see `schema/component.cue`'s `#AdditionalHost`), routed to its
-    /// `primary` port by `runs::start_node`. Always empty for backing and
-    /// stub nodes.
+    /// only — the non-wildcarded entries of `schema/component.cue`'s
+    /// `#Service.additional_hosts`), routed to its `primary` port by
+    /// `runs::start_node`. Always empty for backing and stub nodes.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub additional_hosts: Vec<String>,
     /// Same as `additional_hosts`, but each entry also matches every
-    /// subdomain of itself (`#Service` only — see `schema/component.cue`'s
-    /// `wildcard_hosts`), routed to the same `primary` port by
-    /// `runs::start_node`. Always empty for backing and stub nodes.
+    /// subdomain of itself (`#Service` only — the `wildcard: true` entries
+    /// of `schema/component.cue`'s `#Service.additional_hosts`), routed to
+    /// the same `primary` port by `runs::start_node`. Always empty for
+    /// backing and stub nodes.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub wildcard_hosts: Vec<String>,
     /// `.env`-style files to load before `environment` — see
@@ -371,7 +402,7 @@ pub struct Graph {
 }
 
 /// Clones (or reuses) a bare mirror of `repo` under `workdir` so that
-/// `git show <branch>:fghj.yaml` can read any branch's content without
+/// `git show <branch>:.fghj.yaml` can read any branch's content without
 /// needing a separate checkout per branch — used only by the review-run
 /// branch-override path (`src/runs.rs`), which still needs to build an
 /// arbitrary branch without touching the live workspace checkout.
@@ -453,7 +484,7 @@ fn read_component_file(path: &Path) -> Result<ComponentConfig> {
 }
 
 /// Reads every immediate subdirectory of `workspace` that contains an
-/// `fghj.yaml`, keyed by its local folder name (the convention-based repo id).
+/// `.fghj.yaml`, keyed by its local folder name (the convention-based repo id).
 fn scan_workspace(workspace: &Path) -> Result<BTreeMap<String, ComponentConfig>> {
     let mut out = BTreeMap::new();
     if !workspace.exists() {
@@ -467,7 +498,7 @@ fn scan_workspace(workspace: &Path) -> Result<BTreeMap<String, ComponentConfig>>
         if !path.is_dir() {
             continue;
         }
-        let config_path = path.join("fghj.yaml");
+        let config_path = path.join(".fghj.yaml");
         if !config_path.exists() {
             continue;
         }
@@ -592,8 +623,18 @@ impl<'a> ResolveCtx<'a> {
                     environment: service.environment.to_pairs(),
                     command: service.command.clone(),
                     volumes: service.volumes.clone(),
-                    additional_hosts: service.additional_hosts.clone(),
-                    wildcard_hosts: service.wildcard_hosts.clone(),
+                    additional_hosts: service
+                        .additional_hosts
+                        .iter()
+                        .filter(|h| !h.wildcard())
+                        .map(|h| h.host().to_string())
+                        .collect(),
+                    wildcard_hosts: service
+                        .additional_hosts
+                        .iter()
+                        .filter(|h| h.wildcard())
+                        .map(|h| h.host().to_string())
+                        .collect(),
                     env_file: service.env_file.clone(),
                     restart: service.restart.clone(),
                     user: service.user.clone(),
@@ -688,10 +729,12 @@ impl<'a> ResolveCtx<'a> {
                 "'{service_id}' declares additional_hosts but no primary port; those hosts won't be routed to anything"
             ));
         }
-        if !service.wildcard_hosts.is_empty() && primaries.is_empty() {
-            self.warnings.push(format!(
-                "'{service_id}' declares wildcard_hosts but no primary port; those hosts won't be routed to anything"
-            ));
+        for (port, cfg) in &service.ports {
+            if cfg.wildcard && !cfg.primary && cfg.name.is_none() {
+                self.warnings.push(format!(
+                    "'{service_id}' port {port} sets wildcard but is neither primary nor named; there's no domain to wildcard"
+                ));
+            }
         }
     }
 
@@ -706,7 +749,7 @@ impl<'a> ResolveCtx<'a> {
         &mut self,
         owner_id: &str,
         repo: &str,
-        default_branch: &str,
+        default_branch: Option<&str>,
         wanted_service: Option<&str>,
     ) -> Option<String> {
         let norm = normalize_repo_url(repo);
@@ -738,7 +781,7 @@ impl<'a> ResolveCtx<'a> {
                 label: stub_id.clone(),
                 kind: "service".into(),
                 image: None,
-                branch: Some(default_branch.to_string()),
+                branch: default_branch.map(str::to_string),
                 repo: Some(repo.to_string()),
                 domain_scope: default_domain_scope(),
                 local_path: Some(stub_id.clone()),
@@ -772,7 +815,7 @@ impl<'a> ResolveCtx<'a> {
             from: owner_id.to_string(),
             to: child_id.clone(),
             kind: "depends-on".into(),
-            branch: Some(default_branch.to_string()),
+            branch: default_branch.map(str::to_string),
             flows: Vec::new(),
         });
 
@@ -831,9 +874,13 @@ impl<'a> ResolveCtx<'a> {
                 };
                 match repo {
                     Some(repo) => {
-                        let default_branch = default_branch.unwrap_or_default();
                         for name in wanted {
-                            self.visit_service_dependency(owner_id, &repo, &default_branch, name);
+                            self.visit_service_dependency(
+                                owner_id,
+                                &repo,
+                                default_branch.as_deref(),
+                                name,
+                            );
                         }
                     }
                     None => {
@@ -1166,7 +1213,7 @@ mod tests {
             format!("  {local_path}:\n{indented}\n")
         };
         fs::write(
-            dir.join("fghj.yaml"),
+            dir.join(".fghj.yaml"),
             format!("version: \"1.0\"\nservices:\n{body}"),
         )
         .unwrap();
@@ -1459,8 +1506,9 @@ mod tests {
             "  ports:\n\
              \x20   \"8080\":\n\
              \x20     primary: true\n\
-             \x20 wildcard_hosts:\n\
-             \x20   - myservice.local\n",
+             \x20 additional_hosts:\n\
+             \x20   - host: myservice.local\n\
+             \x20     wildcard: true\n",
         );
 
         let graph = resolve_universe(tmp.path()).unwrap();
@@ -1471,6 +1519,7 @@ mod tests {
             .find(|n| n.id == "myservice.myservice")
             .unwrap();
         assert_eq!(node.wildcard_hosts, vec!["myservice.local"]);
+        assert!(node.additional_hosts.is_empty());
         assert!(graph.warnings.is_empty());
     }
 
@@ -1480,8 +1529,9 @@ mod tests {
         write_component(
             tmp.path(),
             "myservice",
-            "  wildcard_hosts:\n\
-             \x20   - myservice.local\n",
+            "  additional_hosts:\n\
+             \x20   - host: myservice.local\n\
+             \x20     wildcard: true\n",
         );
 
         let graph = resolve_universe(tmp.path()).unwrap();
@@ -1490,7 +1540,7 @@ mod tests {
             graph
                 .warnings
                 .iter()
-                .any(|w| w.contains("myservice") && w.contains("wildcard_hosts"))
+                .any(|w| w.contains("myservice") && w.contains("additional_hosts"))
         );
     }
 
@@ -1503,8 +1553,9 @@ mod tests {
             "  ports:\n\
              \x20   \"8080\":\n\
              \x20     primary: true\n\
-             \x20 wildcard_hosts:\n\
-             \x20   - shared.local\n",
+             \x20 additional_hosts:\n\
+             \x20   - host: shared.local\n\
+             \x20     wildcard: true\n",
         );
         write_component(
             tmp.path(),
@@ -1512,8 +1563,9 @@ mod tests {
             "  ports:\n\
              \x20   \"8080\":\n\
              \x20     primary: true\n\
-             \x20 wildcard_hosts:\n\
-             \x20   - shared.local\n",
+             \x20 additional_hosts:\n\
+             \x20   - host: shared.local\n\
+             \x20     wildcard: true\n",
         );
 
         let graph = resolve_universe(tmp.path()).unwrap();
@@ -1546,6 +1598,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn port_wildcard_round_trips_into_node_ports() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  ports:\n\
+             \x20   \"8080\":\n\
+             \x20     primary: true\n\
+             \x20     wildcard: true\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        let node = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "myservice.myservice")
+            .unwrap();
+        assert!(node.ports["8080"].wildcard);
+        assert!(graph.warnings.is_empty());
+    }
+
+    #[test]
+    fn warns_when_port_wildcard_set_without_primary_or_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  ports:\n\
+             \x20   \"8080\":\n\
+             \x20     wildcard: true\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        assert!(
+            graph
+                .warnings
+                .iter()
+                .any(|w| w.contains("myservice") && w.contains("wildcard"))
+        );
+    }
+
     /// `kind: service`'s `services:` list lets one dependency block (one
     /// `repo`/`default_branch`) name several services owned by the same
     /// target repo — this is what replaces repeating a whole block per
@@ -1558,7 +1654,7 @@ mod tests {
 
         fs::create_dir_all(tmp.path().join("repo-b")).unwrap();
         fs::write(
-            tmp.path().join("repo-b/fghj.yaml"),
+            tmp.path().join("repo-b/.fghj.yaml"),
             "version: \"1.0\"\n\
              services:\n\
              \x20 api:\n\
@@ -1572,7 +1668,7 @@ mod tests {
 
         fs::create_dir_all(tmp.path().join("repo-a")).unwrap();
         fs::write(
-            tmp.path().join("repo-a/fghj.yaml"),
+            tmp.path().join("repo-a/.fghj.yaml"),
             "version: \"1.0\"\n\
              services:\n\
              \x20 web:\n\
@@ -1614,7 +1710,7 @@ mod tests {
 
         fs::create_dir_all(tmp.path().join("repo-a")).unwrap();
         fs::write(
-            tmp.path().join("repo-a/fghj.yaml"),
+            tmp.path().join("repo-a/.fghj.yaml"),
             "version: \"1.0\"\n\
              services:\n\
              \x20 web:\n\
@@ -1638,13 +1734,52 @@ mod tests {
         assert!(graph.warnings.is_empty());
     }
 
+    /// Omitting `default_branch` on a `kind: service` dependency whose repo
+    /// isn't on disk yet must leave the stub node's/edge's `branch` as
+    /// `None`, not `Some("")` — a bare empty string would later reach
+    /// `git clone --branch ""` in `downloads::clone_stub_logged` and fail,
+    /// defeating that function's own `unwrap_or("main")` fallback.
+    #[test]
+    fn git_dependency_without_default_branch_leaves_branch_unset_on_a_stub() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(tmp.path(), "repo-a", "");
+        fs::write(
+            tmp.path().join("repo-a/.fghj.yaml"),
+            "version: \"1.0\"\n\
+             services:\n\
+             \x20 web:\n\
+             \x20   build:\n\
+             \x20     context: .\n\
+             \x20   dependencies:\n\
+             \x20     - kind: service\n\
+             \x20       repo: https://example.com/repo-b.git\n",
+        )
+        .unwrap();
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        let stub = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "repo-b")
+            .expect("stub node for not-yet-downloaded repo-b");
+        assert_eq!(stub.branch, None);
+
+        let edge = graph
+            .edges
+            .iter()
+            .find(|e| e.from == "web.repo-a" && e.to == "repo-b")
+            .expect("depends-on edge to the stub");
+        assert_eq!(edge.branch, None);
+    }
+
     #[test]
     fn git_dependency_without_repo_targets_a_sibling_service_in_the_same_repo() {
         let tmp = tempfile::tempdir().unwrap();
 
         fs::create_dir_all(tmp.path().join("shop-web")).unwrap();
         fs::write(
-            tmp.path().join("shop-web/fghj.yaml"),
+            tmp.path().join("shop-web/.fghj.yaml"),
             "version: \"1.0\"\n\
              services:\n\
              \x20 vite:\n\
@@ -1675,7 +1810,7 @@ mod tests {
 
         fs::create_dir_all(tmp.path().join("shop-web")).unwrap();
         fs::write(
-            tmp.path().join("shop-web/fghj.yaml"),
+            tmp.path().join("shop-web/.fghj.yaml"),
             "version: \"1.0\"\n\
              services:\n\
              \x20 vite:\n\

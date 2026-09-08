@@ -61,4 +61,4 @@ snapshot of what's actually built and what's left, see `PROGRESS.md` itself.
 | `src/docker.rs`, `src/downloads.rs` | [[docker-and-downloads]] |
 | `src/daemon.rs`, `src/main.rs`, `src/bin/fghjd.rs`, `src/server.rs` | [[control-api-and-cli]] |
 | `ui/src/**` | [[ui-architecture]] |
-| `schema/*.cue` | referenced throughout — the CUE shapes are the source of truth for `fghj.yaml`, cross-checked against the Rust structs that deserialize it in [[node-identity-and-domains]] |
+| `schema/*.cue` | referenced throughout — the CUE shapes are the source of truth for `.fghj.yaml`, cross-checked against the Rust structs that deserialize it in [[node-identity-and-domains]] |

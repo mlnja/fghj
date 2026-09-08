@@ -28,9 +28,9 @@ orchestration. Instead of "everything the org owns," you declare "everything
 ## How it's structured
 
 - **Federated config.** There's no root repo or central manifest. Every
-  repository carries its own `fghj.yaml`, declaring its own build, its own
+  repository carries its own `.fghj.yaml`, declaring its own build, its own
   ports, and the dependencies (other services, or backing infrastructure
-  like Postgres/Redis) it needs. See [fghj.yaml](/reference/fghj-yaml/) and
+  like Postgres/Redis) it needs. See [.fghj.yaml](/reference/fghj-yaml/) and
   [Flat workspace model](/concepts/flat-workspace-model/).
 - **Flows.** Any repo can declare a **flow** — a named user journey and the
   extra dependencies it pulls in beyond the repo's own baseline set. Flows

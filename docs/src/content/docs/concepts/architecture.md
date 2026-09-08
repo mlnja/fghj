@@ -38,7 +38,7 @@ description: How fghj's pieces — the CLI, the superdaemon, the resolver, the p
   goes through `fghjd`'s HTTP control API. See
   [Control API](/concepts/control-api/).
 - **The resolver** (`src/resolver.rs`) turns a workspace of sibling repo
-  checkouts, each with its own `fghj.yaml`, into one resolved graph of
+  checkouts, each with its own `.fghj.yaml`, into one resolved graph of
   nodes and edges — assigning stable ids, `*.fghj.internal` domains, and
   flow membership along the way. See [Node identity & domains](/concepts/node-identity-and-domains/),
   [Flat workspace model](/concepts/flat-workspace-model/), and

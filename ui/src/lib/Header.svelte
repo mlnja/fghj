@@ -213,7 +213,7 @@
   <div class="modal-veil" onclick={() => (helpOpen = false)}>
     <div class="modal" onclick={(e) => e.stopPropagation()}>
       <h3>How to read the map</h3>
-      <div class="line"><b style="color:var(--ink)">Solid line</b> — a <code>service</code> or <code>infra</code> dependency resolved from <code>fghj.yaml</code>. <b style="color:var(--ink)">Dashed</b> — a <code>shared-infra</code> reference to another service's resource.</div>
+      <div class="line"><b style="color:var(--ink)">Solid line</b> — a <code>service</code> or <code>infra</code> dependency resolved from <code>.fghj.yaml</code>. <b style="color:var(--ink)">Dashed</b> — a <code>shared-infra</code> reference to another service's resource.</div>
       <div class="line"><b style="color:var(--ink)">Tinted block</b> — infrastructure (postgres, redis): fixed image, no branch.</div>
       <div class="line">Click a node to see its resolved repo, branch and domain. Switch flows with the picker top-left — the selected flow's repos and edges highlight in accent color; every known repo still renders regardless of flow.</div>
       <div class="close" onclick={() => (helpOpen = false)}>Close</div>

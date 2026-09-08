@@ -14,7 +14,7 @@ installer, no Homebrew tap, and no prebuilt binaries at this stage.
   can't reach it.
 - **[CUE](https://cuelang.org/docs/install/)** — only needed for
   `fghj validate`, which shells out to the `cue` CLI to check an
-  `fghj.yaml` against fghj's schema.
+  `.fghj.yaml` against fghj's schema.
 - **macOS** — `fghjd`'s split-DNS integration (writing
   `/etc/resolver/fghj.internal`) and its SSH-agent-socket recovery for
   Git-over-SSH clones are currently macOS-specific. Linux/Windows support

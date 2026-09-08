@@ -1,6 +1,12 @@
 # fghj — Progress Tracker
 
-Last updated: 2026-09-08 (added `#Service.wildcard_hosts` — wildcard
+Last updated: 2026-09-08 (redesigned wildcard subdomain routing as a
+per-host toggle: `#Service.wildcard_hosts` merged into
+`#Service.additional_hosts` — each entry is a bare hostname or
+`{host, wildcard: true}` — and `#Port` gained its own `wildcard` toggle so
+a node's own derived `*.fghj.internal` domain can be wildcarded too, not
+just an author-declared alias).
+Prior update, same day (added `#Service.wildcard_hosts` — wildcard
 subdomain routing via a generalized, dynamic-zone DNS server + macOS
 `/etc/resolver` wiring, so a service can claim an entire DNS subtree
 instead of only exact-match `additional_hosts` aliases).
@@ -74,33 +80,43 @@ durable record, plans in `~/.claude/plans/` are not.
   port; Linux/Windows print a manual-setup message instead (not
   implemented). `dns::in_zone` is `pub(crate)` and reused by
   `ca::DynamicCertResolver` so "is this name ours" has one definition.
-  **Wildcard subdomain routing — `#Service.wildcard_hosts`** — closed
-  (2026-09-08). Generalizes the DNS server and macOS resolver wiring from
-  one fixed zone (`fghj.internal`) to a *dynamic* set: one zone per
-  `wildcard_hosts` suffix currently claimed by a `"running"` container
-  (`dns::ZoneSource`, implemented by `daemon::WorkspaceRegistry` via a new
+  **Wildcard subdomain routing** — closed (2026-09-08), then redesigned
+  same day into a per-host toggle rather than a second field. Generalizes
+  the DNS server and macOS resolver wiring from one fixed zone
+  (`fghj.internal`) to a *dynamic* set: one zone per wildcarded suffix
+  currently claimed by a `"running"` container (`dns::ZoneSource`,
+  implemented by `daemon::WorkspaceRegistry` via a new
   `active_wildcard_suffixes`), re-checked on every DNS query and re-synced
   to `/etc/resolver` on every reconciler tick — so a wildcard zone starts
   or stops answering within one query/tick of its owning container
-  starting or stopping, no `fghjd` restart needed. Lets a service claim an
-  entire DNS subtree (e.g. `myservice.local` matching `acme.myservice.local`,
-  `microsoft.myservice.local`, and any other not-pre-declared subdomain),
-  replicating a tenant-per-subdomain production pattern locally — something
-  the exact-match-only `#Service.additional_hosts` can't do, since
-  `/etc/hosts` has no wildcard syntax. `runs::PortRoute` gained a
-  `#[serde(default)] wildcard: bool` (no DB migration needed — routes
+  starting or stopping, no `fghjd` restart needed. Two ways to opt in, both
+  landing on the same `runs::PortRoute.wildcard` mechanism:
+  `#Service.additional_hosts` entries are now either a bare hostname
+  (exact match) or `{host, wildcard: true}` (matches every subdomain of
+  it), replacing the separate `wildcard_hosts` field from the same-day
+  first cut; and `#Port` gained its own `wildcard` toggle, letting a
+  `primary`/`name`d port's own *derived* `*.fghj.internal` domain be
+  wildcarded too, which an author-declared `additional_hosts` alias could
+  never do (that domain is always derived, never author-declared). Lets a
+  service claim an entire DNS subtree (e.g. `myservice.local` matching
+  `acme.myservice.local`, `microsoft.myservice.local`, and any other
+  not-pre-declared subdomain), replicating a tenant-per-subdomain
+  production pattern locally — something exact-match-only aliases can't
+  do, since `/etc/hosts` has no wildcard syntax. `runs::PortRoute` carries
+  a `#[serde(default)] wildcard: bool` (no DB migration needed — routes
   persist as one JSON blob); `resolve_route` tries an exact match first,
   then falls back to a suffix match over `wildcard: true` routes, so a more
   specific claim always wins over a broader wildcard one. Cert issuance
   needed no changes — `ca::DynamicCertResolver` already mints leaf certs
   lazily per exact SNI name, never a real X.509 wildcard, so a suffix under
   a reserved TLD gets real per-name HTTPS for free; a non-reserved suffix
-  falls back to plain HTTP only, same rule `additional_hosts` follows.
+  falls back to plain HTTP only, same rule exact-match aliases follow.
   `resolve_universe` also warns if two different nodes declare the same
-  `wildcard_hosts` suffix (worse than an `additional_hosts` collision,
-  since it silently claims a whole subtree of names, not just one). See the
-  "Wildcard hosts" section of `docs/reference/fghj-yaml.md` and
-  `concepts/split-dns.md`.
+  wildcarded suffix (worse than an exact-match collision, since it
+  silently claims a whole subtree of names, not just one), and if a
+  `#Port.wildcard: true` is set on a port that's neither `primary` nor
+  `name`d (nothing to wildcard). See the "Additional hosts" section of
+  `docs/reference/fghj-yaml.md` and `concepts/split-dns.md`.
 - **Subsystem C — local CA + TLS-terminating reverse proxy** (`src/ca.rs`,
   `src/proxy.rs`): `fghjd` occupies ports 80/443 (`proxy::bind_http`/
   `bind_https`, localhost-only). Port 80 redirects everything to https.
@@ -446,7 +462,7 @@ plans referenced above.
   against it).** `#Service`/`#BackingDependency` today cover: build
   context/dockerfile/args, a port map, environment (map or list, mirroring
   Compose's own shape), and the three dependency kinds. Real Compose files
-  lean on several things `fghj.yaml` has no equivalent for yet. Roughly in
+  lean on several things `.fghj.yaml` has no equivalent for yet. Roughly in
   order of "will actually block someone from using this for a real service":
   - ~~**Volumes / persistent data — the big one.**~~ **Done (2026-09-07).**
     `#Service.volumes` / `#BackingDependency.volumes` (`schema/component.cue`,
@@ -523,7 +539,7 @@ plans referenced above.
     creep on marginal-value Docker knobs.
   - Compose features that probably *shouldn't* be copied: `extends`/multiple
     compose files with override layering exist because Compose has one
-    monolithic file per stack — fghj's federated per-repo `fghj.yaml` +
+    monolithic file per stack — fghj's federated per-repo `.fghj.yaml` +
     `flows:` model sidesteps that problem structurally, and `flows` already
     covers most of what Compose `profiles` are for (selectively including
     services). Copying override-file layering back in would reintroduce the
@@ -608,7 +624,7 @@ plans referenced above.
     repo* (`../intel`) directly onto `/intel` as vendored source, not as a
     running network service. Since `#Volume.host` isn't sandboxed to the
     declaring repo, `{host: "../intel", container: "/intel"}` on `php`'s own
-    `fghj.yaml` now expresses this directly — no third dependency kind
+    `.fghj.yaml` now expresses this directly — no third dependency kind
     needed. What's still missing: fghj doesn't *clone* `intel` on `php`'s
     behalf the way `kind: service` would (the sibling repo has to already be
     checked out at the right relative path by some other means), so this is

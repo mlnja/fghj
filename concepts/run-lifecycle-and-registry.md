@@ -48,7 +48,7 @@ A `RunSpec.overrides` entry (`{node_id: branch}`) only affects how
 - **Override present**: builds from a **throwaway mirror + checkout** under
   `<workspace>/.fghj/`, never touching the live checkout. `ensure_mirror`
   (`resolver.rs`) clones (or reuses) a bare `--mirror` of the repo so
-  `git show <branch>:fghj.yaml`-style access to any branch works without a
+  `git show <branch>:.fghj.yaml`-style access to any branch works without a
   full checkout per branch; `docker::materialize_checkout` then produces an
   actual working tree for the requested branch. See
   [[branch-ownership-model]] for the full rationale — this ephemeral,

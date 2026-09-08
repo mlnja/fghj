@@ -1,21 +1,21 @@
 ---
 title: fghj validate
-description: Validate an fghj.yaml file against fghj's CUE schema.
+description: Validate an .fghj.yaml file against fghj's CUE schema.
 ---
 
 ```bash
 fghj validate <path>
 ```
 
-Checks a single `fghj.yaml` file against fghj's schema
-(see [fghj.yaml](/reference/fghj-yaml/)) and reports whether it's a valid
+Checks a single `.fghj.yaml` file against fghj's schema
+(see [.fghj.yaml](/reference/fghj-yaml/)) and reports whether it's a valid
 component config.
 
 ## Arguments
 
 | Argument | Description |
 |---|---|
-| `path` | Path to the `fghj.yaml` file to validate. |
+| `path` | Path to the `.fghj.yaml` file to validate. |
 
 ## How it works
 

@@ -26,9 +26,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Validate an fghj.yaml file against the CUE schema
+    /// Validate an .fghj.yaml file against the CUE schema
     Validate {
-        /// Path to the fghj.yaml file to validate
+        /// Path to the .fghj.yaml file to validate
         path: PathBuf,
     },
     /// Resolve the full dependency universe (all flows) and print it as JSON

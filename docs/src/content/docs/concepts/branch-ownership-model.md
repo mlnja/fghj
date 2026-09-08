@@ -7,7 +7,7 @@ Three things get confused if you're not careful, so `fghj` gives them three
 distinct owners:
 
 1. **Flow membership** — *which repos* are in scope for a user journey.
-   This is repo-owned, versioned config: whichever repo's `fghj.yaml`
+   This is repo-owned, versioned config: whichever repo's `.fghj.yaml`
    declares the flow owns its `dependencies` list (see
    [Flat workspace model](/concepts/flat-workspace-model/)). A
    dependency's `default_branch` lives here too, but it's only ever a

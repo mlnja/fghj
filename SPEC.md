@@ -10,7 +10,7 @@ Developers spin up isolated local environments based on specific **User Flows** 
 ## 2. Key Architecture Concepts
 *   **The `fghj` Superdaemon:** A background system service running with root/administrator privileges. It acts as the local DNS server, reverse proxy, NAT router, and SSL certificate authority.
 *   **User Flow:** A functional business scope mapping out exactly which microservices are required to test a specific user journey.
-*   **Federated Configuration:** No single mega-repo config. Every repository contains its own `fghj.yaml` file declaring its specific metadata, local domains, environment templates, and immediate downstream dependencies.
+*   **Federated Configuration:** No single mega-repo config. Every repository contains its own `.fghj.yaml` file declaring its specific metadata, local domains, environment templates, and immediate downstream dependencies.
 
 ---
 
@@ -43,7 +43,7 @@ Developers spin up isolated local environments based on specific **User Flows** 
 
 ---
 
-## 4. Configuration Schema (`fghj.yaml`)
+## 4. Configuration Schema (`.fghj.yaml`)
 
 ### Root Repository Config Example
 ```yaml

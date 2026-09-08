@@ -5,17 +5,17 @@ description: Wire your first workspace, browse the resolved graph, and run a ser
 
 This walks through wiring a repo into a running `fghjd`, then starting it.
 It assumes `fghjd` is already running (see [Installation](/getting-started/installation/))
-and that the repo you're pointing at has an `fghj.yaml` — see
-[fghj.yaml](/reference/fghj-yaml/) if you're setting one up for the first
+and that the repo you're pointing at has an `.fghj.yaml` — see
+[.fghj.yaml](/reference/fghj-yaml/) if you're setting one up for the first
 time.
 
 ## 1. Validate a config
 
-Before wiring anything in, you can check a service's `fghj.yaml` against
+Before wiring anything in, you can check a service's `.fghj.yaml` against
 fghj's schema on its own:
 
 ```bash
-fghj validate ./fghj.yaml
+fghj validate ./.fghj.yaml
 ```
 
 This shells out to `cue vet` under the hood — see

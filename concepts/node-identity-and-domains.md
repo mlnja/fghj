@@ -15,7 +15,7 @@ easy to accidentally conflate them:
    container reaches it at. Must be derivable without any author input, or
    two CUE authors who never talk to each other could hand-pick the same one.
 
-`fghj.yaml` only ever declares the label (`#Service.name`, `#BackingDependency.name`).
+`.fghj.yaml` only ever declares the label (`#Service.name`, `#BackingDependency.name`).
 Everything else — id and domain — is derived by fghj itself, in `src/resolver.rs`
 and `src/runs.rs`.
 

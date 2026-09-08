@@ -27,6 +27,13 @@ package fghj
 	// port at a time, so starting a second run with the same fixed port
 	// will fail to bind rather than silently getting its own copy.
 	host_port?: uint & >0 & <=65535
+	// When this port is `primary` and/or `name`d, also match every
+	// subdomain of its derived domain, not just the exact name — same idea
+	// as `#HostAlias.wildcard` below, but for the node's own auto-derived
+	// `*.fghj.internal` domain, which an `#AdditionalHost` can never name
+	// directly (see its doc comment). No effect on a port that's neither
+	// `primary` nor `name`d — there's no domain to wildcard.
+	wildcard: bool | *false
 }
 
 // A bind mount (host path) or a named volume (Docker-managed storage), on
@@ -68,6 +75,23 @@ package fghj
 	=~"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$" &
 	!~"(^|\\.)fghj\\.internal$"
 
+// An `#AdditionalHost`, or the same host with an explicit wildcard toggle:
+// a bare string is exact-match only, `{host: ..., wildcard: true}` also
+// matches every subdomain of it — e.g. "myservice.local" as a bare string
+// only matches that exact name; wildcarded, it also matches
+// `acme.myservice.local` and `microsoft.myservice.local` alike, without
+// either needing to be declared up front. For a tenant-per-subdomain app,
+// this is what lets arbitrarily many tenant hostnames route to the same
+// `primary` port locally, the same way they'd all hit the same backend in
+// prod. `/etc/hosts` has no wildcard syntax, so a wildcarded entry resolves
+// only through fghjd's own DNS server (and, on macOS, `/etc/resolver`); the
+// same reserved-TLD rule (`.local`/`.test`/`.internal`/`.localhost`)
+// decides whether it gets a real HTTPS cert or plain-HTTP-only either way.
+#HostAlias: #AdditionalHost | {
+	host:     #AdditionalHost
+	wildcard: bool | *false
+}
+
 #Service: {
 	#RunOptions
 	build: #Build
@@ -89,21 +113,10 @@ package fghj
 	command: [...string] | *[]
 	volumes: [...#Volume] | *[]
 	// Extra literal hostnames this service also answers on, routed to its
-	// `primary` port — requires one to be set. See `#AdditionalHost`.
-	additional_hosts: [...#AdditionalHost] | *[]
-	// Like `additional_hosts`, but each entry also matches every subdomain of
-	// itself, not just the exact string — e.g. "myservice.local" matches
-	// `acme.myservice.local` and `microsoft.myservice.local` alike, without
-	// either needing to be declared up front. For a tenant-per-subdomain app,
-	// this is what lets arbitrarily many tenant hostnames route to the same
-	// `primary` port locally, the same way they'd all hit the same backend in
-	// prod. Also requires a `primary` port. `/etc/hosts` has no wildcard
-	// syntax, so — unlike `additional_hosts` — this resolves only through
-	// fghjd's own DNS server (and, on macOS, `/etc/resolver`); the same
-	// reserved-TLD rule (`.local`/`.test`/`.internal`/`.localhost`) decides
-	// whether it gets a real HTTPS cert or plain-HTTP-only. See
-	// `#AdditionalHost`.
-	wildcard_hosts: [...#AdditionalHost] | *[]
+	// `primary` port — requires one to be set. Each entry is a bare
+	// hostname (exact match) or `{host: ..., wildcard: true}` (also matches
+	// every subdomain of it). See `#HostAlias`.
+	additional_hosts: [...#HostAlias] | *[]
 	dependencies: [...#Dependency]
 }
 
