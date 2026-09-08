@@ -5,21 +5,30 @@ package fghj
 // like a Compose fragment.
 #Environment: {[string]: string} | [...string & =~"^[A-Za-z_][A-Za-z0-9_]*=.*$"]
 
-// A dependency on another self-describing service repo, resolved by cloning it
-// into the workspace under a folder named after the repo URL's last path
-// segment — every dependent references the same repo the same way, by URL,
-// so there's no per-dependent override to disagree about.
+// A dependency on another self-describing service — either cloned from
+// another repo by URL, or (same pattern as #SharedBackingDependency) a
+// sibling service already declared in this same repo's own `services:` map
+// when `repo` is omitted. The cross-repo form resolves by cloning into the
+// workspace under a folder named after the repo URL's last path segment —
+// every dependent references the same repo the same way, by URL, so there's
+// no per-dependent override to disagree about. The same-repo form has
+// nothing to clone and no branch to pick — it's purely an ordering/
+// healthcheck dependency between two services built from one checkout
+// (e.g. a dev-server service that proxies to a backend service alongside
+// it).
 #GitDependency: {
-	kind:           "service"
-	repo:           string & =~"^(git@|https://|ssh://)"
-	default_branch: string
+	kind: "service"
+	// Omit for the same-repo form (nothing to clone, no branch to pick);
+	// required for the cross-repo form.
+	repo?:           string & =~"^(git@|https://|ssh://)"
+	default_branch?: string
 	// Which of the target repo's #ComponentConfig.services this depends on —
 	// one entry per service wanted, so depending on several services from the
 	// same repo is still one dependency block (`repo`/`default_branch` stated
-	// once), not one block per service. Omit when that repo declares exactly
-	// one service (used automatically); required — and needs an entry per
-	// name — when it declares more than one, since `repo` alone no longer
-	// names a single unambiguous node.
+	// once, for the cross-repo form), not one block per service. Omit when
+	// that repo declares exactly one service (used automatically); required
+	// — and needs an entry per name — when it declares more than one, since
+	// `repo` alone no longer names a single unambiguous node.
 	services?: [...string & =~"^[a-z0-9][a-z0-9-]*$"]
 }
 

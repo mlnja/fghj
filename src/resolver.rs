@@ -224,8 +224,10 @@ struct BackingDependencyConfig {
 enum Dependency {
     #[serde(rename = "service")]
     Service {
-        repo: String,
-        default_branch: String,
+        #[serde(default)]
+        repo: Option<String>,
+        #[serde(default)]
+        default_branch: Option<String>,
         #[serde(default)]
         services: Vec<String>,
     },
@@ -762,6 +764,35 @@ impl<'a> ResolveCtx<'a> {
         Some(child_id)
     }
 
+    /// Same-repo counterpart to `visit_service_dependency`: a `kind: service`
+    /// dependency that omitted `repo` names a sibling service already
+    /// declared in this same repo's own `services:` map — nothing to clone,
+    /// no stub, just a `depends-on` edge (or a warning, same as
+    /// `visit_local_service`, if `wanted_service` is ambiguous or missing).
+    fn visit_sibling_service_dependency(
+        &mut self,
+        owner_id: &str,
+        local_path: &str,
+        wanted_service: Option<&str>,
+    ) -> Option<String> {
+        let component = self.scanned.get(local_path)?;
+        let child_id = self.visit_local_service(local_path, component, wanted_service)?;
+        if child_id == owner_id {
+            self.warnings.push(format!(
+                "'{owner_id}' declares a same-repo `kind: service` dependency on itself"
+            ));
+            return None;
+        }
+        self.edges.push(Edge {
+            from: owner_id.to_string(),
+            to: child_id.clone(),
+            kind: "depends-on".into(),
+            branch: None,
+            flows: Vec::new(),
+        });
+        Some(child_id)
+    }
+
     fn visit_dependency(&mut self, owner_id: &str, local_path: &str, dep: Dependency) {
         match dep {
             Dependency::Service {
@@ -770,18 +801,33 @@ impl<'a> ResolveCtx<'a> {
                 services,
             } => {
                 // One dependency block can name several of the target repo's
-                // services (see `#GitDependency.services`) — `repo` is
-                // resolved to a `local_path` once inside each call, and
+                // services (see `#GitDependency.services`) — resolving to a
+                // `local_path` (or, for the same-repo form below, reusing the
+                // owner's own) happens once inside each call, and
                 // `visit_local_services` is itself idempotent per repo (see
                 // its `self.visited` guard), so repeating this per name costs
                 // nothing extra beyond the one `depends-on` edge each needs.
                 // No names given at all: same as before, depend on "the"
                 // service (the sole one, or a warning if that's ambiguous).
-                if services.is_empty() {
-                    self.visit_service_dependency(owner_id, &repo, &default_branch, None);
+                let wanted: Vec<Option<&str>> = if services.is_empty() {
+                    vec![None]
                 } else {
-                    for name in &services {
-                        self.visit_service_dependency(owner_id, &repo, &default_branch, Some(name));
+                    services.iter().map(|n| Some(n.as_str())).collect()
+                };
+                match repo {
+                    Some(repo) => {
+                        let default_branch = default_branch.unwrap_or_default();
+                        for name in wanted {
+                            self.visit_service_dependency(owner_id, &repo, &default_branch, name);
+                        }
+                    }
+                    None => {
+                        // Same repo, no `repo:` given — reference a sibling
+                        // service already declared in this repo's own
+                        // `services:` map instead of cloning anything.
+                        for name in wanted {
+                            self.visit_sibling_service_dependency(owner_id, local_path, name);
+                        }
                     }
                 }
             }
@@ -1475,5 +1521,63 @@ mod tests {
                 .any(|e| e.from == "web.repo-a" && e.to == "repo-b.repo-b")
         );
         assert!(graph.warnings.is_empty());
+    }
+
+    #[test]
+    fn git_dependency_without_repo_targets_a_sibling_service_in_the_same_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        fs::create_dir_all(tmp.path().join("shop-web")).unwrap();
+        fs::write(
+            tmp.path().join("shop-web/fghj.yaml"),
+            "version: \"1.0\"\n\
+             services:\n\
+             \x20 vite:\n\
+             \x20   build:\n\
+             \x20     context: .\n\
+             \x20   dependencies:\n\
+             \x20     - kind: service\n\
+             \x20       services: [php]\n\
+             \x20 php:\n\
+             \x20   build:\n\
+             \x20     context: .\n",
+        )
+        .unwrap();
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        assert!(graph.nodes.iter().any(|n| n.id == "vite.shop-web"));
+        assert!(graph.nodes.iter().any(|n| n.id == "php.shop-web"));
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|e| e.from == "vite.shop-web" && e.to == "php.shop-web" && e.kind == "depends-on")
+        );
+        assert!(graph.warnings.is_empty());
+    }
+
+    #[test]
+    fn git_dependency_without_repo_on_itself_warns_instead_of_crashing() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        fs::create_dir_all(tmp.path().join("shop-web")).unwrap();
+        fs::write(
+            tmp.path().join("shop-web/fghj.yaml"),
+            "version: \"1.0\"\n\
+             services:\n\
+             \x20 vite:\n\
+             \x20   build:\n\
+             \x20     context: .\n\
+             \x20   dependencies:\n\
+             \x20     - kind: service\n\
+             \x20       services: [vite]\n",
+        )
+        .unwrap();
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        assert!(!graph.edges.iter().any(|e| e.kind == "depends-on"));
+        assert!(graph.warnings.iter().any(|w| w.contains("itself")));
     }
 }
