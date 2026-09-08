@@ -91,6 +91,19 @@ package fghj
 	// Extra literal hostnames this service also answers on, routed to its
 	// `primary` port — requires one to be set. See `#AdditionalHost`.
 	additional_hosts: [...#AdditionalHost] | *[]
+	// Like `additional_hosts`, but each entry also matches every subdomain of
+	// itself, not just the exact string — e.g. "myservice.local" matches
+	// `acme.myservice.local` and `microsoft.myservice.local` alike, without
+	// either needing to be declared up front. For a tenant-per-subdomain app,
+	// this is what lets arbitrarily many tenant hostnames route to the same
+	// `primary` port locally, the same way they'd all hit the same backend in
+	// prod. Also requires a `primary` port. `/etc/hosts` has no wildcard
+	// syntax, so — unlike `additional_hosts` — this resolves only through
+	// fghjd's own DNS server (and, on macOS, `/etc/resolver`); the same
+	// reserved-TLD rule (`.local`/`.test`/`.internal`/`.localhost`) decides
+	// whether it gets a real HTTPS cert or plain-HTTP-only. See
+	// `#AdditionalHost`.
+	wildcard_hosts: [...#AdditionalHost] | *[]
 	dependencies: [...#Dependency]
 }
 

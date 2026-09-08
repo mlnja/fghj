@@ -25,7 +25,7 @@ pub fn hosts_path() -> PathBuf {
 /// being claimed here the moment its container stops, same lifecycle as a
 /// `runs::PortRoute`. `hosts` need not be sorted or deduped — `sync` does
 /// both, so repeated calls with the same logical set never produce a
-/// spurious rewrite (mirrors `dns::install_macos_resolver`'s idempotent
+/// spurious rewrite (mirrors `dns::sync_macos_resolver`'s idempotent
 /// full-file rewrite).
 pub fn sync(path: &Path, hosts: &[String]) -> Result<()> {
     let mut hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();

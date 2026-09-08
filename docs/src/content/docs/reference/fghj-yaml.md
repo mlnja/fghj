@@ -90,6 +90,7 @@ services:
 | `healthcheck` | `#Healthcheck`, optional | A Docker `HEALTHCHECK`. See [Healthcheck & start order](#healthcheck--start-order) below. |
 | `volumes` | list of `#Volume` | Bind mounts and named volumes. See [Volumes](#volumes) below. |
 | `additional_hosts` | list of `#AdditionalHost` | Extra literal hostname aliases this service also answers on, alongside its derived domain. See [Additional hosts](#additional-hosts) below. |
+| `wildcard_hosts` | list of `#AdditionalHost` | Extra hostname suffixes this service answers on, along with *any* subdomain of them — not just pre-listed ones. See [Wildcard hosts](#wildcard-hosts) below. |
 | `dependencies` | list of `#Dependency` | This service's baseline dependencies — always pulled in regardless of which flow is selected. See [Dependencies](#dependencies) below. |
 
 ## Ports
@@ -242,6 +243,46 @@ Whether an alias gets HTTPS depends on its TLD:
 An alias can never sit inside `fghj.internal` itself — that domain is
 always *derived*, never author-declared, the same rule `ports`' `name`
 field follows.
+
+## Wildcard hosts
+
+`additional_hosts` only ever matches the exact names you list — it can't
+help with a service that does tenant-per-subdomain routing in production
+(`acme.myservice.org`, `microsoft.myservice.org`, ..., arbitrarily many,
+not enumerable up front). `wildcard_hosts` claims a whole DNS subtree
+instead: each entry matches its own apex *and* any subdomain of it,
+however deep, including ones you never listed:
+
+```yaml
+services:
+  myservice:
+    ports:
+      "8080":
+        primary: true
+    wildcard_hosts:
+      - myservice.local
+```
+
+With this, `acme.myservice.local`, `microsoft.myservice.local`, and any
+other `*.myservice.local` all route to `myservice`'s primary port — the
+proxy forwards the raw `Host` header/SNI untouched, so the app's own
+tenant-resolution logic runs exactly as it does in production.
+
+Same requirements and rules as `additional_hosts`: needs the service to
+have a `primary` port (a warning, not a hard failure, if not), the
+reserved-TLD rule for HTTPS applies per-name (a real cert is minted lazily
+for each exact subdomain actually requested, never a literal X.509
+wildcard cert), and an entry can never sit inside `fghj.internal` itself.
+`fghj validate` also warns if two different nodes declare the same
+`wildcard_hosts` suffix — unlike a plain `additional_hosts` collision,
+this claims traffic for a whole subtree of names, not just one, and is
+otherwise only discoverable by noticing traffic silently going to the
+wrong container.
+
+Unlike `additional_hosts`, which works by writing entries into
+`/etc/hosts`, a wildcard suffix is resolved by fghjd's own DNS server
+(`/etc/hosts` has no wildcard syntax) — see
+[Split DNS](/concepts/split-dns/).
 
 ## Healthcheck & start order
 

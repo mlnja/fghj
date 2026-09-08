@@ -492,6 +492,7 @@ mod tests {
                 routes: vec![crate::runs::PortRoute {
                     domain: "svc-a.demo.fghj".to_string(),
                     host_port: 8080,
+                    wildcard: false,
                 }],
                 additional_hosts: Vec::new(),
             }],

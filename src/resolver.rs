@@ -109,6 +109,8 @@ struct ServiceConfig {
     volumes: Vec<VolumeMount>,
     #[serde(default)]
     additional_hosts: Vec<String>,
+    #[serde(default)]
+    wildcard_hosts: Vec<String>,
     #[serde(default = "default_restart")]
     restart: String,
     #[serde(default)]
@@ -302,6 +304,12 @@ pub struct Node {
     /// stub nodes.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub additional_hosts: Vec<String>,
+    /// Same as `additional_hosts`, but each entry also matches every
+    /// subdomain of itself (`#Service` only — see `schema/component.cue`'s
+    /// `wildcard_hosts`), routed to the same `primary` port by
+    /// `runs::start_node`. Always empty for backing and stub nodes.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub wildcard_hosts: Vec<String>,
     /// `.env`-style files to load before `environment` — see
     /// `#RunOptions.env_file`'s doc comment. Resolved and merged into
     /// `environment` by `runs::start_node`, not here — resolving a relative
@@ -585,6 +593,7 @@ impl<'a> ResolveCtx<'a> {
                     command: service.command.clone(),
                     volumes: service.volumes.clone(),
                     additional_hosts: service.additional_hosts.clone(),
+                    wildcard_hosts: service.wildcard_hosts.clone(),
                     env_file: service.env_file.clone(),
                     restart: service.restart.clone(),
                     user: service.user.clone(),
@@ -679,6 +688,11 @@ impl<'a> ResolveCtx<'a> {
                 "'{service_id}' declares additional_hosts but no primary port; those hosts won't be routed to anything"
             ));
         }
+        if !service.wildcard_hosts.is_empty() && primaries.is_empty() {
+            self.warnings.push(format!(
+                "'{service_id}' declares wildcard_hosts but no primary port; those hosts won't be routed to anything"
+            ));
+        }
     }
 
     /// Resolves a `Dependency::Service` reference to its conventional local
@@ -738,6 +752,7 @@ impl<'a> ResolveCtx<'a> {
                 command: Vec::new(),
                 volumes: Vec::new(),
                 additional_hosts: Vec::new(),
+                wildcard_hosts: Vec::new(),
                 env_file: Vec::new(),
                 restart: default_restart(),
                 user: None,
@@ -880,6 +895,7 @@ impl<'a> ResolveCtx<'a> {
                         command,
                         volumes,
                         additional_hosts: Vec::new(),
+                        wildcard_hosts: Vec::new(),
                         env_file,
                         restart,
                         user,
@@ -1091,11 +1107,34 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
         edge.flows = fl;
     }
 
+    // A wildcard suffix claims a whole subtree of names, not just one, so a
+    // collision between two nodes here is worse than an `additional_hosts`
+    // collision — worth its own warning rather than only being discoverable
+    // by noticing traffic silently going to the wrong container.
+    let mut wildcard_owners: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for node in &nodes {
+        for suffix in &node.wildcard_hosts {
+            wildcard_owners
+                .entry(suffix.as_str())
+                .or_default()
+                .push(node.id.as_str());
+        }
+    }
+    let mut warnings = ctx.warnings;
+    for (suffix, owners) in wildcard_owners {
+        if owners.len() > 1 {
+            warnings.push(format!(
+                "wildcard_hosts suffix '{suffix}' is declared by more than one node ({}); only one will actually receive its traffic",
+                owners.join(", ")
+            ));
+        }
+    }
+
     Ok(Graph {
         workspace_name,
         nodes,
         edges,
-        warnings: ctx.warnings,
+        warnings,
     })
 }
 
@@ -1412,6 +1451,82 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_hosts_round_trip_into_graph_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  ports:\n\
+             \x20   \"8080\":\n\
+             \x20     primary: true\n\
+             \x20 wildcard_hosts:\n\
+             \x20   - myservice.local\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        let node = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "myservice.myservice")
+            .unwrap();
+        assert_eq!(node.wildcard_hosts, vec!["myservice.local"]);
+        assert!(graph.warnings.is_empty());
+    }
+
+    #[test]
+    fn warns_when_wildcard_hosts_declared_without_a_primary_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  wildcard_hosts:\n\
+             \x20   - myservice.local\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        assert!(
+            graph
+                .warnings
+                .iter()
+                .any(|w| w.contains("myservice") && w.contains("wildcard_hosts"))
+        );
+    }
+
+    #[test]
+    fn warns_when_two_nodes_declare_the_same_wildcard_hosts_suffix() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "service-a",
+            "  ports:\n\
+             \x20   \"8080\":\n\
+             \x20     primary: true\n\
+             \x20 wildcard_hosts:\n\
+             \x20   - shared.local\n",
+        );
+        write_component(
+            tmp.path(),
+            "service-b",
+            "  ports:\n\
+             \x20   \"8080\":\n\
+             \x20     primary: true\n\
+             \x20 wildcard_hosts:\n\
+             \x20   - shared.local\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        assert!(
+            graph
+                .warnings
+                .iter()
+                .any(|w| w.contains("shared.local") && w.contains("more than one"))
+        );
+    }
+
+    #[test]
     fn warns_when_additional_hosts_declared_without_a_primary_port() {
         let tmp = tempfile::tempdir().unwrap();
         write_component(
@@ -1548,12 +1663,9 @@ mod tests {
 
         assert!(graph.nodes.iter().any(|n| n.id == "vite.shop-web"));
         assert!(graph.nodes.iter().any(|n| n.id == "php.shop-web"));
-        assert!(
-            graph
-                .edges
-                .iter()
-                .any(|e| e.from == "vite.shop-web" && e.to == "php.shop-web" && e.kind == "depends-on")
-        );
+        assert!(graph.edges.iter().any(|e| e.from == "vite.shop-web"
+            && e.to == "php.shop-web"
+            && e.kind == "depends-on"));
         assert!(graph.warnings.is_empty());
     }
 

@@ -1,6 +1,10 @@
 # fghj — Progress Tracker
 
-Last updated: 2026-09-07 (added `fghj exec` — a full-duplex `docker compose
+Last updated: 2026-09-08 (added `#Service.wildcard_hosts` — wildcard
+subdomain routing via a generalized, dynamic-zone DNS server + macOS
+`/etc/resolver` wiring, so a service can claim an entire DNS subtree
+instead of only exact-match `additional_hosts` aliases).
+Prior update, 2026-09-07 (added `fghj exec` — a full-duplex `docker compose
 exec`-equivalent proxied over a new WebSocket route on the control socket,
 closing the "No `docker compose exec`-equivalent" gap under "Real-world
 dry-run findings" below).
@@ -65,11 +69,38 @@ durable record, plans in `~/.claude/plans/` are not.
   in-zone `A` query with `127.0.0.1` (NXDOMAIN outside the zone). Binds an
   OS-assigned ephemeral port (`dns::bind`) rather than the SPEC's suggested
   fixed `5353`, which routinely collides with mDNSResponder/Chrome on a real
-  dev Mac. `dns::install_os_resolver_config` writes `/etc/resolver/fghj.internal`
-  on macOS (`install_macos_resolver`) pointing at that port; Linux/Windows
-  print a manual-setup message instead (not implemented). `dns::in_zone` is
-  `pub(crate)` and reused by `ca::DynamicCertResolver` so "is this name ours"
-  has one definition.
+  dev Mac. `dns::install_os_resolver_config` writes one `/etc/resolver/<zone>`
+  file per active zone on macOS (`sync_macos_resolver`) pointing at that
+  port; Linux/Windows print a manual-setup message instead (not
+  implemented). `dns::in_zone` is `pub(crate)` and reused by
+  `ca::DynamicCertResolver` so "is this name ours" has one definition.
+  **Wildcard subdomain routing — `#Service.wildcard_hosts`** — closed
+  (2026-09-08). Generalizes the DNS server and macOS resolver wiring from
+  one fixed zone (`fghj.internal`) to a *dynamic* set: one zone per
+  `wildcard_hosts` suffix currently claimed by a `"running"` container
+  (`dns::ZoneSource`, implemented by `daemon::WorkspaceRegistry` via a new
+  `active_wildcard_suffixes`), re-checked on every DNS query and re-synced
+  to `/etc/resolver` on every reconciler tick — so a wildcard zone starts
+  or stops answering within one query/tick of its owning container
+  starting or stopping, no `fghjd` restart needed. Lets a service claim an
+  entire DNS subtree (e.g. `myservice.local` matching `acme.myservice.local`,
+  `microsoft.myservice.local`, and any other not-pre-declared subdomain),
+  replicating a tenant-per-subdomain production pattern locally — something
+  the exact-match-only `#Service.additional_hosts` can't do, since
+  `/etc/hosts` has no wildcard syntax. `runs::PortRoute` gained a
+  `#[serde(default)] wildcard: bool` (no DB migration needed — routes
+  persist as one JSON blob); `resolve_route` tries an exact match first,
+  then falls back to a suffix match over `wildcard: true` routes, so a more
+  specific claim always wins over a broader wildcard one. Cert issuance
+  needed no changes — `ca::DynamicCertResolver` already mints leaf certs
+  lazily per exact SNI name, never a real X.509 wildcard, so a suffix under
+  a reserved TLD gets real per-name HTTPS for free; a non-reserved suffix
+  falls back to plain HTTP only, same rule `additional_hosts` follows.
+  `resolve_universe` also warns if two different nodes declare the same
+  `wildcard_hosts` suffix (worse than an `additional_hosts` collision,
+  since it silently claims a whole subtree of names, not just one). See the
+  "Wildcard hosts" section of `docs/reference/fghj-yaml.md` and
+  `concepts/split-dns.md`.
 - **Subsystem C — local CA + TLS-terminating reverse proxy** (`src/ca.rs`,
   `src/proxy.rs`): `fghjd` occupies ports 80/443 (`proxy::bind_http`/
   `bind_https`, localhost-only). Port 80 redirects everything to https.

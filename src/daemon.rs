@@ -222,19 +222,44 @@ impl WorkspaceRegistry {
     pub fn resolve_route(&self, host: &str) -> Option<u16> {
         let states: Vec<Arc<WorkspaceState>> =
             self.by_id.lock().unwrap().values().cloned().collect();
-        states.iter().find_map(|state| {
-            state.runs.list().iter().find_map(|run| {
-                run.containers
-                    .iter()
-                    .filter(|c| c.status == "running")
-                    .find_map(|c| {
-                        c.routes
-                            .iter()
-                            .find(|r| r.domain == host)
-                            .map(|r| r.host_port)
-                    })
+        // Exact matches (a node's own derived domain, a named port, or a
+        // literal `#AdditionalHost`) always win over a wildcard match — a
+        // `wildcard_hosts` suffix only ever fills in for a name nothing more
+        // specific already claims.
+        states
+            .iter()
+            .find_map(|state| {
+                state.runs.list().iter().find_map(|run| {
+                    run.containers
+                        .iter()
+                        .filter(|c| c.status == "running")
+                        .find_map(|c| {
+                            c.routes
+                                .iter()
+                                .find(|r| !r.wildcard && r.domain == host)
+                                .map(|r| r.host_port)
+                        })
+                })
             })
-        })
+            .or_else(|| {
+                states.iter().find_map(|state| {
+                    state.runs.list().iter().find_map(|run| {
+                        run.containers
+                            .iter()
+                            .filter(|c| c.status == "running")
+                            .find_map(|c| {
+                                c.routes
+                                    .iter()
+                                    .find(|r| {
+                                        r.wildcard
+                                            && (host == r.domain
+                                                || host.ends_with(&format!(".{}", r.domain)))
+                                    })
+                                    .map(|r| r.host_port)
+                            })
+                    })
+                })
+            })
     }
 
     /// Every `#AdditionalHost` alias currently claimed by a `"running"`
@@ -259,6 +284,34 @@ impl WorkspaceRegistry {
         hosts.sort();
         hosts.dedup();
         hosts
+    }
+
+    /// Every `wildcard_hosts` suffix currently claimed by a `"running"`
+    /// container in any wired workspace, sorted and deduplicated — the input
+    /// to `dns::install_os_resolver_config`'s per-zone `/etc/resolver` sync.
+    /// Same recompute-from-scratch approach as `active_additional_hosts`.
+    pub fn active_wildcard_suffixes(&self) -> Vec<String> {
+        let states: Vec<Arc<WorkspaceState>> =
+            self.by_id.lock().unwrap().values().cloned().collect();
+        let mut zones: Vec<String> = states
+            .iter()
+            .flat_map(|state| {
+                state.runs.list().into_iter().flat_map(|run| {
+                    run.containers
+                        .into_iter()
+                        .filter(|c| c.status == "running")
+                        .flat_map(|c| {
+                            c.routes
+                                .into_iter()
+                                .filter(|r| r.wildcard)
+                                .map(|r| r.domain)
+                        })
+                })
+            })
+            .collect();
+        zones.sort();
+        zones.dedup();
+        zones
     }
 
     pub fn list(&self) -> Vec<(String, PathBuf)> {
@@ -293,6 +346,12 @@ impl WorkspaceRegistry {
 impl proxy::RouteResolver for WorkspaceRegistry {
     fn resolve(&self, host: &str) -> Option<u16> {
         self.resolve_route(host)
+    }
+}
+
+impl dns::ZoneSource for WorkspaceRegistry {
+    fn active_wildcard_zones(&self) -> Vec<String> {
+        self.active_wildcard_suffixes()
     }
 }
 
@@ -820,6 +879,10 @@ struct ActiveResources {
     dns_task: tokio::task::JoinHandle<()>,
     http_task: tokio::task::JoinHandle<()>,
     https_task: tokio::task::JoinHandle<()>,
+    /// The port fghjd's DNS server bound to, kept around so the reconciler
+    /// can re-sync `/etc/resolver` files (one per active `wildcard_hosts`
+    /// zone) on every tick without re-deriving it.
+    dns_port: u16,
 }
 
 /// `fghjd` itself is meant to run forever — started at boot and restarted on
@@ -859,8 +922,8 @@ impl DaemonControl {
             .local_addr()
             .context("DNS socket has no local address")?
             .port();
-        let dns_task = tokio::spawn(dns::serve(dns_socket));
-        dns::install_os_resolver_config(dns_port)?;
+        let dns_task = tokio::spawn(dns::serve(dns_socket, self.registry.clone()));
+        dns::install_os_resolver_config(dns_port, &self.registry.active_wildcard_suffixes())?;
 
         let http_listener = proxy::bind_http().await?;
         let https_listener = proxy::bind_https().await?;
@@ -885,8 +948,16 @@ impl DaemonControl {
             dns_task,
             http_task,
             https_task,
+            dns_port,
         });
         Ok(())
+    }
+
+    /// The port fghjd's DNS server is currently bound to, if active — used
+    /// by `spawn_reconciler` to re-sync `/etc/resolver` files without
+    /// needing to re-derive or re-bind anything. `None` while idle.
+    fn active_dns_port(&self) -> Option<u16> {
+        self.active.lock().unwrap().as_ref().map(|r| r.dns_port)
     }
 
     /// Reverses `activate`: aborts the DNS/HTTP/HTTPS tasks (freeing the
@@ -901,7 +972,7 @@ impl DaemonControl {
             resources.http_task.abort();
             resources.https_task.abort();
         }
-        let _ = std::fs::remove_file(dns::macos_resolver_path());
+        dns::clear_os_resolver_config();
         if let Err(e) = hosts_file::sync(&hosts_file::hosts_path(), &[]) {
             eprintln!("fghjd: failed to clear /etc/hosts on deactivate: {e}");
         }
@@ -939,6 +1010,14 @@ fn spawn_reconciler(daemon: Arc<DaemonControl>) {
                 &daemon.registry.active_additional_hosts(),
             ) {
                 eprintln!("fghjd: failed to sync /etc/hosts: {e}");
+            }
+            if let Some(dns_port) = daemon.active_dns_port()
+                && let Err(e) = dns::install_os_resolver_config(
+                    dns_port,
+                    &daemon.registry.active_wildcard_suffixes(),
+                )
+            {
+                eprintln!("fghjd: failed to sync /etc/resolver: {e}");
             }
         }
     });

@@ -182,6 +182,13 @@ fn parse_env_file(contents: &str) -> Vec<String> {
 pub struct PortRoute {
     pub domain: String,
     pub host_port: u16,
+    /// When set, `domain` is a suffix from `Node.wildcard_hosts` rather than
+    /// an exact name — `WorkspaceRegistry::resolve_route` matches it against
+    /// the suffix itself *and* any subdomain of it, not just an exact
+    /// string. `#[serde(default)]` so rows persisted before this field
+    /// existed just deserialize as `false` (an ordinary exact route).
+    #[serde(default)]
+    pub wildcard: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -817,12 +824,14 @@ impl RunRegistry {
                 routes.push(PortRoute {
                     domain: domain.clone(),
                     host_port,
+                    wildcard: false,
                 });
             }
             if let Some(name) = &cfg.name {
                 routes.push(PortRoute {
                     domain: format!("{name}.{domain}"),
                     host_port,
+                    wildcard: false,
                 });
             }
         }
@@ -844,8 +853,16 @@ impl RunRegistry {
                 routes.push(PortRoute {
                     domain: host.clone(),
                     host_port,
+                    wildcard: false,
                 });
                 additional_hosts_active.push(host.clone());
+            }
+            for suffix in &node.wildcard_hosts {
+                routes.push(PortRoute {
+                    domain: suffix.clone(),
+                    host_port,
+                    wildcard: true,
+                });
             }
         }
 

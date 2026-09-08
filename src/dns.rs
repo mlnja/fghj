@@ -1,6 +1,7 @@
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::net::UdpSocket;
@@ -31,6 +32,24 @@ const CLASS_IN: u16 = 1;
 /// "is this name ours" rule rather than re-deriving it.
 pub(crate) fn in_zone(qname: &str) -> bool {
     qname == ZONE || qname.ends_with(ZONE_SUFFIX)
+}
+
+/// Whether `qname` (already lowercased) is `zone` itself or a subdomain of
+/// it — the same apex-or-subdomain rule `in_zone` hardcodes for the one
+/// fixed `ZONE`, generalized so it can also be applied to a user-declared
+/// `#Service.wildcard_hosts` suffix at query time.
+fn matches_zone(qname: &str, zone: &str) -> bool {
+    qname == zone || qname.ends_with(&format!(".{zone}"))
+}
+
+/// Supplies the set of currently-active `wildcard_hosts` suffixes (one per
+/// running container that declared any) so the DNS server and the OS
+/// resolver-file sync can answer for them without either needing to know
+/// about `daemon::WorkspaceRegistry` directly. Implemented by
+/// `WorkspaceRegistry` in `daemon.rs`, backed by
+/// `WorkspaceRegistry::active_wildcard_suffixes`.
+pub trait ZoneSource: Send + Sync {
+    fn active_wildcard_zones(&self) -> Vec<String>;
 }
 
 /// IANA reserved special-use TLDs (RFC 2606 / 6762) — never delegated on the
@@ -112,15 +131,18 @@ fn parse_query(buf: &[u8]) -> Option<Query> {
     })
 }
 
-/// Builds a response for `query`. Names inside the `fghj.internal` zone
-/// always get an authoritative NOERROR — with an A answer of 127.0.0.1 if the
-/// question was actually an `A`/`IN` lookup, or a bare NOERROR with zero
-/// answers otherwise (the standard way to say "this name exists, just not
-/// with a record of that type"). Anything outside the zone gets NXDOMAIN,
-/// non-authoritatively — this server was never asked to speak for it.
-fn build_response(query: &Query) -> Vec<u8> {
+/// Builds a response for `query`. Names inside the `fghj.internal` zone, or
+/// inside any currently-active `extra_zones` suffix (a running container's
+/// declared `wildcard_hosts`), always get an authoritative NOERROR — with an
+/// A answer of 127.0.0.1 if the question was actually an `A`/`IN` lookup, or
+/// a bare NOERROR with zero answers otherwise (the standard way to say
+/// "this name exists, just not with a record of that type"). Anything
+/// outside all of those zones gets NXDOMAIN, non-authoritatively — this
+/// server was never asked to speak for it.
+fn build_response(query: &Query, extra_zones: &[String]) -> Vec<u8> {
     let qname_lower = query.qname.to_ascii_lowercase();
-    let zone_hit = in_zone(&qname_lower);
+    let zone_hit =
+        in_zone(&qname_lower) || extra_zones.iter().any(|z| matches_zone(&qname_lower, z));
     let answer_hit = zone_hit && query.qtype == TYPE_A && query.qclass == CLASS_IN;
 
     // Opcode 0 is a standard query, the only kind this server answers.
@@ -175,8 +197,11 @@ pub async fn bind() -> Result<UdpSocket> {
 
 /// Serves DNS queries on `socket` forever. Malformed packets (see
 /// `parse_query`) are silently dropped rather than answered — UDP callers
-/// already have to handle no response as "try again or give up".
-pub async fn serve(socket: UdpSocket) {
+/// already have to handle no response as "try again or give up". `zones`'
+/// active wildcard suffixes are re-fetched fresh on every query (cheap at
+/// this server's query volume) so a suffix starts/stops answering within one
+/// query of its owning container starting/stopping, with no restart needed.
+pub async fn serve(socket: UdpSocket, zones: Arc<dyn ZoneSource>) {
     let port = socket.local_addr().map(|a| a.port()).unwrap_or(0);
     println!("fghjd: DNS server listening on 127.0.0.1:{port}, resolving *.{ZONE} to {ANSWER}");
     let mut buf = [0u8; 512]; // classic DNS-over-UDP message limit; plenty for single-question lookups
@@ -191,22 +216,28 @@ pub async fn serve(socket: UdpSocket) {
         let Some(query) = parse_query(&buf[..len]) else {
             continue;
         };
-        let response = build_response(&query);
+        let response = build_response(&query, &zones.active_wildcard_zones());
         if let Err(e) = socket.send_to(&response, src).await {
             eprintln!("fghjd: DNS send error to {src}: {e}");
         }
     }
 }
 
-/// Routes the OS's resolution of `*.fghj.internal` to this server, per
-/// SPEC.md §5 Subsystem B ("Native OS Integration"). Only macOS is wired up
-/// today (`/etc/resolver`, the mechanism macOS's system resolver reads);
-/// Linux (`systemd-resolved`) and Windows (NRPT) are called out in SPEC.md
-/// but not implemented, so lookups there need a manual `/etc/hosts`-style
-/// workaround until someone picks that up.
-pub fn install_os_resolver_config(port: u16) -> Result<()> {
+/// Routes the OS's resolution of `*.fghj.internal`, plus any currently-active
+/// `wildcard_zones` (a running container's declared `wildcard_hosts`), to
+/// this server, per SPEC.md §5 Subsystem B ("Native OS Integration"). Only
+/// macOS is wired up today (`/etc/resolver`, the mechanism macOS's system
+/// resolver reads); Linux (`systemd-resolved`) and Windows (NRPT) are called
+/// out in SPEC.md but not implemented, so lookups there need a manual
+/// `/etc/hosts`-style workaround until someone picks that up. Called both at
+/// `activate` time and on every reconcile tick (see `daemon.rs`), since
+/// unlike the one fixed `ZONE`, wildcard zones come and go with whichever
+/// containers are currently running.
+pub fn install_os_resolver_config(port: u16, wildcard_zones: &[String]) -> Result<()> {
     if cfg!(target_os = "macos") {
-        install_macos_resolver(Path::new("/etc/resolver"), port)
+        let mut zones: Vec<&str> = vec![ZONE];
+        zones.extend(wildcard_zones.iter().map(String::as_str));
+        sync_macos_resolver(Path::new("/etc/resolver"), port, &zones)
     } else {
         eprintln!(
             "fghjd: automatic OS DNS routing for *.{ZONE} isn't implemented on this platform yet — \
@@ -216,28 +247,89 @@ pub fn install_os_resolver_config(port: u16) -> Result<()> {
     }
 }
 
-/// The file `install_macos_resolver` writes — exposed so `fghj daemon stop`
-/// can remove it on a clean shutdown. Without this, a stopped `fghjd` leaves
-/// `*.fghj.internal` routed at a now-dead port instead of failing over to
-/// normal DNS, until the next `fghjd` start rewrites the file.
-pub fn macos_resolver_path() -> std::path::PathBuf {
-    Path::new("/etc/resolver").join(ZONE)
+/// Reverses `install_os_resolver_config`: removes every fghjd-authored
+/// resolver file (the fixed `ZONE` plus any wildcard zone) on a clean
+/// shutdown. Without this, a stopped `fghjd` leaves those names routed at a
+/// now-dead port instead of failing over to normal DNS, until the next
+/// `fghjd` start rewrites them.
+pub fn clear_os_resolver_config() {
+    if cfg!(target_os = "macos") {
+        clear_macos_resolver(Path::new("/etc/resolver"));
+    }
 }
 
-fn install_macos_resolver(resolver_dir: &Path, port: u16) -> Result<()> {
+/// Content written to a zone's resolver file — recognizing exactly this
+/// shape (regardless of port) is how `sync_macos_resolver`/
+/// `clear_macos_resolver` tell "a file fghjd itself created" apart from a
+/// resolver file some other tool placed, without needing a separate
+/// tracking manifest.
+fn is_fghjd_resolver_content(content: &str) -> bool {
+    content
+        .strip_prefix("nameserver 127.0.0.1\nport ")
+        .and_then(|rest| rest.strip_suffix('\n'))
+        .is_some_and(|port| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Writes (or refreshes) one `resolver_dir/<zone>` file per entry in `zones`
+/// — idempotently, same as before — then removes any *other* file in that
+/// directory whose content matches fghjd's own template
+/// (`is_fghjd_resolver_content`) but whose zone isn't in `zones` anymore,
+/// e.g. a `wildcard_hosts` suffix whose owning container just stopped. A
+/// resolver file some other tool created is never touched, since its
+/// content won't match the template.
+fn sync_macos_resolver(resolver_dir: &Path, port: u16, zones: &[&str]) -> Result<()> {
     fs::create_dir_all(resolver_dir)
         .with_context(|| format!("failed to create {}", resolver_dir.display()))?;
-    let path = resolver_dir.join(ZONE);
     let desired = format!("nameserver 127.0.0.1\nport {port}\n");
-    if fs::read_to_string(&path).ok().as_deref() != Some(desired.as_str()) {
-        fs::write(&path, &desired)
-            .with_context(|| format!("failed to write {}", path.display()))?;
-        println!(
-            "fghjd: wrote {} — *.{ZONE} lookups now route to this DNS server",
-            path.display()
-        );
+
+    for zone in zones {
+        let path = resolver_dir.join(zone);
+        if fs::read_to_string(&path).ok().as_deref() != Some(desired.as_str()) {
+            fs::write(&path, &desired)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+            println!(
+                "fghjd: wrote {} — *.{zone} lookups now route to this DNS server",
+                path.display()
+            );
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir(resolver_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if zones.contains(&name) {
+                continue;
+            }
+            if fs::read_to_string(&path)
+                .ok()
+                .is_some_and(|c| is_fghjd_resolver_content(&c))
+            {
+                let _ = fs::remove_file(&path);
+            }
+        }
     }
     Ok(())
+}
+
+/// Removes every fghjd-authored resolver file in `resolver_dir`
+/// unconditionally (content-based, same rule as `sync_macos_resolver`) —
+/// the full-teardown counterpart used on `deactivate`.
+fn clear_macos_resolver(resolver_dir: &Path) {
+    let Ok(entries) = fs::read_dir(resolver_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if fs::read_to_string(&path)
+            .ok()
+            .is_some_and(|c| is_fghjd_resolver_content(&c))
+        {
+            let _ = fs::remove_file(&path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -301,7 +393,7 @@ mod tests {
         let query = parse_query(&raw).expect("valid query parses");
         assert_eq!(query.qname, "cart.fghj.internal");
 
-        let resp = build_response(&query);
+        let resp = build_response(&query, &[]);
         let (flags0, flags1) = header_flags(&resp);
         assert_eq!(flags0 & 0x80, 0x80, "QR bit must be set on a response");
         assert_eq!(flags0 & 0x04, 0x04, "AA bit must be set for our own zone");
@@ -315,7 +407,7 @@ mod tests {
     fn apex_domain_also_resolves() {
         let raw = encode_query(1, "fghj.internal", TYPE_A);
         let query = parse_query(&raw).unwrap();
-        let resp = build_response(&query);
+        let resp = build_response(&query, &[]);
         let ancount = u16::from_be_bytes([resp[6], resp[7]]);
         assert_eq!(ancount, 1);
     }
@@ -325,7 +417,7 @@ mod tests {
         const TYPE_AAAA: u16 = 28;
         let raw = encode_query(2, "cart.fghj.internal", TYPE_AAAA);
         let query = parse_query(&raw).unwrap();
-        let resp = build_response(&query);
+        let resp = build_response(&query, &[]);
         let (_, flags1) = header_flags(&resp);
         assert_eq!(
             flags1 & 0x0F,
@@ -340,7 +432,7 @@ mod tests {
     fn query_outside_zone_is_nxdomain() {
         let raw = encode_query(3, "example.com", TYPE_A);
         let query = parse_query(&raw).unwrap();
-        let resp = build_response(&query);
+        let resp = build_response(&query, &[]);
         let (flags0, flags1) = header_flags(&resp);
         assert_eq!(
             flags0 & 0x04,
@@ -356,7 +448,7 @@ mod tests {
     fn response_echoes_request_id_and_question() {
         let raw = encode_query(0xBEEF, "auth.fghj.internal", TYPE_A);
         let query = parse_query(&raw).unwrap();
-        let resp = build_response(&query);
+        let resp = build_response(&query, &[]);
         assert_eq!(u16::from_be_bytes([resp[0], resp[1]]), 0xBEEF);
         assert_eq!(
             &resp[12..12 + query.question_bytes.len()],
@@ -390,11 +482,23 @@ mod tests {
     /// End-to-end check over a real loopback socket, exercising `serve`
     /// itself rather than just the pure `parse_query`/`build_response`
     /// functions it wraps.
+    struct StaticZones(Vec<String>);
+
+    impl ZoneSource for StaticZones {
+        fn active_wildcard_zones(&self) -> Vec<String> {
+            self.0.clone()
+        }
+    }
+
+    fn no_zones() -> Arc<dyn ZoneSource> {
+        Arc::new(StaticZones(Vec::new()))
+    }
+
     #[tokio::test]
     async fn serves_real_udp_queries_over_loopback() {
         let socket = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
         let server_addr = socket.local_addr().unwrap();
-        tokio::spawn(serve(socket));
+        tokio::spawn(serve(socket, no_zones()));
 
         let client = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
         let query = encode_query(0xABCD, "checkout.fghj.internal", TYPE_A);
@@ -417,17 +521,77 @@ mod tests {
     }
 
     #[test]
-    fn install_macos_resolver_is_idempotent_and_writes_expected_content() {
+    fn a_query_under_an_active_wildcard_zone_resolves_to_localhost() {
+        let raw = encode_query(5, "acme.myservice.local", TYPE_A);
+        let query = parse_query(&raw).unwrap();
+
+        let resp = build_response(&query, &["myservice.local".to_string()]);
+        let (flags0, flags1) = header_flags(&resp);
+        assert_eq!(flags0 & 0x04, 0x04, "AA bit must be set for an active zone");
+        assert_eq!(flags1 & 0x0F, 0, "RCODE must be NOERROR");
+        let ancount = u16::from_be_bytes([resp[6], resp[7]]);
+        assert_eq!(ancount, 1);
+
+        // A name under a zone that isn't currently active must still be
+        // NXDOMAIN — the set is consulted fresh per query, not cached.
+        let resp = build_response(&query, &[]);
+        let (_, flags1) = header_flags(&resp);
+        assert_eq!(flags1 & 0x0F, 3, "RCODE must be NXDOMAIN once inactive");
+    }
+
+    #[test]
+    fn sync_macos_resolver_is_idempotent_and_writes_expected_content() {
         let tmp = tempfile::tempdir().unwrap();
         let resolver_dir = tmp.path().join("resolver");
 
-        install_macos_resolver(&resolver_dir, 54321).unwrap();
+        sync_macos_resolver(&resolver_dir, 54321, &[ZONE]).unwrap();
         let path = resolver_dir.join(ZONE);
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(contents, "nameserver 127.0.0.1\nport 54321\n");
 
         // Re-running must not error and must leave the file as-is.
-        install_macos_resolver(&resolver_dir, 54321).unwrap();
+        sync_macos_resolver(&resolver_dir, 54321, &[ZONE]).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+    }
+
+    #[test]
+    fn sync_macos_resolver_writes_multiple_zones_and_prunes_stale_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolver_dir = tmp.path().join("resolver");
+
+        sync_macos_resolver(&resolver_dir, 1234, &[ZONE, "myservice.local"]).unwrap();
+        assert!(resolver_dir.join(ZONE).exists());
+        assert!(resolver_dir.join("myservice.local").exists());
+
+        // A foreign file (content some other tool wrote) must survive.
+        let foreign = resolver_dir.join("example.com");
+        fs::write(&foreign, "nameserver 8.8.8.8\n").unwrap();
+
+        // The wildcard zone's owning container stopped — it drops out of
+        // the wanted set and its file must be removed, but the foreign
+        // file and the fixed zone's file must be untouched.
+        sync_macos_resolver(&resolver_dir, 1234, &[ZONE]).unwrap();
+        assert!(resolver_dir.join(ZONE).exists());
+        assert!(!resolver_dir.join("myservice.local").exists());
+        assert_eq!(
+            fs::read_to_string(&foreign).unwrap(),
+            "nameserver 8.8.8.8\n"
+        );
+    }
+
+    #[test]
+    fn clear_macos_resolver_removes_only_fghjd_authored_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolver_dir = tmp.path().join("resolver");
+
+        sync_macos_resolver(&resolver_dir, 1234, &[ZONE, "myservice.local"]).unwrap();
+        let foreign = resolver_dir.join("example.com");
+        fs::write(&foreign, "nameserver 8.8.8.8\n").unwrap();
+
+        clear_macos_resolver(&resolver_dir);
+
+        assert!(!resolver_dir.join(ZONE).exists());
+        assert!(!resolver_dir.join("myservice.local").exists());
+        assert!(foreign.exists());
     }
 }
