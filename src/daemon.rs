@@ -26,6 +26,15 @@ use crate::{ca, dns, docker, downloads, hosts_file, proxy, resolver, runs, store
 /// UI is essentially never stale.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How often `spawn_sync_reconciler` re-resolves each workspace's
+/// `.fghj.yaml` and recomputes config-drift hashes. Deliberately much
+/// coarser than `RECONCILE_INTERVAL`: unlike `refresh` (a handful of Docker
+/// inspect calls), this re-runs full CUE resolution — parsing every
+/// `.fghj.yaml` in the workspace from scratch — which is real work not worth
+/// repeating every second just to catch drift that, by definition, only
+/// happens when someone edits a config file by hand.
+const SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(15);
+
 /// Where `fghjd`'s control API listens — a Unix socket rather than a TCP
 /// port, dockerd-style: it's local-machine-only by nature (no port to pick,
 /// collide with, or scan) and access control is a filesystem permission
@@ -1033,11 +1042,14 @@ impl DaemonControl {
 
 /// Background loop, analogous to a Kubernetes controller's reconcile loop
 /// but read-only with respect to Docker: on each tick it re-inspects every
-/// workspace's live containers and updates their recorded status (see
-/// `RunRegistry::refresh`) so drift caused by someone `docker stop`/`rm`-ing
-/// a container by hand shows up in the UI on its own, without a `fghjd`
-/// restart. It never recreates or restarts a container — no self-healing
-/// there. It does own one side effect outside Docker, though: re-syncing
+/// workspace's live containers and updates their recorded status, published
+/// port, and routes (see `RunRegistry::refresh`) so drift caused by someone
+/// `docker stop`/`rm`-ing a container by hand, or Docker itself moving a
+/// container to a different ephemeral host port on a restart it initiated
+/// (restart policy, `dockerd` restarting), shows up — and routes correctly —
+/// on its own, without a `fghjd` restart. It never recreates or restarts a
+/// container itself — no self-healing there. It does own one side effect
+/// outside Docker, though: re-syncing
 /// `/etc/hosts` (`hosts_file::sync`) to exactly the `#AdditionalHost`
 /// aliases of whatever's currently `"running"`, so a container dying
 /// out-of-band (same drift this loop already detects) also drops its alias
@@ -1070,6 +1082,37 @@ fn spawn_reconciler(daemon: Arc<DaemonControl>) {
                 )
             {
                 eprintln!("fghjd: failed to sync /etc/resolver: {e}");
+            }
+        }
+    });
+}
+
+/// The config-drift counterpart to `spawn_reconciler`: on its own, much
+/// slower interval (`SYNC_RECONCILE_INTERVAL`), re-resolves each wired
+/// workspace's `.fghj.yaml` from disk and asks its `RunRegistry` to compare
+/// that freshly-resolved graph against the config each live container was
+/// actually last started with (`RunRegistry::refresh_sync_status`). Runs
+/// regardless of `daemon.is_active()` — sync status is informational graph
+/// metadata, not a routing/`/etc/hosts` side effect, so there's no
+/// "idle fghjd" reason to skip it the way `spawn_reconciler` skips its
+/// `/etc/hosts`/`/etc/resolver` sync.
+fn spawn_sync_reconciler(daemon: Arc<DaemonControl>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(SYNC_RECONCILE_INTERVAL);
+        loop {
+            interval.tick().await;
+            for (id, path) in daemon.registry.list() {
+                let Some(state) = daemon.registry.get(&id) else {
+                    continue;
+                };
+                let graph =
+                    match tokio::task::spawn_blocking(move || resolver::resolve_universe(&path))
+                        .await
+                    {
+                        Ok(Ok(graph)) => graph,
+                        _ => continue,
+                    };
+                state.runs.refresh_sync_status(&graph).await;
             }
         }
     });
@@ -1199,6 +1242,7 @@ pub async fn run_control_api() -> Result<()> {
         active: Mutex::new(None),
     });
     spawn_reconciler(Arc::clone(&daemon));
+    spawn_sync_reconciler(Arc::clone(&daemon));
 
     // `fghjd` starts active by default: it's meant to occupy 80/443 and
     // *.fghj.internal DNS from the moment the system boots. The one

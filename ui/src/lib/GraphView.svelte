@@ -140,7 +140,12 @@
         </div>
       {/if}
       {#if live}
-        <div class="node-meta">{live.status}{#if live.published_port} · 127.0.0.1:{live.published_port}{/if}</div>
+        <div class="node-meta live-row">
+          <span>{live.status}{#if live.published_port} · 127.0.0.1:{live.published_port}{/if}</span>
+          {#if live.synced === false}
+            <span class="pill unsynced" title="container config no longer matches .fghj.yaml">unsynced</span>
+          {/if}
+        </div>
       {/if}
       {#if containerState}
         <div class="status-bar state-{containerState}" title="container: {containerState}">
@@ -181,6 +186,7 @@
   .ports { font: 500 10px var(--font-mono); color: var(--ink-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .node-domain { font: 500 11px var(--font-mono); color: var(--ink-faint); word-break: break-all; }
   .node-meta { font: 500 10px var(--font-mono); color: var(--ink-faint); margin-top: 6px; }
+  .live-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
   .badge {
     font: 700 8.5px var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint);
     border: 1px dashed var(--line-strong); border-radius: 3px; padding: 2px 5px; flex: 0 0 auto;
@@ -192,4 +198,5 @@
   }
   .pill.dirty { background: var(--warning-bg); color: var(--warning); }
   .pill.clean { background: var(--success-bg); color: var(--success); }
+  .pill.unsynced { background: var(--warning-bg); color: var(--warning); }
 </style>

@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::docker;
-use crate::resolver::{Edge, Graph, Node, VolumeMount};
+use crate::resolver::{Edge, Graph, Healthcheck, Node, VolumeMount};
 use crate::store::WorkspaceDb;
 
 pub const DEFAULT_RUN_ID: &str = "default";
@@ -297,6 +298,17 @@ pub struct PortRoute {
     /// existed just deserialize as `false` (an ordinary exact route).
     #[serde(default)]
     pub wildcard: bool,
+    /// The container-side port (a key into `ContainerInfo.ports`) this route
+    /// was derived from — lets `RunRegistry::refresh` re-inspect just that
+    /// binding and correct `host_port` if Docker republishes the container
+    /// on a different ephemeral host port (e.g. a restart-policy-triggered
+    /// restart, or `dockerd` itself restarting), without needing the
+    /// original `Node` config back. `#[serde(default)]` so a route persisted
+    /// before this field existed just deserializes as `""` — `refresh` skips
+    /// those until the owning container is next started through `fghj`,
+    /// which recomputes routes from scratch anyway.
+    #[serde(default)]
+    pub container_port: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -325,6 +337,39 @@ pub struct ContainerInfo {
     /// running, or the port entry has no live binding yet).
     #[serde(default)]
     pub ports: BTreeMap<String, Option<u16>>,
+    /// The container-side port (a key into `ports`) that `status`/
+    /// `published_port` are inspected against — `node.ports`' `primary`
+    /// entry, or an arbitrary declared port if none is marked `primary` (see
+    /// the selection logic in `start_node`). `None` for a node with no
+    /// declared ports at all, matching `docker::inspect_status`'s own
+    /// "inspect status only" mode. Kept around (rather than re-derived) so
+    /// `RunRegistry::refresh` can re-inspect the same port `start_node`
+    /// picked without needing the original `Node` config. `#[serde(default)]`
+    /// so a row persisted before this field existed just deserializes as
+    /// `None` — `refresh` still updates `status`, just not `published_port`,
+    /// for that container until it's next started through `fghj`.
+    #[serde(default)]
+    pub status_port: Option<String>,
+    /// Hex-encoded hash of everything about this node's resolved config that
+    /// actually affects how the container runs (image, command, env, ports,
+    /// volumes, ...) at the moment it was last actually started through
+    /// fghj — see `spec_hash`. Compared against a freshly recomputed hash of
+    /// the *current* `.fghj.yaml` by `RunRegistry::refresh_sync_status` to
+    /// detect drift; never used to decide anything on its own. Empty for a
+    /// container persisted before this field existed, or by a code path that
+    /// doesn't have a `NodeSpec` to hash (shouldn't happen for anything
+    /// `start_node` itself produced).
+    #[serde(default)]
+    pub config_hash: String,
+    /// Whether `config_hash` still matches what `.fghj.yaml` would produce
+    /// right now — `None` until the first background sync check runs (or
+    /// for a branch-overridden service, which drift-checking can't safely
+    /// recompute without doing a real git checkout — see `resolve_node_spec`).
+    /// Purely informational: the "Desired state" vs "Actual state" indicator
+    /// in the Drawer, never anything `fghj` acts on by itself — recreating a
+    /// drifted container is always the user's own explicit Start/Restart.
+    #[serde(default)]
+    pub synced: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -335,11 +380,92 @@ pub struct RunState {
     pub containers: Vec<ContainerInfo>,
 }
 
+/// The pure, side-effect-free result of `RunRegistry::resolve_node_spec` —
+/// everything about a node's config that has to be actually computed (as
+/// opposed to read straight off `Node`) before it can be either run for real
+/// (`start_node`) or hashed to check for drift (`spec_hash`,
+/// `refresh_sync_status`).
+struct NodeSpec {
+    container_name: String,
+    domain: String,
+    aliases: Vec<String>,
+    image: String,
+    port_list: Vec<(String, Option<u16>)>,
+    binds: Vec<String>,
+    env: Vec<String>,
+}
+
+/// Hashes everything about `node` + `spec` that actually affects how the
+/// container runs, for `ContainerInfo::config_hash` /
+/// `RunRegistry::refresh_sync_status` to compare against. Deliberately
+/// excludes anything that's either pure identity (`container_name`, `domain`,
+/// `aliases` all derive one-to-one from `node.id` + run id — never drift
+/// independently of the rest of the spec) or genuinely ephemeral (an
+/// unpinned port's actual host-side binding is chosen fresh by Docker on
+/// every start; hashing it would flag every single restart as "drifted").
+/// Uses `Sha256` rather than `std::hash::DefaultHasher`, which is explicitly
+/// documented as unstable across Rust versions — that would misreport a
+/// clean upgrade of the `fghj` binary itself as config drift.
+fn spec_hash(node: &Node, spec: &NodeSpec) -> String {
+    #[derive(Serialize)]
+    struct DesiredSpec<'a> {
+        image: &'a str,
+        command: &'a [String],
+        env: &'a [String],
+        ports: &'a [(String, Option<u16>)],
+        binds: &'a [String],
+        restart: &'a str,
+        user: Option<&'a str>,
+        working_dir: Option<&'a str>,
+        labels: &'a BTreeMap<String, String>,
+        cap_add: &'a [String],
+        cap_drop: &'a [String],
+        privileged: bool,
+        extra_hosts: &'a [String],
+        healthcheck: Option<&'a Healthcheck>,
+        platform: Option<&'a str>,
+    }
+
+    let desired = DesiredSpec {
+        image: &spec.image,
+        command: &node.command,
+        env: &spec.env,
+        ports: &spec.port_list,
+        binds: &spec.binds,
+        restart: &node.restart,
+        user: node.user.as_deref(),
+        working_dir: node.working_dir.as_deref(),
+        labels: &node.labels,
+        cap_add: &node.cap_add,
+        cap_drop: &node.cap_drop,
+        privileged: node.privileged,
+        extra_hosts: &node.extra_hosts,
+        healthcheck: node.healthcheck.as_ref(),
+        platform: node.platform.as_deref(),
+    };
+    let bytes = serde_json::to_vec(&desired).expect("DesiredSpec always serializes");
+    let digest = Sha256::digest(&bytes);
+    format!("{digest:x}")
+}
+
 pub struct RunRegistry {
     workspace: std::path::PathBuf,
     db: Arc<WorkspaceDb>,
     docker: Arc<bollard::Docker>,
     runs: Mutex<BTreeMap<String, RunState>>,
+    /// Serializes `restart_container`/`stop_container`/`remove_container`
+    /// across the *whole workspace*, not per node: the frontend's own action
+    /// queue already stops one browser tab from firing a second Start before
+    /// the first resolves, but that's cosmetic — a second tab, a stale
+    /// retry, or a plain `curl` can still race it, and two concurrent
+    /// lifecycle calls for the same node both `docker::stop_and_remove` then
+    /// recreate the same container name, which Docker itself will reject for
+    /// whichever loses the race. An `Arc`'d workspace-wide `tokio::sync::Mutex`
+    /// (must survive an `.await`, unlike the plain `std::sync::Mutex` above
+    /// that only ever guards a quick snapshot/write-back) makes "already
+    /// starting" queue behind the in-flight action instead of racing it,
+    /// matching the same one-at-a-time model the UI's action queue presents.
+    action_lock: tokio::sync::Mutex<()>,
 }
 
 impl RunRegistry {
@@ -377,6 +503,7 @@ impl RunRegistry {
             db,
             docker,
             runs: Mutex::new(reconciled),
+            action_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -385,55 +512,188 @@ impl RunRegistry {
     }
 
     /// Re-inspects every live run's containers against real docker state and
-    /// updates their recorded status in place — including flagging any
-    /// container that's vanished (e.g. `docker rm`'d by hand, outside fghj)
-    /// as `"removed"` — so the next `/runs` poll reflects reality instead of
-    /// a snapshot frozen at whenever the run last started or was persisted.
-    /// Purely observational: it never touches docker itself.
+    /// updates their recorded status, published port, per-port host
+    /// bindings, and routes in place — including flagging any container
+    /// that's vanished (e.g. `docker rm`'d by hand, outside fghj) as
+    /// `"removed"` — so the next `/runs` poll (and `proxy::serve_https`'s
+    /// routing, via `WorkspaceRegistry::resolve_route`) reflects reality
+    /// instead of a snapshot frozen at whenever the run last started or was
+    /// persisted. This *does* correct for Docker itself moving a container
+    /// to a different ephemeral host port (a restart-policy-triggered
+    /// restart, or `dockerd` restarting) even though `fghj` never asked for
+    /// that restart — but it's still purely observational with respect to
+    /// Docker: it only re-reads state Docker already changed on its own, and
+    /// never starts, stops, or recreates a container itself.
     ///
-    /// Snapshots the container names while holding the lock, inspects them
-    /// all without holding it (inspection is an async docker call), then
+    /// Snapshots each container's inspectable identity (name, the port key
+    /// `status`/`published_port` are read from, and the container-side ports
+    /// `routes` were derived from) while holding the lock, inspects it all
+    /// without holding it (inspection is an async docker call per port), then
     /// re-locks to write results back — the lock is never held across an
     /// `.await`.
     pub async fn refresh(&self) {
-        let snapshot: Vec<(String, Vec<String>)> = {
+        let snapshot: Vec<(String, Vec<ContainerInfo>)> = {
             let runs = self.runs.lock().unwrap();
             runs.iter()
-                .map(|(run_id, state)| {
-                    (
-                        run_id.clone(),
-                        state
-                            .containers
-                            .iter()
-                            .map(|c| c.container_name.clone())
-                            .collect(),
-                    )
-                })
+                .map(|(run_id, state)| (run_id.clone(), state.containers.clone()))
                 .collect()
         };
 
-        let mut results: Vec<(String, Vec<String>)> = Vec::new();
-        for (run_id, container_names) in snapshot {
-            let mut statuses = Vec::new();
-            for name in container_names {
-                let status = match docker::inspect_status(&self.docker, &name, "").await {
-                    Ok(Some(s)) => s.status,
-                    _ => "removed".to_string(),
+        let mut results: Vec<(String, Vec<ContainerInfo>)> = Vec::new();
+        for (run_id, containers) in snapshot {
+            let mut updated = Vec::with_capacity(containers.len());
+            for c in containers {
+                let inspected = match c.status_port.as_deref() {
+                    Some(p) => docker::inspect_status(&self.docker, &c.container_name, p).await,
+                    None => docker::inspect_status(&self.docker, &c.container_name, "").await,
                 };
-                statuses.push(status);
+                let (status, published_port) = match inspected {
+                    Ok(Some(s)) => (s.status, s.published_port),
+                    _ => ("removed".to_string(), None),
+                };
+
+                // Re-inspects every declared port, not just `status_port` —
+                // same "one inspect per remaining port" approach `start_node`
+                // uses, reusing the inspect already done above for
+                // `status_port`'s own binding rather than re-querying it.
+                let mut ports = c.ports.clone();
+                for (port, host_port) in ports.iter_mut() {
+                    *host_port = if c.status_port.as_deref() == Some(port.as_str()) {
+                        published_port
+                    } else {
+                        docker::inspect_status(&self.docker, &c.container_name, port)
+                            .await
+                            .ok()
+                            .flatten()
+                            .and_then(|s| s.published_port)
+                    };
+                }
+
+                // Each route remembers the container-side port it was
+                // derived from (`PortRoute.container_port`), so its
+                // `host_port` can be corrected from the freshly re-inspected
+                // `ports` map above without needing the original `Node`
+                // config back. A route persisted before `container_port`
+                // existed (empty string) has no matching key in `ports` and
+                // is left as-is — it self-corrects the next time this
+                // container is started through `fghj`.
+                let routes = c
+                    .routes
+                    .iter()
+                    .cloned()
+                    .map(|r| {
+                        let host_port = ports
+                            .get(&r.container_port)
+                            .copied()
+                            .flatten()
+                            .unwrap_or(r.host_port);
+                        PortRoute { host_port, ..r }
+                    })
+                    .collect();
+
+                updated.push(ContainerInfo {
+                    status,
+                    published_port,
+                    ports,
+                    routes,
+                    ..c
+                });
             }
-            results.push((run_id, statuses));
+            results.push((run_id, updated));
         }
 
         let mut changed_states: Vec<RunState> = Vec::new();
         {
             let mut runs = self.runs.lock().unwrap();
-            for (run_id, statuses) in results {
+            for (run_id, updated) in results {
                 if let Some(state) = runs.get_mut(&run_id) {
                     let mut changed = false;
-                    for (c, status) in state.containers.iter_mut().zip(statuses) {
-                        if status != c.status {
-                            c.status = status;
+                    for (c, new) in state.containers.iter_mut().zip(updated) {
+                        if c.status != new.status
+                            || c.published_port != new.published_port
+                            || c.ports != new.ports
+                            || c.routes
+                                .iter()
+                                .map(|r| r.host_port)
+                                .ne(new.routes.iter().map(|r| r.host_port))
+                        {
+                            *c = new;
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        changed_states.push(state.clone());
+                    }
+                }
+            }
+        }
+        for state in changed_states {
+            let _ = self.db.clone().save_run(state).await;
+        }
+    }
+
+    /// A separate, slower-cadence counterpart to `refresh`, driven by
+    /// `daemon::spawn_sync_reconciler` rather than the 1-second liveness
+    /// loop: recomputes each live container's *desired* hash from the
+    /// current `.fghj.yaml` (`resolve_node_spec(..., side_effects: false)`,
+    /// so nothing is actually built, pulled, or run) and compares it against
+    /// the hash stamped on the container when it was last actually started
+    /// through `fghj`, updating `ContainerInfo::synced` in place. `graph` is
+    /// re-resolved by the caller on every tick — a config-drift check is
+    /// only meaningful against the *current* `.fghj.yaml`, not whatever was
+    /// last cached. Purely informational, same as `refresh`: never starts,
+    /// stops, or recreates anything itself.
+    ///
+    /// A node no longer present in `graph` (removed from `.fghj.yaml`
+    /// entirely) or a branch-overridden service (`resolve_node_spec` returns
+    /// `Ok(None)` for those in dry-run mode — see its own doc comment) is
+    /// reported as `None` ("unknown"), not `false` — there's nothing to
+    /// meaningfully compare against, and `false` would misleadingly read as
+    /// "confirmed drifted."
+    pub async fn refresh_sync_status(&self, graph: &Graph) {
+        let owner = self.db.clone().load_owner().await.ok().flatten();
+
+        let snapshot: Vec<(String, BTreeMap<String, String>, Vec<ContainerInfo>)> = {
+            let runs = self.runs.lock().unwrap();
+            runs.iter()
+                .map(|(run_id, state)| {
+                    (
+                        run_id.clone(),
+                        state.overrides.clone(),
+                        state.containers.clone(),
+                    )
+                })
+                .collect()
+        };
+
+        let mut results: Vec<(String, Vec<Option<bool>>)> = Vec::new();
+        for (run_id, overrides, containers) in snapshot {
+            let mut synced_flags = Vec::with_capacity(containers.len());
+            for c in &containers {
+                let synced = match graph.nodes.iter().find(|n| n.id == c.node_id) {
+                    Some(node) => match self
+                        .resolve_node_spec(graph, node, &run_id, &overrides, owner.as_ref(), false)
+                        .await
+                    {
+                        Ok(Some(spec)) => Some(spec_hash(node, &spec) == c.config_hash),
+                        Ok(None) | Err(_) => None,
+                    },
+                    None => None,
+                };
+                synced_flags.push(synced);
+            }
+            results.push((run_id, synced_flags));
+        }
+
+        let mut changed_states: Vec<RunState> = Vec::new();
+        {
+            let mut runs = self.runs.lock().unwrap();
+            for (run_id, synced_flags) in results {
+                if let Some(state) = runs.get_mut(&run_id) {
+                    let mut changed = false;
+                    for (c, synced) in state.containers.iter_mut().zip(synced_flags) {
+                        if c.synced != synced {
+                            c.synced = synced;
                             changed = true;
                         }
                     }
@@ -488,6 +748,7 @@ impl RunRegistry {
         run_id: &str,
         node_id: &str,
     ) -> Result<ContainerInfo> {
+        let _guard = self.action_lock.lock().await;
         let mut state = {
             let runs = self.runs.lock().unwrap();
             let Some(state) = runs.get(run_id) else {
@@ -532,6 +793,7 @@ impl RunRegistry {
     /// run), this leaves the container itself and its named volumes in
     /// place; a subsequent "Start" click just recreates it.
     pub async fn stop_container(&self, run_id: &str, node_id: &str) -> Result<()> {
+        let _guard = self.action_lock.lock().await;
         let mut state = {
             let runs = self.runs.lock().unwrap();
             let Some(state) = runs.get(run_id) else {
@@ -558,6 +820,7 @@ impl RunRegistry {
     /// point is to outlive any one container), so a later "Start" click
     /// picks the data back up in a fresh container.
     pub async fn remove_container(&self, run_id: &str, node_id: &str) -> Result<()> {
+        let _guard = self.action_lock.lock().await;
         let mut state = {
             let runs = self.runs.lock().unwrap();
             let Some(state) = runs.get(run_id) else {
@@ -738,15 +1001,34 @@ impl RunRegistry {
         Ok(state)
     }
 
-    async fn start_node(
+    /// The pure, side-effect-free half of resolving a node's config — image
+    /// tag, env, port list, volume binds, domain aliases — shared between
+    /// `start_node` (`side_effects: true`, which then actually builds the
+    /// image / ensures named volumes exist / runs the container) and
+    /// `refresh_sync_status` (`side_effects: false`, which only needs the
+    /// same values to compute a comparable hash — see `spec_hash` — without
+    /// building anything or touching Docker at all).
+    ///
+    /// `Ok(None)` only when `side_effects` is `false` and this is a
+    /// branch-overridden service: producing its spec needs a real
+    /// `ensure_mirror`/`materialize_checkout` (a git fetch + worktree
+    /// checkout) to know the checkout root relative binds/`env_file` resolve
+    /// against, and doing that on every background sync-check tick isn't
+    /// worth it — drift-checking simply skips that node rather than
+    /// silently doing network I/O behind the scenes.
+    async fn resolve_node_spec(
         &self,
         graph: &Graph,
         node: &Node,
         run_id: &str,
-        network: &str,
         overrides: &BTreeMap<String, String>,
         owner: Option<&crate::store::WorkspaceOwner>,
-    ) -> Result<ContainerInfo> {
+        side_effects: bool,
+    ) -> Result<Option<NodeSpec>> {
+        if !side_effects && node.kind.as_str() != "backing" && overrides.contains_key(&node.id) {
+            return Ok(None);
+        }
+
         let workspace = sanitize_label(&graph.workspace_name);
         let container_name = format!("fghj-{workspace}-{run_id}-{}", sanitize_label(&node.id));
         // Every node's domain is derived the same way, unconditionally —
@@ -877,15 +1159,17 @@ impl RunRegistry {
                         );
                         let repo_root = self.workspace.join(&local_path);
                         volume_base = Some(repo_root.clone());
-                        let build_dir = repo_root.join(&build.context);
-                        docker::build_image(
-                            &self.docker,
-                            &build_dir,
-                            &build.dockerfile,
-                            &tag,
-                            node.platform.as_deref(),
-                        )
-                        .await?;
+                        if side_effects {
+                            let build_dir = repo_root.join(&build.context);
+                            docker::build_image(
+                                &self.docker,
+                                &build_dir,
+                                &build.dockerfile,
+                                &tag,
+                                node.platform.as_deref(),
+                            )
+                            .await?;
+                        }
                         tag
                     }
                 }
@@ -947,14 +1231,16 @@ impl RunRegistry {
                 } => {
                     let volume_name =
                         derive_volume_name(name, scope, &graph.workspace_name, run_id);
-                    docker::ensure_volume(
-                        &self.docker,
-                        &volume_name,
-                        &graph.workspace_name,
-                        scope,
-                        run_id,
-                    )
-                    .await?;
+                    if side_effects {
+                        docker::ensure_volume(
+                            &self.docker,
+                            &volume_name,
+                            &graph.workspace_name,
+                            scope,
+                            run_id,
+                        )
+                        .await?;
+                    }
                     binds.push(format!(
                         "{volume_name}:{container}{}",
                         if *read_only { ":ro" } else { "" }
@@ -988,23 +1274,65 @@ impl RunRegistry {
             *entry = expand_service_fqdn_templates(entry, node, &domain, graph, run_id);
         }
 
+        Ok(Some(NodeSpec {
+            container_name,
+            domain,
+            aliases,
+            image,
+            port_list,
+            binds,
+            env,
+        }))
+    }
+
+    /// Actually starts a node's container: resolves its full spec via
+    /// `resolve_node_spec` (`side_effects: true`, so the image gets built
+    /// and named volumes get created along the way), stamps the resulting
+    /// `spec_hash` onto the container as a `fghj.config_hash` label, runs
+    /// it, and inspects the result. That label — and the copy of the same
+    /// hash returned on `ContainerInfo::config_hash` — is what a later
+    /// `refresh_sync_status` pass compares a freshly recomputed desired hash
+    /// against to decide whether this node has drifted since it was last
+    /// started.
+    async fn start_node(
+        &self,
+        graph: &Graph,
+        node: &Node,
+        run_id: &str,
+        network: &str,
+        overrides: &BTreeMap<String, String>,
+        owner: Option<&crate::store::WorkspaceOwner>,
+    ) -> Result<ContainerInfo> {
+        let Some(spec) = self
+            .resolve_node_spec(graph, node, run_id, overrides, owner, true)
+            .await?
+        else {
+            bail!(
+                "resolve_node_spec returned no spec for {} despite side_effects being enabled",
+                node.id
+            );
+        };
+        let config_hash = spec_hash(node, &spec);
+        let mut labels = node.labels.clone();
+        labels.insert("fghj.config_hash".to_string(), config_hash.clone());
+
         docker::run_container(
             &self.docker,
             &docker::RunOpts {
-                name: &container_name,
+                name: &spec.container_name,
                 network,
-                aliases: &aliases,
-                env: &env,
-                ports: &port_list,
-                image: &image,
+                aliases: &spec.aliases,
+                env: &spec.env,
+                ports: &spec.port_list,
+                image: &spec.image,
                 command: &node.command,
                 project: network,
                 service_name: &node.id,
-                binds: &binds,
+                binds: &spec.binds,
                 restart_policy: &node.restart,
                 user: node.user.as_deref(),
                 working_dir: node.working_dir.as_deref(),
-                labels: &node.labels,
+                labels: &labels,
                 cap_add: &node.cap_add,
                 cap_drop: &node.cap_drop,
                 privileged: node.privileged,
@@ -1026,8 +1354,8 @@ impl RunRegistry {
             .map(|(port, _)| port.clone())
             .or_else(|| node.ports.keys().next().cloned());
         let inspected = match &status_port {
-            Some(p) => docker::inspect_status(&self.docker, &container_name, p).await?,
-            None => docker::inspect_status(&self.docker, &container_name, "").await?,
+            Some(p) => docker::inspect_status(&self.docker, &spec.container_name, p).await?,
+            None => docker::inspect_status(&self.docker, &spec.container_name, "").await?,
         };
         let (status, published_port) = match inspected {
             Some(s) => (s.status, s.published_port),
@@ -1046,7 +1374,7 @@ impl RunRegistry {
             let host_port = if status_port.as_deref() == Some(port.as_str()) {
                 published_port
             } else {
-                docker::inspect_status(&self.docker, &container_name, port)
+                docker::inspect_status(&self.docker, &spec.container_name, port)
                     .await
                     .ok()
                     .flatten()
@@ -1074,16 +1402,18 @@ impl RunRegistry {
             };
             if cfg.primary {
                 routes.push(PortRoute {
-                    domain: domain.clone(),
+                    domain: spec.domain.clone(),
                     host_port,
                     wildcard: cfg.wildcard,
+                    container_port: port.clone(),
                 });
             }
             if let Some(name) = &cfg.name {
                 routes.push(PortRoute {
-                    domain: format!("{name}.{domain}"),
+                    domain: format!("{name}.{}", spec.domain),
                     host_port,
                     wildcard: cfg.wildcard,
+                    container_port: port.clone(),
                 });
             }
         }
@@ -1096,16 +1426,17 @@ impl RunRegistry {
         // to — `resolver::check_ports` already warns about exactly this at
         // graph-resolution time.
         let mut additional_hosts_active = Vec::new();
-        if let Some(host_port) = routes
+        if let Some((host_port, container_port)) = routes
             .iter()
-            .find(|r| r.domain == domain)
-            .map(|r| r.host_port)
+            .find(|r| r.domain == spec.domain)
+            .map(|r| (r.host_port, r.container_port.clone()))
         {
             for host in &node.additional_hosts {
                 routes.push(PortRoute {
                     domain: host.clone(),
                     host_port,
                     wildcard: false,
+                    container_port: container_port.clone(),
                 });
                 additional_hosts_active.push(host.clone());
             }
@@ -1114,19 +1445,23 @@ impl RunRegistry {
                     domain: suffix.clone(),
                     host_port,
                     wildcard: true,
+                    container_port: container_port.clone(),
                 });
             }
         }
 
         Ok(ContainerInfo {
             node_id: node.id.clone(),
-            container_name,
+            container_name: spec.container_name,
             status,
             published_port,
-            domain,
+            domain: spec.domain,
             routes,
             additional_hosts: additional_hosts_active,
             ports: port_host_ports,
+            status_port,
+            config_hash,
+            synced: Some(true),
         })
     }
 }
@@ -1425,5 +1760,121 @@ mod tests {
         // A different named run gets its own fresh "run"-scoped volume.
         let other_run = derive_volume_name("cache", "run", "shop", "preview-2");
         assert_ne!(a, other_run);
+    }
+
+    /// A throwaway container publishing one port to a Docker-picked
+    /// ephemeral host port, torn down on drop — exists so `refresh` has a
+    /// real container to re-inspect without needing the resolver/`RunOpts`
+    /// machinery `start_node` requires.
+    struct DriftingPortContainer {
+        name: String,
+    }
+
+    impl DriftingPortContainer {
+        fn start() -> Self {
+            let name = format!(
+                "fghj-refresh-test-{}",
+                std::process::id().wrapping_add(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_nanos())
+                        .unwrap_or(0)
+                )
+            );
+            let status = std::process::Command::new("docker")
+                .args([
+                    "run",
+                    "-d",
+                    "--rm",
+                    "--name",
+                    &name,
+                    "-p",
+                    "127.0.0.1::8080",
+                    "busybox",
+                    "sleep",
+                    "60",
+                ])
+                .status()
+                .expect("failed to run `docker run` for refresh test fixture");
+            assert!(
+                status.success(),
+                "docker run failed for refresh test fixture"
+            );
+            Self { name }
+        }
+    }
+
+    impl Drop for DriftingPortContainer {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", &self.name])
+                .status();
+        }
+    }
+
+    /// The bug this guards against: a container Docker republished on a new
+    /// ephemeral host port (e.g. after a restart-policy-triggered restart,
+    /// outside `fghj`'s own start path) used to leave `status` corrected but
+    /// `published_port`/`ports`/`routes` permanently stale, since the old
+    /// `refresh` only ever wrote back `status`. Simulates that by seeding
+    /// the registry with a route pointing at a deliberately wrong port for a
+    /// real, running container, then asserting `refresh` corrects it to the
+    /// port Docker actually published.
+    #[tokio::test]
+    async fn refresh_corrects_a_route_after_docker_moves_the_published_port() {
+        let container = DriftingPortContainer::start();
+        let docker = Arc::new(crate::daemon::connect_docker().expect("docker client"));
+        let real_port = docker::inspect_status(&docker, &container.name, "8080")
+            .await
+            .expect("inspect_status failed")
+            .and_then(|s| s.published_port)
+            .expect("container must have a real published port");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
+        let registry = RunRegistry::new(tmp.path().to_path_buf(), db, docker)
+            .await
+            .expect("RunRegistry::new failed");
+
+        let stale_port = real_port.wrapping_add(1).max(1);
+        let run_id = "default".to_string();
+        let stale_container = ContainerInfo {
+            node_id: "svc".to_string(),
+            container_name: container.name.clone(),
+            status: "running".to_string(),
+            published_port: Some(stale_port),
+            domain: "svc.demo.fghj.internal".to_string(),
+            routes: vec![PortRoute {
+                domain: "svc.demo.fghj.internal".to_string(),
+                host_port: stale_port,
+                wildcard: false,
+                container_port: "8080".to_string(),
+            }],
+            additional_hosts: Vec::new(),
+            ports: BTreeMap::from([("8080".to_string(), Some(stale_port))]),
+            status_port: Some("8080".to_string()),
+            config_hash: String::new(),
+            synced: None,
+        };
+        {
+            let mut runs = registry.runs.lock().unwrap();
+            runs.insert(
+                run_id.clone(),
+                RunState {
+                    run_id: run_id.clone(),
+                    overrides: BTreeMap::new(),
+                    network: "bridge".to_string(),
+                    containers: vec![stale_container],
+                },
+            );
+        }
+
+        registry.refresh().await;
+
+        let state = registry.get(&run_id).expect("run must still be tracked");
+        let c = &state.containers[0];
+        assert_eq!(c.published_port, Some(real_port));
+        assert_eq!(c.ports.get("8080").copied().flatten(), Some(real_port));
+        assert_eq!(c.routes[0].host_port, real_port);
     }
 }

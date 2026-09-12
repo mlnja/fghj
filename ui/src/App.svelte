@@ -148,22 +148,77 @@
     return withWs(`/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/logs/stream`);
   }
 
-  async function startNode(nodeId) {
-    if (!selectedRunId) return;
-    await fetch(withWs(`/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/start`), { method: 'POST' });
-    await loadRuns();
+  // Recent Start/Stop/Delete outcomes, newest first — surfaced in the
+  // Drawer so a failed action (e.g. a stale node id from a graph that
+  // changed shape after the click, or a real Docker error) is visible
+  // instead of a silent no-op. Capped rather than persisted: this is
+  // session-scoped operator feedback, not an audit log.
+  let actionLog = $state([]);
+
+  function logAction(nodeId, action, ok, message) {
+    actionLog = [
+      { id: `${Date.now()}-${Math.random()}`, time: Date.now(), nodeId, action, ok, message },
+      ...actionLog,
+    ].slice(0, 50);
   }
 
-  async function stopNode(nodeId) {
-    if (!selectedRunId) return;
-    await fetch(withWs(`/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/stop`), { method: 'POST' });
+  // Start/Stop/Delete run through one workspace-wide queue, not a per-node
+  // busy flag: the Drawer is a fresh component instance every time it's
+  // opened (Svelte destroys it on close), so any "am I busy" state that
+  // lived inside Drawer itself was lost the moment you closed and reopened
+  // it, silently un-disabling the buttons mid-request. Living here instead
+  // means it survives the Drawer's own lifecycle. One job in flight at a
+  // time (rather than one per node) also means two actions can never race
+  // each other's Docker/network side effects on the same run.
+  let actionQueue = $state([]);
+  let activeAction = $state(null);
+
+  async function processQueue() {
+    if (activeAction || !actionQueue.length) return;
+    const job = actionQueue[0];
+    activeAction = job;
+    let ok = false;
+    let message = '';
+    try {
+      const res = await fetch(withWs(job.path), { method: 'POST' });
+      let body = null;
+      try {
+        body = await res.json();
+      } catch (e) {
+        // non-JSON (or empty) body is fine on success; nothing to parse
+      }
+      ok = res.ok && !body?.error;
+      message = body?.error || (ok ? `${job.action} succeeded` : `HTTP ${res.status}`);
+    } catch (e) {
+      message = String(e);
+    }
+    logAction(job.nodeId, job.action, ok, message);
     await loadRuns();
+    actionQueue = actionQueue.slice(1);
+    activeAction = null;
+    processQueue();
   }
 
-  async function deleteNode(nodeId) {
+  function enqueueNodeAction(nodeId, action, path) {
+    actionQueue = [...actionQueue, { id: `${Date.now()}-${Math.random()}`, nodeId, action, path }];
+    processQueue();
+  }
+
+  let workspaceBusy = $derived(activeAction !== null || actionQueue.length > 0);
+
+  function startNode(nodeId) {
     if (!selectedRunId) return;
-    await fetch(withWs(`/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/delete`), { method: 'POST' });
-    await loadRuns();
+    enqueueNodeAction(nodeId, 'start', `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/start`);
+  }
+
+  function stopNode(nodeId) {
+    if (!selectedRunId) return;
+    enqueueNodeAction(nodeId, 'stop', `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/stop`);
+  }
+
+  function deleteNode(nodeId) {
+    if (!selectedRunId) return;
+    enqueueNodeAction(nodeId, 'delete', `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/delete`);
   }
 
   $effect(() => {
@@ -174,12 +229,16 @@
     }
   });
 
-  let graphPoll = null;
+  // Kept running regardless of which tab is active — not just 'repos' — so
+  // a node whose id changes shape after being resolved for real (a
+  // not-yet-downloaded dependency's placeholder id, once its repo is
+  // actually cloned and its own .fghj.yaml parsed, becomes a different,
+  // proper `service.repo` id) doesn't leave the Containers tab pointing at
+  // a graph that no longer has that node, silently 404ing every Start/Stop
+  // click against it.
   $effect(() => {
-    if (activeTab === 'repos') {
-      graphPoll = setInterval(load, 3000);
-      return () => clearInterval(graphPoll);
-    }
+    const id = setInterval(load, 3000);
+    return () => clearInterval(id);
   });
 
   let selectedRun = $derived(runs.find((r) => r.run_id === selectedRunId) ?? null);
@@ -329,11 +388,25 @@
     {/if}
   </div>
 
+  {#if activeAction || actionQueue.length}
+    <div class="action-banner">
+      <span class="spinner"></span>
+      {#if activeAction}
+        <span>{activeAction.action}ing <b>{activeAction.nodeId}</b>…</span>
+      {/if}
+      {#if actionQueue.length > 1}
+        <span class="queue-count">+{actionQueue.length - 1} queued</span>
+      {/if}
+    </div>
+  {/if}
+
   {#if selectedNode}
     <Drawer
       node={selectedNode}
       onClose={() => (selectedNode = null)}
       {liveInfo}
+      actionLog={actionLog.filter((a) => a.nodeId === selectedNode.id)}
+      busy={workspaceBusy}
       runId={selectedRunId}
       onFetchLogs={fetchLogs}
       onLogStreamUrl={logStreamUrl}
@@ -352,6 +425,19 @@
 </div>
 
 <style>
+  .action-banner {
+    position: fixed; top: 96px; right: 24px; z-index: 50; display: flex; align-items: center; gap: 8px;
+    background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: 6px; padding: 8px 12px;
+    font: 500 11.5px var(--font-mono); color: var(--ink); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  }
+  .action-banner b { color: var(--accent); }
+  .action-banner .queue-count { color: var(--ink-faint); }
+  .action-banner .spinner {
+    display: inline-block; width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto;
+    border: 2px solid var(--line-strong); border-top-color: var(--accent);
+    animation: banner-spin 0.7s linear infinite;
+  }
+  @keyframes banner-spin { to { transform: rotate(360deg); } }
   :global(.warning-banner) {
     display: flex; align-items: center; gap: 10px; background: var(--warning-bg); border: 1px solid var(--warning);
     color: var(--warning); padding: 8px 12px; border-radius: 6px; font: 500 11.5px var(--font-mono); max-width: 760px;

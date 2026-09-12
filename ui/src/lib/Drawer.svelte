@@ -5,6 +5,12 @@
     node,
     onClose,
     liveInfo,
+    actionLog = [],
+    // Workspace-wide (not per-node) in-flight flag, owned by App.svelte so
+    // it survives this component being destroyed/recreated on drawer
+    // close/reopen — see App.svelte's actionQueue for why a locally-scoped
+    // busy flag here couldn't be trusted across that remount.
+    busy = false,
     runId,
     onFetchLogs,
     onLogStreamUrl,
@@ -16,36 +22,21 @@
     onDeleteNode,
   } = $props();
   let activeTab = $state('general');
-  let nodeBusy = $state(false);
 
-  async function startNode() {
-    if (!onStartNode || nodeBusy) return;
-    nodeBusy = true;
-    try {
-      await onStartNode(node.id);
-    } finally {
-      nodeBusy = false;
-    }
+  function formatActionTime(ms) {
+    return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
 
-  async function stopNode() {
-    if (!onStopNode || nodeBusy) return;
-    nodeBusy = true;
-    try {
-      await onStopNode(node.id);
-    } finally {
-      nodeBusy = false;
-    }
+  function startNode() {
+    onStartNode?.(node.id);
   }
 
-  async function deleteNode() {
-    if (!onDeleteNode || nodeBusy) return;
-    nodeBusy = true;
-    try {
-      await onDeleteNode(node.id);
-    } finally {
-      nodeBusy = false;
-    }
+  function stopNode() {
+    onStopNode?.(node.id);
+  }
+
+  function deleteNode() {
+    onDeleteNode?.(node.id);
   }
   let logs = $state('');
   let loadingLogs = $state(false);
@@ -140,24 +131,36 @@
         <button
           class="ctrl-btn"
           onclick={startNode}
-          disabled={!runId || nodeBusy || liveInfo?.status === 'running'}
+          disabled={!runId || busy || liveInfo?.status === 'running'}
         >
           Start
         </button>
         <button
           class="ctrl-btn"
           onclick={stopNode}
-          disabled={!runId || nodeBusy || liveInfo?.status !== 'running'}
+          disabled={!runId || busy || liveInfo?.status !== 'running'}
         >
           Stop
         </button>
         <button
           class="ctrl-btn danger"
           onclick={deleteNode}
-          disabled={!runId || nodeBusy || !liveInfo}
+          disabled={!runId || busy || !liveInfo}
         >
           Delete
         </button>
+      </div>
+    {/if}
+
+    {#if actionLog.length}
+      <div class="action-log">
+        {#each actionLog as entry (entry.id)}
+          <div class="action-entry" class:error={!entry.ok}>
+            <span class="action-time">{formatActionTime(entry.time)}</span>
+            <span class="action-verb">{entry.action}</span>
+            <span class="action-message">{entry.message}</span>
+          </div>
+        {/each}
       </div>
     {/if}
 
@@ -244,6 +247,18 @@
         {#if liveInfo && node.downloaded !== false}
           <div class="row"><span class="k">container status</span><span class="v">{liveInfo.status}</span></div>
           <div class="row"><span class="k">container name</span><span class="v">{liveInfo.container_name}</span></div>
+          <div class="row">
+            <span class="k">config sync</span>
+            <span class="v">
+              {#if liveInfo.synced === false}
+                <span class="pill unsynced" title="the running container's config no longer matches .fghj.yaml — restart this node to pick up the change">desired ≠ actual</span>
+              {:else if liveInfo.synced === true}
+                <span class="pill synced">up to date</span>
+              {:else}
+                <span class="muted">unknown</span>
+              {/if}
+            </span>
+          </div>
         {/if}
       </div>
     {:else if node.downloaded === false}
@@ -287,6 +302,18 @@
   }
   .ctrl-btn:disabled { opacity: 0.4; cursor: default; }
   .ctrl-btn.danger:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+  .action-log {
+    display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; padding: 8px 10px;
+    background: var(--panel-2); border-radius: 6px; max-height: 140px; overflow-y: auto;
+  }
+  .action-entry {
+    display: flex; align-items: baseline; gap: 8px; font: 500 11px var(--font-mono); color: var(--success);
+  }
+  .action-entry.error { color: var(--danger); }
+  .action-time { color: var(--ink-faint); flex: 0 0 auto; }
+  .action-verb { text-transform: uppercase; font-weight: 700; flex: 0 0 auto; }
+  .action-message { color: var(--ink); word-break: break-word; }
+  .action-entry.error .action-message { color: var(--danger); }
   .tabs { display: flex; gap: 2px; padding: 2px; background: var(--panel-2); border-radius: 6px; margin-bottom: 20px; width: fit-content; }
   .tab {
     padding: 6px 14px; border-radius: 4px; font: 700 11px var(--font-mono); text-transform: uppercase;
@@ -312,6 +339,12 @@
   .port-badge.role-additional { background: var(--panel-2); color: var(--ink-dim); border: 1px solid var(--line-strong); }
   .port-badge.role-tcp { background: var(--panel-2); color: var(--ink-faint); border: 1px solid var(--line-strong); }
   .port-badge.wildcard { background: var(--warning-bg); color: var(--warning); }
+  .pill {
+    padding: 1px 7px; border-radius: 999px; font: 700 9px var(--font-mono); text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .pill.unsynced { background: var(--warning-bg); color: var(--warning); }
+  .pill.synced { background: var(--success-bg); color: var(--success); }
   .port-target { color: var(--ink); word-break: break-all; }
   .copy-btn {
     background: none; border: none; padding: 0; margin: 0; font: 500 12px var(--font-mono);

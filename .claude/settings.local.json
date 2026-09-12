@@ -1,0 +1,11 @@
+{
+  "env": {
+    "CLAUDE_CODE_OAUTH_TOKEN": "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"
+  },
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:dev.to)",
+      "WebFetch(domain:new.signadot.com)"
+    ]
+  }
+}

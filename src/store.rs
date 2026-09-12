@@ -229,6 +229,9 @@ impl WorkspaceDb {
             "ALTER TABLE containers ADD COLUMN routes_json TEXT",
             "ALTER TABLE containers ADD COLUMN additional_hosts_json TEXT",
             "ALTER TABLE containers ADD COLUMN ports_json TEXT",
+            "ALTER TABLE containers ADD COLUMN status_port TEXT",
+            "ALTER TABLE containers ADD COLUMN config_hash TEXT",
+            "ALTER TABLE containers ADD COLUMN synced INTEGER",
         ] {
             let _ = conn.execute(stmt, []);
         }
@@ -309,8 +312,8 @@ impl WorkspaceDb {
             tx.execute("DELETE FROM containers WHERE run_id = ?1", rusqlite::params![state.run_id])?;
             for c in &state.containers {
                 tx.execute(
-                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     rusqlite::params![
                         state.run_id,
                         c.node_id,
@@ -320,7 +323,10 @@ impl WorkspaceDb {
                         c.domain,
                         serde_json::to_string(&c.routes)?,
                         serde_json::to_string(&c.additional_hosts)?,
-                        serde_json::to_string(&c.ports)?
+                        serde_json::to_string(&c.ports)?,
+                        c.status_port,
+                        c.config_hash,
+                        c.synced,
                     ],
                 )?;
             }
@@ -364,7 +370,7 @@ impl WorkspaceDb {
             drop(stmt);
 
             let mut stmt = conn.prepare(
-                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json FROM containers",
+                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced FROM containers",
             )?;
             let rows = stmt.query_map([], |row| {
                 let routes_json: Option<String> = row.get(6)?;
@@ -390,6 +396,9 @@ impl WorkspaceDb {
                         routes,
                         additional_hosts,
                         ports,
+                        status_port: row.get(9)?,
+                        config_hash: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                        synced: row.get::<_, Option<i64>>(11)?.map(|v| v != 0),
                     },
                 ))
             })?;
@@ -500,9 +509,13 @@ mod tests {
                     domain: "svc-a.demo.fghj".to_string(),
                     host_port: 8080,
                     wildcard: false,
+                    container_port: "8080".to_string(),
                 }],
                 additional_hosts: Vec::new(),
                 ports: BTreeMap::from([("8080".to_string(), Some(8080))]),
+                status_port: Some("8080".to_string()),
+                config_hash: "deadbeef".to_string(),
+                synced: Some(true),
             }],
         };
         db.clone().save_run(state).await.unwrap();
