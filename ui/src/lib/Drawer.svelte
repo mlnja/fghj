@@ -226,20 +226,20 @@
           </div>
         {/each}
         {#each node.additional_hosts ?? [] as host}
-          {@const isLive = liveInfo?.routes?.some((r) => r.domain === host)}
+          {@const liveRoute = liveInfo?.routes?.find((r) => r.domain === host)}
           <div class="row">
             <span class="k">additional</span>
             <span class="v">
-              {#if isLive}<a href="https://{host}" target="_blank" rel="noopener">{host}</a>{:else}{host}{/if}
+              {#if liveRoute}<a href="{liveRoute.https ? 'https' : 'http'}://{host}" target="_blank" rel="noopener">{host}</a>{:else}{host}{/if}
             </span>
           </div>
         {/each}
         {#each node.wildcard_hosts ?? [] as host}
-          {@const isLive = liveInfo?.routes?.some((r) => r.domain === host)}
+          {@const liveRoute = liveInfo?.routes?.find((r) => r.domain === host)}
           <div class="row">
             <span class="k">additional (wildcard)</span>
             <span class="v">
-              {#if isLive}<a href="https://{host}" target="_blank" rel="noopener">*.{host}</a>{:else}*.{host}{/if}
+              {#if liveRoute}<a href="{liveRoute.https ? 'https' : 'http'}://{host}" target="_blank" rel="noopener">*.{host}</a>{:else}*.{host}{/if}
             </span>
           </div>
         {/each}

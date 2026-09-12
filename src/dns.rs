@@ -67,6 +67,21 @@ pub fn is_reserved_alias(host: &str) -> bool {
         .any(|tld| host == *tld || host.ends_with(&format!(".{tld}")))
 }
 
+/// The one rule for whether `name` can ever get a certificate from fghj's
+/// local CA: an in-zone `*.fghj.internal` name always can (that's the zone
+/// this whole tool exists to serve), and anything else only can if it's
+/// under a reserved-and-never-real TLD *and* actually routed to something —
+/// never a blanket "any `.local`-shaped SNI gets a cert," which would let a
+/// browser mint trust for a name nothing in this workspace declared. A real,
+/// non-reserved-TLD hostname (e.g. a third-party OAuth callback host) is
+/// never eligible, `routed` or not — see `ca::DynamicCertResolver::resolve_for`,
+/// the one caller that actually mints certs off this, and `runs::start_node`,
+/// which uses it to tell the UI whether a route can ever be linked as
+/// `https://` at all.
+pub(crate) fn cert_eligible(name: &str, routed: bool) -> bool {
+    in_zone(name) || (is_reserved_alias(name) && routed)
+}
+
 struct Query {
     id: u16,
     opcode: u8,

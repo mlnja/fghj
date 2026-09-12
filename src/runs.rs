@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::dns;
 use crate::docker;
 use crate::resolver::{Edge, Graph, Healthcheck, Node, VolumeMount};
 use crate::store::WorkspaceDb;
@@ -309,6 +310,25 @@ pub struct PortRoute {
     /// which recomputes routes from scratch anyway.
     #[serde(default)]
     pub container_port: String,
+    /// Whether `domain` is eligible for a cert from fghj's local CA — the
+    /// exact same `dns::cert_eligible` rule `ca::DynamicCertResolver::resolve_for`
+    /// applies at TLS-handshake time, computed once here (every route pushed
+    /// below is routed by construction) so the UI doesn't need its own copy
+    /// of the rule. Always `true` for the node's own convention-derived
+    /// `*.fghj.internal` domain/named ports; only actually variable for an
+    /// author-declared `additional_hosts`/`wildcard_hosts` alias, since only
+    /// those can name a real, non-reserved TLD (e.g. a third-party OAuth
+    /// callback host) that fghj's CA will never certify — the UI links such
+    /// a route as `http://`, not a `https://` link that would always fail
+    /// with a TLS error. `#[serde(default = "default_https_eligible")]`
+    /// assumes the common case for a route persisted before this field
+    /// existed, until the owning container is next started through `fghj`.
+    #[serde(default = "default_https_eligible")]
+    pub https: bool,
+}
+
+fn default_https_eligible() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1498,6 +1518,7 @@ impl RunRegistry {
             };
             if cfg.primary {
                 routes.push(PortRoute {
+                    https: dns::cert_eligible(&spec.domain, true),
                     domain: spec.domain.clone(),
                     host_port,
                     wildcard: cfg.wildcard,
@@ -1505,8 +1526,10 @@ impl RunRegistry {
                 });
             }
             if let Some(name) = &cfg.name {
+                let domain = format!("{name}.{}", spec.domain);
                 routes.push(PortRoute {
-                    domain: format!("{name}.{}", spec.domain),
+                    https: dns::cert_eligible(&domain, true),
+                    domain,
                     host_port,
                     wildcard: cfg.wildcard,
                     container_port: port.clone(),
@@ -1529,6 +1552,7 @@ impl RunRegistry {
         {
             for host in &node.additional_hosts {
                 routes.push(PortRoute {
+                    https: dns::cert_eligible(host, true),
                     domain: host.clone(),
                     host_port,
                     wildcard: false,
@@ -1538,6 +1562,7 @@ impl RunRegistry {
             }
             for suffix in &node.wildcard_hosts {
                 routes.push(PortRoute {
+                    https: dns::cert_eligible(suffix, true),
                     domain: suffix.clone(),
                     host_port,
                     wildcard: true,
@@ -1945,6 +1970,7 @@ mod tests {
                 domain: "svc.demo.fghj.internal".to_string(),
                 host_port: stale_port,
                 wildcard: false,
+                https: true,
                 container_port: "8080".to_string(),
             }],
             additional_hosts: Vec::new(),

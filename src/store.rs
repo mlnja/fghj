@@ -510,6 +510,7 @@ mod tests {
                     domain: "svc-a.demo.fghj".to_string(),
                     host_port: 8080,
                     wildcard: false,
+                    https: true,
                     container_port: "8080".to_string(),
                 }],
                 additional_hosts: Vec::new(),

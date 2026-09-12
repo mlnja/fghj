@@ -266,8 +266,7 @@ impl DynamicCertResolver {
     /// no public constructor, so exercising `resolve()` itself would require
     /// driving a full handshake for what is otherwise a plain lookup.
     fn resolve_for(&self, name: &str) -> Option<Arc<CertifiedKey>> {
-        let eligible = dns::in_zone(name)
-            || (dns::is_reserved_alias(name) && self.routes.resolve(name).is_some());
+        let eligible = dns::cert_eligible(name, self.routes.resolve(name).is_some());
         if !eligible {
             return None;
         }
