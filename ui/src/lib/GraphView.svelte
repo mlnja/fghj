@@ -103,7 +103,7 @@
     {@const dimmed = currentFlow && !inFlow}
     {@const live = runContainers?.[n.id]}
     {@const dotColor = live ? (live.status === 'running' ? 'var(--success)' : 'var(--danger)') : 'var(--success)'}
-    {@const containerState = mode === 'containers' && n.kind !== 'flow' ? (live ? (live.status === 'running' ? 'running' : 'stopped') : 'none') : null}
+    {@const containerState = mode === 'containers' && n.kind !== 'flow' ? (live ? (live.pending_action ?? (live.status === 'running' ? 'running' : 'stopped')) : 'none') : null}
     <div
       class="node"
       class:not-downloaded={n.downloaded === false}
@@ -174,6 +174,10 @@
   .status-bar.state-running { background: var(--success); color: #ffffff; }
   .status-bar.state-stopped { background: var(--warning); color: #ffffff; }
   .status-bar.state-none { background: var(--line-strong); color: var(--ink-faint); }
+  .status-bar.state-starting, .status-bar.state-stopping, .status-bar.state-removing {
+    background: var(--accent); color: #ffffff; animation: status-pulse 1s ease-in-out infinite;
+  }
+  @keyframes status-pulse { 50% { opacity: 0.55; } }
   .node-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; gap: 8px; }
   .node-id-wrap { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .node-id { font: 600 13.5px var(--font-mono); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

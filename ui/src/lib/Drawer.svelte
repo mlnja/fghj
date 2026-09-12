@@ -245,7 +245,7 @@
         {/each}
         <div class="row"><span class="k">flows</span><span class="v">{node.flows?.join(', ') || '—'}</span></div>
         {#if liveInfo && node.downloaded !== false}
-          <div class="row"><span class="k">container status</span><span class="v">{liveInfo.status}</span></div>
+          <div class="row"><span class="k">container status</span><span class="v">{liveInfo.status}{liveInfo.pending_action ? ` (${liveInfo.pending_action}…)` : ''}</span></div>
           <div class="row"><span class="k">container name</span><span class="v">{liveInfo.container_name}</span></div>
           <div class="row">
             <span class="k">config sync</span>

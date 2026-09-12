@@ -399,6 +399,7 @@ impl WorkspaceDb {
                         status_port: row.get(9)?,
                         config_hash: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
                         synced: row.get::<_, Option<i64>>(11)?.map(|v| v != 0),
+                        pending_action: None,
                     },
                 ))
             })?;
@@ -516,6 +517,7 @@ mod tests {
                 status_port: Some("8080".to_string()),
                 config_hash: "deadbeef".to_string(),
                 synced: Some(true),
+                pending_action: None,
             }],
         };
         db.clone().save_run(state).await.unwrap();

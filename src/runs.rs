@@ -370,6 +370,41 @@ pub struct ContainerInfo {
     /// drifted container is always the user's own explicit Start/Restart.
     #[serde(default)]
     pub synced: Option<bool>,
+    /// Which start/stop/delete action (if any) is currently in flight for
+    /// this node, per `RunRegistry`'s `pending` map — never persisted (not a
+    /// DB column; always `None` coming out of `store.rs` or a freshly-built
+    /// `ContainerInfo`) and never read by anything but `RunRegistry::list`,
+    /// which fills it in live from `pending` right before handing state back
+    /// to the API. This is the one truth the UI needs to know "what is this
+    /// node doing right now" — it should stop inferring it from its own
+    /// click history.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub pending_action: Option<PendingAction>,
+}
+
+/// A start/stop/delete call currently claimed in `RunRegistry::pending` for
+/// some node — the transient half of a node's lifecycle, layered on top of
+/// `ContainerInfo::status` (which only ever reflects Docker's own settled
+/// state: running/exited/removed). Surfaced to the API via
+/// `ContainerInfo::pending_action` so the frontend can render "starting…" /
+/// disable buttons off real backend state instead of guessing from its own
+/// in-flight requests.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingAction {
+    Starting,
+    Stopping,
+    Removing,
+}
+
+impl std::fmt::Display for PendingAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PendingAction::Starting => write!(f, "starting"),
+            PendingAction::Stopping => write!(f, "stopping"),
+            PendingAction::Removing => write!(f, "removing"),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -454,18 +489,41 @@ pub struct RunRegistry {
     docker: Arc<bollard::Docker>,
     runs: Mutex<BTreeMap<String, RunState>>,
     /// Serializes `restart_container`/`stop_container`/`remove_container`
-    /// across the *whole workspace*, not per node: the frontend's own action
-    /// queue already stops one browser tab from firing a second Start before
-    /// the first resolves, but that's cosmetic — a second tab, a stale
-    /// retry, or a plain `curl` can still race it, and two concurrent
-    /// lifecycle calls for the same node both `docker::stop_and_remove` then
-    /// recreate the same container name, which Docker itself will reject for
-    /// whichever loses the race. An `Arc`'d workspace-wide `tokio::sync::Mutex`
-    /// (must survive an `.await`, unlike the plain `std::sync::Mutex` above
-    /// that only ever guards a quick snapshot/write-back) makes "already
-    /// starting" queue behind the in-flight action instead of racing it,
-    /// matching the same one-at-a-time model the UI's action queue presents.
+    /// across the *whole workspace*, not per node: two concurrent lifecycle
+    /// calls for the same node both `docker::stop_and_remove` then recreate
+    /// the same container name, which Docker itself will reject for
+    /// whichever loses the race, and interleaving two *different* nodes'
+    /// Docker calls arbitrarily isn't obviously safe either. An `Arc`'d
+    /// workspace-wide `tokio::sync::Mutex` (must survive an `.await`, unlike
+    /// the plain `std::sync::Mutex` above that only ever guards a quick
+    /// snapshot/write-back) makes concurrent calls run one at a time instead
+    /// of racing. On its own this only reorders work, though — see `pending`
+    /// below for what actually stops a duplicate from running at all.
     action_lock: tokio::sync::Mutex<()>,
+    /// Node ids with a start/stop/delete currently in flight, and which one.
+    /// `action_lock` alone only *serializes* concurrent calls — a second
+    /// "start" for a node already starting would just wait its turn behind
+    /// the lock, then go on to redundantly stop-and-recreate the container
+    /// the first call just started. Checking (and inserting into) this map
+    /// *before* ever waiting on `action_lock` lets `begin_action` reject
+    /// that second call immediately instead of queuing it to run anyway.
+    /// Also the source of truth `list()` reads to fill in
+    /// `ContainerInfo::pending_action` for the API/UI.
+    pending: Mutex<HashMap<String, PendingAction>>,
+}
+
+/// RAII marker returned by `RunRegistry::begin_action`: removes `node_id`
+/// from `pending` when the call it guards finishes, success or error, so a
+/// later — not concurrent — action against the same node is never blocked.
+struct PendingGuard<'a> {
+    pending: &'a Mutex<HashMap<String, PendingAction>>,
+    node_id: String,
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        self.pending.lock().unwrap().remove(&self.node_id);
+    }
 }
 
 impl RunRegistry {
@@ -504,11 +562,46 @@ impl RunRegistry {
             docker,
             runs: Mutex::new(reconciled),
             action_lock: tokio::sync::Mutex::new(()),
+            pending: Mutex::new(HashMap::new()),
         })
     }
 
+    /// Claims `node_id` for the duration of a start/stop/delete call, or
+    /// fails fast if another such call against the same node is already in
+    /// flight — see `pending`'s doc comment for why `action_lock` alone
+    /// can't provide this. Callers should acquire this *before*
+    /// `action_lock`, so a genuine duplicate never even waits in line.
+    fn begin_action(&self, node_id: &str, action: PendingAction) -> Result<PendingGuard<'_>> {
+        let mut pending = self.pending.lock().unwrap();
+        if let Some(existing) = pending.get(node_id) {
+            bail!("node {node_id} is already {existing}");
+        }
+        pending.insert(node_id.to_string(), action);
+        drop(pending);
+        Ok(PendingGuard {
+            pending: &self.pending,
+            node_id: node_id.to_string(),
+        })
+    }
+
+    /// Every live run's state, with each container's `pending_action` filled
+    /// in fresh from `pending` — the one place those two otherwise-separate
+    /// pieces of state (settled Docker status vs. in-flight action) are
+    /// merged into the single view the API and UI actually consume.
     pub fn list(&self) -> Vec<RunState> {
-        self.runs.lock().unwrap().values().cloned().collect()
+        let pending = self.pending.lock().unwrap();
+        self.runs
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .map(|mut state| {
+                for c in &mut state.containers {
+                    c.pending_action = pending.get(&c.node_id).copied();
+                }
+                state
+            })
+            .collect()
     }
 
     /// Re-inspects every live run's containers against real docker state and
@@ -748,6 +841,7 @@ impl RunRegistry {
         run_id: &str,
         node_id: &str,
     ) -> Result<ContainerInfo> {
+        let _pending = self.begin_action(node_id, PendingAction::Starting)?;
         let _guard = self.action_lock.lock().await;
         let mut state = {
             let runs = self.runs.lock().unwrap();
@@ -793,6 +887,7 @@ impl RunRegistry {
     /// run), this leaves the container itself and its named volumes in
     /// place; a subsequent "Start" click just recreates it.
     pub async fn stop_container(&self, run_id: &str, node_id: &str) -> Result<()> {
+        let _pending = self.begin_action(node_id, PendingAction::Stopping)?;
         let _guard = self.action_lock.lock().await;
         let mut state = {
             let runs = self.runs.lock().unwrap();
@@ -820,6 +915,7 @@ impl RunRegistry {
     /// point is to outlive any one container), so a later "Start" click
     /// picks the data back up in a fresh container.
     pub async fn remove_container(&self, run_id: &str, node_id: &str) -> Result<()> {
+        let _pending = self.begin_action(node_id, PendingAction::Removing)?;
         let _guard = self.action_lock.lock().await;
         let mut state = {
             let runs = self.runs.lock().unwrap();
@@ -1462,6 +1558,7 @@ impl RunRegistry {
             status_port,
             config_hash,
             synced: Some(true),
+            pending_action: None,
         })
     }
 }
@@ -1855,6 +1952,7 @@ mod tests {
             status_port: Some("8080".to_string()),
             config_hash: String::new(),
             synced: None,
+            pending_action: None,
         };
         {
             let mut runs = registry.runs.lock().unwrap();

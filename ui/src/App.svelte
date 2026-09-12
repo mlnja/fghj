@@ -204,7 +204,22 @@
     processQueue();
   }
 
-  let workspaceBusy = $derived(activeAction !== null || actionQueue.length > 0);
+  // `ContainerInfo.pending_action` (from `RunRegistry.pending` on the
+  // backend) is the actual source of truth for "what is this node doing
+  // right now" — it's what `begin_action` itself checks before rejecting a
+  // duplicate call, so it can never disagree with reality the way a
+  // frontend-only guess could (e.g. after a page reload, or from a second
+  // browser tab). `activeAction`/`actionQueue` above stay only as an
+  // optimistic fill-in for the ~1s gap between firing a request and the
+  // next `/runs` poll picking up the backend's own flag.
+  let backendPending = $derived(selectedRun ? selectedRun.containers.filter((c) => c.pending_action) : []);
+  const ACTION_GERUNDS = { start: 'starting', stop: 'stopping', delete: 'removing' };
+  let displayPending = $derived.by(() => {
+    if (backendPending.length) return backendPending.map((c) => ({ nodeId: c.node_id, action: c.pending_action }));
+    if (activeAction) return [{ nodeId: activeAction.nodeId, action: ACTION_GERUNDS[activeAction.action] ?? activeAction.action }];
+    return [];
+  });
+  let workspaceBusy = $derived(activeAction !== null || actionQueue.length > 0 || backendPending.length > 0);
 
   function startNode(nodeId) {
     if (!selectedRunId) return;
@@ -388,14 +403,12 @@
     {/if}
   </div>
 
-  {#if activeAction || actionQueue.length}
+  {#if displayPending.length}
     <div class="action-banner">
       <span class="spinner"></span>
-      {#if activeAction}
-        <span>{activeAction.action}ing <b>{activeAction.nodeId}</b>…</span>
-      {/if}
-      {#if actionQueue.length > 1}
-        <span class="queue-count">+{actionQueue.length - 1} queued</span>
+      <span>{displayPending[0].action} <b>{displayPending[0].nodeId}</b>…</span>
+      {#if displayPending.length > 1}
+        <span class="queue-count">+{displayPending.length - 1} more</span>
       {/if}
     </div>
   {/if}
