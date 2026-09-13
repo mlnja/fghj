@@ -519,12 +519,14 @@ pub async fn logs_tail(docker: &Docker, name: &str, tail: usize) -> Result<Strin
 pub fn logs_follow(
     docker: &Docker,
     name: &str,
+    timestamps: bool,
 ) -> impl Stream<Item = Result<bollard::container::LogOutput, bollard::errors::Error>> + use<> {
     let options = LogsOptionsBuilder::default()
         .follow(true)
         .stdout(true)
         .stderr(true)
         .tail("0")
+        .timestamps(timestamps)
         .build();
     docker.logs(name, Some(options))
 }

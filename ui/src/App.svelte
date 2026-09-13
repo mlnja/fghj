@@ -148,6 +148,31 @@
     return withWs(`/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/logs/stream`);
   }
 
+  // Persisted-log-history support (see `store::WorkspaceDb`'s `logs` table):
+  // `fetchLogGenerations` lists the current/previous generation for the
+  // Drawer's picker; `fetchLogHistory` pages through one generation,
+  // oldest-first, for both the initial load and scroll-triggered
+  // infinite-scroll-back.
+  async function fetchLogGenerations(nodeId) {
+    if (!selectedRunId) return [];
+    const res = await fetch(
+      withWs(`/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/logs/generations`),
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.generations ?? [];
+  }
+
+  async function fetchLogHistory(nodeId, generation, beforeSeq) {
+    if (!selectedRunId) return [];
+    let path = `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/logs/history?generation=${generation}`;
+    if (beforeSeq != null) path += `&before_seq=${beforeSeq}`;
+    const res = await fetch(withWs(path));
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.lines ?? [];
+  }
+
   // Recent Start/Stop/Delete outcomes, newest first — surfaced in the
   // Drawer so a failed action (e.g. a stale node id from a graph that
   // changed shape after the click, or a real Docker error) is visible
@@ -422,6 +447,8 @@
       busy={workspaceBusy}
       runId={selectedRunId}
       onFetchLogs={fetchLogs}
+      onFetchLogGenerations={fetchLogGenerations}
+      onFetchLogHistory={fetchLogHistory}
       onLogStreamUrl={logStreamUrl}
       onDownload={downloadNode}
       onPullStatus={pullStatus}

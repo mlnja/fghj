@@ -12,8 +12,9 @@
     // busy flag here couldn't be trusted across that remount.
     busy = false,
     runId,
-    onFetchLogs,
     onLogStreamUrl,
+    onFetchLogGenerations,
+    onFetchLogHistory,
     onDownload,
     onPullStatus,
     onDownloadComplete,
@@ -38,8 +39,18 @@
   function deleteNode() {
     onDeleteNode?.(node.id);
   }
-  let logs = $state('');
-  let loadingLogs = $state(false);
+  // Persisted log history (see `store::WorkspaceDb`'s `logs` table): a
+  // generation picker (current vs. previous, per the two-generation
+  // retention policy) backing a scroll-up-for-more-history view, so a
+  // crashed container's last lines stay readable even after it's gone —
+  // the point of persisting logs at all rather than just reading Docker's
+  // own (destroyed-on-remove) log buffer.
+  let generations = $state([]);
+  let selectedGeneration = $state(null);
+  let historyLines = $state([]);
+  let loadingHistory = $state(false);
+  let hasMoreHistory = $state(true);
+  let logsScrollEl = $state(null);
   let streaming = $state(false);
   let downloading = $state(false);
   let dlStatus = $state(null); // null | 'running' | 'done' | 'error'
@@ -55,11 +66,59 @@
     copiedTimer = setTimeout(() => (copiedKey = null), 1200);
   }
 
-  async function loadLogs() {
-    if (!onFetchLogs) return;
-    loadingLogs = true;
-    logs = await onFetchLogs(node.id);
-    loadingLogs = false;
+  function scrollLogsToBottom() {
+    requestAnimationFrame(() => {
+      if (logsScrollEl) logsScrollEl.scrollTop = logsScrollEl.scrollHeight;
+    });
+  }
+
+  async function loadInitialHistory(generation) {
+    historyLines = [];
+    hasMoreHistory = true;
+    if (!onFetchLogHistory) return;
+    loadingHistory = true;
+    historyLines = await onFetchLogHistory(node.id, generation);
+    loadingHistory = false;
+    hasMoreHistory = historyLines.length >= 500;
+    scrollLogsToBottom();
+  }
+
+  async function loadLogGenerations(nodeId) {
+    if (!onFetchLogGenerations) return;
+    generations = await onFetchLogGenerations(nodeId);
+    selectedGeneration = generations[0]?.generation ?? null;
+    if (selectedGeneration != null) await loadInitialHistory(selectedGeneration);
+  }
+
+  function selectGeneration(generation) {
+    if (generation === selectedGeneration) return;
+    selectedGeneration = generation;
+    loadInitialHistory(generation);
+  }
+
+  async function loadOlderHistory() {
+    if (loadingHistory || !hasMoreHistory || selectedGeneration == null || !onFetchLogHistory) return;
+    const oldestSeq = historyLines[0]?.seq;
+    if (oldestSeq == null) {
+      hasMoreHistory = false;
+      return;
+    }
+    loadingHistory = true;
+    const older = await onFetchLogHistory(node.id, selectedGeneration, oldestSeq);
+    if (!older.length) {
+      hasMoreHistory = false;
+    } else {
+      const prevHeight = logsScrollEl?.scrollHeight ?? 0;
+      historyLines = [...older, ...historyLines];
+      requestAnimationFrame(() => {
+        if (logsScrollEl) logsScrollEl.scrollTop = logsScrollEl.scrollHeight - prevHeight;
+      });
+    }
+    loadingHistory = false;
+  }
+
+  function onLogsScroll() {
+    if (logsScrollEl && logsScrollEl.scrollTop < 40) loadOlderHistory();
   }
 
   async function poll() {
@@ -95,10 +154,20 @@
     };
   });
 
+  // Loads the retained generations (current/previous) and the selected
+  // one's history whenever the Logs tab is opened or the node changes.
+  $effect(() => {
+    if (activeTab !== 'logs') return;
+    loadLogGenerations(node.id);
+  });
+
   // Live-follows the container's log output over SSE whenever the Logs tab
-  // is open against a running container, so new lines show up without
-  // re-clicking "load logs". Re-runs (tearing down the previous connection
-  // first) whenever the tab, node, or live container identity changes.
+  // is open against a running container, appending straight onto the
+  // current generation's view so new lines show up without polling. Only
+  // applied while viewing the current generation — switching to "previous"
+  // to read a crash's history shouldn't have unrelated live lines land in
+  // it. Re-runs (tearing down the previous connection first) whenever the
+  // tab, node, or live container identity changes.
   $effect(() => {
     if (activeTab !== 'logs' || !liveInfo || !onLogStreamUrl) return;
     const url = onLogStreamUrl(node.id);
@@ -107,7 +176,10 @@
     const source = new EventSource(url);
     streaming = true;
     source.onmessage = (e) => {
-      logs = logs ? `${logs}\n${e.data}` : e.data;
+      if (generations.length && selectedGeneration !== generations[0].generation) return;
+      const lastSeq = historyLines.length ? historyLines[historyLines.length - 1].seq : -1;
+      historyLines = [...historyLines, { seq: lastSeq + 1, stream: 'stdout', ts: '', line: e.data }];
+      scrollLogsToBottom();
     };
     source.onerror = () => {
       streaming = false;
@@ -275,18 +347,38 @@
           <pre>{dlLog}</pre>
         {/if}
       </div>
-    {:else if liveInfo}
+    {:else}
       <div class="logs">
         <div class="logs-toolbar">
-          <button class="btn" onclick={loadLogs}>{loadingLogs ? 'loading…' : 'load logs'}</button>
+          {#if generations.length}
+            <div class="gen-picker">
+              {#each generations as g, i}
+                <button
+                  class="gen-btn"
+                  class:active={g.generation === selectedGeneration}
+                  onclick={() => selectGeneration(g.generation)}
+                  title="{g.line_count} lines{g.first_ts ? `, ${g.first_ts} – ${g.last_ts}` : ''}"
+                >
+                  {i === 0 ? 'current' : i === 1 ? 'previous' : `gen ${g.generation}`}
+                </button>
+              {/each}
+            </div>
+          {/if}
           {#if streaming}<span class="live-badge"><span class="spinner"></span> live</span>{/if}
         </div>
-        {#if logs}
-          <pre>{logs}</pre>
+        {#if historyLines.length}
+          <pre class="log-pane" bind:this={logsScrollEl} onscroll={onLogsScroll}
+            >{#if loadingHistory}<span class="loading-more">loading more…</span>
+{/if}{#each historyLines as l (l.seq)}{l.ts} {l.line}
+{/each}</pre>
+        {:else if loadingHistory}
+          <div class="logs-empty">loading…</div>
+        {:else}
+          <div class="logs-empty">
+            {liveInfo ? 'no logs captured yet' : 'no logs — start this node to begin capturing'}
+          </div>
         {/if}
       </div>
-    {:else}
-      <div class="logs-empty">no live container — start a run to see logs</div>
     {/if}
 </SideDrawer>
 
@@ -360,6 +452,14 @@
   }
   .logs .btn:disabled { opacity: 0.6; cursor: default; }
   .logs-toolbar { display: flex; align-items: center; gap: 10px; }
+  .gen-picker { display: flex; gap: 6px; }
+  .gen-btn {
+    padding: 5px 10px; border-radius: 4px; background: var(--panel-2);
+    border: 1px solid var(--line-strong); color: var(--ink-dim); font: 700 10px var(--font-mono);
+    text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer;
+  }
+  .gen-btn.active { color: var(--ink); border-color: var(--accent, #6fa8ff); }
+  .loading-more { color: var(--ink-faint); font-style: italic; }
   .live-badge {
     display: flex; align-items: center; gap: 4px; font: 700 10px var(--font-mono); text-transform: uppercase;
     letter-spacing: 0.04em; color: var(--success, #6fdc8c);
