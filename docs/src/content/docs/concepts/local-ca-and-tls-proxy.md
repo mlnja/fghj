@@ -65,6 +65,64 @@ currently backed by a real route. A non-reserved alias (anything that
 could be a real, internet-routable domain) never gets a certificate at
 all — see below.
 
+## What's actually in each certificate
+
+Both the root CA and every leaf cert are built with [rcgen](https://docs.rs/rcgen), which
+defaults to a minimal, RFC-legal-but-not-defensive certificate: no
+`SubjectKeyIdentifier` (SKI), no `AuthorityKeyIdentifier` (AKI), and no
+`basicConstraints`, unless the caller explicitly opts in. `fghjd` opts in
+deliberately for both certs it mints, for different reasons.
+
+**The root CA** (`ca::generate_ca`) is self-signed, so RFC 5280 doesn't
+*require* an AKI on it (issuer and subject are the same key by
+construction). It's created with:
+
+- `is_ca = IsCa::Ca(BasicConstraints::Unconstrained)` — marks it as a CA
+  with no path-length limit, and (as a side effect of rcgen only writing
+  `SubjectKeyIdentifier`/`basicConstraints` when `is_ca` isn't left at its
+  default `NoCa`) is what gives the root its own SKI. That SKI is what
+  every leaf's AKI below points back to.
+- `key_usages = [KeyCertSign, CrlSign]` — the two usages meaningful for a
+  CA key: signing certificates and (were fghj ever to issue one) a CRL.
+
+**Every leaf cert** (`ca::DynamicCertResolver::issue`) is signed by that CA
+via `Issuer::from_ca_cert_der`, and is built with:
+
+- `CertificateParams::new(vec![name])`, which populates the
+  `SubjectAlternativeName` extension with `name` as a DNS SAN — the actual
+  field TLS clients check against the SNI they asked for (the `CommonName`
+  is set too, but is legacy/cosmetic by comparison).
+- `use_authority_key_identifier_extension = true` — writes an AKI whose
+  key identifier is derived from the CA's own SKI (via
+  `Issuer::from_ca_cert_der`, which parses the issuer cert's existing SKI
+  extension rather than recomputing one). This is the field that was
+  missing before this was added, and it's not optional: RFC 5280 §4.2.1.1
+  requires a non-self-signed certificate to carry an AKI. Some verifiers
+  enforce that literally — a newer OpenSSL (and anything linked against
+  it, e.g. a `pip`/`twine` upload from a Python built against it) will
+  flatly reject a chain whose leaf has no AKI, even though `openssl
+  s_client`, curl, and browsers are lenient about it and connect anyway.
+  That leniency gap is exactly why this class of bug can ship unnoticed:
+  the everyday manual check ("does it curl?") passes, and only a stricter
+  client surfaces it.
+- `is_ca = IsCa::ExplicitNoCa` — explicitly marks the leaf as *not* a CA
+  (as opposed to just leaving `is_ca` at rcgen's default `NoCa`, which
+  skips writing the extension at all). This is what turns on the leaf's
+  own `SubjectKeyIdentifier` and an explicit `basicConstraints: CA:FALSE`
+  — both technically optional for an end-entity cert per RFC 5280, but
+  cheap to include and exactly what a "real" CA-issued server cert looks
+  like.
+- `key_usages = [DigitalSignature, KeyEncipherment]` and
+  `extended_key_usages = [ServerAuth]` — the usages a TLS server
+  certificate is actually expected to declare.
+
+The round trip (leaf's AKI must equal the CA's SKI) is asserted directly in
+`ca::tests::issued_leaf_cert_carries_aki_ski_and_basic_constraints`, alongside
+the existing `issued_leaf_cert_chains_to_the_ca` test that checks the
+cryptographic signature itself verifies against the CA's public key —
+between the two, both "is this chain trustworthy" and "is this chain
+*shaped* the way a strict verifier expects" are covered.
+
 ## The reverse proxy
 
 `fghjd` occupies ports 80 and 443, localhost-only:

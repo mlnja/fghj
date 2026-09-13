@@ -6,7 +6,10 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose};
+use rcgen::{
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose,
+};
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
@@ -249,6 +252,25 @@ impl DynamicCertResolver {
         let mut params = CertificateParams::new(vec![name.to_string()])
             .context("failed to construct leaf cert params")?;
         params.distinguished_name.push(DnType::CommonName, name);
+        // RFC 5280 requires any non-self-signed certificate to carry an
+        // AuthorityKeyIdentifier pointing back to its issuer's key.
+        // `use_authority_key_identifier_extension` defaults to `false` in
+        // rcgen, and it silently produced leaf certs with *no* AKI (and, via
+        // `is_ca` defaulting to `NoCa`, no SubjectKeyIdentifier or
+        // basicConstraints either — rcgen only writes those for certs whose
+        // `is_ca` isn't left at its default). Newer OpenSSL enforces the AKI
+        // requirement strictly and rejects the chain; looser stacks
+        // (`openssl s_client`, browsers) don't, which is how this went
+        // unnoticed. `ExplicitNoCa` marks this leaf as an explicit
+        // (non-CA) end-entity cert, which is what actually turns on the SKI
+        // and `basicConstraints: CA:FALSE` extensions.
+        params.is_ca = IsCa::ExplicitNoCa;
+        params.use_authority_key_identifier_extension = true;
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
 
         let cert = params
             .signed_by(&leaf_key, &issuer)
@@ -403,5 +425,58 @@ mod tests {
             leaf.verify_signature(Some(ca_cert.public_key())).is_ok(),
             "leaf certificate signature must verify against the CA's public key"
         );
+    }
+
+    /// RFC 5280 requires a non-self-signed certificate to carry an
+    /// AuthorityKeyIdentifier pointing back to its issuer's key; strict
+    /// verifiers (newer OpenSSL, unlike `openssl s_client` or browsers)
+    /// reject a chain without one. Also checks for the SubjectKeyIdentifier
+    /// and `basicConstraints: CA:FALSE` extensions that come along with
+    /// marking the leaf `IsCa::ExplicitNoCa` rather than leaving it at
+    /// rcgen's default `NoCa`.
+    #[test]
+    fn issued_leaf_cert_carries_aki_ski_and_basic_constraints() {
+        let ca = generate_ca().unwrap();
+        let ca_cert_der = ca.cert_der.clone();
+        let resolver = DynamicCertResolver::new(ca, provider(), no_routes());
+
+        let certified = resolver.resolve_for("cart.fghj.internal").unwrap();
+        let leaf_der = certified.cert[0].clone();
+
+        use x509_parser::extensions::ParsedExtension;
+        use x509_parser::prelude::*;
+        let (_, leaf) = X509Certificate::from_der(&leaf_der).unwrap();
+        let (_, ca_cert) = X509Certificate::from_der(&ca_cert_der).unwrap();
+
+        let find_ski = |cert: &X509Certificate| -> Vec<u8> {
+            cert.iter_extensions()
+                .find_map(|ext| match ext.parsed_extension() {
+                    ParsedExtension::SubjectKeyIdentifier(id) => Some(id.0.to_vec()),
+                    _ => None,
+                })
+                .expect("cert must carry a SubjectKeyIdentifier")
+        };
+        let ca_ski = find_ski(&ca_cert);
+        let leaf_aki = leaf
+            .iter_extensions()
+            .find_map(|ext| match ext.parsed_extension() {
+                ParsedExtension::AuthorityKeyIdentifier(aki) => {
+                    aki.key_identifier.as_ref().map(|id| id.0.to_vec())
+                }
+                _ => None,
+            })
+            .expect("leaf cert must carry an AuthorityKeyIdentifier");
+        assert_eq!(
+            leaf_aki, ca_ski,
+            "leaf's AuthorityKeyIdentifier must match the CA's SubjectKeyIdentifier"
+        );
+        find_ski(&leaf); // asserts (via find_ski's own expect) that the leaf has its own SKI too
+
+        let bc = leaf
+            .basic_constraints()
+            .unwrap()
+            .expect("leaf cert must carry a basicConstraints extension")
+            .value;
+        assert!(!bc.ca, "leaf cert's basicConstraints must be CA:FALSE");
     }
 }
