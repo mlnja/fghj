@@ -15,6 +15,7 @@
     onLogStreamUrl,
     onFetchLogGenerations,
     onFetchLogHistory,
+    onFetchEvents,
     onDownload,
     onPullStatus,
     onDownloadComplete,
@@ -52,6 +53,17 @@
   let hasMoreHistory = $state(true);
   let logsScrollEl = $state(null);
   let streaming = $state(false);
+
+  // ArgoCD-style "events": what `fghjd` itself did during the last start or
+  // stop of this node (image build, container creation, healthcheck wait,
+  // ...), as opposed to the log-history state above (the container's own
+  // stdout/stderr). Only the current cycle of `eventsAction` is ever
+  // returned by the backend — see `store::WorkspaceDb::begin_event_cycle` —
+  // so there's no generation picker here, just a start/stop toggle.
+  let eventsAction = $state('start');
+  let events = $state([]);
+  let loadingEvents = $state(false);
+  let eventsPollTimer = null;
   let downloading = $state(false);
   let dlStatus = $state(null); // null | 'running' | 'done' | 'error'
   let dlLog = $state('');
@@ -121,6 +133,19 @@
     if (logsScrollEl && logsScrollEl.scrollTop < 40) loadOlderHistory();
   }
 
+  async function loadEvents(nodeId, action) {
+    if (!onFetchEvents) return;
+    loadingEvents = true;
+    events = await onFetchEvents(nodeId, action);
+    loadingEvents = false;
+  }
+
+  function selectEventsAction(action) {
+    if (action === eventsAction) return;
+    eventsAction = action;
+    loadEvents(node.id, action);
+  }
+
   async function poll() {
     if (!onPullStatus) return;
     const s = await onPullStatus(node.id);
@@ -151,6 +176,28 @@
     return () => {
       if (pollTimer) clearInterval(pollTimer);
       if (copiedTimer) clearTimeout(copiedTimer);
+      if (eventsPollTimer) clearInterval(eventsPollTimer);
+    };
+  });
+
+  // Loads the current cycle's events whenever the Events tab is opened (or
+  // the node/action toggle changes), then polls while it stays open so
+  // steps of an in-flight start/stop show up without a manual refresh —
+  // there are only ever a handful of rows, so a short poll interval is
+  // cheap. Stops as soon as the tab is left or the drawer closes.
+  $effect(() => {
+    if (activeTab !== 'events') {
+      if (eventsPollTimer) {
+        clearInterval(eventsPollTimer);
+        eventsPollTimer = null;
+      }
+      return;
+    }
+    loadEvents(node.id, eventsAction);
+    eventsPollTimer = setInterval(() => loadEvents(node.id, eventsAction), 1000);
+    return () => {
+      clearInterval(eventsPollTimer);
+      eventsPollTimer = null;
     };
   });
 
@@ -239,6 +286,9 @@
     <div class="tabs">
       <div class="tab" class:active={activeTab === 'general'} onclick={() => (activeTab = 'general')}>General info</div>
       <div class="tab" class:active={activeTab === 'logs'} onclick={() => (activeTab = 'logs')}>Logs</div>
+      {#if node.downloaded !== false}
+        <div class="tab" class:active={activeTab === 'events'} onclick={() => (activeTab = 'events')}>Events</div>
+      {/if}
     </div>
 
     {#if activeTab === 'general'}
@@ -345,6 +395,33 @@
         {/if}
         {#if dlLog}
           <pre>{dlLog}</pre>
+        {/if}
+      </div>
+    {:else if activeTab === 'events'}
+      <div class="logs">
+        <div class="logs-toolbar">
+          <div class="gen-picker">
+            <button class="gen-btn" class:active={eventsAction === 'start'} onclick={() => selectEventsAction('start')}>start</button>
+            <button class="gen-btn" class:active={eventsAction === 'stop'} onclick={() => selectEventsAction('stop')}>stop</button>
+          </div>
+        </div>
+        {#if events.length}
+          <div class="event-list">
+            {#each events as e (e.seq)}
+              <div class="event-row" class:error={e.status === 'error'}>
+                <span class="event-time">{new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                <span class="event-status status-{e.status}">
+                  {#if e.status === 'running'}<span class="spinner"></span>{:else if e.status === 'ok'}✓{:else if e.status === 'error'}✕{/if}
+                </span>
+                <span class="event-step">{e.step}</span>
+                {#if e.detail}<span class="event-detail">{e.detail}</span>{/if}
+              </div>
+            {/each}
+          </div>
+        {:else if loadingEvents}
+          <div class="logs-empty">loading…</div>
+        {:else}
+          <div class="logs-empty">no {eventsAction} events recorded yet</div>
         {/if}
       </div>
     {:else}
@@ -460,6 +537,18 @@
   }
   .gen-btn.active { color: var(--ink); border-color: var(--accent, #6fa8ff); }
   .loading-more { color: var(--ink-faint); font-style: italic; }
+  .event-list { display: flex; flex-direction: column; gap: 2px; }
+  .event-row {
+    display: flex; align-items: baseline; gap: 8px; padding: 4px 8px; border-radius: 4px;
+    font: 500 11px var(--font-mono); background: var(--panel-2);
+  }
+  .event-row.error { background: var(--danger-bg, rgba(255, 90, 90, 0.08)); }
+  .event-time { color: var(--ink-faint); flex: 0 0 auto; }
+  .event-status { flex: 0 0 auto; width: 12px; text-align: center; }
+  .event-status.status-ok { color: var(--success, #6fdc8c); }
+  .event-status.status-error { color: var(--danger); }
+  .event-step { color: var(--ink); text-transform: uppercase; letter-spacing: 0.03em; flex: 0 0 auto; }
+  .event-detail { color: var(--ink-faint); word-break: break-all; }
   .live-badge {
     display: flex; align-items: center; gap: 4px; font: 700 10px var(--font-mono); text-transform: uppercase;
     letter-spacing: 0.04em; color: var(--success, #6fdc8c);

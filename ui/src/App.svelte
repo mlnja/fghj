@@ -173,6 +173,23 @@
     return data.lines ?? [];
   }
 
+  // ArgoCD-style "events": what `fghjd` itself did during the last start or
+  // stop of this node (image build, container creation, healthcheck wait,
+  // ...), as opposed to `fetchLogs`/`fetchLogHistory`'s raw container
+  // stdout/stderr. Only the current cycle of `action` is ever returned —
+  // see `store::WorkspaceDb::begin_event_cycle`.
+  async function fetchEvents(nodeId, action) {
+    if (!selectedRunId) return [];
+    const res = await fetch(
+      withWs(
+        `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/events?action=${action}`,
+      ),
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.events ?? [];
+  }
+
   // Recent Start/Stop/Delete outcomes, newest first — surfaced in the
   // Drawer so a failed action (e.g. a stale node id from a graph that
   // changed shape after the click, or a real Docker error) is visible
@@ -449,6 +466,7 @@
       onFetchLogs={fetchLogs}
       onFetchLogGenerations={fetchLogGenerations}
       onFetchLogHistory={fetchLogHistory}
+      onFetchEvents={fetchEvents}
       onLogStreamUrl={logStreamUrl}
       onDownload={downloadNode}
       onPullStatus={pullStatus}

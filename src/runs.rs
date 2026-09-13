@@ -620,6 +620,57 @@ impl RunRegistry {
         }
     }
 
+    /// Clears out the previous cycle of `action` ("start" or "stop") for
+    /// `node_id`, so the step-by-step narration `record_event` appends next
+    /// is the only one a caller of the `/events` endpoint sees — per the
+    /// explicit "new start overrides old start, new stop overrides old
+    /// stop" requirement. Best-effort: a failure here only means a later
+    /// `record_event` call might append onto a stale cycle instead of a
+    /// fresh one, which isn't worth failing the actual start/stop over.
+    async fn begin_event_cycle(&self, run_id: &str, node_id: &str, action: &str) {
+        if let Err(e) = self
+            .db
+            .clone()
+            .begin_event_cycle(run_id.to_string(), node_id.to_string(), action.to_string())
+            .await
+        {
+            eprintln!("fghjd: failed to begin {action} event cycle for node {node_id}: {e:#}");
+        }
+    }
+
+    /// Appends one orchestration-level step (image build, container
+    /// creation, healthcheck wait, ...) to the current `action` cycle for
+    /// `node_id` — the ArgoCD-style "events" narration of what `fghjd`
+    /// itself is doing, distinct from the container's own stdout/stderr
+    /// captured by `spawn_log_capture`. Best-effort, same reasoning as
+    /// `begin_event_cycle`: a logging failure shouldn't fail the actual
+    /// start/stop.
+    async fn record_event(
+        &self,
+        run_id: &str,
+        node_id: &str,
+        action: &str,
+        step: &str,
+        status: &str,
+        detail: Option<String>,
+    ) {
+        if let Err(e) = self
+            .db
+            .clone()
+            .append_event(
+                run_id.to_string(),
+                node_id.to_string(),
+                action.to_string(),
+                step.to_string(),
+                status.to_string(),
+                detail,
+            )
+            .await
+        {
+            eprintln!("fghjd: failed to record {action} event '{step}' for node {node_id}: {e:#}");
+        }
+    }
+
     /// Claims `node_id` for the duration of a start/stop/delete call, or
     /// fails fast if another such call against the same node is already in
     /// flight — see `pending`'s doc comment for why `action_lock` alone
@@ -868,7 +919,19 @@ impl RunRegistry {
             state
         };
         for c in &state.containers {
+            self.begin_event_cycle(run_id, &c.node_id, "stop").await;
+            self.record_event(
+                run_id,
+                &c.node_id,
+                "stop",
+                "stopping container",
+                "running",
+                None,
+            )
+            .await;
             docker::stop_and_remove(&self.docker, &c.container_name).await;
+            self.record_event(run_id, &c.node_id, "stop", "stopping container", "ok", None)
+                .await;
         }
         docker::remove_network(&self.docker, &state.network).await;
         // The default run's `scope: "run"` volumes get the exact same
@@ -926,9 +989,6 @@ impl RunRegistry {
                 owner.as_ref(),
             )
             .await?;
-        if node.healthcheck.is_some() {
-            wait_for_healthy(&self.docker, &info.container_name).await;
-        }
         state.containers.retain(|c| c.node_id != info.node_id);
         state.containers.push(info.clone());
         self.db.clone().save_run(state.clone()).await?;
@@ -953,11 +1013,23 @@ impl RunRegistry {
         let Some(c) = state.containers.iter_mut().find(|c| c.node_id == node_id) else {
             bail!("no such node in run {run_id}: {node_id}");
         };
+        self.begin_event_cycle(run_id, node_id, "stop").await;
+        self.record_event(
+            run_id,
+            node_id,
+            "stop",
+            "stopping container",
+            "running",
+            None,
+        )
+        .await;
         docker::stop_container(&self.docker, &c.container_name).await;
         c.status = match docker::inspect_status(&self.docker, &c.container_name, "").await {
             Ok(Some(s)) => s.status,
             _ => "exited".to_string(),
         };
+        self.record_event(run_id, node_id, "stop", "stopping container", "ok", None)
+            .await;
         self.db.clone().save_run(state.clone()).await?;
         self.runs.lock().unwrap().insert(run_id.to_string(), state);
         Ok(())
@@ -982,7 +1054,19 @@ impl RunRegistry {
             bail!("no such node in run {run_id}: {node_id}");
         };
         let c = state.containers.remove(pos);
+        self.begin_event_cycle(run_id, node_id, "stop").await;
+        self.record_event(
+            run_id,
+            node_id,
+            "stop",
+            "removing container",
+            "running",
+            None,
+        )
+        .await;
         docker::stop_and_remove(&self.docker, &c.container_name).await;
+        self.record_event(run_id, node_id, "stop", "removing container", "ok", None)
+            .await;
         self.db.clone().save_run(state.clone()).await?;
         self.runs.lock().unwrap().insert(run_id.to_string(), state);
         Ok(())
@@ -1037,9 +1121,6 @@ impl RunRegistry {
                 .await
             {
                 Ok(info) => {
-                    if node.healthcheck.is_some() {
-                        wait_for_healthy(&self.docker, &info.container_name).await;
-                    }
                     containers.push(info);
                 }
                 Err(e) => {
@@ -1133,9 +1214,6 @@ impl RunRegistry {
                     owner.as_ref(),
                 )
                 .await?;
-            if node.healthcheck.is_some() {
-                wait_for_healthy(&self.docker, &info.container_name).await;
-            }
             state.containers.retain(|c| c.node_id != info.node_id);
             state.containers.push(info);
             // Saved after every node, not just at the end, so a later
@@ -1263,10 +1341,19 @@ impl RunRegistry {
                             sanitize_label(&node.id),
                             sanitize_label(branch)
                         );
+                        self.record_event(
+                            run_id,
+                            &node.id,
+                            "start",
+                            "preparing checkout",
+                            "running",
+                            Some(branch.clone()),
+                        )
+                        .await;
                         let internal_dir = self.workspace.join(".fghj");
                         let mirror_dir = internal_dir.clone();
                         let owner_for_mirror = owner.cloned();
-                        let mirror = tokio::task::spawn_blocking(move || {
+                        let mirror = match tokio::task::spawn_blocking(move || {
                             crate::resolver::ensure_mirror(
                                 &repo,
                                 &mirror_dir,
@@ -1274,24 +1361,85 @@ impl RunRegistry {
                             )
                         })
                         .await
-                        .context("ensure_mirror task panicked")??;
+                        .context("ensure_mirror task panicked")?
+                        {
+                            Ok(m) => m,
+                            Err(e) => {
+                                self.record_event(
+                                    run_id,
+                                    &node.id,
+                                    "start",
+                                    "preparing checkout",
+                                    "error",
+                                    Some(format!("{e:#}")),
+                                )
+                                .await;
+                                return Err(e);
+                            }
+                        };
                         let checkout = internal_dir.join("checkouts").join(format!(
                             "{}-{}",
                             sanitize_label(&node.id),
                             sanitize_label(branch)
                         ));
                         let checkout_root =
-                            docker::materialize_checkout(&mirror, branch, &checkout).await?;
+                            match docker::materialize_checkout(&mirror, branch, &checkout).await {
+                                Ok(root) => root,
+                                Err(e) => {
+                                    self.record_event(
+                                        run_id,
+                                        &node.id,
+                                        "start",
+                                        "preparing checkout",
+                                        "error",
+                                        Some(format!("{e:#}")),
+                                    )
+                                    .await;
+                                    return Err(e);
+                                }
+                            };
+                        self.record_event(
+                            run_id,
+                            &node.id,
+                            "start",
+                            "preparing checkout",
+                            "ok",
+                            None,
+                        )
+                        .await;
                         volume_base = Some(checkout_root.clone());
                         let build_dir = checkout_root.join(&build.context);
-                        docker::build_image(
+                        self.record_event(
+                            run_id,
+                            &node.id,
+                            "start",
+                            "building image",
+                            "running",
+                            Some(tag.clone()),
+                        )
+                        .await;
+                        if let Err(e) = docker::build_image(
                             &self.docker,
                             &build_dir,
                             &build.dockerfile,
                             &tag,
                             node.platform.as_deref(),
                         )
-                        .await?;
+                        .await
+                        {
+                            self.record_event(
+                                run_id,
+                                &node.id,
+                                "start",
+                                "building image",
+                                "error",
+                                Some(format!("{e:#}")),
+                            )
+                            .await;
+                            return Err(e);
+                        }
+                        self.record_event(run_id, &node.id, "start", "building image", "ok", None)
+                            .await;
                         tag
                     }
                     // Default: build straight from the live workspace checkout,
@@ -1311,14 +1459,44 @@ impl RunRegistry {
                         volume_base = Some(repo_root.clone());
                         if side_effects {
                             let build_dir = repo_root.join(&build.context);
-                            docker::build_image(
+                            self.record_event(
+                                run_id,
+                                &node.id,
+                                "start",
+                                "building image",
+                                "running",
+                                Some(tag.clone()),
+                            )
+                            .await;
+                            if let Err(e) = docker::build_image(
                                 &self.docker,
                                 &build_dir,
                                 &build.dockerfile,
                                 &tag,
                                 node.platform.as_deref(),
                             )
-                            .await?;
+                            .await
+                            {
+                                self.record_event(
+                                    run_id,
+                                    &node.id,
+                                    "start",
+                                    "building image",
+                                    "error",
+                                    Some(format!("{e:#}")),
+                                )
+                                .await;
+                                return Err(e);
+                            }
+                            self.record_event(
+                                run_id,
+                                &node.id,
+                                "start",
+                                "building image",
+                                "ok",
+                                None,
+                            )
+                            .await;
                         }
                         tag
                     }
@@ -1453,20 +1631,66 @@ impl RunRegistry {
         overrides: &BTreeMap<String, String>,
         owner: Option<&crate::store::WorkspaceOwner>,
     ) -> Result<ContainerInfo> {
-        let Some(spec) = self
+        self.begin_event_cycle(run_id, &node.id, "start").await;
+        self.record_event(
+            run_id,
+            &node.id,
+            "start",
+            "resolving config",
+            "running",
+            None,
+        )
+        .await;
+        let spec = match self
             .resolve_node_spec(graph, node, run_id, overrides, owner, true)
-            .await?
-        else {
-            bail!(
-                "resolve_node_spec returned no spec for {} despite side_effects being enabled",
-                node.id
-            );
+            .await
+        {
+            Ok(Some(spec)) => spec,
+            Ok(None) => {
+                let msg = format!(
+                    "resolve_node_spec returned no spec for {} despite side_effects being enabled",
+                    node.id
+                );
+                self.record_event(
+                    run_id,
+                    &node.id,
+                    "start",
+                    "resolving config",
+                    "error",
+                    Some(msg.clone()),
+                )
+                .await;
+                bail!(msg);
+            }
+            Err(e) => {
+                self.record_event(
+                    run_id,
+                    &node.id,
+                    "start",
+                    "resolving config",
+                    "error",
+                    Some(format!("{e:#}")),
+                )
+                .await;
+                return Err(e);
+            }
         };
+        self.record_event(run_id, &node.id, "start", "resolving config", "ok", None)
+            .await;
         let config_hash = spec_hash(node, &spec);
         let mut labels = node.labels.clone();
         labels.insert("fghj.config_hash".to_string(), config_hash.clone());
 
-        docker::run_container(
+        self.record_event(
+            run_id,
+            &node.id,
+            "start",
+            "creating container",
+            "running",
+            None,
+        )
+        .await;
+        if let Err(e) = docker::run_container(
             &self.docker,
             &docker::RunOpts {
                 name: &spec.container_name,
@@ -1491,7 +1715,21 @@ impl RunRegistry {
                 platform: node.platform.as_deref(),
             },
         )
-        .await?;
+        .await
+        {
+            self.record_event(
+                run_id,
+                &node.id,
+                "start",
+                "creating container",
+                "error",
+                Some(format!("{e:#}")),
+            )
+            .await;
+            return Err(e);
+        }
+        self.record_event(run_id, &node.id, "start", "creating container", "ok", None)
+            .await;
 
         self.spawn_log_capture(run_id, &node.id, &spec.container_name);
 
@@ -1606,6 +1844,30 @@ impl RunRegistry {
                 });
             }
         }
+
+        if node.healthcheck.is_some() {
+            self.record_event(
+                run_id,
+                &node.id,
+                "start",
+                "waiting for healthcheck",
+                "running",
+                None,
+            )
+            .await;
+            wait_for_healthy(&self.docker, &spec.container_name).await;
+            self.record_event(
+                run_id,
+                &node.id,
+                "start",
+                "waiting for healthcheck",
+                "ok",
+                None,
+            )
+            .await;
+        }
+        self.record_event(run_id, &node.id, "start", "ready", "ok", None)
+            .await;
 
         Ok(ContainerInfo {
             node_id: node.id.clone(),

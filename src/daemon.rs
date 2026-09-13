@@ -725,6 +725,31 @@ async fn get_run_node_log_history(
     }
 }
 
+#[derive(Deserialize)]
+struct EventsQuery {
+    action: String,
+}
+
+/// The current cycle's step-by-step narration of what `fghjd` itself did
+/// for the last `start` or `stop` of this node — the ArgoCD-style "events"
+/// counterpart to the raw container-log history above. Only ever the most
+/// recent cycle of `action`: see `store::WorkspaceDb::begin_event_cycle`.
+async fn get_run_node_events(
+    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    Query(q): Query<EventsQuery>,
+    WorkspaceExtractor(state): WorkspaceExtractor,
+) -> Response {
+    match state
+        .db
+        .clone()
+        .list_events(run_id, node_id, q.action)
+        .await
+    {
+        Ok(events) => Json(serde_json::json!({ "events": events })).into_response(),
+        Err(e) => err_response(e),
+    }
+}
+
 /// First message a client must send once the socket is upgraded — everything
 /// `docker::exec_start` needs. `cols`/`rows` are only meaningful when `tty`.
 #[derive(Deserialize)]
@@ -933,6 +958,10 @@ fn build_router(registry: Arc<WorkspaceRegistry>, daemon: Arc<DaemonControl>) ->
         .route(
             "/runs/{run_id}/nodes/{node_id}/logs/history",
             get(get_run_node_log_history),
+        )
+        .route(
+            "/runs/{run_id}/nodes/{node_id}/events",
+            get(get_run_node_events),
         )
         .route(
             "/runs/{run_id}/nodes/{node_id}/exec/ws",
