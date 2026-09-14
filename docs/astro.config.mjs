@@ -34,12 +34,19 @@ export default defineConfig({
             { label: 'Fog-of-war visibility', slug: 'concepts/fog-of-war-visibility' },
             { label: 'Node identity & domains', slug: 'concepts/node-identity-and-domains' },
             { label: 'Local CA & TLS proxy', slug: 'concepts/local-ca-and-tls-proxy' },
+            { label: 'In-network TLS proxy sidecar', slug: 'concepts/sidecar' },
             { label: 'Split DNS', slug: 'concepts/split-dns' },
             { label: 'Run lifecycle & registry', slug: 'concepts/run-lifecycle-and-registry' },
             { label: 'Persistence & workspace store', slug: 'concepts/persistence-and-workspace-store' },
             { label: 'Docker & downloads', slug: 'concepts/docker-and-downloads' },
             { label: 'Control API', slug: 'concepts/control-api' },
             { label: 'UI architecture', slug: 'concepts/ui-architecture' },
+          ],
+        },
+        {
+          label: 'Guides',
+          items: [
+            { label: 'HTTP vs. raw: choosing a zone', slug: 'guides/networking-http-vs-raw' },
           ],
         },
         {

@@ -6,7 +6,10 @@ use include_dir::{Dir, include_dir};
 
 use crate::{downloads, runs, store};
 
-static UI_DIST: Dir = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
+/// `pub(crate)` so `sidecar_image` can reuse this same embedded copy when
+/// materializing the sidecar's Docker build context, rather than embedding
+/// the UI a second time.
+pub(crate) static UI_DIST: Dir = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 
 /// Per-workspace in-memory state: one of these lives behind an `Arc` in the
 /// daemon's `WorkspaceRegistry`, shared across the concurrent request tasks

@@ -25,6 +25,8 @@ tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "net", "fs", "io-util", "io-std", "signal"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "logging", "tls12"] }
 tokio-tungstenite = "0.29.0"
+rustls-native-certs = "0.8.4"
+pem = "3"
 
 [dev-dependencies]
 x509-parser = { version = "0.18.1", features = ["verify"] }

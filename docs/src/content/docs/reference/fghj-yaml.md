@@ -76,7 +76,7 @@ services:
 | `build.args` | map of string→string | Build-time `--build-arg` values. |
 | `ports` | map of container-port→`#Port` | Declared container ports. The map key is the literal container port number (e.g. `"8080"`), published to Docker as-is — not a semantic label. See [Ports](#ports) below. |
 | `domain_scope` | `"run"` \| `"stable"` | Whether this service's derived domain includes the run id. Defaults to `"run"`. See [Node identity & domains](/concepts/node-identity-and-domains/#domain-derivation-one-formula-no-exceptions). |
-| `environment` | map or list | Either `{KEY: value}` or a list of `"KEY=value"` strings — mirrors Docker Compose's own `environment` shape. Values can reference a `*.fghj.internal` domain with `${FGHJ_SERVICE_FQDN}`/`${FGHJ_SERVICE_FQDN:name}` — see [Domain templates in `environment`](#domain-templates-in-environment) below. |
+| `environment` | map or list | Either `{KEY: value}` or a list of `"KEY=value"` strings — mirrors Docker Compose's own `environment` shape. Values can reference a sibling's domain with `${FGHJ_SERVICE_FQDN}`/`${FGHJ_SERVICE_FQDN_HTTP}` — see [Domain templates in `environment`](#domain-templates-in-environment) below. |
 | `env_file` | list of strings | `.env`-style files loaded *before* `environment` — Compose's `env_file`. Each path resolves against this repo's own checkout root, same rule as `#Volume.host`. An explicit `environment` entry always wins over one loaded from a file. Also available on `kind: backing` — see its own field table below for how the path resolves there. Same `${FGHJ_SERVICE_FQDN}` templating as `environment` applies to loaded values too. |
 | `platform` | string, optional | Pins the platform (`os[/arch[/variant]]`, e.g. `linux/arm64`) passed to `docker build --platform`, for cross-compiling this service's image to a specific architecture. Unset (the default) builds for the host's own platform. |
 | `command` | list of strings | Overrides the image's default `CMD`, Compose-`command`-style. Empty (the default) leaves the image's own `CMD`/`ENTRYPOINT` untouched. |
@@ -120,20 +120,33 @@ ephemeral localhost port, just with no `*.fghj.internal` name.
 
 ## Domain templates in `environment`
 
-`environment` (and `env_file`) values can reference a `*.fghj.internal`
-domain without hand-computing it:
+`environment` (and `env_file`) values can reference a sibling's domain
+without hand-computing it. Every node actually has two derived domains —
+see [Node identity &
+domains](/concepts/node-identity-and-domains/#domain-derivation-one-formula-no-exceptions-two-zones)
+and [Split DNS](/concepts/split-dns/) — and the macro form you use picks
+which one you get:
 
 ```yaml
 environment:
-  PMA_HOST: ${FGHJ_SERVICE_FQDN:mysql}
-  PMA_ABSOLUTE_URI: https://${FGHJ_SERVICE_FQDN}/
+  DATABASE_URL: postgres://user:pass@${FGHJ_SERVICE_FQDN:postgres}:5432/app
+  PMA_ABSOLUTE_URI: https://${FGHJ_SERVICE_FQDN_HTTP}/
 ```
 
 | Token | Resolves to |
 |---|---|
-| `${FGHJ_SERVICE_FQDN}` | This node's own derived domain. |
-| `${FGHJ_SERVICE_FQDN:name}` | The derived domain of whichever sibling is declared with that leaf `name`: a `kind: backing` dependency owned by the same service as the node whose `environment` this is (a backing dependency can reference another backing dependency this way too, not just the owning service), or — if no such backing dependency matches — a service this node directly depends on via `kind: service` (same-repo or cross-repo). |
-| `${FGHJ_SERVICE_FQDN:a::b::name}` | Same lookup, but disambiguates a leaf `name` that matches more than one sibling by also qualifying it with as many of its owning segments as needed, root-first — the same segments a node's id is built from leaf-first (`{name}.{owner-id}`), just written in the opposite, more-readable order. E.g. `aikifactory::aikifactory::minio` reaches the same node as the id `minio.aikifactory.aikifactory` (before the workspace suffix). |
+| `${FGHJ_SERVICE_FQDN}` | This node's own **raw** domain (`*.fghj.raw.internal`) — direct, in-network-only, resolved straight to the real container IP. This is the default because it's what nearly every real caller needs: a database connection string, an internal API call, a raw port that isn't HTTP(S) at all. |
+| `${FGHJ_SERVICE_FQDN:name}` | The **raw** domain of whichever sibling is declared with that leaf `name`, same lookup rules as below. |
+| `${FGHJ_SERVICE_FQDN_HTTP}` / `${FGHJ_SERVICE_FQDN_HTTP:name}` | The same lookups, but resolving to the **http** domain (`*.fghj.internal`) instead — proxied, TLS-terminated, the same address in or out of the run's docker network. Use this only when something specifically needs that proxied identity on purpose, e.g. minting a presigned URL meant to be handed to something outside the network. Reachable automatically from inside a container too — see [Reaching the TLS proxy from inside a container](#reaching-the-tls-proxy-from-inside-a-container) below. |
+| `${FGHJ_SERVICE_FQDN:a::b::name}` / `${FGHJ_SERVICE_FQDN_HTTP:a::b::name}` | Same lookup, but disambiguates a leaf `name` that matches more than one sibling by also qualifying it with as many of its owning segments as needed, root-first — the same segments a node's id is built from leaf-first (`{name}.{owner-id}`), just written in the opposite, more-readable order. E.g. `aikifactory::aikifactory::minio` reaches the same node as the id `minio.aikifactory.aikifactory` (before the workspace suffix). |
+
+The bare `name` lookup (with or without the `_HTTP` suffix) resolves to
+whichever sibling is declared with that leaf `name`: a `kind: backing`
+dependency owned by the same service as the node whose `environment` this
+is (a backing dependency can reference another backing dependency this way
+too, not just the owning service), or — if no such backing dependency
+matches — a service this node directly depends on via `kind: service`
+(same-repo or cross-repo).
 
 Can't reach a *named port* on a sibling — only its bare domain — and for
 the `kind: service` case, only a dependency this exact node declares
@@ -321,6 +334,39 @@ domain is always derived, never author-declared. To wildcard a node's own
 default domain instead (so it, too, matches every subdomain of itself, not
 just the exact name), set `wildcard: true` on the `#Port` that's `primary`
 and/or `name`d — see [Ports](#ports) above.
+
+## Reaching the TLS proxy from inside a container
+
+Every node actually has two derived domains — a raw one
+(`*.fghj.raw.internal`) and an HTTP(S)-proxied one (`*.fghj.internal`) —
+covered in full in [Node identity &
+domains](/concepts/node-identity-and-domains/#domain-derivation-one-formula-no-exceptions-two-zones)
+and [Split DNS](/concepts/split-dns/). From inside a service's own
+container, a sibling's **raw** domain resolves straight to that sibling's
+container IP via Docker's own embedded per-network DNS — the right
+behavior for a node's own container port (a database's `5432`, an internal
+API's own port): fastest path, no extra hop, no TLS.
+
+A sibling's **http** domain, from inside the same container, resolves
+instead to this run's TLS proxy sidecar — the exact same SNI-dispatch
+logic, same hostname, same port (`443`/`80`), that a browser or host
+process outside the network gets when it dials that name. This is
+automatic for every node in a run: nothing to declare, no `extra_hosts`
+entry, no sentinel. Use the http domain (via
+`${FGHJ_SERVICE_FQDN_HTTP:name}` — see [Domain templates in
+`environment`](#domain-templates-in-environment) above) for anything that
+specifically needs the *same* HTTPS hostname a browser or host process
+would use — most commonly, a service that mints URLs meant to be handed
+back out (a presigned S3 URL, an OAuth redirect, a webhook callback) and
+can only have one endpoint configured for both its own calls and the URLs
+it generates.
+
+The container also needs to trust fghj's local CA for that TLS connection
+to succeed — see [Local CA & TLS proxy](/concepts/local-ca-and-tls-proxy/).
+
+This mechanism doesn't depend on any container-runtime-specific gateway
+forwarding — it works the same way on Docker Desktop, OrbStack, and native
+Linux Docker Engine alike.
 
 ## Healthcheck & start order
 

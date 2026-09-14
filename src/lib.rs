@@ -14,6 +14,7 @@ pub mod proxy;
 pub mod resolver;
 pub mod runs;
 pub mod server;
+pub mod sidecar_image;
 pub mod store;
 
 /// Resolves the workspace directory, cloning `entry` into it by convention if

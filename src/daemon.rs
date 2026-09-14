@@ -48,8 +48,9 @@ pub fn socket_path() -> PathBuf {
 
 /// Durable storage for the local CA — must survive a reboot, or every
 /// `fghjd` restart would need the user to re-approve a brand new CA in
-/// Keychain Access.
-fn ca_dir() -> PathBuf {
+/// Keychain Access. `pub(crate)` so `runs.rs` can bind-mount it (read-only)
+/// into a run's sidecar proxy container.
+pub(crate) fn ca_dir() -> PathBuf {
     PathBuf::from("/var/lib/fghjd/ca")
 }
 
@@ -353,14 +354,21 @@ impl WorkspaceRegistry {
 }
 
 impl proxy::RouteResolver for WorkspaceRegistry {
-    fn resolve(&self, host: &str) -> Option<u16> {
-        self.resolve_route(host)
+    fn resolve(&self, host: &str) -> Option<proxy::Backend> {
+        self.resolve_route(host).map(|port| proxy::Backend {
+            host: "127.0.0.1".to_string(),
+            port,
+        })
     }
 }
 
 impl dns::ZoneSource for WorkspaceRegistry {
-    fn active_wildcard_zones(&self) -> Vec<String> {
-        self.active_wildcard_suffixes()
+    fn recognizes(&self, qname: &str) -> bool {
+        dns::in_zone(qname)
+            || self
+                .active_wildcard_suffixes()
+                .iter()
+                .any(|z| dns::matches_zone(qname, z))
     }
 }
 
@@ -1068,7 +1076,12 @@ impl DaemonControl {
             .local_addr()
             .context("DNS socket has no local address")?
             .port();
-        let dns_task = tokio::spawn(dns::serve(dns_socket, self.registry.clone()));
+        let dns_task = tokio::spawn(dns::serve(
+            dns_socket,
+            self.registry.clone(),
+            std::net::Ipv4Addr::LOCALHOST,
+            None,
+        ));
         dns::install_os_resolver_config(dns_port, &self.registry.active_wildcard_suffixes())?;
 
         let http_listener = proxy::bind_http().await?;
@@ -1303,6 +1316,27 @@ pub async fn run_control_api() -> Result<()> {
     tokio::task::spawn_blocking(move || ca::install_macos_trust(&cert_path))
         .await
         .context("CA trust install task panicked")??;
+    // `cert.pem`/`bundle.pem` under the same dir: the whole mechanism by
+    // which a container trusts fghj's zone, via a plain `volumes:` mount in
+    // its own `.fghj.yaml` — see `ca::refresh_trust_files`. The CA itself
+    // never rotates at runtime, so this only needs to run once here, not on
+    // a periodic reconciler.
+    ca::refresh_trust_files(&ca_dir(), &ca).context("failed to refresh CA trust files")?;
+
+    // Best-effort and non-blocking: not every workspace ends up starting a
+    // run before `fghjd` itself might need to restart, so a slow/failed
+    // build here (first build compiles the whole crate, and needs crates.io
+    // reachable) shouldn't hold up `fghjd` starting or fail it outright — a
+    // run that actually needs its sidecar will surface a real error from
+    // `RunRegistry::ensure_sidecar`'s own call to this same function.
+    {
+        let docker = docker.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::sidecar_image::ensure_built(&docker).await {
+                eprintln!("fghjd: failed to pre-build the sidecar proxy image: {e:#}");
+            }
+        });
+    }
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());
 

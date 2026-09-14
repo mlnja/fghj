@@ -13,6 +13,28 @@ any wildcarded suffix a running service has claimed (see
 [Wildcarding an alias](/reference/fghj-yaml/#wildcarding-an-alias)),
 without touching resolution for anything else on the machine.
 
+## Two zones, two resolvers, one wire implementation
+
+Every node gets two derived domains (see [Node identity &
+domains](/concepts/node-identity-and-domains/) for `derive_domain`'s
+formula): `*.fghj.internal` — HTTP(S)-canonical, always answered with
+`127.0.0.1` — and `*.fghj.raw.internal` — raw/direct, resolved via Docker's
+own native per-network DNS straight to the real container's IP, never
+answered by `fghjd` at all. This page covers the `fghj.internal` server
+described below, which is what the host's OS resolver is wired into.
+
+Inside a run's own docker network, a second instance of the same DNS wire
+implementation runs in that run's sidecar container
+(see [In-network TLS proxy sidecar](/concepts/sidecar/)) — same
+`parse_query`/`build_response` code, different answer and different
+"is this mine?" rule: it answers `*.fghj.internal` (and any active alias)
+with its own container IP instead of `127.0.0.1`, and forwards anything
+else — including every `*.fghj.raw.internal` query — verbatim to Docker's
+embedded resolver at `127.0.0.11:53`. Every node in the run points its
+`--dns` at the sidecar first, so this is fully automatic: no
+`/etc/resolver` file, no OS integration, just an ordinary container DNS
+setting.
+
 ## A hand-rolled server, on purpose
 
 `fghjd` implements the DNS wire format directly rather than pulling in a
@@ -25,8 +47,12 @@ starting or stopping. The answer is always
 the same (`127.0.0.1`, with a short 5-second TTL so a container restart's
 new route is picked up quickly instead of being cached stale on the
 client), and every in-zone query gets that answer while everything
-out-of-zone gets NXDOMAIN. The "is this name ours?" check is a single
-shared implementation, reused by the TLS proxy's certificate resolver (see
+out-of-zone gets NXDOMAIN. The "is this name ours?" check is exposed as a
+`ZoneSource` trait (`recognizes(qname) -> bool`) so the wire-format code
+itself doesn't need to know what "ours" means — the host server's impl
+wraps `fghj.internal` plus active wildcard suffixes; the sidecar's wraps
+its own polled route table instead (see below). The host's own zone rule is
+also reused directly by the TLS proxy's certificate resolver (see
 [Local CA & TLS proxy](/concepts/local-ca-and-tls-proxy/)) so both
 subsystems can never disagree about what's in-zone.
 

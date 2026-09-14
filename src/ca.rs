@@ -87,6 +87,63 @@ pub fn ca_cert_path(dir: &Path) -> PathBuf {
     dir.join(CA_CERT_FILE)
 }
 
+/// Path to the CA private key PEM `ensure_ca` persists under `dir` —
+/// exposed so callers (e.g. the sidecar container's bind-mount setup in
+/// `runs.rs`) can name the key file without reaching into `ca.rs` internals.
+pub fn ca_key_path(dir: &Path) -> PathBuf {
+    dir.join(CA_KEY_FILE)
+}
+
+const TRUST_CERT_FILE: &str = "cert.pem";
+const TRUST_BUNDLE_FILE: &str = "bundle.pem";
+
+/// Writes two world-readable, key-free files into `dir`, alongside the CA's
+/// own (root-only-readable-key) material: `cert.pem` (just fghj's CA cert)
+/// and `bundle.pem` (that same cert merged with this host's real root CA
+/// store — a drop-in replacement for a container's own system trust file).
+/// This is the entire feature surface for trusting fghj's zone from a
+/// container: no `.fghj.yaml` schema of its own, just two stable paths a
+/// workspace mounts itself via the existing generic `volumes:` mechanism.
+///
+/// Deliberately a separate step from `ensure_ca`, not folded into it: the
+/// sidecar's own `ensure_ca` call (`fghj-sidecar.rs`) runs against a `:ro`
+/// bind mount of this same directory, and would fail if `ensure_ca` itself
+/// tried to write these back into it. Callers that own a writable `dir`
+/// (currently just `daemon::run_control_api`) call this explicitly instead.
+pub fn refresh_trust_files(dir: &Path, ca: &LoadedCa) -> Result<()> {
+    write_world_readable(&dir.join(TRUST_CERT_FILE), ca.cert_pem.as_bytes())?;
+
+    let mut bundle = String::new();
+    for der in native_root_certs() {
+        let pem = pem::Pem::new("CERTIFICATE", der.to_vec());
+        bundle.push_str(&pem::encode_config(
+            &pem,
+            pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF),
+        ));
+    }
+    bundle.push_str(&ca.cert_pem);
+    write_world_readable(&dir.join(TRUST_BUNDLE_FILE), bundle.as_bytes())?;
+
+    Ok(())
+}
+
+/// This host's real root CA store (macOS Keychain / Linux system bundle /
+/// ...). Best-effort by design: `rustls-native-certs` documents that a
+/// handful of unparsable OS entries is normal, and even a wholly empty
+/// result (e.g. a minimal container with no system store at all) should
+/// still leave `bundle.pem` usable — just equivalent to `cert.pem` alone —
+/// rather than failing the whole refresh.
+fn native_root_certs() -> Vec<CertificateDer<'static>> {
+    rustls_native_certs::load_native_certs().certs
+}
+
+fn write_world_readable(path: &Path, contents: &[u8]) -> Result<()> {
+    fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o644))
+        .with_context(|| format!("failed to set permissions on {}", path.display()))?;
+    Ok(())
+}
+
 fn load_ca(cert_path: &Path, key_path: &Path) -> Result<LoadedCa> {
     let cert_pem = fs::read_to_string(cert_path)
         .with_context(|| format!("failed to read {}", cert_path.display()))?;
@@ -330,8 +387,11 @@ mod tests {
     struct StaticRoutes(std::collections::HashMap<&'static str, u16>);
 
     impl proxy::RouteResolver for StaticRoutes {
-        fn resolve(&self, host: &str) -> Option<u16> {
-            self.0.get(host).copied()
+        fn resolve(&self, host: &str) -> Option<proxy::Backend> {
+            self.0.get(host).copied().map(|port| proxy::Backend {
+                host: "127.0.0.1".to_string(),
+                port,
+            })
         }
     }
 
@@ -351,6 +411,40 @@ mod tests {
         // Second call must load the same CA rather than regenerating it.
         let second = ensure_ca(&dir).unwrap();
         assert_eq!(first.cert_pem, second.cert_pem);
+    }
+
+    #[test]
+    fn refresh_trust_files_writes_a_bare_cert_and_a_merged_bundle_with_no_key_material() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ca = generate_ca_for_tests();
+
+        refresh_trust_files(tmp.path(), &ca).unwrap();
+
+        let cert = fs::read_to_string(tmp.path().join(TRUST_CERT_FILE)).unwrap();
+        assert_eq!(cert, ca.cert_pem);
+        assert!(
+            !cert.contains("PRIVATE KEY"),
+            "cert.pem must never contain key material"
+        );
+
+        let bundle = fs::read_to_string(tmp.path().join(TRUST_BUNDLE_FILE)).unwrap();
+        assert!(
+            bundle.ends_with(&ca.cert_pem),
+            "fghj's own CA cert must be present (and last) in the merged bundle"
+        );
+        assert!(
+            !bundle.contains("PRIVATE KEY"),
+            "bundle.pem must never contain key material"
+        );
+
+        for path in [TRUST_CERT_FILE, TRUST_BUNDLE_FILE] {
+            let mode = fs::metadata(tmp.path().join(path))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o644, "{path} must be world-readable");
+        }
     }
 
     #[test]

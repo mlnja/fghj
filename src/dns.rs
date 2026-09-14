@@ -1,7 +1,8 @@
 use std::fs;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::net::UdpSocket;
@@ -16,8 +17,10 @@ const ZONE_SUFFIX: &str = ".fghj.internal";
 /// Every workspace runs on one machine, so every `*.fghj.internal` name
 /// resolves to the same place regardless of which service it names — the
 /// TLS reverse proxy (`proxy.rs`, SPEC.md Subsystem C) is what routes by name
-/// once it terminates on this address.
-const ANSWER: Ipv4Addr = Ipv4Addr::LOCALHOST;
+/// once it terminates on this address. The host server always answers with
+/// this; the in-network sidecar (`fghj-sidecar.rs`) answers with its own
+/// discovered IP instead — see `serve`'s `answer_ip` parameter.
+pub const ANSWER: Ipv4Addr = Ipv4Addr::LOCALHOST;
 
 /// Short TTL: this is a dev-loop tool, not a public zone, so answers should
 /// never be cached long enough to survive a `fghjd` restart onto a different
@@ -38,18 +41,19 @@ pub(crate) fn in_zone(qname: &str) -> bool {
 /// it — the same apex-or-subdomain rule `in_zone` hardcodes for the one
 /// fixed `ZONE`, generalized so it can also be applied to a user-declared
 /// `#Service.wildcard_hosts` suffix at query time.
-fn matches_zone(qname: &str, zone: &str) -> bool {
+pub(crate) fn matches_zone(qname: &str, zone: &str) -> bool {
     qname == zone || qname.ends_with(&format!(".{zone}"))
 }
 
-/// Supplies the set of currently-active `wildcard_hosts` suffixes (one per
-/// running container that declared any) so the DNS server and the OS
-/// resolver-file sync can answer for them without either needing to know
-/// about `daemon::WorkspaceRegistry` directly. Implemented by
-/// `WorkspaceRegistry` in `daemon.rs`, backed by
-/// `WorkspaceRegistry::active_wildcard_suffixes`.
+/// Whether a DNS server (`serve`) should claim authority for a query name —
+/// the general "is this mine to answer" hook. Implemented by
+/// `WorkspaceRegistry` in `daemon.rs` (the host server: `in_zone(qname)` or
+/// an active `wildcard_hosts` suffix) and by `FileRoutes` in
+/// `fghj-sidecar.rs` (the in-network sidecar: anything already in its
+/// polled route table) — one server, two entirely different notions of
+/// "recognized", both expressed the same way.
 pub trait ZoneSource: Send + Sync {
-    fn active_wildcard_zones(&self) -> Vec<String>;
+    fn recognizes(&self, qname: &str) -> bool;
 }
 
 /// IANA reserved special-use TLDs (RFC 2606 / 6762) — never delegated on the
@@ -146,18 +150,14 @@ fn parse_query(buf: &[u8]) -> Option<Query> {
     })
 }
 
-/// Builds a response for `query`. Names inside the `fghj.internal` zone, or
-/// inside any currently-active `extra_zones` suffix (a running container's
-/// declared `wildcard_hosts`), always get an authoritative NOERROR — with an
-/// A answer of 127.0.0.1 if the question was actually an `A`/`IN` lookup, or
-/// a bare NOERROR with zero answers otherwise (the standard way to say
-/// "this name exists, just not with a record of that type"). Anything
-/// outside all of those zones gets NXDOMAIN, non-authoritatively — this
-/// server was never asked to speak for it.
-fn build_response(query: &Query, extra_zones: &[String]) -> Vec<u8> {
-    let qname_lower = query.qname.to_ascii_lowercase();
-    let zone_hit =
-        in_zone(&qname_lower) || extra_zones.iter().any(|z| matches_zone(&qname_lower, z));
+/// Builds a response for `query`, given whether `zone_hit` (the caller
+/// already consulted a `ZoneSource`) — a recognized name always gets an
+/// authoritative NOERROR, with an A answer of `answer_ip` if the question
+/// was actually an `A`/`IN` lookup, or a bare NOERROR with zero answers
+/// otherwise (the standard way to say "this name exists, just not with a
+/// record of that type"). An unrecognized name gets NXDOMAIN,
+/// non-authoritatively — this server was never asked to speak for it.
+fn build_response(query: &Query, answer_ip: Ipv4Addr, zone_hit: bool) -> Vec<u8> {
     let answer_hit = zone_hit && query.qtype == TYPE_A && query.qclass == CLASS_IN;
 
     // Opcode 0 is a standard query, the only kind this server answers.
@@ -191,10 +191,44 @@ fn build_response(query: &Query, extra_zones: &[String]) -> Vec<u8> {
         resp.extend(CLASS_IN.to_be_bytes());
         resp.extend(ANSWER_TTL.to_be_bytes());
         resp.extend(4u16.to_be_bytes()); // RDLENGTH
-        resp.extend(ANSWER.octets());
+        resp.extend(answer_ip.octets());
     }
 
     resp
+}
+
+/// Forwards a query this server doesn't recognize verbatim to `upstream`
+/// (Docker's own embedded resolver, in the sidecar's case) over a fresh UDP
+/// socket, and relays whatever comes back to `src` byte-for-byte — pure
+/// passthrough, no re-parsing needed since the reply's transaction ID and
+/// question section already match what the original client sent. Silently
+/// drops the query if `upstream` doesn't answer within `FORWARD_TIMEOUT`,
+/// same as any other DNS server would leave the client to retry or give up.
+async fn forward_to_upstream(
+    query_bytes: &[u8],
+    upstream: SocketAddr,
+    src: SocketAddr,
+    socket: &UdpSocket,
+) {
+    const FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
+
+    let Ok(upstream_socket) = UdpSocket::bind(("0.0.0.0", 0)).await else {
+        return;
+    };
+    if upstream_socket
+        .send_to(query_bytes, upstream)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut buf = [0u8; 512];
+    let Ok(Ok((len, _))) =
+        tokio::time::timeout(FORWARD_TIMEOUT, upstream_socket.recv_from(&mut buf)).await
+    else {
+        return;
+    };
+    let _ = socket.send_to(&buf[..len], src).await;
 }
 
 /// Binds the DNS listening socket on an OS-assigned ephemeral port, rather
@@ -212,13 +246,26 @@ pub async fn bind() -> Result<UdpSocket> {
 
 /// Serves DNS queries on `socket` forever. Malformed packets (see
 /// `parse_query`) are silently dropped rather than answered — UDP callers
-/// already have to handle no response as "try again or give up". `zones`'
-/// active wildcard suffixes are re-fetched fresh on every query (cheap at
-/// this server's query volume) so a suffix starts/stops answering within one
-/// query of its owning container starting/stopping, with no restart needed.
-pub async fn serve(socket: UdpSocket, zones: Arc<dyn ZoneSource>) {
+/// already have to handle no response as "try again or give up". `zones` is
+/// re-consulted fresh on every query (cheap at this server's query volume)
+/// so a name starts/stops answering within one query of whatever backs
+/// `zones.recognizes` changing, with no restart needed. A recognized name is
+/// always answered directly with `answer_ip`; an unrecognized one is
+/// forwarded verbatim to `upstream` if set (the sidecar's use case — Docker's
+/// embedded resolver at `127.0.0.11:53`), or answered NXDOMAIN directly if
+/// `upstream` is `None` (the host's use case — the OS never sends this
+/// server an out-of-zone query to begin with, thanks to
+/// `install_os_resolver_config`'s per-domain `/etc/resolver` scoping).
+pub async fn serve(
+    socket: UdpSocket,
+    zones: Arc<dyn ZoneSource>,
+    answer_ip: Ipv4Addr,
+    upstream: Option<SocketAddr>,
+) {
     let port = socket.local_addr().map(|a| a.port()).unwrap_or(0);
-    println!("fghjd: DNS server listening on 127.0.0.1:{port}, resolving *.{ZONE} to {ANSWER}");
+    println!(
+        "fghjd: DNS server listening on 127.0.0.1:{port}, resolving recognized names to {answer_ip}"
+    );
     let mut buf = [0u8; 512]; // classic DNS-over-UDP message limit; plenty for single-question lookups
     loop {
         let (len, src) = match socket.recv_from(&mut buf).await {
@@ -231,7 +278,13 @@ pub async fn serve(socket: UdpSocket, zones: Arc<dyn ZoneSource>) {
         let Some(query) = parse_query(&buf[..len]) else {
             continue;
         };
-        let response = build_response(&query, &zones.active_wildcard_zones());
+        let qname_lower = query.qname.to_ascii_lowercase();
+        let zone_hit = zones.recognizes(&qname_lower);
+        if !zone_hit && let Some(upstream) = upstream {
+            forward_to_upstream(&buf[..len], upstream, src, &socket).await;
+            continue;
+        }
+        let response = build_response(&query, answer_ip, zone_hit);
         if let Err(e) = socket.send_to(&response, src).await {
             eprintln!("fghjd: DNS send error to {src}: {e}");
         }
@@ -408,7 +461,7 @@ mod tests {
         let query = parse_query(&raw).expect("valid query parses");
         assert_eq!(query.qname, "cart.fghj.internal");
 
-        let resp = build_response(&query, &[]);
+        let resp = build_response(&query, ANSWER, true);
         let (flags0, flags1) = header_flags(&resp);
         assert_eq!(flags0 & 0x80, 0x80, "QR bit must be set on a response");
         assert_eq!(flags0 & 0x04, 0x04, "AA bit must be set for our own zone");
@@ -422,7 +475,7 @@ mod tests {
     fn apex_domain_also_resolves() {
         let raw = encode_query(1, "fghj.internal", TYPE_A);
         let query = parse_query(&raw).unwrap();
-        let resp = build_response(&query, &[]);
+        let resp = build_response(&query, ANSWER, true);
         let ancount = u16::from_be_bytes([resp[6], resp[7]]);
         assert_eq!(ancount, 1);
     }
@@ -432,7 +485,7 @@ mod tests {
         const TYPE_AAAA: u16 = 28;
         let raw = encode_query(2, "cart.fghj.internal", TYPE_AAAA);
         let query = parse_query(&raw).unwrap();
-        let resp = build_response(&query, &[]);
+        let resp = build_response(&query, ANSWER, true);
         let (_, flags1) = header_flags(&resp);
         assert_eq!(
             flags1 & 0x0F,
@@ -447,7 +500,7 @@ mod tests {
     fn query_outside_zone_is_nxdomain() {
         let raw = encode_query(3, "example.com", TYPE_A);
         let query = parse_query(&raw).unwrap();
-        let resp = build_response(&query, &[]);
+        let resp = build_response(&query, ANSWER, false);
         let (flags0, flags1) = header_flags(&resp);
         assert_eq!(
             flags0 & 0x04,
@@ -463,7 +516,7 @@ mod tests {
     fn response_echoes_request_id_and_question() {
         let raw = encode_query(0xBEEF, "auth.fghj.internal", TYPE_A);
         let query = parse_query(&raw).unwrap();
-        let resp = build_response(&query, &[]);
+        let resp = build_response(&query, ANSWER, true);
         assert_eq!(u16::from_be_bytes([resp[0], resp[1]]), 0xBEEF);
         assert_eq!(
             &resp[12..12 + query.question_bytes.len()],
@@ -500,8 +553,8 @@ mod tests {
     struct StaticZones(Vec<String>);
 
     impl ZoneSource for StaticZones {
-        fn active_wildcard_zones(&self) -> Vec<String> {
-            self.0.clone()
+        fn recognizes(&self, qname: &str) -> bool {
+            in_zone(qname) || self.0.iter().any(|z| matches_zone(qname, z))
         }
     }
 
@@ -513,7 +566,7 @@ mod tests {
     async fn serves_real_udp_queries_over_loopback() {
         let socket = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
         let server_addr = socket.local_addr().unwrap();
-        tokio::spawn(serve(socket, no_zones()));
+        tokio::spawn(serve(socket, no_zones(), ANSWER, None));
 
         let client = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
         let query = encode_query(0xABCD, "checkout.fghj.internal", TYPE_A);
@@ -535,12 +588,80 @@ mod tests {
         assert_eq!(&resp[resp.len() - 4..], &ANSWER.octets());
     }
 
+    /// A sidecar-style server answers with its own discovered IP, not always
+    /// `127.0.0.1` — `answer_ip` must actually be threaded through, not
+    /// hardcoded.
+    #[tokio::test]
+    async fn serve_answers_with_the_configured_answer_ip_not_always_localhost() {
+        let sidecar_ip = Ipv4Addr::new(172, 20, 0, 5);
+        let socket = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let server_addr = socket.local_addr().unwrap();
+        tokio::spawn(serve(socket, no_zones(), sidecar_ip, None));
+
+        let client = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let query = encode_query(0x1111, "checkout.fghj.internal", TYPE_A);
+        client.send_to(&query, server_addr).await.unwrap();
+
+        let mut buf = [0u8; 512];
+        let (len, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.recv_from(&mut buf),
+        )
+        .await
+        .expect("server should respond within 2s")
+        .unwrap();
+        let resp = &buf[..len];
+        assert_eq!(&resp[resp.len() - 4..], &sidecar_ip.octets());
+    }
+
+    /// The sidecar's forwarding behavior: a query outside `zones` gets
+    /// relayed byte-for-byte to `upstream`, and whatever `upstream` answers
+    /// gets relayed back to the original client verbatim.
+    #[tokio::test]
+    async fn serve_forwards_unrecognized_queries_to_upstream_verbatim() {
+        let fake_upstream = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_addr = fake_upstream.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (len, src) = fake_upstream.recv_from(&mut buf).await.unwrap();
+            // A canned "reply" — the point is only that these exact bytes
+            // come back to the original client unmodified, not that this is
+            // a well-formed DNS message.
+            let canned_reply = [buf[..len].to_vec(), vec![0xDE, 0xAD, 0xBE, 0xEF]].concat();
+            fake_upstream.send_to(&canned_reply, src).await.unwrap();
+        });
+
+        let socket = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let server_addr = socket.local_addr().unwrap();
+        tokio::spawn(serve(socket, no_zones(), ANSWER, Some(upstream_addr)));
+
+        let client = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let query = encode_query(0x2222, "some-plain-docker-service", TYPE_A);
+        client.send_to(&query, server_addr).await.unwrap();
+
+        let mut buf = [0u8; 512];
+        let (len, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.recv_from(&mut buf),
+        )
+        .await
+        .expect("forwarded reply should arrive within 2s")
+        .unwrap();
+        let resp = &buf[..len];
+        assert_eq!(
+            &resp[..query.len()],
+            &query[..],
+            "original query echoed back by the canned upstream reply"
+        );
+        assert_eq!(&resp[resp.len() - 4..], &[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
     #[test]
     fn a_query_under_an_active_wildcard_zone_resolves_to_localhost() {
         let raw = encode_query(5, "acme.myservice.local", TYPE_A);
         let query = parse_query(&raw).unwrap();
 
-        let resp = build_response(&query, &["myservice.local".to_string()]);
+        let resp = build_response(&query, ANSWER, true);
         let (flags0, flags1) = header_flags(&resp);
         assert_eq!(flags0 & 0x04, 0x04, "AA bit must be set for an active zone");
         assert_eq!(flags1 & 0x0F, 0, "RCODE must be NOERROR");
@@ -549,7 +670,7 @@ mod tests {
 
         // A name under a zone that isn't currently active must still be
         // NXDOMAIN — the set is consulted fresh per query, not cached.
-        let resp = build_response(&query, &[]);
+        let resp = build_response(&query, ANSWER, false);
         let (_, flags1) = header_flags(&resp);
         assert_eq!(flags1 & 0x0F, 3, "RCODE must be NXDOMAIN once inactive");
     }

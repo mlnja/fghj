@@ -165,20 +165,136 @@ idle — via `fghj daemon stop` or the process shutting down outright.
 Routing a hostname to a backend is decoupled from Docker behind a small
 one-method interface, so the proxy's own test suite can exercise real TLS
 handshakes and relaying against a plain in-memory map instead of needing
-live containers just to test routing logic. In production, that interface
-is backed by every wired workspace's active runs: it scans for a running
-container whose registered routes claim the requested hostname, and
-returns the host port Docker actually published that container's port on.
-Only running containers are considered, so a stopped container's stale
-route can't hand back a dead port.
+live containers just to test routing logic:
+
+```rust
+pub struct Backend {
+    pub host: String,
+    pub port: u16,
+}
+
+pub trait RouteResolver: Send + Sync {
+    fn resolve(&self, host: &str) -> Option<Backend>;
+}
+```
+
+Returning a full `Backend` (host *and* port), not just a port, is what lets
+the same trait and the same `proxy::serve_https`/`serve_http_redirect`
+logic back both the host-side proxy and the in-network sidecar proxy
+described below — the two differ only in what they resolve a hostname to.
+
+In production on the host, that interface is backed by every wired
+workspace's active runs: it scans for a running container whose registered
+routes claim the requested hostname, and returns `127.0.0.1` plus the host
+port Docker actually published that container's port on. Only running
+containers are considered, so a stopped container's stale route can't hand
+back a dead port.
 
 Where those routes come from, and how they're derived and persisted, is
 covered in [Run lifecycle & registry](/concepts/run-lifecycle-and-registry/);
 how a route's domain itself is derived is covered in
 [Node identity & domains](/concepts/node-identity-and-domains/).
 
+## Reaching the proxy from inside a run's own network
+
+The host-side proxy above is bound to `127.0.0.1`, reachable from the host
+but not from inside a run's own docker network. A service can need the
+*same* HTTPS hostname to work both for its own internal calls and for the
+URLs it hands out to external consumers (a presigned S3 URL is the
+motivating case) — only the host-side proxy has a TLS listener behind that
+name, and only the host can reach it, so plain in-network DNS resolving
+straight to a sibling's IP would bypass the proxy (and TLS) entirely for
+that case.
+
+`fghjd` solves this with one dedicated sidecar container per run, attached
+to that run's own docker network, running the exact same `RouteResolver`
++ `serve_https`/`serve_http_redirect` logic as the host-side proxy — a
+separate `fghj-sidecar` binary, not a mode flag on `fghjd`, since it needs
+the CA's private key mounted in and otherwise deserves the smallest
+possible attack surface. It doesn't talk to `fghjd` over the network at
+all: `fghjd` writes a small JSON route table to a bind-mounted file every
+time a run's containers or routes change, and the sidecar polls that
+file's mtime once a second and reloads it — no dependency on any
+particular container runtime's network-event or filesystem-event
+propagation, which is exactly the source of the platform-specific
+workarounds this design replaces. Each route entry names the owning
+sibling container's own `fghj.raw.internal` domain/alias as the connect
+target, so Docker's own per-network DNS resolves it for the sidecar
+exactly like it would for any other container — no separate IP
+bookkeeping needed.
+
+Reaching this path needs no per-consumer setup: the sidecar also runs this
+run's DNS authority for the whole network (see [Split
+DNS](/concepts/split-dns/)), and every node's container points its `--dns`
+there first. Every `*.fghj.internal` name and active alias resolves to the
+sidecar's own IP automatically, from inside the network, with the same
+hostname a browser outside it would use — no `extra_hosts` entry, no
+opt-in. One sidecar per run (never shared across runs or workspaces) keeps
+the same network isolation every other part of a run's docker network
+already has.
+
+## Trust files for containers
+
+Neither the host-side proxy nor the sidecar injects CA trust into any
+container — a container that dials an in-zone name over HTTPS still needs
+to be told to trust fghj's local CA some other way. `fghjd` keeps this as
+low-friction as it can: alongside the real CA material (`ca-cert.pem` and
+the root-only, `0600` `ca-key.pem`), `ca::refresh_trust_files` maintains
+two more files in that same `/var/lib/fghjd/ca/` directory, refreshed on
+every `fghjd` start —
+
+- **`cert.pem`** — just fghj's CA cert, PEM-encoded, no key material.
+- **`bundle.pem`** — that same cert merged with this host's own real root
+  CA store (via [`rustls-native-certs`](https://docs.rs/rustls-native-certs)),
+  so it also works as a straight drop-in replacement for a container's
+  *entire* system trust file — real CAs stay trusted too, not just fghj's.
+
+Both files are world-readable and contain no private key, so any
+workspace can mount either one wherever it needs, without any dedicated
+`.fghj.yaml` schema — the existing generic `volumes:` mechanism is enough:
+
+```yaml
+# for an image with a shell/package manager: mount cert.pem and point a
+# language-specific trust-store env var at it (NODE_EXTRA_CA_CERTS,
+# REQUESTS_CA_BUNDLE, SSL_CERT_FILE, ...)
+volumes:
+  - host: /var/lib/fghjd/ca/cert.pem
+    container: /usr/local/share/fghj-ca.pem
+    read_only: true
+```
+
+```yaml
+# for a scratch/distroless image with no shell: overlay bundle.pem
+# straight onto the runtime's system trust file
+volumes:
+  - host: /var/lib/fghjd/ca/bundle.pem
+    container: /etc/ssl/certs/ca-certificates.crt
+    read_only: true
+```
+
+`refresh_trust_files` is a separate step from generating/loading the CA,
+not folded into it, because the sidecar's own startup loads the CA against
+a `:ro` bind mount of this same directory (see above) and would fail if
+that shared code path tried to write back into it — only a caller that
+owns a writable copy of the directory (`daemon::run_control_api`, on the
+host) calls it. Since fghj's CA itself is essentially never regenerated in
+ordinary use (it's meant to survive indefinitely, precisely so you never
+have to re-approve trust — see [The local CA](#the-local-ca) above), these
+two files don't need any periodic reconciliation either; a one-time
+refresh at daemon startup keeps them correct. See the [HTTP vs. raw
+guide](/guides/networking-http-vs-raw/#trusting-fghjs-ca-inside-a-container)
+for full worked examples, including the presigned-URL case that motivated
+this.
+
 ## Limitations
 
 Non-macOS trust-store installation isn't implemented yet — Linux would
 need `update-ca-certificates` or equivalent, Windows the platform CA
 store.
+
+Making every node's DNS resolution depend on the sidecar being up is a
+larger blast radius than before this split existed, when a node's own
+container needed nothing beyond Docker's own embedded resolver. Mitigated,
+not eliminated: every node's `--dns` list falls back to Docker's embedded
+resolver (`127.0.0.11`) second, so it only ever kicks in if the sidecar is
+genuinely unreachable (a timeout), not on every ordinary query.

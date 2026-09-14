@@ -1193,6 +1193,7 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
             &node.domain_scope,
             &workspace_name,
             crate::runs::DEFAULT_RUN_ID,
+            crate::runs::DomainZone::Http,
         );
     }
 

@@ -259,6 +259,12 @@ pub struct RunOpts<'a> {
     pub privileged: bool,
     /// Pre-formatted `HostConfig.extra_hosts` entries (`"hostname:ip"`).
     pub extra_hosts: &'a [String],
+    /// `HostConfig.dns` — resolver IPs to use instead of Docker's default,
+    /// tried in order. Every node gets the run's sidecar first (authoritative
+    /// for the `fghj.internal` zone and any active alias) and Docker's own
+    /// embedded resolver (`127.0.0.11`) second as a fallback. Empty leaves
+    /// Docker's default (embedded resolver only) untouched.
+    pub dns: &'a [String],
     pub healthcheck: Option<&'a Healthcheck>,
     /// Pins the image's platform for `create_container`'s platform-aware
     /// image lookup (`os[/arch[/variant]]`, e.g. "linux/amd64"). fghj doesn't
@@ -355,6 +361,11 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
                 None
             } else {
                 Some(opts.extra_hosts.to_vec())
+            },
+            dns: if opts.dns.is_empty() {
+                None
+            } else {
+                Some(opts.dns.to_vec())
             },
             ..Default::default()
         }),
@@ -459,6 +470,42 @@ pub async fn inspect_status(
         status,
         published_port,
     }))
+}
+
+/// A container's own IP address on one specific docker network — nothing
+/// today exposes this; `RunOpts.aliases`/Docker's embedded per-network DNS
+/// covers every existing need to *reach* a container by name, but the
+/// sidecar-proxy `extra_hosts` sentinel (see `runs.rs`'s
+/// `rewrite_extra_hosts_sentinel`) needs the sidecar's raw IP to hand to
+/// *other* containers via `HostConfig.extra_hosts`, which takes literal IPs,
+/// not names. Returns `Ok(None)` if the container doesn't exist or isn't
+/// attached to `network` (same not-found-is-fine convention as
+/// `inspect_status`).
+pub async fn inspect_network_ip(
+    docker: &Docker,
+    name: &str,
+    network: &str,
+) -> Result<Option<String>> {
+    let inspected = match docker
+        .inspect_container(
+            name,
+            Some(InspectContainerOptionsBuilder::default().build()),
+        )
+        .await
+    {
+        Ok(entry) => entry,
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => return Ok(None),
+        Err(e) => return Err(e).context("docker inspect_container failed"),
+    };
+
+    Ok(inspected
+        .network_settings
+        .and_then(|n| n.networks)
+        .and_then(|mut networks| networks.remove(network))
+        .and_then(|endpoint| endpoint.ip_address)
+        .filter(|ip| !ip.is_empty()))
 }
 
 /// Inspects a container's declared `HEALTHCHECK` status ("starting",

@@ -11,14 +11,24 @@ use tokio_rustls::server::TlsStream;
 
 use crate::{ca, dns};
 
-/// Resolves an in-zone hostname that isn't the zone apex to the `127.0.0.1`
-/// port of the running container it should be proxied to, if any. Kept as a
-/// trait (implemented by `daemon::WorkspaceRegistry::resolve_route` in
-/// production) rather than a concrete dependency so this module doesn't need
-/// to know anything about workspaces, runs, or Docker — and so tests can
-/// exercise dispatch with a plain in-memory map instead of real containers.
+/// Where a resolved hostname should actually be relayed to. Usually
+/// `127.0.0.1` (the host-published port of a running container, or the
+/// control API) — but a `RouteResolver` backing an in-network sidecar proxy
+/// resolves to a sibling container's own docker-network address instead, so
+/// this carries a full host, not just a port.
+pub struct Backend {
+    pub host: String,
+    pub port: u16,
+}
+
+/// Resolves an in-zone hostname that isn't the zone apex to the backend it
+/// should be proxied to, if any. Kept as a trait (implemented by
+/// `daemon::WorkspaceRegistry::resolve_route` in production) rather than a
+/// concrete dependency so this module doesn't need to know anything about
+/// workspaces, runs, or Docker — and so tests can exercise dispatch with a
+/// plain in-memory map instead of real containers.
 pub trait RouteResolver: Send + Sync {
-    fn resolve(&self, host: &str) -> Option<u16>;
+    fn resolve(&self, host: &str) -> Option<Backend>;
 }
 
 /// `fghj` occupies these unconditionally while `fghjd` runs — unlike the
@@ -130,7 +140,7 @@ async fn handle_http_connection(stream: TcpStream, routes: Arc<dyn RouteResolver
         .flatten();
 
     match plain_backend {
-        Some(port) => relay_to_backend(&mut reader, port, &prefix).await,
+        Some(backend) => relay_to_backend(&mut reader, &backend, &prefix).await,
         None => {
             let response = build_redirect_response(&host, &path);
             let mut stream = reader.into_inner();
@@ -243,15 +253,18 @@ async fn handle_https_connection(
         return;
     };
 
-    let backend_port = if name == dns::ZONE {
-        Some(control_port)
+    let backend = if name == dns::ZONE {
+        Some(Backend {
+            host: "127.0.0.1".to_string(),
+            port: control_port,
+        })
     } else {
         routes.resolve(&name)
     };
 
-    match backend_port {
-        Some(port) => {
-            if let Err(e) = relay_to_backend(&mut tls_stream, port, &[]).await {
+    match backend {
+        Some(backend) => {
+            if let Err(e) = relay_to_backend(&mut tls_stream, &backend, &[]).await {
                 eprintln!("fghjd: backend proxy error ({name}): {e}");
             }
         }
@@ -266,24 +279,28 @@ async fn handle_https_connection(
     }
 }
 
-/// Relays `client_stream` to whatever is listening on `127.0.0.1:port` — the
-/// control API for the zone apex, a running container's published port for
-/// everything else `routes` recognizes over HTTPS, or (via
-/// `handle_http_connection`) a non-reserved `#AdditionalHost` over plain
-/// HTTP. Generic over the client-side stream type so both the TLS path
-/// (`TlsStream<TcpStream>`) and the plain-HTTP path
+/// Relays `client_stream` to `backend` — usually `127.0.0.1:port` (the
+/// control API for the zone apex, or a running container's published port),
+/// but a sidecar's `RouteResolver` may resolve to a sibling container's own
+/// docker-network address instead. Generic over the client-side stream type
+/// so both the TLS path (`TlsStream<TcpStream>`) and the plain-HTTP path
 /// (`BufReader<TcpStream>`, which still needs to write to the client) share
 /// one implementation. `prefix` is written to the backend before the
 /// bidirectional copy starts — empty for HTTPS, and for HTTP the bytes
 /// `handle_http_connection` already consumed off the socket to read `Host`,
 /// which the backend still needs to see.
-async fn relay_to_backend<S>(client_stream: &mut S, port: u16, prefix: &[u8]) -> Result<()>
+async fn relay_to_backend<S>(client_stream: &mut S, backend: &Backend, prefix: &[u8]) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let mut backend = TcpStream::connect(("127.0.0.1", port))
+    let mut backend = TcpStream::connect((backend.host.as_str(), backend.port))
         .await
-        .with_context(|| format!("failed to connect to backend on 127.0.0.1:{port}"))?;
+        .with_context(|| {
+            format!(
+                "failed to connect to backend on {}:{}",
+                backend.host, backend.port
+            )
+        })?;
     if !prefix.is_empty() {
         backend
             .write_all(prefix)
@@ -372,12 +389,16 @@ mod tests {
     }
 
     /// A `RouteResolver` backed by a plain in-memory map, so dispatch logic
-    /// can be exercised without a real workspace/run/Docker stack.
+    /// can be exercised without a real workspace/run/Docker stack. Ports are
+    /// always resolved against `127.0.0.1`, matching the host-side proxy.
     struct StaticRoutes(std::collections::HashMap<String, u16>);
 
     impl RouteResolver for StaticRoutes {
-        fn resolve(&self, host: &str) -> Option<u16> {
-            self.0.get(host).copied()
+        fn resolve(&self, host: &str) -> Option<Backend> {
+            self.0.get(host).copied().map(|port| Backend {
+                host: "127.0.0.1".to_string(),
+                port,
+            })
         }
     }
 
@@ -621,7 +642,15 @@ mod tests {
             drop(sock);
         });
 
-        let result = relay_to_backend(&mut server_tls, backend_port, &[]).await;
+        let result = relay_to_backend(
+            &mut server_tls,
+            &Backend {
+                host: "127.0.0.1".to_string(),
+                port: backend_port,
+            },
+            &[],
+        )
+        .await;
         assert!(
             result.is_ok(),
             "a client-side reset must not be reported as a relay failure: {result:?}"
@@ -651,10 +680,52 @@ mod tests {
             drop(sock);
         });
 
-        let result = relay_to_backend(&mut server_tls, backend_port, &[]).await;
+        let result = relay_to_backend(
+            &mut server_tls,
+            &Backend {
+                host: "127.0.0.1".to_string(),
+                port: backend_port,
+            },
+            &[],
+        )
+        .await;
         assert!(
             result.is_err(),
             "a backend-side reset must be reported as a relay failure, not silently swallowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_to_backend_dials_the_host_named_in_backend_not_a_hardcoded_loopback() {
+        let ca = ca::generate_ca_for_tests();
+        let ca_der = ca.cert_der_for_tests();
+        let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider(), no_routes()));
+        let (mut server_tls, client_tls) = handshake_pair(resolver, ca_der).await;
+        drop(client_tls);
+
+        let backend = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let backend_port = backend.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (sock, _) = backend.accept().await.unwrap();
+            drop(sock);
+        });
+
+        // "localhost" (not the literal "127.0.0.1") only succeeds if
+        // `relay_to_backend` actually dials `backend.host` — a sidecar
+        // resolving to a sibling container's own hostname/IP depends on
+        // exactly this, not a hardcoded loopback address.
+        let result = relay_to_backend(
+            &mut server_tls,
+            &Backend {
+                host: "localhost".to_string(),
+                port: backend_port,
+            },
+            &[],
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "relay_to_backend must connect to the host named in `Backend`: {result:?}"
         );
     }
 }

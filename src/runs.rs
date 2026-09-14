@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,64 +42,113 @@ pub struct RunSpec {
     pub flow: Option<String>,
 }
 
-/// Derives a node's canonical `*.fghj.internal` domain for a given run — the
+/// Which of the two zones a derived domain belongs to — see `dns.rs`'s
+/// module doc for the full split. `Http` is the proxy/SNI-dispatched,
+/// same-address-in-or-out zone (`fghj.internal`, unchanged from before this
+/// split existed); `Raw` is the new in-network-only zone
+/// (`fghj.raw.internal`) that resolves straight to a container's own IP via
+/// Docker's native per-network DNS, for callers that need a real port
+/// number raw TCP can't safely multiplex behind one shared address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DomainZone {
+    Http,
+    Raw,
+}
+
+impl DomainZone {
+    fn suffix(self) -> &'static str {
+        match self {
+            DomainZone::Http => "fghj.internal",
+            DomainZone::Raw => "fghj.raw.internal",
+        }
+    }
+}
+
+/// Derives a node's canonical domain in the given zone for a given run — the
 /// single definition `start_node` uses when actually launching a container,
 /// also called from `resolver::resolve_universe` (always with
-/// `DEFAULT_RUN_ID`) so `Node.domain` can carry a node's default-run address
-/// before any container for it has ever been started. Two nodes can never
-/// collide on the result: `node_id` is already the unique, leaf-first id
-/// (see `resolver::visit_local_service`/`visit_dependency`), and `run_id` is
-/// folded in for every run except the default one (see `start_node`'s own
-/// comment for why).
+/// `DEFAULT_RUN_ID` and `DomainZone::Http`) so `Node.domain` can carry a
+/// node's default-run address before any container for it has ever been
+/// started. Two nodes can never collide on the result: `node_id` is already
+/// the unique, leaf-first id (see `resolver::visit_local_service`/
+/// `visit_dependency`), and `run_id` is folded in for every run except the
+/// default one (see `start_node`'s own comment for why).
 pub fn derive_domain(
     node_id: &str,
     domain_scope: &str,
     workspace_name: &str,
     run_id: &str,
+    zone: DomainZone,
 ) -> String {
     let workspace = sanitize_label(workspace_name);
+    let suffix = zone.suffix();
     if domain_scope == "stable" || run_id == DEFAULT_RUN_ID {
-        format!("{node_id}.{workspace}.fghj.internal")
+        format!("{node_id}.{workspace}.{suffix}")
     } else {
-        format!("{node_id}.{run_id}.{workspace}.fghj.internal")
+        format!("{node_id}.{run_id}.{workspace}.{suffix}")
     }
 }
 
-/// Expands `${FGHJ_SERVICE_FQDN}` (this node's own derived domain) and
-/// `${FGHJ_SERVICE_FQDN:path}` (a sibling's domain — see `sibling_domain`
-/// for what `path` can look like) in a single `environment`/`env_file`
-/// value, so a CUE author can reference a `*.fghj.internal` address without
-/// hand-computing `derive_domain`'s formula into a literal string (the
-/// convention every hardcoded `*_HOST`/`*_URL` value in
-/// `aikido-core`/`aikifactory`'s `.fghj.yaml` followed before this
-/// existed). A manual scan rather than the `regex` crate (not otherwise a
-/// dependency) — the grammar is just those two forms, simple enough that a
-/// scanner is less code than pulling in a new crate. An unresolvable
-/// `:path` (no such sibling) or a token missing its closing `}` is left
-/// untouched in the output rather than erroring — a typo here shouldn't
-/// fail an entire run when the literal fallback is at least diagnosable in
-/// logs, the same tolerance `parse_env_file` extends to a malformed line.
+/// Expands `${FGHJ_SERVICE_FQDN}`/`${FGHJ_SERVICE_FQDN:path}` (this node's
+/// own, or a sibling's, `fghj.raw.internal` domain — see `sibling_domain`
+/// for what `path` can look like) and `${FGHJ_SERVICE_FQDN_HTTP}`/
+/// `${FGHJ_SERVICE_FQDN_HTTP:path}` (the `fghj.internal` — proxied — domain
+/// instead) in a single `environment`/`env_file` value, so a CUE author can
+/// reference a derived address without hand-computing `derive_domain`'s
+/// formula into a literal string (the convention every hardcoded
+/// `*_HOST`/`*_URL` value in `aikido-core`/`aikifactory`'s `.fghj.yaml`
+/// followed before this existed). The bare `FQDN` form resolves to the raw
+/// zone — direct container access — because that's what every real caller
+/// of this macro today actually needs (a database connection string, a raw
+/// S3 endpoint); `_HTTP` is the rare opt-in for a service's own *proxied*
+/// identity (e.g. a presigned URL meant to be handed to something outside
+/// the network). The longer `_HTTP` token is checked first so it's never
+/// mistaken for the shorter one plus a literal `_HTTP` suffix. A manual scan
+/// rather than the `regex` crate (not otherwise a dependency) — the grammar
+/// is just those forms, simple enough that a scanner is less code than
+/// pulling in a new crate. An unresolvable `:path` (no such sibling) or a
+/// token missing its closing `}` is left untouched in the output rather
+/// than erroring — a typo here shouldn't fail an entire run when the
+/// literal fallback is at least diagnosable in logs, the same tolerance
+/// `parse_env_file` extends to a malformed line.
 fn expand_service_fqdn_templates(
     value: &str,
     node: &Node,
-    own_domain: &str,
+    own_raw_domain: &str,
+    own_http_domain: &str,
     graph: &Graph,
     run_id: &str,
 ) -> String {
-    const TOKEN: &str = "${FGHJ_SERVICE_FQDN";
+    // `TOKEN_RAW` is a literal prefix of `TOKEN_HTTP`, so `rest.find`ing it
+    // always lands on the truly leftmost occurrence of either token — a
+    // standalone `_HTTP` search alone would miss the case where the
+    // leftmost token is actually the plain (raw) form, and searching both
+    // separately would need extra tie-breaking since they can share a start
+    // index. Whichever one `find` lands on, a cheap `starts_with` check at
+    // that position tells the two apart.
+    const TOKEN_HTTP: &str = "${FGHJ_SERVICE_FQDN_HTTP";
+    const TOKEN_RAW: &str = "${FGHJ_SERVICE_FQDN";
     let mut out = String::with_capacity(value.len());
     let mut rest = value;
-    while let Some(start) = rest.find(TOKEN) {
+    loop {
+        let Some(start) = rest.find(TOKEN_RAW) else {
+            break;
+        };
+        let (token_len, zone, own_domain) = if rest[start..].starts_with(TOKEN_HTTP) {
+            (TOKEN_HTTP.len(), DomainZone::Http, own_http_domain)
+        } else {
+            (TOKEN_RAW.len(), DomainZone::Raw, own_raw_domain)
+        };
         out.push_str(&rest[..start]);
         let Some(end_rel) = rest[start..].find('}') else {
             out.push_str(&rest[start..]);
             return out;
         };
         let end = start + end_rel;
-        let inner = &rest[start + TOKEN.len()..end]; // "" or ":name"
+        let inner = &rest[start + token_len..end]; // "" or ":name"
         let resolved = match inner.strip_prefix(':') {
             None => Some(own_domain.to_string()),
-            Some(name) => sibling_domain(node, name, graph, run_id),
+            Some(name) => sibling_domain(node, name, graph, run_id, zone),
         };
         match resolved {
             Some(domain) => out.push_str(&domain),
@@ -138,7 +188,13 @@ fn expand_service_fqdn_templates(
 /// suffix `derive_domain` appends). Fewer segments than the full id just
 /// means "match any id with this as a trailing-toward-the-root prefix" —
 /// as many as it takes to stop being ambiguous, no more.
-fn sibling_domain(node: &Node, path: &str, graph: &Graph, run_id: &str) -> Option<String> {
+fn sibling_domain(
+    node: &Node,
+    path: &str,
+    graph: &Graph,
+    run_id: &str,
+    zone: DomainZone,
+) -> Option<String> {
     let mut segments: Vec<&str> = path.split("::").collect();
     segments.reverse();
     let id_prefix = segments.join(".");
@@ -169,7 +225,113 @@ fn sibling_domain(node: &Node, path: &str, graph: &Graph, run_id: &str) -> Optio
         &sibling.domain_scope,
         &graph.workspace_name,
         run_id,
+        zone,
     ))
+}
+
+/// One entry in the route table `write_route_table` persists for a run's
+/// sidecar proxy to poll (see `src/bin/fghj-sidecar.rs`'s own
+/// field-name-matching `RouteFileEntry`, kept as a separate type so that
+/// binary doesn't need to depend on this module at all). Needs no raw
+/// IP/container-name derivation: `connect_host` is the container's
+/// `fghj.raw.internal` domain, a real Docker network alias (see
+/// `resolve_node_spec`'s `aliases`) that Docker's own embedded per-network
+/// DNS resolves for any container on the network, including the sidecar
+/// itself — the `fghj.internal` domain (`lookup`) is deliberately *not* a
+/// Docker alias on the node's own container anymore, since the sidecar
+/// itself is what needs to own that name's resolution.
+#[derive(Debug, PartialEq, Serialize)]
+struct RouteFileEntry {
+    lookup: String,
+    wildcard: bool,
+    connect_host: String,
+    connect_port: u16,
+}
+
+/// The pure part of `write_route_table` — every routable domain across
+/// `containers`, connecting via each container's own `raw_domain` (see
+/// `RouteFileEntry`'s doc comment for why). Split out from the actual file
+/// write so it can be unit-tested without touching `/var/lib/fghjd`, which
+/// is root-owned in production.
+fn route_file_entries(containers: &[ContainerInfo]) -> Vec<RouteFileEntry> {
+    containers
+        .iter()
+        .flat_map(|c| {
+            c.routes.iter().filter_map(move |r| {
+                let connect_port = r.container_port.split('/').next()?.parse().ok()?;
+                Some(RouteFileEntry {
+                    lookup: r.domain.clone(),
+                    wildcard: r.wildcard,
+                    connect_host: c.raw_domain.clone(),
+                    connect_port,
+                })
+            })
+        })
+        .collect()
+}
+
+fn sidecar_routes_dir(network: &str) -> PathBuf {
+    PathBuf::from("/var/lib/fghjd/runs").join(network)
+}
+
+fn sidecar_routes_path(network: &str) -> PathBuf {
+    sidecar_routes_dir(network).join("routes.json")
+}
+
+fn sidecar_ca_dir() -> PathBuf {
+    PathBuf::from("/var/lib/fghjd/sidecar-ca")
+}
+
+/// A world-readable copy of the CA cert+key, refreshed on every sidecar
+/// (re)creation, kept separate from the real `daemon::ca_dir()` — `fghjd`
+/// runs as root and the real `ca-key.pem` is deliberately `0600`
+/// root-owned, but Docker Desktop/OrbStack's bind-mount sharing on macOS is
+/// brokered by a process running as the logged-in user, not root: even a
+/// container claiming to run as `root` can't read a `0600` root-owned file
+/// through that bridge, since the permission check happens on the host side
+/// against the real user, before the request ever reaches the container's
+/// own UID namespace. Mounting the CA into a container at all is already
+/// the accepted tradeoff for this feature (see `fghj-sidecar.rs`'s own
+/// doc comment); this only has to be readable by whoever is already running
+/// `sudo fghjd` on this machine, which is a strictly smaller exposure.
+fn refresh_sidecar_ca_copy() -> Result<PathBuf> {
+    let dir = sidecar_ca_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {dir:?}"))?;
+
+    let src_dir = crate::daemon::ca_dir();
+    for (src, dest_name) in [
+        (crate::ca::ca_cert_path(&src_dir), "ca-cert.pem"),
+        (crate::ca::ca_key_path(&src_dir), "ca-key.pem"),
+    ] {
+        let bytes = std::fs::read(&src).with_context(|| format!("failed to read {src:?}"))?;
+        let dest = dir.join(dest_name);
+        std::fs::write(&dest, bytes).with_context(|| format!("failed to write {dest:?}"))?;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644))
+            .with_context(|| format!("failed to set permissions on {dest:?}"))?;
+    }
+
+    Ok(dir)
+}
+
+/// Regenerates the route table this run's sidecar proxy polls from, from
+/// `state.containers` alone — every routable domain across every container
+/// this run knows about, whether or not that container's own status is
+/// currently `running` (matching a stopped-then-restarted route staying
+/// valid the moment the container comes back). Best-effort: a write failure
+/// here shouldn't fail the start/stop call it's riding along on, since the
+/// next lifecycle call for this run retries it anyway.
+fn write_route_table(state: &RunState) -> Result<()> {
+    let dir = sidecar_routes_dir(&state.network);
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {dir:?}"))?;
+
+    let entries = route_file_entries(&state.containers);
+
+    let path = sidecar_routes_path(&state.network);
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(&entries)?)
+        .with_context(|| format!("failed to write {tmp:?}"))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("failed to rename into {path:?}"))?;
+    Ok(())
 }
 
 /// Derives the real Docker volume name for a `VolumeMount::Named` entry —
@@ -181,7 +343,13 @@ fn sibling_domain(node: &Node, path: &str, graph: &Graph, run_id: &str) -> Optio
 fn derive_volume_name(name: &str, scope: &str, workspace_name: &str, run_id: &str) -> String {
     format!(
         "fghj-vol-{}",
-        sanitize_label(&derive_domain(name, scope, workspace_name, run_id))
+        sanitize_label(&derive_domain(
+            name,
+            scope,
+            workspace_name,
+            run_id,
+            DomainZone::Http,
+        ))
     )
 }
 
@@ -339,6 +507,15 @@ pub struct ContainerInfo {
     pub status: String,
     pub published_port: Option<u16>,
     pub domain: String,
+    /// This node's `fghj.raw.internal` domain — the real Docker network
+    /// alias for the node's own container (see `resolve_node_spec`'s
+    /// `aliases`), used by `write_route_table` as the sidecar's
+    /// `connect_host` for relaying `domain`'s HTTP(S) traffic to the real
+    /// backend. `#[serde(default)]` so a row persisted before this field
+    /// existed just deserializes empty, until the container is next started
+    /// through fghj.
+    #[serde(default)]
+    pub raw_domain: String,
     pub routes: Vec<PortRoute>,
     /// The subset of `Node.additional_hosts` that actually got a route (i.e.
     /// the node has a `primary` port) — kept separate from `routes` (which
@@ -434,6 +611,19 @@ pub struct RunState {
     pub overrides: BTreeMap<String, String>,
     pub network: String,
     pub containers: Vec<ContainerInfo>,
+    /// The deterministic name of this run's in-network TLS proxy sidecar
+    /// (see `RunRegistry::ensure_sidecar`) — one per run, never shared
+    /// across workspaces. Empty for a `RunState` persisted before this field
+    /// existed, until that run is next started/topped up.
+    #[serde(default)]
+    pub sidecar_container_name: String,
+    /// The sidecar's own address on `network` — `None` until
+    /// `docker::inspect_network_ip` has actually resolved it (or for a
+    /// pre-sidecar persisted `RunState`). Cached here rather than
+    /// re-inspected on every node start so `start_node` doesn't need a
+    /// Docker round-trip just to set every node's `--dns`.
+    #[serde(default)]
+    pub sidecar_ip: Option<String>,
 }
 
 /// The pure, side-effect-free result of `RunRegistry::resolve_node_spec` —
@@ -444,6 +634,7 @@ pub struct RunState {
 struct NodeSpec {
     container_name: String,
     domain: String,
+    raw_domain: String,
     aliases: Vec<String>,
     image: String,
     port_list: Vec<(String, Option<u16>)>,
@@ -567,20 +758,27 @@ impl RunRegistry {
         let persisted = db.clone().load_runs().await?;
         let mut reconciled = BTreeMap::new();
         for (run_id, mut state) in persisted {
-            let mut alive = true;
-            for c in &mut state.containers {
-                match docker::inspect_status(&docker, &c.container_name, "").await {
-                    Ok(Some(status)) => c.status = status.status,
-                    _ => {
-                        alive = false;
-                        break;
-                    }
+            // Per-container, not per-run: one container having disappeared
+            // (stopped, renamed, mid-recreate at exactly the moment `fghjd`
+            // restarted) doesn't mean the rest of the run's containers did
+            // too. Dropping the whole run's tracked list on a single miss
+            // silently orphaned every other still-running container from
+            // `fghjd`'s bookkeeping — including from the sidecar route
+            // table, since that's built from exactly this list.
+            let mut alive = Vec::new();
+            for mut c in state.containers {
+                if let Ok(Some(status)) =
+                    docker::inspect_status(&docker, &c.container_name, "").await
+                {
+                    c.status = status.status;
+                    alive.push(c);
                 }
             }
-            if alive {
-                reconciled.insert(run_id, state);
-            } else {
+            state.containers = alive;
+            if state.containers.is_empty() {
                 let _ = db.clone().delete_run(run_id).await;
+            } else {
+                reconciled.insert(run_id, state);
             }
         }
         Ok(Self {
@@ -933,6 +1131,10 @@ impl RunRegistry {
             self.record_event(run_id, &c.node_id, "stop", "stopping container", "ok", None)
                 .await;
         }
+        if !state.sidecar_container_name.is_empty() {
+            docker::stop_and_remove(&self.docker, &state.sidecar_container_name).await;
+        }
+        let _ = std::fs::remove_dir_all(sidecar_routes_dir(&state.network));
         docker::remove_network(&self.docker, &state.network).await;
         // The default run's `scope: "run"` volumes get the exact same
         // derived name on every start (`derive_volume_name` only folds the
@@ -987,11 +1189,15 @@ impl RunRegistry {
                 &state.network,
                 &state.overrides,
                 owner.as_ref(),
+                state.sidecar_ip.as_deref(),
             )
             .await?;
         state.containers.retain(|c| c.node_id != info.node_id);
         state.containers.push(info.clone());
         self.db.clone().save_run(state.clone()).await?;
+        if let Err(e) = write_route_table(&state) {
+            eprintln!("fghjd: failed to write sidecar route table for run {run_id}: {e:#}");
+        }
         self.runs.lock().unwrap().insert(run_id.to_string(), state);
         Ok(info)
     }
@@ -1031,6 +1237,9 @@ impl RunRegistry {
         self.record_event(run_id, node_id, "stop", "stopping container", "ok", None)
             .await;
         self.db.clone().save_run(state.clone()).await?;
+        if let Err(e) = write_route_table(&state) {
+            eprintln!("fghjd: failed to write sidecar route table for run {run_id}: {e:#}");
+        }
         self.runs.lock().unwrap().insert(run_id.to_string(), state);
         Ok(())
     }
@@ -1068,8 +1277,112 @@ impl RunRegistry {
         self.record_event(run_id, node_id, "stop", "removing container", "ok", None)
             .await;
         self.db.clone().save_run(state.clone()).await?;
+        if let Err(e) = write_route_table(&state) {
+            eprintln!("fghjd: failed to write sidecar route table for run {run_id}: {e:#}");
+        }
         self.runs.lock().unwrap().insert(run_id.to_string(), state);
         Ok(())
+    }
+
+    /// Starts (or confirms already running) this run's in-network TLS proxy
+    /// sidecar — one per run, on that run's own docker network, never
+    /// shared across workspaces/runs, so a container inside the network can
+    /// reach a sibling's `*.fghj.internal` name with the same addressing a
+    /// browser outside the network gets from the host-side proxy. Returns
+    /// its deterministic container name and its address on `network`.
+    ///
+    /// Idempotent, like `ensure_running`'s per-node liveness check: checked
+    /// directly against Docker rather than trusted from `RunState`, since
+    /// the sidecar can be stopped/removed out-of-band just like any other
+    /// container.
+    async fn ensure_sidecar(
+        &self,
+        workspace_name: &str,
+        run_id: &str,
+        network: &str,
+    ) -> Result<(String, String)> {
+        let name = format!("fghj-{}-{}-sidecar", sanitize_label(workspace_name), run_id);
+
+        let alive = matches!(
+            docker::inspect_status(&self.docker, &name, "").await,
+            Ok(Some(s)) if s.status == "running"
+        );
+        if alive && let Some(ip) = docker::inspect_network_ip(&self.docker, &name, network).await? {
+            return Ok((name, ip));
+        }
+        // A stopped-but-not-removed sidecar from a previous run would
+        // otherwise collide with create_container's fixed name.
+        docker::stop_and_remove(&self.docker, &name).await;
+
+        crate::sidecar_image::ensure_built(&self.docker).await?;
+
+        let routes_dir = sidecar_routes_dir(network);
+        std::fs::create_dir_all(&routes_dir)
+            .with_context(|| format!("failed to create {routes_dir:?}"))?;
+        let routes_path = sidecar_routes_path(network);
+        if !routes_path.exists() {
+            std::fs::write(&routes_path, b"[]")
+                .with_context(|| format!("failed to create {routes_path:?}"))?;
+        }
+
+        // Canonicalized, not the literal `/var/lib/...` path: macOS's `/var`
+        // is a symlink to `/private/var`, and OrbStack's bind-mount source
+        // resolution doesn't follow it — a source of `/var/lib/fghjd/...`
+        // silently resolves inside the Docker VM's own filesystem instead of
+        // the real host path, so the mounted directory shows up empty
+        // instead of erroring. The already-resolved `/private/var/lib/...`
+        // form mounts correctly.
+        let routes_dir = std::fs::canonicalize(&routes_dir)
+            .with_context(|| format!("failed to canonicalize {routes_dir:?}"))?;
+        let ca_dir = refresh_sidecar_ca_copy()?;
+        let ca_dir = std::fs::canonicalize(ca_dir)
+            .context("failed to canonicalize the sidecar CA directory")?;
+
+        // Sibling mounts, not nested — binding `ca` underneath an already
+        // bind-mounted, read-only `/etc/fghj-sidecar` fails outright (the
+        // container runtime can't create a mountpoint inside a read-only
+        // mount). `/etc/fghj-sidecar` itself is never bind-mounted from the
+        // host, so the runtime creates it as an ordinary (writable)
+        // directory in the container's own layer, and both binds attach
+        // under it independently.
+        let binds = vec![
+            format!("{}:/etc/fghj-sidecar/routes:ro", routes_dir.display()),
+            format!("{}:/etc/fghj-sidecar/ca:ro", ca_dir.display()),
+        ];
+
+        docker::run_container(
+            &self.docker,
+            &docker::RunOpts {
+                name: &name,
+                network,
+                aliases: &[],
+                env: &[],
+                ports: &[],
+                image: &crate::sidecar_image::image_tag(),
+                command: &[],
+                project: network,
+                service_name: "fghj-sidecar",
+                binds: &binds,
+                restart_policy: "unless-stopped",
+                user: None,
+                working_dir: None,
+                labels: &BTreeMap::new(),
+                cap_add: &[],
+                cap_drop: &[],
+                privileged: false,
+                extra_hosts: &[],
+                dns: &[],
+                healthcheck: None,
+                platform: None,
+            },
+        )
+        .await
+        .context("failed to start this run's sidecar proxy")?;
+
+        let ip = docker::inspect_network_ip(&self.docker, &name, network)
+            .await?
+            .context("sidecar proxy started but has no address on its own network")?;
+        Ok((name, ip))
     }
 
     pub async fn start(&self, graph: &Graph, spec: RunSpec) -> Result<RunState> {
@@ -1088,6 +1401,17 @@ impl RunRegistry {
 
         let network = format!("fghj-{}-{}", sanitize_label(&graph.workspace_name), run_id);
         docker::ensure_network(&self.docker, &network, &network).await?;
+
+        let (sidecar_container_name, sidecar_ip) = match self
+            .ensure_sidecar(&graph.workspace_name, &run_id, &network)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                docker::remove_network(&self.docker, &network).await;
+                return Err(e);
+            }
+        };
 
         let owner = self.db.clone().load_owner().await.ok().flatten();
 
@@ -1117,6 +1441,7 @@ impl RunRegistry {
                     &network,
                     &spec.overrides,
                     owner.as_ref(),
+                    Some(&sidecar_ip),
                 )
                 .await
             {
@@ -1127,6 +1452,7 @@ impl RunRegistry {
                     for c in &containers {
                         docker::stop_and_remove(&self.docker, &c.container_name).await;
                     }
+                    docker::stop_and_remove(&self.docker, &sidecar_container_name).await;
                     docker::remove_network(&self.docker, &network).await;
                     return Err(e);
                 }
@@ -1138,8 +1464,13 @@ impl RunRegistry {
             overrides: spec.overrides,
             network,
             containers,
+            sidecar_container_name,
+            sidecar_ip: Some(sidecar_ip),
         };
         self.db.clone().save_run(state.clone()).await?;
+        if let Err(e) = write_route_table(&state) {
+            eprintln!("fghjd: failed to write sidecar route table for run {run_id}: {e:#}");
+        }
         self.runs.lock().unwrap().insert(run_id, state.clone());
         Ok(state)
     }
@@ -1158,6 +1489,9 @@ impl RunRegistry {
         let run_id = DEFAULT_RUN_ID.to_string();
         let network = format!("fghj-{}-{}", sanitize_label(&graph.workspace_name), run_id);
         docker::ensure_network(&self.docker, &network, &network).await?;
+        let (sidecar_container_name, sidecar_ip) = self
+            .ensure_sidecar(&graph.workspace_name, &run_id, &network)
+            .await?;
 
         let mut state = self
             .runs
@@ -1170,7 +1504,24 @@ impl RunRegistry {
                 overrides: BTreeMap::new(),
                 network: network.clone(),
                 containers: Vec::new(),
+                sidecar_container_name: sidecar_container_name.clone(),
+                sidecar_ip: Some(sidecar_ip.clone()),
             });
+        state.sidecar_container_name = sidecar_container_name;
+        state.sidecar_ip = Some(sidecar_ip);
+        // Persisted unconditionally, not just when a node below actually
+        // needs (re)starting — otherwise a call where every node is already
+        // alive would compute a fresh sidecar IP but never actually publish
+        // it into `self.runs`/the DB/the route table, leaving a later
+        // `restart_container` to see a stale `sidecar_ip: None`.
+        self.db.clone().save_run(state.clone()).await?;
+        if let Err(e) = write_route_table(&state) {
+            eprintln!("fghjd: failed to write sidecar route table for run {run_id}: {e:#}");
+        }
+        self.runs
+            .lock()
+            .unwrap()
+            .insert(run_id.clone(), state.clone());
 
         let owner = self.db.clone().load_owner().await.ok().flatten();
 
@@ -1197,7 +1548,16 @@ impl RunRegistry {
                 docker::inspect_status(&self.docker, &container_name, "").await,
                 Ok(Some(s)) if s.status == "running"
             );
-            if alive {
+            // Alive alone isn't enough to skip: `state.containers` (loaded
+            // from `self.runs`, itself loaded from the DB — see `new`'s
+            // reconciliation, which drops a whole run's history the moment
+            // any single one of its containers isn't found) can be missing
+            // this node's `ContainerInfo`/routes even though the container
+            // itself is still running fine. Falling through and recreating
+            // it is how it gets re-described (and its routes re-registered
+            // in the route table below) rather than staying silently
+            // unrouted until something else happens to bounce it.
+            if alive && state.containers.iter().any(|c| c.node_id == node.id) {
                 continue;
             }
             // A stopped-but-not-removed container from a previous run would
@@ -1212,6 +1572,7 @@ impl RunRegistry {
                     &network,
                     &BTreeMap::new(),
                     owner.as_ref(),
+                    state.sidecar_ip.as_deref(),
                 )
                 .await?;
             state.containers.retain(|c| c.node_id != info.node_id);
@@ -1220,6 +1581,9 @@ impl RunRegistry {
             // failure in this same call doesn't lose track of containers
             // that did start successfully.
             self.db.clone().save_run(state.clone()).await?;
+            if let Err(e) = write_route_table(&state) {
+                eprintln!("fghjd: failed to write sidecar route table for run {run_id}: {e:#}");
+            }
             self.runs
                 .lock()
                 .unwrap()
@@ -1281,11 +1645,28 @@ impl RunRegistry {
         // by the CUE author to give a node one fixed identity shared across
         // every run, not just the default one.
         //
-        // This is also the sole Docker network alias registered below, so
-        // it resolves identically whether asked from inside this run's
-        // docker network (Docker's own embedded DNS) or from the host
-        // (fghjd's DNS server, which answers any name in the zone).
-        let domain = derive_domain(&node.id, &node.domain_scope, &graph.workspace_name, run_id);
+        // `domain` (the `fghj.internal` zone) is never registered as a
+        // Docker alias on this node's own container — the run's sidecar
+        // owns resolving it, universally, from inside this run's docker
+        // network (see `dns.rs`'s module doc for the full zone split), so
+        // it stays consistent with what the host's own DNS server answers
+        // it with too. `raw_domain` (`fghj.raw.internal`) is the real
+        // Docker network alias registered below: in-network-only, resolved
+        // straight to this container's own IP by Docker's embedded DNS.
+        let domain = derive_domain(
+            &node.id,
+            &node.domain_scope,
+            &graph.workspace_name,
+            run_id,
+            DomainZone::Http,
+        );
+        let raw_domain = derive_domain(
+            &node.id,
+            &node.domain_scope,
+            &graph.workspace_name,
+            run_id,
+            DomainZone::Raw,
+        );
 
         // Where a node's relative bind-mount `host` / `env_file` paths
         // resolve against — the repo's checkout root, not `build.context`
@@ -1505,17 +1886,16 @@ impl RunRegistry {
         };
 
         // Named ports (`#Port.name`) get their own domain, nested under this
-        // node's — `admin.api.default.shop.fghj.internal` — and need to be
-        // real Docker aliases too, or they'd resolve from the host (fghjd's
-        // DNS answers anything in the zone) but not from sibling containers,
-        // breaking the same inside/outside consistency the primary domain
-        // relies on.
-        let mut aliases = vec![domain.clone()];
+        // node's raw domain — `admin.api.default.shop.fghj.raw.internal` —
+        // and need to be real Docker aliases too, so a sibling container can
+        // reach a specific named port directly by name instead of having to
+        // know its container-side port number ahead of time.
+        let mut aliases = vec![raw_domain.clone()];
         aliases.extend(
             node.ports
                 .values()
                 .filter_map(|p| p.name.as_ref())
-                .map(|name| format!("{name}.{domain}")),
+                .map(|name| format!("{name}.{raw_domain}")),
         );
 
         let port_list: Vec<(String, Option<u16>)> = node
@@ -1599,12 +1979,14 @@ impl RunRegistry {
         }
         env.extend(node.environment.iter().cloned());
         for entry in &mut env {
-            *entry = expand_service_fqdn_templates(entry, node, &domain, graph, run_id);
+            *entry =
+                expand_service_fqdn_templates(entry, node, &raw_domain, &domain, graph, run_id);
         }
 
         Ok(Some(NodeSpec {
             container_name,
             domain,
+            raw_domain,
             aliases,
             image,
             port_list,
@@ -1622,6 +2004,7 @@ impl RunRegistry {
     /// `refresh_sync_status` pass compares a freshly recomputed desired hash
     /// against to decide whether this node has drifted since it was last
     /// started.
+    #[allow(clippy::too_many_arguments)]
     async fn start_node(
         &self,
         graph: &Graph,
@@ -1630,6 +2013,7 @@ impl RunRegistry {
         network: &str,
         overrides: &BTreeMap<String, String>,
         owner: Option<&crate::store::WorkspaceOwner>,
+        sidecar_ip: Option<&str>,
     ) -> Result<ContainerInfo> {
         self.begin_event_cycle(run_id, &node.id, "start").await;
         self.record_event(
@@ -1681,6 +2065,18 @@ impl RunRegistry {
         let mut labels = node.labels.clone();
         labels.insert("fghj.config_hash".to_string(), config_hash.clone());
 
+        // Every node asks this run's sidecar for DNS first — it's the
+        // authority for the `fghj.internal` zone (and any active
+        // `additional_hosts`/`wildcard_hosts` alias) inside this network,
+        // forwarding anything else on to Docker's own embedded resolver.
+        // Falls back to Docker's default (unset) only if the sidecar's IP
+        // somehow isn't known yet — `ensure_sidecar` always runs, and is
+        // inspected for its IP, before any node's `start_node` call, so
+        // this shouldn't actually happen in practice.
+        let dns: Vec<String> = sidecar_ip
+            .map(|ip| vec![ip.to_string(), "127.0.0.11".to_string()])
+            .unwrap_or_default();
+
         self.record_event(
             run_id,
             &node.id,
@@ -1697,6 +2093,7 @@ impl RunRegistry {
                 network,
                 aliases: &spec.aliases,
                 env: &spec.env,
+                dns: &dns,
                 ports: &spec.port_list,
                 image: &spec.image,
                 command: &node.command,
@@ -1875,6 +2272,7 @@ impl RunRegistry {
             status,
             published_port,
             domain: spec.domain,
+            raw_domain: spec.raw_domain,
             routes,
             additional_hosts: additional_hosts_active,
             ports: port_host_ports,
@@ -2017,6 +2415,69 @@ mod tests {
         assert_eq!(sanitize_label("__leading__"), "leading");
     }
 
+    #[test]
+    fn derive_domain_picks_the_suffix_for_the_requested_zone() {
+        assert_eq!(
+            derive_domain("svc", "run", "demo", DEFAULT_RUN_ID, DomainZone::Http),
+            "svc.demo.fghj.internal"
+        );
+        assert_eq!(
+            derive_domain("svc", "run", "demo", DEFAULT_RUN_ID, DomainZone::Raw),
+            "svc.demo.fghj.raw.internal"
+        );
+        // Non-default run id, non-stable scope: run id folds into both zones
+        // identically, only the suffix differs.
+        assert_eq!(
+            derive_domain("svc", "run", "demo", "feature-x", DomainZone::Http),
+            "svc.feature-x.demo.fghj.internal"
+        );
+        assert_eq!(
+            derive_domain("svc", "run", "demo", "feature-x", DomainZone::Raw),
+            "svc.feature-x.demo.fghj.raw.internal"
+        );
+        // `stable` scope folds out the run id in both zones the same way.
+        assert_eq!(
+            derive_domain("svc", "stable", "demo", "feature-x", DomainZone::Raw),
+            "svc.demo.fghj.raw.internal"
+        );
+    }
+
+    #[test]
+    fn route_file_entries_connect_via_the_raw_domain_not_the_http_one() {
+        let containers = vec![ContainerInfo {
+            node_id: "svc".to_string(),
+            container_name: "fghj-test-svc".to_string(),
+            status: "running".to_string(),
+            published_port: Some(8080),
+            domain: "svc.demo.fghj.internal".to_string(),
+            raw_domain: "svc.demo.fghj.raw.internal".to_string(),
+            routes: vec![PortRoute {
+                domain: "svc.demo.fghj.internal".to_string(),
+                host_port: 8080,
+                wildcard: false,
+                https: true,
+                container_port: "8080".to_string(),
+            }],
+            additional_hosts: Vec::new(),
+            ports: BTreeMap::from([("8080".to_string(), Some(8080))]),
+            status_port: Some("8080".to_string()),
+            config_hash: String::new(),
+            synced: None,
+            pending_action: None,
+        }];
+
+        let entries = route_file_entries(&containers);
+        assert_eq!(
+            entries,
+            vec![RouteFileEntry {
+                lookup: "svc.demo.fghj.internal".to_string(),
+                wildcard: false,
+                connect_host: "svc.demo.fghj.raw.internal".to_string(),
+                connect_port: 8080,
+            }]
+        );
+    }
+
     fn edge(from: &str, to: &str, kind: &str) -> Edge {
         Edge {
             from: from.to_string(),
@@ -2124,6 +2585,22 @@ mod tests {
         let out = expand_service_fqdn_templates(
             "https://${FGHJ_SERVICE_FQDN}/",
             &php,
+            "php.app.shop.fghj.raw.internal",
+            "php.app.shop.fghj.internal",
+            &graph,
+            DEFAULT_RUN_ID,
+        );
+        assert_eq!(out, "https://php.app.shop.fghj.raw.internal/");
+    }
+
+    #[test]
+    fn expand_service_fqdn_templates_http_variant_resolves_the_proxied_self_reference() {
+        let php = test_node("php.app", "php", "service");
+        let graph = test_graph(vec![php.clone()], vec![]);
+        let out = expand_service_fqdn_templates(
+            "https://${FGHJ_SERVICE_FQDN_HTTP}/",
+            &php,
+            "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
             DEFAULT_RUN_ID,
@@ -2143,11 +2620,31 @@ mod tests {
         let out = expand_service_fqdn_templates(
             "mysql://${FGHJ_SERVICE_FQDN:mysql}:3306/app",
             &php,
+            "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
             DEFAULT_RUN_ID,
         );
-        assert_eq!(out, "mysql://mysql.php.app.shop.fghj.internal:3306/app");
+        assert_eq!(out, "mysql://mysql.php.app.shop.fghj.raw.internal:3306/app");
+    }
+
+    #[test]
+    fn expand_service_fqdn_templates_http_variant_resolves_a_sibling() {
+        let php = test_node("php.app", "php", "service");
+        let mysql = test_node("mysql.php.app", "mysql", "backing");
+        let graph = test_graph(
+            vec![php.clone(), mysql],
+            vec![edge("php.app", "mysql.php.app", "owns")],
+        );
+        let out = expand_service_fqdn_templates(
+            "https://${FGHJ_SERVICE_FQDN_HTTP:mysql}/",
+            &php,
+            "php.app.shop.fghj.raw.internal",
+            "php.app.shop.fghj.internal",
+            &graph,
+            DEFAULT_RUN_ID,
+        );
+        assert_eq!(out, "https://mysql.php.app.shop.fghj.internal/");
     }
 
     #[test]
@@ -2167,11 +2664,12 @@ mod tests {
         let out = expand_service_fqdn_templates(
             "${FGHJ_SERVICE_FQDN:mysql}",
             &phpmyadmin,
+            "phpmyadmin.php.app.shop.fghj.raw.internal",
             "phpmyadmin.php.app.shop.fghj.internal",
             &graph,
             DEFAULT_RUN_ID,
         );
-        assert_eq!(out, "mysql.php.app.shop.fghj.internal");
+        assert_eq!(out, "mysql.php.app.shop.fghj.raw.internal");
     }
 
     #[test]
@@ -2188,11 +2686,12 @@ mod tests {
         let out = expand_service_fqdn_templates(
             "http://${FGHJ_SERVICE_FQDN:php}",
             &vite,
+            "vite.app.shop.fghj.raw.internal",
             "vite.app.shop.fghj.internal",
             &graph,
             DEFAULT_RUN_ID,
         );
-        assert_eq!(out, "http://php.app.shop.fghj.internal");
+        assert_eq!(out, "http://php.app.shop.fghj.raw.internal");
     }
 
     #[test]
@@ -2217,20 +2716,22 @@ mod tests {
         let bare = expand_service_fqdn_templates(
             "${FGHJ_SERVICE_FQDN:mysql}",
             &php,
+            "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
             DEFAULT_RUN_ID,
         );
-        assert_eq!(bare, "mysql.php.app.shop.fghj.internal");
+        assert_eq!(bare, "mysql.php.app.shop.fghj.raw.internal");
 
         let qualified = expand_service_fqdn_templates(
             "${FGHJ_SERVICE_FQDN:otherrepo::mysql}",
             &php,
+            "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
             DEFAULT_RUN_ID,
         );
-        assert_eq!(qualified, "mysql.otherrepo.shop.fghj.internal");
+        assert_eq!(qualified, "mysql.otherrepo.shop.fghj.raw.internal");
     }
 
     #[test]
@@ -2241,6 +2742,7 @@ mod tests {
         let unknown = expand_service_fqdn_templates(
             "${FGHJ_SERVICE_FQDN:nope}",
             &php,
+            "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
             DEFAULT_RUN_ID,
@@ -2250,6 +2752,7 @@ mod tests {
         let unterminated = expand_service_fqdn_templates(
             "prefix ${FGHJ_SERVICE_FQDN no closing brace",
             &php,
+            "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
             DEFAULT_RUN_ID,
@@ -2358,6 +2861,7 @@ mod tests {
             status: "running".to_string(),
             published_port: Some(stale_port),
             domain: "svc.demo.fghj.internal".to_string(),
+            raw_domain: "svc.demo.fghj.raw.internal".to_string(),
             routes: vec![PortRoute {
                 domain: "svc.demo.fghj.internal".to_string(),
                 host_port: stale_port,
@@ -2381,6 +2885,8 @@ mod tests {
                     overrides: BTreeMap::new(),
                     network: "bridge".to_string(),
                     containers: vec![stale_container],
+                    sidecar_container_name: String::new(),
+                    sidecar_ip: None,
                 },
             );
         }

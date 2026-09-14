@@ -255,6 +255,9 @@ impl WorkspaceDb {
             "ALTER TABLE containers ADD COLUMN status_port TEXT",
             "ALTER TABLE containers ADD COLUMN config_hash TEXT",
             "ALTER TABLE containers ADD COLUMN synced INTEGER",
+            "ALTER TABLE runs ADD COLUMN sidecar_container_name TEXT",
+            "ALTER TABLE runs ADD COLUMN sidecar_ip TEXT",
+            "ALTER TABLE containers ADD COLUMN raw_domain TEXT",
         ] {
             let _ = conn.execute(stmt, []);
         }
@@ -328,15 +331,21 @@ impl WorkspaceDb {
             let mut conn = self.conn.lock().unwrap();
             let tx = conn.transaction()?;
             tx.execute(
-                "INSERT INTO runs (run_id, overrides_json, network) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(run_id) DO UPDATE SET overrides_json = excluded.overrides_json, network = excluded.network",
-                rusqlite::params![state.run_id, serde_json::to_string(&state.overrides)?, state.network],
+                "INSERT INTO runs (run_id, overrides_json, network, sidecar_container_name, sidecar_ip) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(run_id) DO UPDATE SET overrides_json = excluded.overrides_json, network = excluded.network, sidecar_container_name = excluded.sidecar_container_name, sidecar_ip = excluded.sidecar_ip",
+                rusqlite::params![
+                    state.run_id,
+                    serde_json::to_string(&state.overrides)?,
+                    state.network,
+                    state.sidecar_container_name,
+                    state.sidecar_ip,
+                ],
             )?;
             tx.execute("DELETE FROM containers WHERE run_id = ?1", rusqlite::params![state.run_id])?;
             for c in &state.containers {
                 tx.execute(
-                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                     rusqlite::params![
                         state.run_id,
                         c.node_id,
@@ -350,6 +359,7 @@ impl WorkspaceDb {
                         c.status_port,
                         c.config_hash,
                         c.synced,
+                        c.raw_domain,
                     ],
                 )?;
             }
@@ -381,19 +391,37 @@ impl WorkspaceDb {
         tokio::task::spawn_blocking(move || {
             let conn = self.conn.lock().unwrap();
             let mut runs = BTreeMap::new();
-            let mut stmt = conn.prepare("SELECT run_id, overrides_json, network FROM runs")?;
+            let mut stmt = conn.prepare(
+                "SELECT run_id, overrides_json, network, sidecar_container_name, sidecar_ip FROM runs",
+            )?;
             let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
             })?;
             for row in rows {
-                let (run_id, overrides_json, network) = row?;
+                let (run_id, overrides_json, network, sidecar_container_name, sidecar_ip) = row?;
                 let overrides = serde_json::from_str(&overrides_json).unwrap_or_default();
-                runs.insert(run_id.clone(), RunState { run_id, overrides, network, containers: Vec::new() });
+                runs.insert(
+                    run_id.clone(),
+                    RunState {
+                        run_id,
+                        overrides,
+                        network,
+                        containers: Vec::new(),
+                        sidecar_container_name: sidecar_container_name.unwrap_or_default(),
+                        sidecar_ip,
+                    },
+                );
             }
             drop(stmt);
 
             let mut stmt = conn.prepare(
-                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced FROM containers",
+                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain FROM containers",
             )?;
             let rows = stmt.query_map([], |row| {
                 let routes_json: Option<String> = row.get(6)?;
@@ -422,6 +450,7 @@ impl WorkspaceDb {
                         status_port: row.get(9)?,
                         config_hash: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
                         synced: row.get::<_, Option<i64>>(11)?.map(|v| v != 0),
+                        raw_domain: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
                         pending_action: None,
                     },
                 ))
@@ -808,8 +837,11 @@ mod tests {
                 status_port: Some("8080".to_string()),
                 config_hash: "deadbeef".to_string(),
                 synced: Some(true),
+                raw_domain: "svc-a.demo.fghj.raw.internal".to_string(),
                 pending_action: None,
             }],
+            sidecar_container_name: "fghj-demo-default-sidecar".to_string(),
+            sidecar_ip: Some("172.20.0.5".to_string()),
         };
         db.clone().save_run(state).await.unwrap();
 
@@ -825,6 +857,8 @@ mod tests {
             restored.overrides.get("svc-a"),
             Some(&"feature-x".to_string())
         );
+        assert_eq!(restored.sidecar_container_name, "fghj-demo-default-sidecar");
+        assert_eq!(restored.sidecar_ip, Some("172.20.0.5".to_string()));
 
         db.clone().delete_run("default".to_string()).await.unwrap();
         assert!(db.load_runs().await.unwrap().is_empty());

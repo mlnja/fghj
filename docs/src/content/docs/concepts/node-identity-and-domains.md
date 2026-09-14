@@ -162,20 +162,41 @@ Prometheus instance's scrape port plus its admin UI, say — expose both
 under sensible names without any extra schema. See
 [.fghj.yaml](/reference/fghj-yaml/) for the full `#Port` shape.
 
-## Domain derivation: one formula, no exceptions
+## Domain derivation: one formula, no exceptions, two zones
 
-No node kind can declare its own raw domain. Every node's domain is
-derived the same way:
+No node kind can declare its own raw domain. Every node's domain — in
+either zone — is derived the same way:
 
 ```rust
-fn derive_domain(node_id, domain_scope, workspace_name, run_id) -> String {
+fn derive_domain(node_id, domain_scope, workspace_name, run_id, zone) -> String {
+    let suffix = match zone {
+        DomainZone::Http => "fghj.internal",
+        DomainZone::Raw => "fghj.raw.internal",
+    };
     if domain_scope == "stable" || run_id == DEFAULT_RUN_ID {
-        format!("{node_id}.{workspace}.fghj.internal")
+        format!("{node_id}.{workspace}.{suffix}")
     } else {
-        format!("{node_id}.{run_id}.{workspace}.fghj.internal")
+        format!("{node_id}.{run_id}.{workspace}.{suffix}")
     }
 }
 ```
+
+Every node actually gets *two* domains out of this, one per `zone`, always
+differing only in suffix: `cart.myworkspace.fghj.internal` (HTTP(S),
+proxied, same address in or out of the run's docker network — see [Split
+DNS](/concepts/split-dns/)) and `cart.myworkspace.fghj.raw.internal` (raw,
+in-network only, resolved straight to the container's own IP via Docker's
+native per-network DNS — never TLS-terminated, never reachable from the
+host). Only the raw domain is ever a real Docker network alias on the
+node's own container; the http one is answered by the run's sidecar
+instead, which is what makes it resolvable identically from inside and
+outside the network with no per-consumer setup. In `.fghj.yaml`, the macro
+`${FGHJ_SERVICE_FQDN:name}` expands to the *raw* domain by default (direct
+access is what nearly every real caller needs — a database connection
+string, an internal API call); `${FGHJ_SERVICE_FQDN_HTTP:name}` expands to
+the http one instead, for the rarer case of needing the proxied identity on
+purpose (e.g. minting a presigned URL meant to be handed to something
+outside the network).
 
 `run_id` is folded in for named/review runs, since more than one can be
 alive at once and each needs its own identity — but the **default run**
@@ -189,11 +210,6 @@ in — a deliberate choice for something meant to keep one fixed identity
 across every run of the graph (a shared Postgres instance, say). Only one
 run can actually own a `"stable"`-scoped name from the host at a time, but
 it's always the same name.
-
-This derived domain is registered as the container's Docker network
-alias, so it resolves identically whether asked from inside the run's own
-Docker network or from the host via `fghjd`'s own DNS server — see
-[Split DNS](/concepts/split-dns/).
 
 ## Limitations
 
