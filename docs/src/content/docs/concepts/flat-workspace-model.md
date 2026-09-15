@@ -17,8 +17,8 @@ reference to its backend; the backend references the frontend), never
 
 All repos live as sibling folders in one flat **workspace** directory,
 named by convention — the last path segment of the repo URL, with `.git`
-stripped — though a dependency can override that via `local_path` if it
-needs to.
+stripped. There's no per-dependent override for this: every dependent
+referencing the same repo agrees on its folder name by construction.
 
 ## Lazy, partial resolution
 

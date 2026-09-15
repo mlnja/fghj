@@ -27,10 +27,12 @@ different questions with two different answers:
 
 ## Schema and migrations
 
-Three tables: workspace metadata (id, entry URL, creation time, plus the
-owner columns below), runs (run id, serialized overrides, network name),
-and containers (one row per container in a run, including its serialized
-routes). New columns get added to existing tables over time; since SQLite
+Five tables: `meta` (workspace id, entry URL, creation time, plus the
+owner columns below), `runs` (run id, serialized overrides, network name),
+`containers` (one row per container in a run, including its serialized
+routes), `logs` (generation-tracked container log lines), and `events`
+(start/stop orchestration steps). New columns get added to existing
+tables over time; since SQLite
 has no `ADD COLUMN IF NOT EXISTS`, opening the database runs a best-effort
 `ALTER TABLE ... ADD COLUMN` for each such column and just ignores the
 error when it's already present.

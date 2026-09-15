@@ -28,13 +28,17 @@ cd fghj
 cargo build --release
 ```
 
-This produces two binaries under `target/release/`:
+This produces three binaries under `target/release/`:
 
 - **`fghj`** — the unprivileged CLI you run day to day.
 - **`fghjd`** — the root-owned superdaemon (DNS server, TLS proxy, local
   CA, control API).
+- **`fghj-sidecar`** — the in-network TLS/DNS proxy that runs one per
+  run, baked into a Docker image on demand (see [In-network TLS proxy
+  sidecar](/concepts/sidecar/)). You never invoke this one directly or
+  put it on `PATH`.
 
-Put both on your `PATH`, e.g.:
+Put `fghj` and `fghjd` on your `PATH`, e.g.:
 
 ```bash
 cp target/release/fghj target/release/fghjd /usr/local/bin/

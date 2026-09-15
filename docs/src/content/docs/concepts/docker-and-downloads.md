@@ -108,10 +108,16 @@ that never actually lands the repo at its expected path.
 
 ## Privilege drop, shared with the branch-override build path
 
-Both the download path and the branch-override build path (see
-[Run lifecycle & registry](/concepts/run-lifecycle-and-registry/)) run
-`git clone` as the real workspace owner rather than as root, using the
-same identity-borrowing mechanism described in
+The download path's own `git clone` runs as the real workspace owner
+rather than as root, using the identity-borrowing mechanism described in
 [Persistence & workspace store](/concepts/persistence-and-workspace-store/),
 as defense in depth against a clone subprocess hanging on an unanswerable
-interactive prompt.
+interactive prompt. The branch-override build path (see [Run lifecycle &
+registry](/concepts/run-lifecycle-and-registry/)) shares this same
+privilege drop only for its first step — fetching/updating the shared
+bare mirror (`resolver::ensure_mirror`) — since that's the step that
+actually talks to the remote and could hang on a prompt. The second step,
+materializing that mirror into the throwaway working-tree checkout the
+build runs against (`docker::materialize_checkout`), is a purely local
+clone with no network access, and runs as whatever user `fghjd` itself
+runs as (root) rather than dropping privilege again.

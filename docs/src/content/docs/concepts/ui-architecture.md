@@ -29,22 +29,25 @@ repo always renders, dimmed when it's outside the selected flow.
 
 ## Multi-workspace from one page
 
-The current workspace is tracked in the URL and applied to every request
+The current workspace id is read once from the page's `?workspace=` query
+param at load (falling back to whatever was last stored in
+`localStorage` if that's absent), then applied to every request
 automatically, matching the control API's own workspace-scoping — see
-[Control API](/concepts/control-api/). Switching workspaces resets every
-piece of workspace-scoped state before re-fetching, so stale data from
-the previous workspace never briefly renders under the new one's
-identity.
+[Control API](/concepts/control-api/). Switching workspaces persists the
+new id to `localStorage` (the URL itself isn't kept in sync afterward)
+and resets every piece of workspace-scoped state before re-fetching, so
+stale data from the previous workspace never briefly renders under the
+new one's identity.
 
 ## Polling, not push
 
 There's no websocket for the graph or run list — both are plain interval
-polling, gated by which tab is active so an inactive tab doesn't waste
-requests: the graph refreshes every few seconds on the Repos tab
-(reflecting live Git branch/dirty state without a manual refresh — see
-[Branch ownership model](/concepts/branch-ownership-model/)), and the run
-list refreshes on a faster interval on the Actual tab, matched to the
-backend reconciler's own tick rate (see
+polling. The graph poll (every few seconds) runs unconditionally
+regardless of which tab is active — deliberately, so branch/dirty state
+stays fresh in the background even while looking at another tab (see
+[Branch ownership model](/concepts/branch-ownership-model/)) — while the
+run list poll is gated to the Actual tab, on a faster interval matched to
+the backend reconciler's own tick rate (see
 [Run lifecycle & registry](/concepts/run-lifecycle-and-registry/)) so the
 UI is essentially never stale relative to what the backend has already
 reconciled.

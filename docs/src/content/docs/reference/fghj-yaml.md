@@ -458,7 +458,7 @@ bind to the same instance via `kind: shared-backing` below.
 |---|---|
 | `name` | Lowercase label, unique among this service's own backing dependencies. |
 | `image` | Docker image reference. |
-| `ports` | List of container ports to publish. |
+| `ports` | Either a bare list of container ports to publish (`["5432"]`), or the same `{port: #Port}` map form `service.ports` uses (see [Ports](#ports) above) — e.g. `minio`'s S3 API and web console can each get their own `primary`/`name`/`wildcard`/`host_port` this way, exactly like a service's own ports. |
 | `environment` | Same shape as `service.environment`. |
 | `domain_scope` | `"run"` (default) or `"stable"` — same semantics as `service.domain_scope`. |
 | `command` | Same shape as `service.command` — overrides the image's default `CMD`, e.g. to pass extra startup flags to a stock database image. |
