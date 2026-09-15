@@ -11,6 +11,7 @@ pub mod docker;
 pub mod downloads;
 pub mod hosts_file;
 pub mod proxy;
+pub mod raw_net;
 pub mod resolver;
 pub mod runs;
 pub mod server;

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -19,7 +20,7 @@ use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 
 use crate::server::{self, WorkspaceState};
-use crate::{ca, dns, docker, downloads, hosts_file, proxy, resolver, runs, store};
+use crate::{ca, dns, docker, downloads, hosts_file, proxy, raw_net, resolver, runs, store};
 
 /// How often the background reconciler re-inspects live containers. Kept in
 /// step with the frontend's `/runs` poll interval (see `App.svelte`) so the
@@ -324,6 +325,33 @@ impl WorkspaceRegistry {
         zones
     }
 
+    /// Every `"running"` container's `raw_domain` and published host ports
+    /// in any wired workspace — the input to `raw_net::reconcile`. Same
+    /// recompute-from-scratch approach as `active_additional_hosts`/
+    /// `active_wildcard_suffixes`.
+    pub fn active_raw_endpoints(&self) -> Vec<raw_net::RawEndpoint> {
+        let states: Vec<Arc<WorkspaceState>> =
+            self.by_id.lock().unwrap().values().cloned().collect();
+        states
+            .iter()
+            .flat_map(|state| {
+                state.runs.list().into_iter().flat_map(|run| {
+                    run.containers
+                        .into_iter()
+                        .filter(|c| c.status == "running")
+                        .map(|c| raw_net::RawEndpoint {
+                            raw_domain: c.raw_domain,
+                            ports: c
+                                .ports
+                                .into_iter()
+                                .filter_map(|(port, host_port)| Some((port, host_port?)))
+                                .collect(),
+                        })
+                })
+            })
+            .collect()
+    }
+
     pub fn list(&self) -> Vec<(String, PathBuf)> {
         self.by_id
             .lock()
@@ -363,12 +391,19 @@ impl proxy::RouteResolver for WorkspaceRegistry {
 }
 
 impl dns::ZoneSource for WorkspaceRegistry {
-    fn recognizes(&self, qname: &str) -> bool {
-        dns::in_zone(qname)
+    fn answer_for(&self, qname: &str) -> Option<Ipv4Addr> {
+        if dns::in_zone(qname)
             || self
                 .active_wildcard_suffixes()
                 .iter()
                 .any(|z| dns::matches_zone(qname, z))
+        {
+            Some(dns::ANSWER)
+        } else if dns::matches_zone(qname, dns::ZONE_RAW) {
+            Some(raw_net::virtual_ip_for(qname))
+        } else {
+            None
+        }
     }
 }
 
@@ -1076,12 +1111,7 @@ impl DaemonControl {
             .local_addr()
             .context("DNS socket has no local address")?
             .port();
-        let dns_task = tokio::spawn(dns::serve(
-            dns_socket,
-            self.registry.clone(),
-            std::net::Ipv4Addr::LOCALHOST,
-            None,
-        ));
+        let dns_task = tokio::spawn(dns::serve(dns_socket, self.registry.clone(), None));
         dns::install_os_resolver_config(dns_port, &self.registry.active_wildcard_suffixes())?;
 
         let http_listener = proxy::bind_http().await?;
@@ -1135,6 +1165,9 @@ impl DaemonControl {
         if let Err(e) = hosts_file::sync(&hosts_file::hosts_path(), &[]) {
             eprintln!("fghjd: failed to clear /etc/hosts on deactivate: {e}");
         }
+        if let Err(e) = raw_net::clear() {
+            eprintln!("fghjd: failed to clear raw-net routes on deactivate: {e}");
+        }
     }
 }
 
@@ -1146,14 +1179,16 @@ impl DaemonControl {
 /// container to a different ephemeral host port on a restart it initiated
 /// (restart policy, `dockerd` restarting), shows up — and routes correctly —
 /// on its own, without a `fghjd` restart. It never recreates or restarts a
-/// container itself — no self-healing there. It does own one side effect
-/// outside Docker, though: re-syncing
-/// `/etc/hosts` (`hosts_file::sync`) to exactly the `#AdditionalHost`
-/// aliases of whatever's currently `"running"`, so a container dying
-/// out-of-band (same drift this loop already detects) also drops its alias
-/// within one tick, not just its status. Skipped entirely while `fghjd` is
-/// idle (`daemon.is_active()` is false) so it doesn't fight `fghj daemon
-/// stop`'s clean-up by re-adding entries `deactivate` just removed.
+/// container itself — no self-healing there. It does own side effects
+/// outside Docker, though: re-syncing `/etc/hosts` (`hosts_file::sync`) to
+/// exactly the `#AdditionalHost` aliases of whatever's currently
+/// `"running"`, and re-syncing the raw-zone virtual-IP NAT routes
+/// (`raw_net::reconcile`) to exactly its currently-published ports — so a
+/// container dying out-of-band (same drift this loop already detects) also
+/// drops its alias/route within one tick, not just its status. Skipped
+/// entirely while `fghjd` is idle (`daemon.is_active()` is false) so it
+/// doesn't fight `fghj daemon stop`'s clean-up by re-adding entries
+/// `deactivate` just removed.
 fn spawn_reconciler(daemon: Arc<DaemonControl>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
@@ -1180,6 +1215,9 @@ fn spawn_reconciler(daemon: Arc<DaemonControl>) {
                 )
             {
                 eprintln!("fghjd: failed to sync /etc/resolver: {e}");
+            }
+            if let Err(e) = raw_net::reconcile(&daemon.registry.active_raw_endpoints()) {
+                eprintln!("fghjd: failed to sync raw-net routes: {e}");
             }
         }
     });

@@ -57,6 +57,10 @@ struct RouteFileEntry {
 /// exists to avoid. A 1s poll of one small JSON file costs nothing and has
 /// no missed-event failure mode.
 struct FileRoutes {
+    /// This sidecar container's own in-network address — every recognized
+    /// query is answered with this, never with a per-backend IP (see
+    /// `dns::ZoneSource`'s impl below).
+    own_ip: Ipv4Addr,
     routes: Mutex<Vec<RouteFileEntry>>,
 }
 
@@ -68,8 +72,9 @@ impl FileRoutes {
         serde_json::from_slice(&bytes).unwrap_or_default()
     }
 
-    fn spawn_polling() -> Arc<Self> {
+    fn spawn_polling(own_ip: Ipv4Addr) -> Arc<Self> {
         let this = Arc::new(Self {
+            own_ip,
             routes: Mutex::new(Self::load()),
         });
         let watched = this.clone();
@@ -117,8 +122,8 @@ impl proxy::RouteResolver for FileRoutes {
 /// zone-suffix bookkeeping needed. Reuses `RouteResolver::resolve` (already
 /// polled/loaded) rather than a second data source.
 impl dns::ZoneSource for FileRoutes {
-    fn recognizes(&self, qname: &str) -> bool {
-        proxy::RouteResolver::resolve(self, qname).is_some()
+    fn answer_for(&self, qname: &str) -> Option<Ipv4Addr> {
+        proxy::RouteResolver::resolve(self, qname).map(|_| self.own_ip)
     }
 }
 
@@ -149,7 +154,8 @@ async fn main() -> Result<()> {
     let ca = ca::ensure_ca(Path::new(CA_DIR))
         .context("failed to load CA from the mounted /etc/fghj-sidecar/ca")?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let file_routes = FileRoutes::spawn_polling();
+    let own_ip = discover_own_ip().context("failed to discover this sidecar's own IP")?;
+    let file_routes = FileRoutes::spawn_polling(own_ip);
     let routes: Arc<dyn proxy::RouteResolver> = file_routes.clone();
     let zones: Arc<dyn dns::ZoneSource> = file_routes;
     let cert_resolver = Arc::new(ca::DynamicCertResolver::new(
@@ -177,7 +183,6 @@ async fn main() -> Result<()> {
     // this container's own address; anything else is forwarded verbatim to
     // Docker's embedded resolver, exactly like the host server forwards
     // nothing at all because the OS never routes it an out-of-zone query.
-    let own_ip = discover_own_ip().context("failed to discover this sidecar's own IP")?;
     let dns_socket = UdpSocket::bind(("0.0.0.0", 53))
         .await
         .context("failed to bind sidecar DNS listener on 0.0.0.0:53")?;
@@ -196,7 +201,7 @@ async fn main() -> Result<()> {
             provider,
             routes
         ),
-        dns::serve(dns_socket, zones, own_ip, Some(docker_embedded_dns)),
+        dns::serve(dns_socket, zones, Some(docker_embedded_dns)),
     );
     Ok(())
 }
