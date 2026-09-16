@@ -271,7 +271,7 @@ fn route_file_entries(containers: &[ContainerInfo]) -> Vec<RouteFileEntry> {
 }
 
 fn sidecar_routes_dir(network: &str) -> PathBuf {
-    PathBuf::from("/var/lib/fghjd/runs").join(network)
+    crate::store::fghjd_root().join("runs").join(network)
 }
 
 fn sidecar_routes_path(network: &str) -> PathBuf {
@@ -279,7 +279,7 @@ fn sidecar_routes_path(network: &str) -> PathBuf {
 }
 
 fn sidecar_ca_dir() -> PathBuf {
-    PathBuf::from("/var/lib/fghjd/sidecar-ca")
+    crate::store::fghjd_root().join("sidecar-ca")
 }
 
 /// A world-readable copy of the CA cert+key, refreshed on every sidecar
@@ -1925,6 +1925,12 @@ impl RunRegistry {
                             .expect("node with volumes has a resolved checkout root")
                             .join(host)
                     };
+                    // Resolve symlinks (notably macOS's `/var` -> `/private/var`)
+                    // before handing the path to Docker: bind-mounting a file
+                    // through a symlinked parent directory makes some Docker
+                    // backends (OrbStack) misdetect the mount source's type and
+                    // reject an otherwise-valid file-to-file bind mount.
+                    let host_path = std::fs::canonicalize(&host_path).unwrap_or(host_path);
                     binds.push(format!(
                         "{}:{container}{}",
                         host_path.display(),

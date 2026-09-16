@@ -14,6 +14,7 @@
     onPullFlowComplete,
     onRunFlow,
     onOpenOperations,
+    onOpenTelemetry,
     workspaces,
     currentWorkspaceId,
     onOpenWorkspaces,
@@ -205,6 +206,8 @@
     {/each}
   </div>
 
+  <div class="divider"></div>
+  <div class="help-btn" onclick={onOpenTelemetry} title="fghjd telemetry (logs, DNS/DNAT status)">⚡</div>
   <div class="divider"></div>
   <div class="help-btn" onclick={() => (helpOpen = true)}>?</div>
 </div>

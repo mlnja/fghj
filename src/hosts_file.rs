@@ -65,6 +65,30 @@ pub fn sync(path: &Path, hosts: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Reads back exactly what `sync` last wrote into the managed block. The
+/// on-disk file is the source of truth here — this re-parses it rather than
+/// tracking a separate list — so it reflects what's actually installed, not
+/// merely what was last computed as desired. Backs the telemetry drawer's
+/// network-status tab (`daemon.rs`'s `/daemon/net-status`).
+pub fn managed_hosts(path: &Path) -> Vec<String> {
+    let existing = fs::read_to_string(path).unwrap_or_default();
+    let mut in_block = false;
+    let mut hosts = Vec::new();
+    for line in existing.lines() {
+        match line.trim() {
+            _ if line.trim() == BEGIN_MARKER => in_block = true,
+            _ if line.trim() == END_MARKER => in_block = false,
+            trimmed if in_block => {
+                if let Some(host) = trimmed.strip_prefix("127.0.0.1 ") {
+                    hosts.push(host.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    hosts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +161,17 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             format!("before\nafter\n{BEGIN_MARKER}\n127.0.0.1 fresh.local\n{END_MARKER}\n")
         );
+    }
+
+    #[test]
+    fn managed_hosts_reads_back_exactly_what_sync_wrote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hosts");
+        fs::write(&path, "127.0.0.1 localhost\n::1 localhost\n").unwrap();
+
+        assert!(managed_hosts(&path).is_empty());
+
+        sync(&path, &["b.local".to_string(), "a.local".to_string()]).unwrap();
+        assert_eq!(managed_hosts(&path), vec!["a.local", "b.local"]);
     }
 }

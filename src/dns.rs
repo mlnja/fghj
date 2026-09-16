@@ -7,6 +7,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::net::UdpSocket;
 
+use crate::daemon_log;
+
 /// The zone this server is authoritative for. Every node's domain
 /// (`runs::start_node`) is derived into this zone from its id, workspace,
 /// and run id — never author-declared, so nothing outside this zone needs
@@ -21,7 +23,7 @@ const ZONE_SUFFIX: &str = ".fghj.internal";
 /// published port. Never TLS-terminated, never certified (`cert_eligible`
 /// only matches `ZONE`), and never answered with the shared `ANSWER`
 /// constant: every name under this zone gets its own distinct
-/// `raw_net::virtual_ip_for` address instead.
+/// `raw_net::resolve` address instead.
 pub(crate) const ZONE_RAW: &str = "fghj.raw.internal";
 
 /// Every workspace runs on one machine, so every `*.fghj.internal` name
@@ -60,7 +62,7 @@ pub(crate) fn matches_zone(qname: &str, zone: &str) -> bool {
 /// and if so, which IP to answer with — the general "is this mine, and what
 /// do I say" hook. Implemented by `WorkspaceRegistry` in `daemon.rs` (the
 /// host server: `ANSWER` for `in_zone(qname)`/an active `wildcard_hosts`
-/// suffix, a per-node `raw_net::virtual_ip_for` address under `ZONE_RAW`,
+/// suffix, a per-node `raw_net::resolve` address under `ZONE_RAW`,
 /// or `None`) and by `FileRoutes` in `fghj-sidecar.rs` (the in-network
 /// sidecar: its own discovered IP for anything already in its polled route
 /// table, `None` otherwise) — one server, two entirely different notions of
@@ -273,13 +275,13 @@ pub async fn bind() -> Result<UdpSocket> {
 /// `install_os_resolver_config`'s per-domain `/etc/resolver` scoping).
 pub async fn serve(socket: UdpSocket, zones: Arc<dyn ZoneSource>, upstream: Option<SocketAddr>) {
     let port = socket.local_addr().map(|a| a.port()).unwrap_or(0);
-    println!("fghjd: DNS server listening on 127.0.0.1:{port}");
+    daemon_log::info(format!("fghjd: DNS server listening on 127.0.0.1:{port}"));
     let mut buf = [0u8; 512]; // classic DNS-over-UDP message limit; plenty for single-question lookups
     loop {
         let (len, src) = match socket.recv_from(&mut buf).await {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("fghjd: DNS recv error: {e}");
+                daemon_log::warn(format!("fghjd: DNS recv error: {e}"));
                 continue;
             }
         };
@@ -296,7 +298,7 @@ pub async fn serve(socket: UdpSocket, zones: Arc<dyn ZoneSource>, upstream: Opti
         }
         let response = build_response(&query, answer);
         if let Err(e) = socket.send_to(&response, src).await {
-            eprintln!("fghjd: DNS send error to {src}: {e}");
+            daemon_log::warn(format!("fghjd: DNS send error to {src}: {e}"));
         }
     }
 }
@@ -317,10 +319,10 @@ pub fn install_os_resolver_config(port: u16, wildcard_zones: &[String]) -> Resul
         zones.extend(wildcard_zones.iter().map(String::as_str));
         sync_macos_resolver(Path::new("/etc/resolver"), port, &zones)
     } else {
-        eprintln!(
+        daemon_log::warn(format!(
             "fghjd: automatic OS DNS routing for *.{ZONE} isn't implemented on this platform yet — \
              point your resolver at 127.0.0.1:{port} for that zone manually"
-        );
+        ));
         Ok(())
     }
 }
@@ -336,16 +338,48 @@ pub fn clear_os_resolver_config() {
     }
 }
 
-/// Content written to a zone's resolver file — recognizing exactly this
-/// shape (regardless of port) is how `sync_macos_resolver`/
-/// `clear_macos_resolver` tell "a file fghjd itself created" apart from a
-/// resolver file some other tool placed, without needing a separate
-/// tracking manifest.
-fn is_fghjd_resolver_content(content: &str) -> bool {
+/// Parses the port back out of a resolver file's content if it matches
+/// fghjd's own template — the single source of truth for "is this a file
+/// fghjd itself wrote, and if so at what port," used both to recognize
+/// fghjd-authored files (`is_fghjd_resolver_content`) and to read the port
+/// back for the telemetry status endpoint (`managed_resolver_zones`).
+fn parse_fghjd_resolver_port(content: &str) -> Option<u16> {
     content
         .strip_prefix("nameserver 127.0.0.1\nport ")
         .and_then(|rest| rest.strip_suffix('\n'))
-        .is_some_and(|port| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
+        .and_then(|port| port.parse::<u16>().ok())
+}
+
+/// Recognizing exactly this shape (regardless of port) is how
+/// `sync_macos_resolver`/`clear_macos_resolver` tell "a file fghjd itself
+/// created" apart from a resolver file some other tool placed, without
+/// needing a separate tracking manifest.
+fn is_fghjd_resolver_content(content: &str) -> bool {
+    parse_fghjd_resolver_port(content).is_some()
+}
+
+/// Reads back which zones are currently routed to this DNS server and at
+/// what port, by scanning `resolver_dir` for fghjd-authored files
+/// (`parse_fghjd_resolver_port`) — the on-disk state `sync_macos_resolver`
+/// last wrote is the source of truth, so this re-parses it rather than
+/// tracking a separate list. Backs the telemetry drawer's network-status tab
+/// (`daemon.rs`'s `/daemon/net-status`).
+pub fn managed_resolver_zones(resolver_dir: &Path) -> Vec<(String, u16)> {
+    let Ok(entries) = fs::read_dir(resolver_dir) else {
+        return Vec::new();
+    };
+    let mut zones: Vec<(String, u16)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?.to_string();
+            let content = fs::read_to_string(&path).ok()?;
+            let port = parse_fghjd_resolver_port(&content)?;
+            Some((name, port))
+        })
+        .collect();
+    zones.sort();
+    zones
 }
 
 /// Writes (or refreshes) one `resolver_dir/<zone>` file per entry in `zones`
@@ -365,10 +399,10 @@ fn sync_macos_resolver(resolver_dir: &Path, port: u16, zones: &[&str]) -> Result
         if fs::read_to_string(&path).ok().as_deref() != Some(desired.as_str()) {
             fs::write(&path, &desired)
                 .with_context(|| format!("failed to write {}", path.display()))?;
-            println!(
+            daemon_log::info(format!(
                 "fghjd: wrote {} — *.{zone} lookups now route to this DNS server",
                 path.display()
-            );
+            ));
         }
     }
 
@@ -755,5 +789,29 @@ mod tests {
         assert!(!resolver_dir.join(ZONE).exists());
         assert!(!resolver_dir.join("myservice.local").exists());
         assert!(foreign.exists());
+    }
+
+    #[test]
+    fn managed_resolver_zones_reads_back_fghjd_authored_zones_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolver_dir = tmp.path().join("resolver");
+
+        sync_macos_resolver(&resolver_dir, 5353, &[ZONE, "myservice.local"]).unwrap();
+        fs::write(resolver_dir.join("example.com"), "nameserver 8.8.8.8\n").unwrap();
+
+        let mut zones = managed_resolver_zones(&resolver_dir);
+        zones.sort();
+        let mut expected = vec![
+            (ZONE.to_string(), 5353),
+            ("myservice.local".to_string(), 5353),
+        ];
+        expected.sort();
+        assert_eq!(zones, expected);
+    }
+
+    #[test]
+    fn managed_resolver_zones_of_a_missing_dir_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(managed_resolver_zones(&tmp.path().join("nonexistent")).is_empty());
     }
 }

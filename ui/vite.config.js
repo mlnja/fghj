@@ -6,6 +6,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/universe.json': 'http://127.0.0.1:7878',
+      '/daemon': 'http://127.0.0.1:7878',
     },
   },
 })

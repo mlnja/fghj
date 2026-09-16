@@ -20,7 +20,9 @@ use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 
 use crate::server::{self, WorkspaceState};
-use crate::{ca, dns, docker, downloads, hosts_file, proxy, raw_net, resolver, runs, store};
+use crate::{
+    ca, daemon_log, dns, docker, downloads, hosts_file, proxy, raw_net, resolver, runs, store,
+};
 
 /// How often the background reconciler re-inspects live containers. Kept in
 /// step with the frontend's `/runs` poll interval (see `App.svelte`) so the
@@ -52,7 +54,7 @@ pub fn socket_path() -> PathBuf {
 /// Keychain Access. `pub(crate)` so `runs.rs` can bind-mount it (read-only)
 /// into a run's sidecar proxy container.
 pub(crate) fn ca_dir() -> PathBuf {
-    PathBuf::from("/var/lib/fghjd/ca")
+    store::fghjd_root().join("ca")
 }
 
 /// Tracks that the operator's last explicit `fghj daemon` call was `stop`,
@@ -133,20 +135,20 @@ impl WorkspaceRegistry {
         let mut by_id = HashMap::new();
         for (id, path) in store::load_index(&index_path) {
             if !path.exists() {
-                eprintln!(
+                daemon_log::warn(format!(
                     "fghjd: skipping missing workspace {id} ({})",
                     path.display()
-                );
+                ));
                 continue;
             }
             match WorkspaceState::new(path.clone(), docker.clone()).await {
                 Ok(state) => {
                     by_id.insert(id, Arc::new(state));
                 }
-                Err(e) => eprintln!(
+                Err(e) => daemon_log::warn(format!(
                     "fghjd: failed to load workspace {id} ({}): {e}",
                     path.display()
-                ),
+                )),
             }
         }
         Self {
@@ -400,7 +402,7 @@ impl dns::ZoneSource for WorkspaceRegistry {
         {
             Some(dns::ANSWER)
         } else if dns::matches_zone(qname, dns::ZONE_RAW) {
-            Some(raw_net::virtual_ip_for(qname))
+            Some(raw_net::resolve(qname))
         } else {
             None
         }
@@ -418,6 +420,13 @@ struct StartRequest {
 #[derive(Deserialize)]
 struct StopRequest {
     id: String,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn err_response(e: anyhow::Error) -> Response {
@@ -1016,6 +1025,8 @@ fn build_router(registry: Arc<WorkspaceRegistry>, daemon: Arc<DaemonControl>) ->
         .route("/daemon/start", post(post_daemon_start))
         .route("/daemon/stop", post(post_daemon_stop))
         .route("/daemon/status", get(get_daemon_status))
+        .route("/daemon/logs", get(get_daemon_logs))
+        .route("/daemon/net-status", get(get_daemon_net_status))
         .with_state(daemon);
 
     api.merge(daemon_api).fallback(static_handler)
@@ -1031,7 +1042,7 @@ async fn post_daemon_start(State(daemon): State<Arc<DaemonControl>>) -> Response
     match daemon.activate().await {
         Ok(()) => {
             if let Err(e) = set_idle_requested(false) {
-                eprintln!("fghjd: failed to persist daemon state: {e}");
+                daemon_log::warn(format!("fghjd: failed to persist daemon state: {e}"));
             }
             Json(serde_json::json!({ "active": true })).into_response()
         }
@@ -1052,13 +1063,79 @@ async fn post_daemon_start(State(daemon): State<Arc<DaemonControl>>) -> Response
 async fn post_daemon_stop(State(daemon): State<Arc<DaemonControl>>) -> Response {
     daemon.deactivate();
     if let Err(e) = set_idle_requested(true) {
-        eprintln!("fghjd: failed to persist daemon state: {e}");
+        daemon_log::warn(format!("fghjd: failed to persist daemon state: {e}"));
     }
     Json(serde_json::json!({ "active": false })).into_response()
 }
 
 async fn get_daemon_status(State(daemon): State<Arc<DaemonControl>>) -> Response {
     Json(serde_json::json!({ "active": daemon.is_active() })).into_response()
+}
+
+#[derive(Deserialize)]
+struct DaemonLogsQuery {
+    after_seq: Option<u64>,
+    #[serde(default = "default_daemon_logs_limit")]
+    limit: usize,
+}
+
+fn default_daemon_logs_limit() -> usize {
+    500
+}
+
+/// Recent `fghjd` process log lines (see `daemon_log`) — backs the
+/// telemetry drawer's "Logs" tab. Polled rather than streamed (SSE): unlike
+/// a container's stdout, this is low-volume, operator-facing lifecycle/
+/// reconcile output, not app request logs — a short poll interval is just
+/// as responsive and much simpler than a live stream. Takes no `State`
+/// extractor since `daemon_log`'s ring buffer is process-global, not tied to
+/// any particular `DaemonControl`.
+async fn get_daemon_logs(Query(q): Query<DaemonLogsQuery>) -> Response {
+    Json(serde_json::json!({ "entries": daemon_log::tail(q.after_seq, q.limit) })).into_response()
+}
+
+/// Snapshot of the three native-OS integration mechanisms `spawn_reconciler`
+/// maintains — `/etc/hosts`, macOS's `/etc/resolver`, and the raw-zone
+/// virtual-IP NAT routes — read directly from their actual on-disk/live
+/// state (not from what was last *computed* as desired), so drift between
+/// "what fghjd wanted" and "what's actually installed" would show up here.
+/// Backs the telemetry drawer's "DNS / DNAT" tab.
+async fn get_daemon_net_status(State(daemon): State<Arc<DaemonControl>>) -> Response {
+    let hosts = hosts_file::managed_hosts(&hosts_file::hosts_path());
+    let resolver_zones: Vec<_> = dns::managed_resolver_zones(Path::new("/etc/resolver"))
+        .into_iter()
+        .map(|(zone, port)| serde_json::json!({ "zone": zone, "port": port }))
+        .collect();
+
+    // `raw_net`'s own storage only keeps bare `RouteSpec`s (virtual IP +
+    // ports, no domain) — the reverse virtual-IP -> raw-domain mapping is
+    // done here, from the registry's current endpoints, rather than
+    // plumbing a domain field through `raw_net`'s internal state.
+    let domain_by_ip: HashMap<Ipv4Addr, String> = daemon
+        .registry
+        .active_raw_endpoints()
+        .iter()
+        .map(|e| (raw_net::resolve(&e.raw_domain), e.raw_domain.clone()))
+        .collect();
+    let raw_routes: Vec<_> = raw_net::current_routes()
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "virtual_ip": r.virtual_ip,
+                "container_port": r.container_port,
+                "host_port": r.host_port,
+                "raw_domain": domain_by_ip.get(&r.virtual_ip),
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "hosts": hosts,
+        "resolver_zones": resolver_zones,
+        "raw_routes": raw_routes,
+        "last_reconcile_ms": daemon.last_reconcile_ms(),
+    }))
+    .into_response()
 }
 
 /// The pieces of `fghjd` that only exist while it's in the "active" state:
@@ -1089,6 +1166,12 @@ pub struct DaemonControl {
     provider: Arc<rustls::crypto::CryptoProvider>,
     control_port: u16,
     active: Mutex<Option<ActiveResources>>,
+    /// Epoch-millis timestamp of `spawn_reconciler`'s last completed sync of
+    /// `/etc/hosts`/`/etc/resolver`/raw-net routes — surfaced by
+    /// `/daemon/net-status` so the telemetry drawer can show how fresh that
+    /// state is, not just what it currently is. `None` until the first tick
+    /// after `fghjd` starts (or while idle — see `spawn_reconciler`).
+    last_reconcile_ms: Mutex<Option<u64>>,
 }
 
 impl DaemonControl {
@@ -1149,6 +1232,13 @@ impl DaemonControl {
         self.active.lock().unwrap().as_ref().map(|r| r.dns_port)
     }
 
+    /// Epoch-millis of `spawn_reconciler`'s last completed sync attempt, or
+    /// `None` if it hasn't run yet. See the field doc for what this does and
+    /// doesn't cover.
+    pub fn last_reconcile_ms(&self) -> Option<u64> {
+        *self.last_reconcile_ms.lock().unwrap()
+    }
+
     /// Reverses `activate`: aborts the DNS/HTTP/HTTPS tasks (freeing the
     /// ports/socket they held) and clears fghj's managed entries from the OS
     /// resolver config and `/etc/hosts`. Docker containers already running
@@ -1163,10 +1253,14 @@ impl DaemonControl {
         }
         dns::clear_os_resolver_config();
         if let Err(e) = hosts_file::sync(&hosts_file::hosts_path(), &[]) {
-            eprintln!("fghjd: failed to clear /etc/hosts on deactivate: {e}");
+            daemon_log::warn(format!(
+                "fghjd: failed to clear /etc/hosts on deactivate: {e}"
+            ));
         }
         if let Err(e) = raw_net::clear() {
-            eprintln!("fghjd: failed to clear raw-net routes on deactivate: {e}");
+            daemon_log::warn(format!(
+                "fghjd: failed to clear raw-net routes on deactivate: {e}"
+            ));
         }
     }
 }
@@ -1206,7 +1300,7 @@ fn spawn_reconciler(daemon: Arc<DaemonControl>) {
                 &hosts_file::hosts_path(),
                 &daemon.registry.active_additional_hosts(),
             ) {
-                eprintln!("fghjd: failed to sync /etc/hosts: {e}");
+                daemon_log::warn(format!("fghjd: failed to sync /etc/hosts: {e}"));
             }
             if let Some(dns_port) = daemon.active_dns_port()
                 && let Err(e) = dns::install_os_resolver_config(
@@ -1214,11 +1308,12 @@ fn spawn_reconciler(daemon: Arc<DaemonControl>) {
                     &daemon.registry.active_wildcard_suffixes(),
                 )
             {
-                eprintln!("fghjd: failed to sync /etc/resolver: {e}");
+                daemon_log::warn(format!("fghjd: failed to sync /etc/resolver: {e}"));
             }
             if let Err(e) = raw_net::reconcile(&daemon.registry.active_raw_endpoints()) {
-                eprintln!("fghjd: failed to sync raw-net routes: {e}");
+                daemon_log::warn(format!("fghjd: failed to sync raw-net routes: {e}"));
             }
+            *daemon.last_reconcile_ms.lock().unwrap() = Some(now_ms());
         }
     });
 }
@@ -1371,7 +1466,9 @@ pub async fn run_control_api() -> Result<()> {
         let docker = docker.clone();
         tokio::spawn(async move {
             if let Err(e) = crate::sidecar_image::ensure_built(&docker).await {
-                eprintln!("fghjd: failed to pre-build the sidecar proxy image: {e:#}");
+                daemon_log::warn(format!(
+                    "fghjd: failed to pre-build the sidecar proxy image: {e:#}"
+                ));
             }
         });
     }
@@ -1397,6 +1494,7 @@ pub async fn run_control_api() -> Result<()> {
         provider,
         control_port,
         active: Mutex::new(None),
+        last_reconcile_ms: Mutex::new(None),
     });
     spawn_reconciler(Arc::clone(&daemon));
     spawn_sync_reconciler(Arc::clone(&daemon));
@@ -1412,19 +1510,20 @@ pub async fn run_control_api() -> Result<()> {
     // "something else is already listening on 80/443") still fails startup
     // fast, before the control API ever serves a request.
     if is_idle_requested() {
-        println!(
+        daemon_log::info(
             "fghjd: starting idle — last `fghj daemon` action was `stop`; run `fghj daemon start` to reconcile"
+                .to_string(),
         );
     } else {
         daemon.activate().await?;
     }
 
     let app = build_router(registry, Arc::clone(&daemon));
-    println!(
+    daemon_log::info(format!(
         "fghjd: control API listening on {} (CLI) and reachable via https://{}",
         socket_path.display(),
         dns::ZONE
-    );
+    ));
 
     // Same router, two listeners: the Unix socket is the CLI's channel, the
     // TCP one is only ever dialed internally by the HTTPS proxy's apex-name
@@ -1432,7 +1531,7 @@ pub async fn run_control_api() -> Result<()> {
     let cli_app = app.clone();
     tokio::spawn(async move {
         if let Err(e) = axum::serve(cli_listener, cli_app).await {
-            eprintln!("fghjd: control socket server error: {e}");
+            daemon_log::warn(format!("fghjd: control socket server error: {e}"));
         }
     });
 
@@ -1452,7 +1551,9 @@ pub async fn run_control_api() -> Result<()> {
             result.context("control API server error")?;
         }
         _ = shutdown_signal => {
-            println!("fghjd: received shutdown signal, releasing ports and cleaning up...");
+            daemon_log::info(
+                "fghjd: received shutdown signal, releasing ports and cleaning up...".to_string(),
+            );
             daemon.deactivate();
         }
     }

@@ -5,6 +5,7 @@
   import Placeholder from './lib/Placeholder.svelte';
   import RunControls from './lib/RunControls.svelte';
   import OperationsDrawer from './lib/OperationsDrawer.svelte';
+  import TelemetryDrawer from './lib/TelemetryDrawer.svelte';
 
   let universe = $state(null);
   let error = $state(null);
@@ -12,6 +13,7 @@
   let currentFlow = $state(null);
   let selectedNode = $state(null);
   let opsOpen = $state(false);
+  let telemetryOpen = $state(false);
   let runs = $state([]);
   let selectedRunId = $state(null);
   let runsPoll = null;
@@ -118,6 +120,22 @@
   async function listPullJobs() {
     const res = await fetch(withWs('/pull-jobs'));
     if (!res.ok) return [];
+    return await res.json();
+  }
+
+  // Daemon-global — never workspace-scoped, so no withWs().
+  async function fetchDaemonLogs(afterSeq) {
+    let path = '/daemon/logs?limit=500';
+    if (afterSeq != null) path += `&after_seq=${afterSeq}`;
+    const res = await fetch(path);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.entries ?? [];
+  }
+
+  async function fetchDaemonNetStatus() {
+    const res = await fetch('/daemon/net-status');
+    if (!res.ok) return null;
     return await res.json();
   }
 
@@ -400,6 +418,7 @@
     onPullFlowComplete={onPullAllComplete}
     onRunFlow={runFlow}
     onOpenOperations={() => (opsOpen = true)}
+    onOpenTelemetry={() => (telemetryOpen = true)}
     workspaces={workspaces}
     currentWorkspaceId={currentWorkspaceId}
     onOpenWorkspaces={loadWorkspaces}
@@ -479,6 +498,14 @@
 
   {#if opsOpen}
     <OperationsDrawer onClose={() => (opsOpen = false)} onListJobs={listPullJobs} />
+  {/if}
+
+  {#if telemetryOpen}
+    <TelemetryDrawer
+      onClose={() => (telemetryOpen = false)}
+      onFetchDaemonLogs={fetchDaemonLogs}
+      onFetchNetStatus={fetchDaemonNetStatus}
+    />
   {/if}
 </div>
 

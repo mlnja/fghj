@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 
 pub mod ca;
 pub mod daemon;
+pub mod daemon_log;
 pub mod dns;
 pub mod docker;
 pub mod downloads;

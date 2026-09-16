@@ -126,6 +126,10 @@ impl RawNetBackend for MacosPfBackend {
         *self.applied.lock().unwrap() = Vec::new();
         Ok(())
     }
+
+    fn status(&self) -> Vec<RouteSpec> {
+        self.applied.lock().unwrap().clone()
+    }
 }
 
 /// Pure add/remove diff between the currently-aliased and desired virtual-IP
