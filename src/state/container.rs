@@ -6,7 +6,7 @@ use super::sync_status::SyncStatus;
 
 /// A `*.fghj.internal` name this container answers to, and the `127.0.0.1`
 /// port Docker published its backing container-side port on when the route
-/// was derived — the SNI -> backend lookup `proxy::serve_https` dispatches
+/// was derived — the SNI -> backend lookup `web::proxy::serve_https` dispatches
 /// real per-service HTTPS routing through (see `state::query::resolve_route`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortRoute {
@@ -31,7 +31,7 @@ pub struct PortRoute {
     #[serde(default)]
     pub container_port: String,
     /// Whether `domain` is eligible for a cert from fghj's local CA — the
-    /// same `dns::cert_eligible` rule `ca::DynamicCertResolver::resolve_for`
+    /// same `dns::cert_eligible` rule `web::ca::DynamicCertResolver::resolve_for`
     /// applies at TLS-handshake time, computed once at route-derivation
     /// time so the UI doesn't need its own copy of the rule. Always `true`
     /// for a node's convention-derived `*.fghj.internal` domain; only

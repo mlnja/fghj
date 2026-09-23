@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use bollard::Docker;
 use include_dir::{Dir, include_dir};
 
-use crate::{docker, persistence, server};
+use crate::{docker, persistence, web};
 
 static SRC_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/src");
 const CARGO_TOML: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
@@ -71,7 +71,7 @@ fn materialize(scratch: &Path) -> Result<()> {
     SRC_DIR
         .extract(scratch.join("src"))
         .context("failed to extract embedded src/ into sidecar build context")?;
-    server::UI_DIST
+    web::ui::UI_DIST
         .extract(scratch.join("ui/dist"))
         .context("failed to extract embedded ui/dist into sidecar build context")?;
     Ok(())

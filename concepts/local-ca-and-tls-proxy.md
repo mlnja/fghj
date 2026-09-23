@@ -9,7 +9,7 @@ the machine has to (a) own a certificate authority the OS/browser will
 trust, and (b) terminate TLS for an unbounded, dynamically-changing set of
 hostnames and forward the plaintext to whatever container is actually
 running behind each one. Both jobs belong to `fghjd`, the root-owned
-superdaemon (`src/ca.rs` + `src/proxy.rs`).
+superdaemon (`src/web/ca.rs` + `src/web/proxy.rs`).
 
 ## Why one wildcard cert doesn't work
 
@@ -98,11 +98,11 @@ pub trait RouteResolver {
 
 This one-method trait is the entire interface `proxy::serve_https` needs to
 turn a hostname into a `127.0.0.1:<port>` to relay to. It's deliberately
-kept separate from `daemon::WorkspaceRegistry`/Docker so `proxy.rs`'s own
+kept separate from `daemon::WorkspaceRegistry`/Docker so `web::proxy`'s own
 test suite can exercise real TLS handshakes and byte-for-byte relaying
 against a plain in-memory map, instead of needing live containers to test
 routing logic at all (see `routed_in_zone_sni_proxies_to_its_registered_backend`
-in `proxy.rs`'s tests).
+in `web::proxy`'s tests).
 
 `WorkspaceRegistry` implements `RouteResolver::resolve` via
 `resolve_route`: it scans every wired workspace's active runs for a
@@ -137,8 +137,9 @@ might already be taken by something else on a real dev machine.
 
 ## Status
 
-Implemented: `src/ca.rs` (CA generation/persistence/trust install, dynamic
-per-SNI leaf issuance), `src/proxy.rs` (HTTP redirect, TLS termination,
+Implemented: `src/web/ca.rs` (CA generation/persistence/trust install,
+dynamic per-SNI leaf issuance), `src/web/proxy.rs` (HTTP redirect, TLS
+termination,
 `RouteResolver`, apex vs. per-service dispatch, fancy-404 for unknown in-zone
 names). `daemon::WorkspaceRegistry` implements `RouteResolver` over real run
 state. Not implemented: any non-macOS trust-store install path (Linux would

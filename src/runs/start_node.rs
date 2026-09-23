@@ -190,7 +190,7 @@ impl RunRegistry {
         // network, so it can't resolve these names the way sibling
         // containers do (via Docker's embedded per-network DNS, which only
         // answers from inside that network) — this is what lets
-        // `proxy::serve_https` dispatch an incoming SNI straight to the
+        // `web::proxy::serve_https` dispatch an incoming SNI straight to the
         // right container instead.
         let mut routes = Vec::new();
         for (port, cfg) in &node.ports {

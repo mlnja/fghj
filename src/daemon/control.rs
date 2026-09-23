@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 
 use crate::daemon::registry::WorkspaceRegistry;
-use crate::{ca, daemon_log, dns, effects, hosts_file, persistence, proxy, raw_net};
+use crate::web::{ca, proxy};
+use crate::{daemon_log, dns, effects, hosts_file, persistence, raw_net};
 
 /// The pieces of `fghjd` that only exist while it's in the "active" state:
 /// the DNS server, and the HTTP/HTTPS reverse proxy occupying 80/443.

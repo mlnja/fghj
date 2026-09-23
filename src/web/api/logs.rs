@@ -10,8 +10,8 @@ use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use serde::Deserialize;
 
-use crate::daemon::api::error::{bad_request, err_response};
-use crate::daemon::api::extract::WorkspaceExtractor;
+use crate::web::api::error::{bad_request, err_response};
+use crate::web::api::extract::WorkspaceExtractor;
 use crate::{docker, runs};
 
 #[derive(Deserialize)]

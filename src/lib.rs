@@ -6,7 +6,6 @@ use anyhow::{Context, Result, bail};
 
 pub mod action;
 pub mod actor;
-pub mod ca;
 pub mod daemon;
 pub mod daemon_log;
 pub mod dns;
@@ -15,7 +14,6 @@ pub mod downloads;
 pub mod effects;
 pub mod hosts_file;
 pub mod persistence;
-pub mod proxy;
 pub mod raw_net;
 pub mod reducer;
 pub mod registry;
@@ -25,6 +23,7 @@ pub mod server;
 pub mod sidecar_image;
 pub mod state;
 pub mod util;
+pub mod web;
 
 /// Resolves the workspace directory, cloning `entry` into it by convention if
 /// given and not already present.

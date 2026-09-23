@@ -5,8 +5,8 @@ use axum::body::Bytes;
 use axum::extract::Path as AxumPath;
 use axum::response::{IntoResponse, Response};
 
-use crate::daemon::api::error::{action_rejected_response, bad_request, err_response};
-use crate::daemon::api::extract::{ActorExtractor, WorkspaceExtractor};
+use crate::web::api::error::{action_rejected_response, bad_request, err_response};
+use crate::web::api::extract::{ActorExtractor, WorkspaceExtractor};
 use crate::{action, actor, runs, state};
 
 /// Builds the 200 response for a successful node-lifecycle dispatch: the

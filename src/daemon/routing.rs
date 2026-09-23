@@ -11,7 +11,8 @@ use std::net::Ipv4Addr;
 
 use crate::daemon::registry::WorkspaceRegistry;
 use crate::state::query;
-use crate::{dns, proxy, raw_net};
+use crate::web::proxy;
+use crate::{dns, raw_net};
 
 impl proxy::RouteResolver for WorkspaceRegistry {
     fn resolve(&self, host: &str) -> Option<proxy::Backend> {

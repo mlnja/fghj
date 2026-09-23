@@ -1,13 +1,15 @@
 //! The `fghjd` control daemon.
 //!
-//! See `concepts/control-api-and-cli.md`. [`api`] holds the HTTP surface;
-//! the files beside it hold the daemon's own state and lifecycle.
+//! See `concepts/control-api-and-cli.md`. This module is the daemon's own
+//! state and lifecycle — which workspaces exist, whether the daemon is
+//! actively occupying ports/DNS, and the reconcilers that keep reality in
+//! step. The HTTP surface it serves lives in `web`; [`bootstrap`] is where
+//! the two meet.
 
 use std::path::PathBuf;
 
 use crate::persistence;
 
-pub mod api;
 pub mod bootstrap;
 pub mod control;
 pub mod reconcile;

@@ -1,3 +1,17 @@
+//! The local certificate authority behind every `https://*.fghj.internal`
+//! URL.
+//!
+//! Three jobs: generating/loading the CA itself (durable, under
+//! `daemon::ca_dir` — regenerating it would mean re-approving it in Keychain
+//! Access on every restart), minting leaf certs on demand as
+//! [`DynamicCertResolver`] answers `web::proxy`'s TLS handshakes, and
+//! installing trust — into the macOS system store for the browser, and as
+//! mountable PEM files for containers that need to trust the zone from the
+//! inside.
+//!
+//! Which names get a certificate is deliberately not "anything asked for":
+//! see [`DynamicCertResolver::resolve_for`] and `dns::cert_eligible`.
+
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -15,7 +29,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 
-use crate::{dns, proxy};
+use crate::dns;
+use crate::web::proxy;
 
 const CA_CERT_FILE: &str = "ca-cert.pem";
 const CA_KEY_FILE: &str = "ca-key.pem";

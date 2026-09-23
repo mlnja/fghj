@@ -15,7 +15,7 @@ impl RunRegistry {
     /// updates their recorded status, published port, and per-port host
     /// bindings — including flagging any container that's vanished (e.g.
     /// `docker rm`'d by hand, outside fghj) as `"removed"` — so the next
-    /// `/runs` poll (and `proxy::serve_https`'s routing, via
+    /// `/runs` poll (and `web::proxy::serve_https`'s routing, via
     /// `state::query::resolve_route`) reflects reality instead of a snapshot
     /// frozen at whenever the run last started or was persisted. Purely
     /// observational with respect to Docker: it only re-reads state Docker

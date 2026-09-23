@@ -8,12 +8,13 @@
 //!
 //! - [`env_file`] — `.env`-style parsing.
 //! - [`label`] — munging arbitrary text into a `[a-z0-9-]` slug.
-//! - [`mime`] — content type by file extension.
-//! - [`query`] — looking up a key in a `k=v&k=v` query string.
 //! - [`time`] — the current unix time in milliseconds.
+//!
+//! Helpers that are equally small but only mean anything in terms of HTTP
+//! live in `web` instead (`web::mime`, `web::query`) — the test for this
+//! module is whether a helper would still make sense in a `fghj` with no
+//! web surface at all.
 
 pub mod env_file;
 pub mod label;
-pub mod mime;
-pub mod query;
 pub mod time;

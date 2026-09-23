@@ -25,7 +25,8 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
-use fghj::{ca, dns, proxy};
+use fghj::dns;
+use fghj::web::{ca, proxy};
 use serde::Deserialize;
 use tokio::net::{TcpListener, UdpSocket};
 

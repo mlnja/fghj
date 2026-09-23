@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use crate::actor;
 use crate::daemon::registry::WorkspaceRegistry;
 use crate::server::WorkspaceState;
-use crate::util::query::query_param;
+use crate::web::query::query_param;
 
 /// Extracts the workspace named by `?workspace=<id>` in the request's query
 /// string, or rejects with the same 400 the old handler used to return for a

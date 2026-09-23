@@ -1,4 +1,10 @@
 //! The axum router: every route the daemon serves, in one table.
+//!
+//! Two sub-routers, split by what they carry as axum state — `/workspaces`,
+//! `/runs`, `/pull*` are per-workspace and hold the `WorkspaceRegistry`;
+//! `/daemon/*` is about the daemon process itself and holds `DaemonControl`.
+//! Anything neither claims falls through to the embedded UI
+//! (`web::ui::static_handler`).
 
 use std::sync::Arc;
 
@@ -12,7 +18,6 @@ pub mod exec;
 pub mod extract;
 pub mod logs;
 pub mod runs;
-pub mod static_files;
 pub mod workspaces;
 
 use crate::daemon::control::DaemonControl;
@@ -32,8 +37,9 @@ use runs::{
     get_runs, post_run_node_delete, post_run_node_start, post_run_node_stop, post_run_stop,
     post_runs,
 };
-use static_files::static_handler;
 use workspaces::{get_universe, get_workspaces, post_workspaces, post_workspaces_stop};
+
+use crate::web::ui::static_handler;
 
 pub(crate) fn build_router(registry: Arc<WorkspaceRegistry>, daemon: Arc<DaemonControl>) -> Router {
     let api = Router::new()

@@ -58,13 +58,13 @@ in, so it deserves its own minimal, easy-to-audit entrypoint rather than a
 branch inside a binary that also unconditionally requires root and runs the
 full control API.
 
-**Widened `RouteResolver` (`src/proxy.rs`) to resolve to a full `Backend {
+**Widened `RouteResolver` (`src/web/proxy.rs`) to resolve to a full `Backend {
 host, port }`, not just a port.** The host-side proxy always relayed to
 `127.0.0.1` and only needed a port; the sidecar relays to sibling
 containers by their own network address. One trait, one `serve_https`
 /`serve_http_redirect` implementation, two different `resolve()` backings —
 the host-side one still hardcodes `127.0.0.1`, the sidecar's reads a route
-file. `ca.rs` needed no change: it only ever checked `.is_some()` on the
+file. `web::ca` needed no change: it only ever checked `.is_some()` on the
 result.
 
 **Synced via a bind-mounted, polled JSON file — no network call between
@@ -84,7 +84,7 @@ network) with no separate IP bookkeeping.
 
 **The sidecar's Docker image is built by embedding the whole crate into
 `fghjd` at compile time** (`src/sidecar_image.rs`, `include_dir!`, same
-trick `server.rs` uses for the UI) and materializing it to
+trick `web::ui` uses for the UI) and materializing it to
 `/var/lib/fghjd/sidecar-build/` on first use. `fghjd` ships as a prebuilt
 binary with no cargo workspace on the target machine, so there's no
 existing source tree to hand to `docker build` — this makes the sidecar

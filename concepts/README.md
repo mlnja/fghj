@@ -53,12 +53,12 @@ snapshot of what's actually built and what's left, see `PROGRESS.md` itself.
 
 | Source | Guide |
 |---|---|
-| `src/resolver.rs` | [[node-identity-and-domains]], [[flat-workspace-model]], [[fog-of-war-visibility]], [[branch-ownership-model]] |
-| `src/ca.rs`, `src/proxy.rs` | [[local-ca-and-tls-proxy]] |
+| `src/resolver/` | [[node-identity-and-domains]], [[flat-workspace-model]], [[fog-of-war-visibility]], [[branch-ownership-model]] |
+| `src/web/ca.rs`, `src/web/proxy.rs` | [[local-ca-and-tls-proxy]] |
 | `src/dns.rs` | [[split-dns]] |
-| `src/runs.rs` | [[run-lifecycle-and-registry]], [[node-identity-and-domains]] |
-| `src/store.rs` | [[persistence-and-workspace-store]] |
+| `src/runs/`, `src/state/`, `src/reducer/`, `src/effects/` | [[run-lifecycle-and-registry]], [[node-identity-and-domains]] |
+| `src/persistence/` | [[persistence-and-workspace-store]] |
 | `src/docker.rs`, `src/downloads.rs` | [[docker-and-downloads]] |
-| `src/daemon.rs`, `src/main.rs`, `src/bin/fghjd.rs`, `src/server.rs` | [[control-api-and-cli]] |
-| `ui/src/**` | [[ui-architecture]] |
+| `src/web/api/`, `src/daemon/`, `src/main.rs`, `src/bin/fghjd.rs` | [[control-api-and-cli]] |
+| `src/web/ui.rs`, `ui/src/**` | [[ui-architecture]] |
 | `schema/*.cue` | referenced throughout — the CUE shapes are the source of truth for `.fghj.yaml`, cross-checked against the Rust structs that deserialize it in [[node-identity-and-domains]] |

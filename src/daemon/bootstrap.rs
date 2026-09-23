@@ -6,12 +6,13 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 
-use crate::daemon::api::build_router;
 use crate::daemon::control::DaemonControl;
 use crate::daemon::reconcile::{spawn_reconciler, spawn_sync_reconciler};
 use crate::daemon::registry::WorkspaceRegistry;
 use crate::daemon::{ca_dir, socket_path};
-use crate::{ca, daemon_log, dns, persistence};
+use crate::web::api::build_router;
+use crate::web::ca;
+use crate::{daemon_log, dns, persistence};
 
 /// Connects to the Docker Engine API, preferring the plain `DOCKER_HOST`/
 /// default-socket convention bollard understands natively, but falling back

@@ -6,8 +6,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use crate::daemon::api::extract::WorkspaceExtractor;
 use crate::downloads;
+use crate::web::api::extract::WorkspaceExtractor;
 
 #[derive(Deserialize)]
 pub(crate) struct FlowQuery {

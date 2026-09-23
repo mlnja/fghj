@@ -80,8 +80,8 @@ pub(crate) fn refresh_sidecar_ca_copy() -> Result<PathBuf> {
 
     let src_dir = crate::daemon::ca_dir();
     for (src, dest_name) in [
-        (crate::ca::ca_cert_path(&src_dir), "ca-cert.pem"),
-        (crate::ca::ca_key_path(&src_dir), "ca-key.pem"),
+        (crate::web::ca::ca_cert_path(&src_dir), "ca-cert.pem"),
+        (crate::web::ca::ca_key_path(&src_dir), "ca-key.pem"),
     ] {
         let bytes = std::fs::read(&src).with_context(|| format!("failed to read {src:?}"))?;
         let dest = dir.join(dest_name);

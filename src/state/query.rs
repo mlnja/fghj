@@ -57,7 +57,7 @@ fn live_host_port(container: &ContainerInfo, route: &PortRoute) -> u16 {
 
 /// The `127.0.0.1:<port>` a running container publishes `host` at, if any —
 /// the SNI -> container lookup backing per-service HTTPS routing (see
-/// `proxy::serve_https`).
+/// `web::proxy::serve_https`).
 ///
 /// Exact matches (a node's own derived domain, a named port, or a literal
 /// `#AdditionalHost`) always win over a wildcard match: a `wildcard_hosts`

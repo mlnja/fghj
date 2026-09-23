@@ -9,9 +9,9 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use crate::daemon::api::error::{bad_request, err_response};
-use crate::daemon::api::extract::WorkspaceExtractor;
 use crate::daemon::registry::WorkspaceRegistry;
+use crate::web::api::error::{bad_request, err_response};
+use crate::web::api::extract::WorkspaceExtractor;
 use crate::{persistence, resolver};
 
 #[derive(Deserialize)]

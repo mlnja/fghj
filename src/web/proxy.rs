@@ -1,3 +1,16 @@
+//! The TLS reverse proxy on ports 80/443 (SPEC.md Subsystem C).
+//!
+//! Every `*.fghj.internal` name resolves to `127.0.0.1` (see `dns`), so this
+//! is what actually decides *which* container a request reaches: it reads
+//! the TLS SNI, asks a [`RouteResolver`] for a [`Backend`], and relays bytes
+//! to it. Port 80 exists only to redirect to 443.
+//!
+//! Runs in two places with the same code: on the host (resolver backed by
+//! `daemon::WorkspaceRegistry`, relaying to published `127.0.0.1` ports) and
+//! inside each run's sidecar container (resolver backed by the on-disk route
+//! table, relaying to sibling containers' docker-network addresses) — hence
+//! [`Backend`] carrying a full host rather than just a port.
+
 use std::io;
 use std::sync::Arc;
 
@@ -9,7 +22,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 
-use crate::{ca, dns};
+use crate::dns;
+use crate::web::ca;
 
 /// Where a resolved hostname should actually be relayed to. Usually
 /// `127.0.0.1` (the host-published port of a running container, or the

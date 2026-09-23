@@ -91,9 +91,10 @@ without any TLS proxy in front of it.
 ## Status
 
 Implemented: `src/main.rs` (`validate`/`graph`/`wire`/`daemon stop`),
-`src/bin/fghjd.rs`, `src/daemon.rs` (`WorkspaceRegistry`, the full route
+`src/bin/fghjd.rs`, `src/daemon/` (`WorkspaceRegistry`, the full route
 table, `spawn_reconciler`, `connect_docker`'s Docker-context fallback for
-Docker Desktop/OrbStack/colima), `src/server.rs` (embedded UI serving). Known
+Docker Desktop/OrbStack/colima), `src/web/api/` (the axum router and its
+handlers), `src/web/ui.rs` (embedded UI serving). Known
 mismatch: `SPEC.md`'s described CLI surface (`fghj setup`, `fghj up`,
 `fghj branch`, `fghj branch set`) does not match what's actually
 implemented — see `PROGRESS.md`'s "Known gaps" for the open question of

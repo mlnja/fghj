@@ -28,7 +28,7 @@ pub(crate) const ZONE_RAW: &str = "fghj.raw.internal";
 
 /// Every workspace runs on one machine, so every `*.fghj.internal` name
 /// resolves to the same place regardless of which service it names — the
-/// TLS reverse proxy (`proxy.rs`, SPEC.md Subsystem C) is what routes by name
+/// TLS reverse proxy (`web::proxy`, SPEC.md Subsystem C) is what routes by name
 /// once it terminates on this address. The host server always answers with
 /// this for `ZONE`; the in-network sidecar (`fghj-sidecar.rs`) answers with
 /// its own discovered IP instead; a `ZONE_RAW` name gets its own distinct
@@ -44,7 +44,7 @@ const TYPE_A: u16 = 1;
 const CLASS_IN: u16 = 1;
 
 /// Whether `qname` (already lowercased) is the zone apex or a subdomain of
-/// it. `pub(crate)` so `ca::DynamicCertResolver` can reuse the exact same
+/// it. `pub(crate)` so `web::ca::DynamicCertResolver` can reuse the exact same
 /// "is this name ours" rule rather than re-deriving it.
 pub(crate) fn in_zone(qname: &str) -> bool {
     qname == ZONE || qname.ends_with(ZONE_SUFFIX)
@@ -75,7 +75,7 @@ pub trait ZoneSource: Send + Sync {
 /// real internet, so a hostname under one of these can't collide with a real
 /// production domain. This is the eligibility gate for an `#AdditionalHost`
 /// to get a certificate from fghj's local CA at all (see
-/// `ca::DynamicCertResolver::resolve_for`); anything else is treated as
+/// `web::ca::DynamicCertResolver::resolve_for`); anything else is treated as
 /// potentially real and only ever gets proxied over plain HTTP, never
 /// certified.
 const RESERVED_ALIAS_TLDS: &[&str] = &["local", "test", "internal", "localhost"];
@@ -93,7 +93,7 @@ pub fn is_reserved_alias(host: &str) -> bool {
 /// never a blanket "any `.local`-shaped SNI gets a cert," which would let a
 /// browser mint trust for a name nothing in this workspace declared. A real,
 /// non-reserved-TLD hostname (e.g. a third-party OAuth callback host) is
-/// never eligible, `routed` or not — see `ca::DynamicCertResolver::resolve_for`,
+/// never eligible, `routed` or not — see `web::ca::DynamicCertResolver::resolve_for`,
 /// the one caller that actually mints certs off this, and `runs::start_node`,
 /// which uses it to tell the UI whether a route can ever be linked as
 /// `https://` at all.

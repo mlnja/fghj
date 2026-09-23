@@ -11,8 +11,8 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 
-use crate::daemon::api::error::bad_request;
-use crate::daemon::api::extract::WorkspaceExtractor;
+use crate::web::api::error::bad_request;
+use crate::web::api::extract::WorkspaceExtractor;
 use crate::{docker, runs};
 
 /// First message a client must send once the socket is upgraded — everything

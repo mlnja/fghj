@@ -118,7 +118,7 @@ pub trait RawNetBackend: Send + Sync {
 /// Backend selection: macOS gets the real `pf`/`ifconfig` implementation,
 /// everything else gets a `NoopBackend` that logs once and does nothing —
 /// the same runtime-`cfg!` pattern `dns::install_os_resolver_config` and
-/// `ca::install_macos_trust` already use, so the crate keeps compiling
+/// `web::ca::install_macos_trust` already use, so the crate keeps compiling
 /// unconditionally on every platform.
 fn backend() -> &'static dyn RawNetBackend {
     static BACKEND: OnceLock<Box<dyn RawNetBackend>> = OnceLock::new();
