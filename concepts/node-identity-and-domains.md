@@ -6,9 +6,8 @@ Every node in the resolved graph — a service built from a repo, or a backing
 dependency like postgres — eventually needs three distinct things, and it's
 easy to accidentally conflate them:
 
-1. **An id** — a stable key used internally (map keys, override targets,
-   container names, edges) that must never collide between two unrelated
-   nodes.
+1. **An id** — a stable key used internally (map keys, container names,
+   edges) that must never collide between two unrelated nodes.
 2. **A label** — what a human reads on the graph (`GraphView.svelte`'s node
    card, `Drawer.svelte`'s heading). Friendly, short, author-chosen.
 3. **A domain** — the actual `*.fghj.internal` hostname a browser or another

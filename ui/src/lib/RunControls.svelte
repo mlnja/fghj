@@ -1,25 +1,18 @@
 <script>
-  let { runs, serviceIds, onStart, onStop, onOpenOperations } = $props();
+  let { runs, onStart, onStop, onOpenOperations } = $props();
 
   let showForm = $state(false);
   let runName = $state('');
-  let overrideService = $state('');
-  let overrideBranch = $state('');
 
   function startDefault() {
-    onStart({ run_id: null, overrides: {} });
+    onStart({ run_id: null });
   }
 
   function startReview() {
     if (!runName.trim()) return;
-    const overrides = {};
-    if (overrideService && overrideBranch.trim()) {
-      overrides[overrideService] = overrideBranch.trim();
-    }
-    onStart({ run_id: runName.trim(), overrides });
+    onStart({ run_id: runName.trim() });
     showForm = false;
     runName = '';
-    overrideBranch = '';
   }
 </script>
 
@@ -33,15 +26,6 @@
   {#if showForm}
     <div class="form">
       <input class="field" placeholder="run name (e.g. review-auth-pr123)" bind:value={runName} />
-      <select class="field" bind:value={overrideService}>
-        <option value="">— override branch on service (optional) —</option>
-        {#each serviceIds as id}
-          <option value={id}>{id}</option>
-        {/each}
-      </select>
-      {#if overrideService}
-        <input class="field" placeholder="branch" bind:value={overrideBranch} />
-      {/if}
       <button class="btn" onclick={startReview}>Start review run</button>
     </div>
   {/if}

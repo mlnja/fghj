@@ -28,7 +28,7 @@ different questions with two different answers:
 ## Schema and migrations
 
 Five tables: `meta` (workspace id, entry URL, creation time, plus the
-owner columns below), `runs` (run id, serialized overrides, network name),
+owner columns below), `runs` (run id, network name),
 `containers` (one row per container in a run, including its serialized
 routes), `logs` (generation-tracked container log lines), and `events`
 (start/stop orchestration steps). New columns get added to existing

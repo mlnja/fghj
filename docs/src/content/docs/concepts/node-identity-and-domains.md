@@ -9,7 +9,7 @@ Every node in the resolved graph — a service built from a repo, or a
 backing dependency like Postgres — needs three distinct identifiers, and
 it's easy to accidentally conflate them:
 
-1. **An id** — a stable internal key (map keys, override targets,
+1. **An id** — a stable internal key (map keys,
    container names, edges) that must never collide between two unrelated
    nodes.
 2. **A label** — what a human reads on the graph. Friendly, short,

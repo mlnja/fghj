@@ -1,6 +1,6 @@
 ---
 title: Run lifecycle & registry
-description: Default vs. named/review runs, branch overrides, and how fghj keeps run state honest against real Docker state.
+description: Default vs. named/review runs, and how fghj keeps run state honest against real Docker state.
 ---
 
 ## Two different verbs, one shared registry
@@ -13,8 +13,7 @@ to start what you asked for:
   scratch." If a run with this id is already up, it's stopped and torn
   down first, then every non-flow-filtered node in the graph is started
   fresh. A review run is meant to be reproducible from a clean slate every
-  time you hit start again — for example, after changing which branch is
-  overridden.
+  time you hit start again.
 - **Topping up the default environment** — "make sure everything reachable
   from this flow (or the whole graph) is running; never touch a container
   that's already alive." This backs both "Start default environment" and
@@ -28,20 +27,17 @@ Liveness is checked directly against Docker on every call, never trusted
 from persisted state alone — a container can be stopped or removed
 out-of-band between calls, so only a fresh check is trustworthy.
 
-## Branch overrides: a throwaway build, never the live checkout
+## Branch overrides: removed
 
-A run can override which branch a specific node builds from — but that
-only affects what it builds **from**, never the shared workspace checkout:
+Every node always builds straight from the live workspace checkout, so
+local edits are picked up on every run without needing a commit first.
 
-- **No override** (the common case): builds straight from the live
-  workspace checkout, so local edits are picked up on every run without
-  needing a commit first.
-- **Override present**: builds from a throwaway mirror + checkout kept
-  separately, never touching the live checkout. See
-  [Branch ownership model](/concepts/branch-ownership-model/) for the full
-  rationale — this ephemeral, side-by-side override is deliberately the
-  *only* way to build a specific branch of a dependency, precisely because
-  there's exactly one live checkout per repo, workspace-wide.
+This used to have a second mode — a run could override which branch a
+specific node built from, via a throwaway mirror + checkout kept
+separately from the live checkout. It was removed: see
+[Branch ownership model](/concepts/branch-ownership-model/) for why (a
+real permission bug in the mirror clone, plus no designed answer for an
+override branch whose own config doesn't match the live graph's shape).
 
 ## The reconciler: read-only drift correction
 

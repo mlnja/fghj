@@ -47,9 +47,8 @@ disambiguates by whether the left side contains a `/` — so `RunOpts.binds:
 created.
 
 A `Bind`'s `host`, if relative, resolves against the checkout root
-`start_node` already has in hand for the build (`volume_base` — the
-branch-override checkout dir or the live workspace path, whichever the
-image was actually built from). It is **not** sandboxed to that repo — an
+`start_node` already has in hand for the build (`volume_base` — the live
+workspace path the image was actually built from). It is **not** sandboxed to that repo — an
 absolute or `..`-escaping path passes straight through, a deliberate
 choice (see PROGRESS.md's real-world dry-run findings) to support the
 pattern of bind-mounting a sibling repo's checkout directly (e.g.
@@ -140,14 +139,15 @@ progress (a cloned node always flips to `downloaded: true` on the next
 resolve) or terminate, so the loop can't spin forever short of a
 pathological clone that never actually lands the repo at its expected path.
 
-## Privilege drop, shared with the resolver's branch-override path
+## Privilege drop for clones
 
-`run_git_clone_logged` and `resolver::ensure_mirror` (used for the branch-
-override build path — see [[run-lifecycle-and-registry]]) both take an
-optional `&WorkspaceOwner` and apply it the same way (see
-[[persistence-and-workspace-store]] for the full owner-capture story) and
-both apply `store::harden_git_ssh` on top, as defense in depth against a
-`git clone` subprocess hanging on an unanswerable interactive prompt.
+`run_git_clone_logged` takes an optional `&WorkspaceOwner` and applies it
+(see [[persistence-and-workspace-store]] for the full owner-capture story),
+plus `store::harden_git_ssh` on top, as defense in depth against a
+`git clone` subprocess hanging on an unanswerable interactive prompt. (The
+resolver used to have a second privilege-dropped clone path,
+`ensure_mirror`, for the now-removed branch-override build path — see
+[[run-lifecycle-and-registry]] — that function no longer exists.)
 
 ## Status
 

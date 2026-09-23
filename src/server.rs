@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use include_dir::{Dir, include_dir};
 
-use crate::{downloads, runs, store};
+use crate::{downloads, persistence, runs};
 
 /// `pub(crate)` so `sidecar_image` can reuse this same embedded copy when
 /// materializing the sidecar's Docker build context, rather than embedding
@@ -18,7 +18,7 @@ pub(crate) static UI_DIST: Dir = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 /// `fghjd` restart.
 pub struct WorkspaceState {
     pub path: PathBuf,
-    pub db: Arc<store::WorkspaceDb>,
+    pub db: Arc<persistence::WorkspaceDb>,
     pub docker: Arc<bollard::Docker>,
     pub runs: runs::RunRegistry,
     pub downloads: downloads::DownloadRegistry,
@@ -26,7 +26,7 @@ pub struct WorkspaceState {
 
 impl WorkspaceState {
     pub async fn new(path: PathBuf, docker: Arc<bollard::Docker>) -> Result<Self> {
-        let db = Arc::new(store::WorkspaceDb::open(&path)?);
+        let db = Arc::new(persistence::WorkspaceDb::open(&path)?);
         let runs = runs::RunRegistry::new(path.clone(), db.clone(), docker.clone()).await?;
         Ok(Self {
             runs,

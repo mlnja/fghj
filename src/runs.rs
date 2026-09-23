@@ -11,8 +11,8 @@ use sha2::{Digest, Sha256};
 
 use crate::dns;
 use crate::docker;
+use crate::persistence::{self, LogLine, WorkspaceDb};
 use crate::resolver::{Edge, Graph, Healthcheck, Node, VolumeMount};
-use crate::store::{LogLine, WorkspaceDb};
 
 pub const DEFAULT_RUN_ID: &str = "default";
 
@@ -29,12 +29,23 @@ fn sanitize_label(s: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
+/// The concrete run id `start` derives from a `RunSpec::run_id` — sanitized,
+/// falling back to `DEFAULT_RUN_ID` when absent or empty after sanitizing.
+/// Exposed so `daemon::post_runs` can compute the same id up front to
+/// dispatch `Action::RunPlanned` under, before `start`/`ensure_running`
+/// (now called from inside `effects::docker::converge::perform_create`,
+/// not synchronously from the HTTP handler) ever runs.
+pub fn resolve_run_id(run_id: Option<&str>) -> String {
+    run_id
+        .map(sanitize_label)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_RUN_ID.to_string())
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct RunSpec {
     #[serde(default)]
     pub run_id: Option<String>,
-    #[serde(default)]
-    pub overrides: BTreeMap<String, String>,
     /// Scopes the run to only the nodes reachable from this flow (see
     /// `Node::flows`) instead of the whole graph — e.g. starting just the
     /// checkout flow's services instead of every service fghj knows about.
@@ -271,7 +282,7 @@ fn route_file_entries(containers: &[ContainerInfo]) -> Vec<RouteFileEntry> {
 }
 
 fn sidecar_routes_dir(network: &str) -> PathBuf {
-    crate::store::fghjd_root().join("runs").join(network)
+    persistence::fghjd_root().join("runs").join(network)
 }
 
 fn sidecar_routes_path(network: &str) -> PathBuf {
@@ -279,7 +290,7 @@ fn sidecar_routes_path(network: &str) -> PathBuf {
 }
 
 fn sidecar_ca_dir() -> PathBuf {
-    crate::store::fghjd_root().join("sidecar-ca")
+    persistence::fghjd_root().join("sidecar-ca")
 }
 
 /// A world-readable copy of the CA cert+key, refreshed on every sidecar
@@ -520,8 +531,8 @@ pub struct ContainerInfo {
     /// The subset of `Node.additional_hosts` that actually got a route (i.e.
     /// the node has a `primary` port) — kept separate from `routes` (which
     /// also carries the node's own derived-domain and named-port routes)
-    /// because `daemon::WorkspaceRegistry::active_additional_hosts` needs
-    /// exactly this list, and only this list, to sync `/etc/hosts`: a
+    /// because `effects::hosts::HostsEffect` needs exactly this list, and
+    /// only this list, to sync `/etc/hosts`: a
     /// `*.fghj.internal` route is already served by fghjd's own DNS, and
     /// would be actively wrong to also pin as a static `/etc/hosts` entry.
     #[serde(default)]
@@ -570,7 +581,7 @@ pub struct ContainerInfo {
     pub synced: Option<bool>,
     /// Which start/stop/delete action (if any) is currently in flight for
     /// this node, per `RunRegistry`'s `pending` map — never persisted (not a
-    /// DB column; always `None` coming out of `store.rs` or a freshly-built
+    /// DB column; always `None` coming out of `persistence::sqlite` or a freshly-built
     /// `ContainerInfo`) and never read by anything but `RunRegistry::list`,
     /// which fills it in live from `pending` right before handing state back
     /// to the API. This is the one truth the UI needs to know "what is this
@@ -608,7 +619,6 @@ impl std::fmt::Display for PendingAction {
 #[derive(Debug, Serialize, Clone)]
 pub struct RunState {
     pub run_id: String,
-    pub overrides: BTreeMap<String, String>,
     pub network: String,
     pub containers: Vec<ContainerInfo>,
     /// The deterministic name of this run's in-network TLS proxy sidecar
@@ -755,32 +765,7 @@ impl RunRegistry {
         db: Arc<WorkspaceDb>,
         docker: Arc<bollard::Docker>,
     ) -> Result<Self> {
-        let persisted = db.clone().load_runs().await?;
-        let mut reconciled = BTreeMap::new();
-        for (run_id, mut state) in persisted {
-            // Per-container, not per-run: one container having disappeared
-            // (stopped, renamed, mid-recreate at exactly the moment `fghjd`
-            // restarted) doesn't mean the rest of the run's containers did
-            // too. Dropping the whole run's tracked list on a single miss
-            // silently orphaned every other still-running container from
-            // `fghjd`'s bookkeeping — including from the sidecar route
-            // table, since that's built from exactly this list.
-            let mut alive = Vec::new();
-            for mut c in state.containers {
-                if let Ok(Some(status)) =
-                    docker::inspect_status(&docker, &c.container_name, "").await
-                {
-                    c.status = status.status;
-                    alive.push(c);
-                }
-            }
-            state.containers = alive;
-            if state.containers.is_empty() {
-                let _ = db.clone().delete_run(run_id).await;
-            } else {
-                reconciled.insert(run_id, state);
-            }
-        }
+        let reconciled = persistence::rehydrate(db.clone(), docker.clone()).await?;
         Ok(Self {
             workspace,
             db,
@@ -1028,6 +1013,20 @@ impl RunRegistry {
         }
     }
 
+    /// The read-only Docker-volume counterpart to `refresh` — lists what
+    /// `docker::list_run_volumes` actually finds for `run_id` right now.
+    /// Keeps `self.docker` private to this module (nothing outside
+    /// `runs.rs` touches the Docker client directly) while still letting
+    /// `effects::docker::observe` discover volume identity without its own
+    /// independent Docker-polling loop. Empty (rather than an error) if the
+    /// Docker call itself fails — same "purely observational, never worth
+    /// surfacing as a hard failure" stance as `refresh`.
+    pub async fn volume_names(&self, run_id: &str) -> Vec<String> {
+        docker::list_run_volumes(&self.docker, run_id)
+            .await
+            .unwrap_or_default()
+    }
+
     /// A separate, slower-cadence counterpart to `refresh`, driven by
     /// `daemon::spawn_sync_reconciler` rather than the 1-second liveness
     /// loop: recomputes each live container's *desired* hash from the
@@ -1041,36 +1040,23 @@ impl RunRegistry {
     /// stops, or recreates anything itself.
     ///
     /// A node no longer present in `graph` (removed from `.fghj.yaml`
-    /// entirely) or a branch-overridden service (`resolve_node_spec` returns
-    /// `Ok(None)` for those in dry-run mode — see its own doc comment) is
-    /// reported as `None` ("unknown"), not `false` — there's nothing to
-    /// meaningfully compare against, and `false` would misleadingly read as
-    /// "confirmed drifted."
+    /// entirely) is reported as `None` ("unknown"), not `false` — there's
+    /// nothing to meaningfully compare against, and `false` would
+    /// misleadingly read as "confirmed drifted."
     pub async fn refresh_sync_status(&self, graph: &Graph) {
-        let owner = self.db.clone().load_owner().await.ok().flatten();
-
-        let snapshot: Vec<(String, BTreeMap<String, String>, Vec<ContainerInfo>)> = {
+        let snapshot: Vec<(String, Vec<ContainerInfo>)> = {
             let runs = self.runs.lock().unwrap();
             runs.iter()
-                .map(|(run_id, state)| {
-                    (
-                        run_id.clone(),
-                        state.overrides.clone(),
-                        state.containers.clone(),
-                    )
-                })
+                .map(|(run_id, state)| (run_id.clone(), state.containers.clone()))
                 .collect()
         };
 
         let mut results: Vec<(String, Vec<Option<bool>>)> = Vec::new();
-        for (run_id, overrides, containers) in snapshot {
+        for (run_id, containers) in snapshot {
             let mut synced_flags = Vec::with_capacity(containers.len());
             for c in &containers {
                 let synced = match graph.nodes.iter().find(|n| n.id == c.node_id) {
-                    Some(node) => match self
-                        .resolve_node_spec(graph, node, &run_id, &overrides, owner.as_ref(), false)
-                        .await
-                    {
+                    Some(node) => match self.resolve_node_spec(graph, node, &run_id, false).await {
                         Ok(Some(spec)) => Some(spec_hash(node, &spec) == c.config_hash),
                         Ok(None) | Err(_) => None,
                     },
@@ -1172,7 +1158,6 @@ impl RunRegistry {
         let Some(node) = graph.nodes.iter().find(|n| n.id == node_id) else {
             bail!("no such node: {node_id}");
         };
-        let owner = self.db.clone().load_owner().await.ok().flatten();
         let container_name = format!(
             "fghj-{}-{}-{}",
             sanitize_label(&graph.workspace_name),
@@ -1187,8 +1172,6 @@ impl RunRegistry {
                 node,
                 run_id,
                 &state.network,
-                &state.overrides,
-                owner.as_ref(),
                 state.sidecar_ip.as_deref(),
             )
             .await?;
@@ -1386,12 +1369,7 @@ impl RunRegistry {
     }
 
     pub async fn start(&self, graph: &Graph, spec: RunSpec) -> Result<RunState> {
-        let run_id = spec
-            .run_id
-            .as_deref()
-            .map(sanitize_label)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| DEFAULT_RUN_ID.to_string());
+        let run_id = resolve_run_id(spec.run_id.as_deref());
 
         // starting an already-running run replaces it cleanly
         let already_running = self.runs.lock().unwrap().contains_key(&run_id);
@@ -1413,8 +1391,6 @@ impl RunRegistry {
             }
         };
 
-        let owner = self.db.clone().load_owner().await.ok().flatten();
-
         let node_map: HashMap<&str, &Node> =
             graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
         let target_ids: Vec<String> = graph
@@ -1434,15 +1410,7 @@ impl RunRegistry {
         for node_id in &ordered_ids {
             let node = node_map[node_id.as_str()];
             match self
-                .start_node(
-                    graph,
-                    node,
-                    &run_id,
-                    &network,
-                    &spec.overrides,
-                    owner.as_ref(),
-                    Some(&sidecar_ip),
-                )
+                .start_node(graph, node, &run_id, &network, Some(&sidecar_ip))
                 .await
             {
                 Ok(info) => {
@@ -1461,7 +1429,6 @@ impl RunRegistry {
 
         let state = RunState {
             run_id: run_id.clone(),
-            overrides: spec.overrides,
             network,
             containers,
             sidecar_container_name,
@@ -1501,7 +1468,6 @@ impl RunRegistry {
             .cloned()
             .unwrap_or_else(|| RunState {
                 run_id: run_id.clone(),
-                overrides: BTreeMap::new(),
                 network: network.clone(),
                 containers: Vec::new(),
                 sidecar_container_name: sidecar_container_name.clone(),
@@ -1522,8 +1488,6 @@ impl RunRegistry {
             .lock()
             .unwrap()
             .insert(run_id.clone(), state.clone());
-
-        let owner = self.db.clone().load_owner().await.ok().flatten();
 
         let node_map: HashMap<&str, &Node> =
             graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
@@ -1565,15 +1529,7 @@ impl RunRegistry {
             docker::stop_and_remove(&self.docker, &container_name).await;
 
             let info = self
-                .start_node(
-                    graph,
-                    node,
-                    &run_id,
-                    &network,
-                    &BTreeMap::new(),
-                    owner.as_ref(),
-                    state.sidecar_ip.as_deref(),
-                )
+                .start_node(graph, node, &run_id, &network, state.sidecar_ip.as_deref())
                 .await?;
             state.containers.retain(|c| c.node_id != info.node_id);
             state.containers.push(info);
@@ -1600,27 +1556,13 @@ impl RunRegistry {
     /// `refresh_sync_status` (`side_effects: false`, which only needs the
     /// same values to compute a comparable hash — see `spec_hash` — without
     /// building anything or touching Docker at all).
-    ///
-    /// `Ok(None)` only when `side_effects` is `false` and this is a
-    /// branch-overridden service: producing its spec needs a real
-    /// `ensure_mirror`/`materialize_checkout` (a git fetch + worktree
-    /// checkout) to know the checkout root relative binds/`env_file` resolve
-    /// against, and doing that on every background sync-check tick isn't
-    /// worth it — drift-checking simply skips that node rather than
-    /// silently doing network I/O behind the scenes.
     async fn resolve_node_spec(
         &self,
         graph: &Graph,
         node: &Node,
         run_id: &str,
-        overrides: &BTreeMap<String, String>,
-        owner: Option<&crate::store::WorkspaceOwner>,
         side_effects: bool,
     ) -> Result<Option<NodeSpec>> {
-        if !side_effects && node.kind.as_str() != "backing" && overrides.contains_key(&node.id) {
-            return Ok(None);
-        }
-
         let workspace = sanitize_label(&graph.workspace_name);
         let container_name = format!("fghj-{workspace}-{run_id}-{}", sanitize_label(&node.id));
         // Every node's domain is derived the same way, unconditionally —
@@ -1709,179 +1651,53 @@ impl RunRegistry {
                     args: BTreeMap::new(),
                 });
 
-                match overrides.get(&node.id) {
-                    // Branch override: build from a throwaway checkout of that
-                    // branch, leaving the live workspace dir untouched.
-                    Some(branch) => {
-                        let repo = match node.repo.clone() {
-                            Some(r) => r,
-                            None => bail!("service node {} has no repo", node.id),
-                        };
-                        let tag = format!(
-                            "fghj/{}:{}",
-                            sanitize_label(&node.id),
-                            sanitize_label(branch)
-                        );
-                        self.record_event(
-                            run_id,
-                            &node.id,
-                            "start",
-                            "preparing checkout",
-                            "running",
-                            Some(branch.clone()),
-                        )
-                        .await;
-                        let internal_dir = self.workspace.join(".fghj");
-                        let mirror_dir = internal_dir.clone();
-                        let owner_for_mirror = owner.cloned();
-                        let mirror = match tokio::task::spawn_blocking(move || {
-                            crate::resolver::ensure_mirror(
-                                &repo,
-                                &mirror_dir,
-                                owner_for_mirror.as_ref(),
-                            )
-                        })
-                        .await
-                        .context("ensure_mirror task panicked")?
-                        {
-                            Ok(m) => m,
-                            Err(e) => {
-                                self.record_event(
-                                    run_id,
-                                    &node.id,
-                                    "start",
-                                    "preparing checkout",
-                                    "error",
-                                    Some(format!("{e:#}")),
-                                )
-                                .await;
-                                return Err(e);
-                            }
-                        };
-                        let checkout = internal_dir.join("checkouts").join(format!(
-                            "{}-{}",
-                            sanitize_label(&node.id),
-                            sanitize_label(branch)
-                        ));
-                        let checkout_root =
-                            match docker::materialize_checkout(&mirror, branch, &checkout).await {
-                                Ok(root) => root,
-                                Err(e) => {
-                                    self.record_event(
-                                        run_id,
-                                        &node.id,
-                                        "start",
-                                        "preparing checkout",
-                                        "error",
-                                        Some(format!("{e:#}")),
-                                    )
-                                    .await;
-                                    return Err(e);
-                                }
-                            };
-                        self.record_event(
-                            run_id,
-                            &node.id,
-                            "start",
-                            "preparing checkout",
-                            "ok",
-                            None,
-                        )
-                        .await;
-                        volume_base = Some(checkout_root.clone());
-                        let build_dir = checkout_root.join(&build.context);
+                let local_path = match node.local_path.clone() {
+                    Some(p) => p,
+                    None => bail!("service node {} has no local_path", node.id),
+                };
+                let branch = node.branch.clone().unwrap_or_else(|| "local".to_string());
+                let tag = format!(
+                    "fghj/{}:{}",
+                    sanitize_label(&node.id),
+                    sanitize_label(&branch)
+                );
+                let repo_root = self.workspace.join(&local_path);
+                volume_base = Some(repo_root.clone());
+                if side_effects {
+                    let build_dir = repo_root.join(&build.context);
+                    self.record_event(
+                        run_id,
+                        &node.id,
+                        "start",
+                        "building image",
+                        "running",
+                        Some(tag.clone()),
+                    )
+                    .await;
+                    if let Err(e) = docker::build_image(
+                        &self.docker,
+                        &build_dir,
+                        &build.dockerfile,
+                        &tag,
+                        node.platform.as_deref(),
+                    )
+                    .await
+                    {
                         self.record_event(
                             run_id,
                             &node.id,
                             "start",
                             "building image",
-                            "running",
-                            Some(tag.clone()),
+                            "error",
+                            Some(format!("{e:#}")),
                         )
                         .await;
-                        if let Err(e) = docker::build_image(
-                            &self.docker,
-                            &build_dir,
-                            &build.dockerfile,
-                            &tag,
-                            node.platform.as_deref(),
-                        )
-                        .await
-                        {
-                            self.record_event(
-                                run_id,
-                                &node.id,
-                                "start",
-                                "building image",
-                                "error",
-                                Some(format!("{e:#}")),
-                            )
-                            .await;
-                            return Err(e);
-                        }
-                        self.record_event(run_id, &node.id, "start", "building image", "ok", None)
-                            .await;
-                        tag
+                        return Err(e);
                     }
-                    // Default: build straight from the live workspace checkout,
-                    // so local edits are picked up on every run.
-                    None => {
-                        let local_path = match node.local_path.clone() {
-                            Some(p) => p,
-                            None => bail!("service node {} has no local_path", node.id),
-                        };
-                        let branch = node.branch.clone().unwrap_or_else(|| "local".to_string());
-                        let tag = format!(
-                            "fghj/{}:{}",
-                            sanitize_label(&node.id),
-                            sanitize_label(&branch)
-                        );
-                        let repo_root = self.workspace.join(&local_path);
-                        volume_base = Some(repo_root.clone());
-                        if side_effects {
-                            let build_dir = repo_root.join(&build.context);
-                            self.record_event(
-                                run_id,
-                                &node.id,
-                                "start",
-                                "building image",
-                                "running",
-                                Some(tag.clone()),
-                            )
-                            .await;
-                            if let Err(e) = docker::build_image(
-                                &self.docker,
-                                &build_dir,
-                                &build.dockerfile,
-                                &tag,
-                                node.platform.as_deref(),
-                            )
-                            .await
-                            {
-                                self.record_event(
-                                    run_id,
-                                    &node.id,
-                                    "start",
-                                    "building image",
-                                    "error",
-                                    Some(format!("{e:#}")),
-                                )
-                                .await;
-                                return Err(e);
-                            }
-                            self.record_event(
-                                run_id,
-                                &node.id,
-                                "start",
-                                "building image",
-                                "ok",
-                                None,
-                            )
-                            .await;
-                        }
-                        tag
-                    }
+                    self.record_event(run_id, &node.id, "start", "building image", "ok", None)
+                        .await;
                 }
+                tag
             }
         };
 
@@ -2010,15 +1826,12 @@ impl RunRegistry {
     /// `refresh_sync_status` pass compares a freshly recomputed desired hash
     /// against to decide whether this node has drifted since it was last
     /// started.
-    #[allow(clippy::too_many_arguments)]
     async fn start_node(
         &self,
         graph: &Graph,
         node: &Node,
         run_id: &str,
         network: &str,
-        overrides: &BTreeMap<String, String>,
-        owner: Option<&crate::store::WorkspaceOwner>,
         sidecar_ip: Option<&str>,
     ) -> Result<ContainerInfo> {
         self.begin_event_cycle(run_id, &node.id, "start").await;
@@ -2031,10 +1844,7 @@ impl RunRegistry {
             None,
         )
         .await;
-        let spec = match self
-            .resolve_node_spec(graph, node, run_id, overrides, owner, true)
-            .await
-        {
+        let spec = match self.resolve_node_spec(graph, node, run_id, true).await {
             Ok(Some(spec)) => spec,
             Ok(None) => {
                 let msg = format!(
@@ -2419,6 +2229,18 @@ mod tests {
         );
         assert_eq!(sanitize_label("already-clean"), "already-clean");
         assert_eq!(sanitize_label("__leading__"), "leading");
+    }
+
+    #[test]
+    fn resolve_run_id_falls_back_to_default_when_absent_or_empty() {
+        assert_eq!(resolve_run_id(None), DEFAULT_RUN_ID);
+        assert_eq!(resolve_run_id(Some("")), DEFAULT_RUN_ID);
+        assert_eq!(resolve_run_id(Some("///")), DEFAULT_RUN_ID);
+    }
+
+    #[test]
+    fn resolve_run_id_sanitizes_a_given_id() {
+        assert_eq!(resolve_run_id(Some("Feature/JIRA-123")), "feature-jira-123");
     }
 
     #[test]
@@ -2888,7 +2710,6 @@ mod tests {
                 run_id.clone(),
                 RunState {
                     run_id: run_id.clone(),
-                    overrides: BTreeMap::new(),
                     network: "bridge".to_string(),
                     containers: vec![stale_container],
                     sidecar_container_name: String::new(),

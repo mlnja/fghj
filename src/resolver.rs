@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Clone)]
@@ -429,50 +429,6 @@ pub struct Graph {
     pub warnings: Vec<String>,
 }
 
-/// Clones (or reuses) a bare mirror of `repo` under `workdir` so that
-/// `git show <branch>:.fghj.yaml` can read any branch's content without
-/// needing a separate checkout per branch — used only by the review-run
-/// branch-override path (`src/runs.rs`), which still needs to build an
-/// arbitrary branch without touching the live workspace checkout.
-/// `owner` drops the clone's privileges back to the real user who wired the
-/// workspace (see [`crate::store::WorkspaceOwner`]) — `fghjd` runs as root
-/// and has no SSH credentials of its own for a private remote. Pass `None`
-/// when already running as the correct user.
-pub fn ensure_mirror(
-    repo: &str,
-    workdir: &Path,
-    owner: Option<&crate::store::WorkspaceOwner>,
-) -> Result<PathBuf> {
-    let dir_name = repo
-        .rsplit('/')
-        .next()
-        .unwrap_or(repo)
-        .trim_end_matches(".git")
-        .to_string();
-    let mirror_path = workdir.join(format!("{dir_name}.git"));
-
-    if !mirror_path.exists() {
-        let mut cmd = Command::new("git");
-        cmd.args(["clone", "--quiet", "--mirror", repo])
-            .arg(&mirror_path);
-        if let Some(owner) = owner {
-            owner.apply_to_command(&mut cmd);
-        }
-        crate::store::harden_git_ssh(&mut cmd);
-        let output = cmd
-            .output()
-            .with_context(|| format!("failed to run git clone --mirror for {repo}"))?;
-        if !output.status.success() {
-            bail!(
-                "git clone --mirror failed for {repo}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-    }
-
-    Ok(mirror_path)
-}
-
 /// Derives the conventional local checkout folder name from a git URL: the
 /// last path segment, with a trailing `.git` stripped.
 pub fn repo_name_from_url(repo: &str) -> String {
@@ -543,8 +499,8 @@ fn scan_workspace(workspace: &Path) -> Result<BTreeMap<String, ComponentConfig>>
 
 /// Reads the `origin` remote URL and checked-out branch of a real git working
 /// tree, if any — used so a downloaded node still carries the `repo`/`branch`
-/// info needed for the review-run branch-override path, even though
-/// resolution itself no longer needs it to find the node on disk.
+/// info the UI displays per node (see `Node::repo`/`Node::branch`), even
+/// though resolution itself no longer needs it to find the node on disk.
 fn git_remote_and_branch(dir: &Path) -> (Option<String>, Option<String>) {
     let repo = Command::new("git")
         .arg("-C")
@@ -955,6 +911,18 @@ impl<'a> ResolveCtx<'a> {
                 let backing_id = format!("{name}.{owner_id}");
                 let ports = ports.into_map();
                 self.check_port_config(&backing_id, &ports);
+                // A backing dependency has no checkout of its own — it's
+                // declared inline in the owning service's `.fghj.yaml` — but
+                // it still belongs to that service's repo/branch, and its
+                // dirty status *is* the owning checkout's, since editing the
+                // dependency block is editing that same working tree. The
+                // owner's `Node` is always already in `self.nodes` here:
+                // it's inserted before the loop that calls `visit_dependency`
+                // for any of its own dependencies.
+                let owner = self.nodes.get(owner_id);
+                let owner_repo = owner.and_then(|o| o.repo.clone());
+                let owner_branch = owner.and_then(|o| o.branch.clone());
+                let owner_dirty = owner.is_some_and(|o| o.dirty);
                 self.nodes
                     .entry(backing_id.clone())
                     .or_insert_with(|| Node {
@@ -962,13 +930,13 @@ impl<'a> ResolveCtx<'a> {
                         label: name.clone(),
                         kind: "backing".into(),
                         image: Some(image),
-                        branch: None,
-                        repo: None,
+                        branch: owner_branch,
+                        repo: owner_repo,
                         domain_scope,
                         local_path: None,
                         domain: String::new(),
                         downloaded: true,
-                        dirty: false,
+                        dirty: owner_dirty,
                         flows: Vec::new(),
                         build: None,
                         ports,
@@ -1500,6 +1468,40 @@ mod tests {
             backing.command,
             vec!["mysqld", "--sql_mode=NO_ENGINE_SUBSTITUTION"]
         );
+    }
+
+    #[test]
+    fn backing_dependency_inherits_repo_branch_and_dirty_from_its_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_component(
+            tmp.path(),
+            "myservice",
+            "  dependencies:\n\
+             \x20   - kind: backing\n\
+             \x20     name: mysql\n\
+             \x20     image: mysql:8.0.33\n\
+             \x20     ports: [\"3306\"]\n",
+        );
+
+        let graph = resolve_universe(tmp.path()).unwrap();
+
+        let service = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "myservice.myservice")
+            .unwrap();
+        let backing = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "mysql.myservice.myservice")
+            .unwrap();
+        // A backing dependency has no checkout of its own — it's declared
+        // inline in the owner's `.fghj.yaml` — so its git identity is
+        // whatever the owner's is, never independently derived.
+        assert_eq!(backing.repo, service.repo);
+        assert_eq!(backing.branch, service.branch);
+        assert_eq!(backing.dirty, service.dirty);
+        assert!(backing.local_path.is_none());
     }
 
     #[test]

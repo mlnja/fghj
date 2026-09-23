@@ -9,6 +9,13 @@
     return m ? m[1] : url;
   }
 
+  // Kind is a git-repo'd, independently deployable service vs. a "backing"
+  // dependency (a database, cache, ...) declared inline in some service's
+  // config with no repo of its own — shown as an icon before the name
+  // instead of a text pill so it reads at a glance without eating a row.
+  const SERVICE_ICON = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M8 1.6 13.8 5v6L8 14.4 2.2 11V5Z"/><path d="M2.2 5 8 8.2 13.8 5M8 8.2v6.2"/></svg>`;
+  const BACKING_ICON = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.3"><ellipse cx="8" cy="3.4" rx="5.4" ry="1.9"/><path d="M2.6 3.4v9.2c0 1.05 2.42 1.9 5.4 1.9s5.4-.85 5.4-1.9V3.4"/><path d="M2.6 8c0 1.05 2.42 1.9 5.4 1.9s5.4-.85 5.4-1.9"/></svg>`;
+
   function layout(g) {
     const edges = g.edges.filter((e) => e.kind !== 'shared-infra').map((e) => [e.from, e.to]);
 
@@ -102,8 +109,8 @@
     {@const inFlow = n.flows.includes(currentFlow)}
     {@const dimmed = currentFlow && !inFlow}
     {@const live = runContainers?.[n.id]}
-    {@const dotColor = live ? (live.status === 'running' ? 'var(--success)' : 'var(--danger)') : 'var(--success)'}
     {@const containerState = mode === 'containers' && n.kind !== 'flow' ? (live ? (live.pending_action ?? (live.status === 'running' ? 'running' : 'stopped')) : 'none') : null}
+    {@const syncKnown = live && live.synced != null}
     <div
       class="node"
       class:not-downloaded={n.downloaded === false}
@@ -116,18 +123,41 @@
         <div class="node-id-wrap">
           {#if n.downloaded === false}
             <span class="badge">not downloaded</span>
-          {:else}
-            <span class="dot" style="background:{dotColor}"></span>
+          {:else if n.kind === 'backing'}
+            <span class="kind-icon backing" title="backing dependency">{@html BACKING_ICON}</span>
+          {:else if n.kind === 'service'}
+            <span class="kind-icon service" title="service">{@html SERVICE_ICON}</span>
           {/if}
           <span class="node-id">{n.label}</span>
         </div>
         <span class="crate-tag">{l.codeOf.get(n.id)}</span>
       </div>
-      <div class="kind-row">
-        <span class="kind-pill" class:infra={n.kind === 'infra'}>{n.kind}</span>
-        {#if n.ports?.length}<span class="ports">{n.ports.join(', ')}</span>{/if}
-      </div>
-      <div class="node-domain">{mode === 'containers' ? (n.domain || n.image || '') : shortRepo(n.repo)}</div>
+
+      <!-- Docker half: only ever populated in containers mode, since
+           there's nothing runtime-related to show for a plain repo view. -->
+      {#if syncKnown}
+        <div class="node-meta live-row">
+          <span class="pill" class:drifted={!live.synced} class:synced={live.synced} title="{live.synced ? 'running container matches .fghj.yaml' : 'running container config no longer matches .fghj.yaml — reset to pick up the change'}">
+            {live.synced ? 'SYNCED' : 'DRIFTED'}
+          </span>
+        </div>
+      {/if}
+
+      <!-- The literal boundary between the two halves: container status is
+           the one fact that's neither a git nor a repo fact, so it gets the
+           dividing line instead of living inside either half. -->
+      {#if containerState}
+        <div class="status-bar state-{containerState}" title="container: {containerState}">
+          {containerState === 'none' ? 'absent' : containerState}
+        </div>
+      {/if}
+
+      <!-- Git half: always shown, mode-independent. -->
+      {#if mode === 'repos'}
+        <div class="node-domain">{shortRepo(n.repo)}</div>
+      {:else if n.repo}
+        <div class="node-meta">{shortRepo(n.repo)}</div>
+      {/if}
       {#if n.services?.length > 1}
         <div class="node-meta">{n.services.join(', ')}</div>
       {/if}
@@ -135,21 +165,8 @@
         <div class="node-meta branch-row">
           <span>{n.branch}</span>
           {#if n.downloaded !== false}
-            <span class="pill" class:dirty={n.dirty} class:clean={!n.dirty}>{n.dirty ? 'DIRTY' : 'CLEAN'}</span>
+            <span class="pill" class:dirty={n.dirty} class:clean={!n.dirty} title="git working tree">{n.dirty ? 'DIRTY' : 'CLEAN'}</span>
           {/if}
-        </div>
-      {/if}
-      {#if live}
-        <div class="node-meta live-row">
-          <span>{live.status}{#if live.published_port} · 127.0.0.1:{live.published_port}{/if}</span>
-          {#if live.synced === false}
-            <span class="pill unsynced" title="container config no longer matches .fghj.yaml">unsynced</span>
-          {/if}
-        </div>
-      {/if}
-      {#if containerState}
-        <div class="status-bar state-{containerState}" title="container: {containerState}">
-          {containerState === 'none' ? 'absent' : containerState}
         </div>
       {/if}
     </div>
@@ -166,8 +183,14 @@
   .node.in-flow { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .node.not-downloaded { border-style: dashed; opacity: 0.7; background: transparent; }
   .node.dimmed { opacity: 0.35; }
+  /* Normal document flow, not absolutely pinned to the card's bottom edge —
+     an absolutely-positioned bar sat at a fixed height regardless of how
+     much text was above it, overlapping whatever content was there. It's
+     also the literal dividing line between the docker half (above: live
+     port/drift) and the git half (below: repo/branch/dirty) of the card,
+     bled out to the card's left/right edges past its own padding. */
   .status-bar {
-    position: absolute; left: 0; right: 0; bottom: 0; height: 26px;
+    margin: 10px -14px; height: 26px;
     display: flex; align-items: center; justify-content: center;
     font: 700 12px var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em;
   }
@@ -181,16 +204,15 @@
   .node-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; gap: 8px; }
   .node-id-wrap { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .node-id { font: 600 13.5px var(--font-mono); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .kind-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
-  .kind-pill {
-    font: 700 8.5px var(--font-mono); text-transform: uppercase; letter-spacing: 0.05em;
-    color: var(--accent); border: 1px solid var(--accent-dim); border-radius: 3px; padding: 1px 5px; flex: 0 0 auto;
-  }
-  .kind-pill.infra { color: var(--ink-faint); border-color: var(--line-strong); }
-  .ports { font: 500 10px var(--font-mono); color: var(--ink-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* service (git-backed, independently deployable) vs. backing (an inline
+     dependency declared by some service, e.g. a database — no repo of its
+     own) — see resolver::Node::kind's doc for the exact two values. */
+  .kind-icon { display: inline-flex; flex: 0 0 auto; }
+  .kind-icon.service { color: var(--accent); }
+  .kind-icon.backing { color: var(--ink-faint); }
   .node-domain { font: 500 11px var(--font-mono); color: var(--ink-faint); word-break: break-all; }
   .node-meta { font: 500 10px var(--font-mono); color: var(--ink-faint); margin-top: 6px; }
-  .live-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .live-row { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
   .badge {
     font: 700 8.5px var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint);
     border: 1px dashed var(--line-strong); border-radius: 3px; padding: 2px 5px; flex: 0 0 auto;
@@ -202,5 +224,6 @@
   }
   .pill.dirty { background: var(--warning-bg); color: var(--warning); }
   .pill.clean { background: var(--success-bg); color: var(--success); }
-  .pill.unsynced { background: var(--warning-bg); color: var(--warning); }
+  .pill.drifted { background: var(--warning-bg); color: var(--warning); }
+  .pill.synced { background: var(--success-bg); color: var(--success); }
 </style>

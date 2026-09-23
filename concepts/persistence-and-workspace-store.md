@@ -28,9 +28,12 @@ questions with two different answers:
 ## Schema and migrations
 
 Three tables: `meta` (one row per workspace — id, entry URL, creation time,
-plus the owner columns below), `runs` (run id, serialized overrides,
-network name), `containers` (one row per container in a run, including a
-`routes_json` column holding the serialized `PortRoute` list).
+plus the owner columns below), `runs` (run id, network name — plus a
+leftover `overrides_json` column from the now-removed branch-override
+feature, still written as `'{}'` to satisfy its `NOT NULL` constraint on
+pre-existing databases but no longer read), `containers` (one row per
+container in a run, including a `routes_json` column holding the
+serialized `PortRoute` list).
 
 New columns (`owner_uid`/`owner_gid`/`owner_home`/`owner_ssh_auth_sock` on
 `meta`, `routes_json` on `containers`) were added after the tables already

@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use bollard::Docker;
 use include_dir::{Dir, include_dir};
 
-use crate::{docker, server, store};
+use crate::{docker, persistence, server};
 
 static SRC_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/src");
 const CARGO_TOML: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
@@ -40,7 +40,7 @@ pub async fn ensure_built(docker: &Docker) -> Result<()> {
         return Ok(());
     }
 
-    let scratch = store::fghjd_root().join("sidecar-build");
+    let scratch = persistence::fghjd_root().join("sidecar-build");
     materialize(&scratch)
         .with_context(|| format!("failed to materialize sidecar build context at {scratch:?}"))?;
 

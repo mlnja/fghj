@@ -16,10 +16,19 @@ distinct owners:
    repo, shared by every flow that happens to reference it. There is no
    per-flow copy of a dependency's checkout, so there is exactly one branch
    active per repo, workspace-wide, at any moment.
-3. **Per-run branch pin** — an ephemeral override scoped to a single run,
-   already implemented as `RunSpec.overrides` (`src/runs.rs`). It builds from
-   a throwaway mirror+checkout under `<workspace>/.fghj/` and never touches
-   the live workspace checkout or any config.
+3. **Per-run branch pin** — this used to exist as an ephemeral override
+   scoped to a single run (`RunSpec.overrides`, building from a throwaway
+   mirror+checkout under `<workspace>/.fghj/`, never touching the live
+   workspace checkout or any config). It has been **removed entirely**: the
+   permission model needed to make its mirror clone work under a
+   privilege-dropped `fghjd` was never actually sound (`<workspace>/.fghj`
+   is created root-owned before any owner is known), and once that surfaced
+   it became clear the feature also had no answer for an override branch
+   whose own `.fghj.yaml` structurally differs from the live graph (a
+   missing flow or service) — see [[run-lifecycle-and-registry]] for the
+   removal note. There is currently no per-run branch pin mechanism; a
+   dependency's branch is only ever the one thing the live checkout has
+   active.
 
 ## Why this matters
 
@@ -28,11 +37,10 @@ on a dependency edge, **a diamond dependency can never require two different
 branches of the same repo at once** — that failure mode is structurally
 impossible here, not just avoided by convention. Two flows (or two
 dependents) referencing the same repo are necessarily looking at the same
-checkout, on the same branch, because there is only one checkout. If you
-want a specific dependency built from a specific branch for one experiment,
-that's what the per-run override exists for — it's explicitly ephemeral and
-side-by-side with the live checkout, not a second "real" branch state for
-that repo.
+checkout, on the same branch, because there is only one checkout. (There is
+currently no supported way to build one dependency from a different branch
+for a single experiment without checking it out live — see the removal note
+above.)
 
 `resolver.rs` used to track a `path_branches: HashMap<repo, HashSet<branch>>`
 and flag a `"diamond conflict"` warning (plus a `conflict` field on `Node`/

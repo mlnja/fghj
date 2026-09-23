@@ -22,6 +22,7 @@
     onStartNode,
     onStopNode,
     onDeleteNode,
+    onResetNode,
   } = $props();
   let activeTab = $state('general');
 
@@ -39,6 +40,31 @@
 
   function deleteNode() {
     onDeleteNode?.(node.id);
+  }
+
+  // Same backend action as "Start" (`runs::Runs::restart_container` always
+  // stops+removes the existing container, then rebuilds/re-creates it) —
+  // this button just exposes it while the container is already running,
+  // which "Start" is hidden for. Container-only: never touches volumes.
+  function resetNode() {
+    onResetNode?.(node.id);
+  }
+
+  // Single source of truth for "what can this node's controls do right
+  // now" — replaces a scatter of ad hoc `liveInfo?.status === 'running'`
+  // checks per button with one explicit state, so adding/auditing a
+  // transition means touching one place. `liveInfo` is undefined once
+  // `ContainerActionSettled` removes a deleted node's entry (or before it's
+  // ever been started), which is exactly "absent"; a live `pending_action`
+  // always wins over `status` since Docker hasn't settled yet.
+  //   absent    -> only Start (create + start fresh)
+  //   stopped   -> Start or Delete
+  //   running   -> Stop, Delete, or Reset (force a fresh container)
+  //   starting/stopping/removing -> nothing; show the in-flight action instead
+  function nodeLifecycle(info) {
+    if (!info) return 'absent';
+    if (info.pending_action) return info.pending_action;
+    return info.status === 'running' ? 'running' : 'stopped';
   }
   // Persisted log history (see `store::WorkspaceDb`'s `logs` table): a
   // generation picker (current vs. previous, per the two-generation
@@ -246,28 +272,24 @@
     <h3 class="stencil">{node.label}</h3>
 
     {#if node.downloaded !== false}
+      {@const lifecycle = nodeLifecycle(liveInfo)}
       <div class="controls">
-        <button
-          class="ctrl-btn"
-          onclick={startNode}
-          disabled={!runId || busy || liveInfo?.status === 'running'}
-        >
-          Start
-        </button>
-        <button
-          class="ctrl-btn"
-          onclick={stopNode}
-          disabled={!runId || busy || liveInfo?.status !== 'running'}
-        >
-          Stop
-        </button>
-        <button
-          class="ctrl-btn danger"
-          onclick={deleteNode}
-          disabled={!runId || busy || !liveInfo}
-        >
-          Delete
-        </button>
+        {#if lifecycle === 'starting' || lifecycle === 'stopping' || lifecycle === 'removing'}
+          <span class="ctrl-status"><span class="spinner"></span> {lifecycle}…</span>
+        {:else}
+          {#if lifecycle === 'absent' || lifecycle === 'stopped'}
+            <button class="ctrl-btn" onclick={startNode} disabled={!runId || busy}>Start</button>
+          {/if}
+          {#if lifecycle === 'running'}
+            <button class="ctrl-btn" onclick={stopNode} disabled={!runId || busy}>Stop</button>
+          {/if}
+          {#if lifecycle !== 'absent'}
+            <button class="ctrl-btn danger" onclick={deleteNode} disabled={!runId || busy}>Delete</button>
+          {/if}
+          {#if lifecycle === 'running'}
+            <button class="ctrl-btn" onclick={resetNode} disabled={!runId || busy} title="Stop and recreate this container fresh. Volumes are untouched.">Reset</button>
+          {/if}
+        {/if}
       </div>
     {/if}
 
@@ -337,6 +359,10 @@
                 {:else}
                   <span class="muted">{displayDomain}</span>
                 {/if}
+              {:else if liveInfo?.ports?.[port] && liveInfo?.raw_domain}
+                <button class="copy-btn" onclick={() => copyText(`${liveInfo.raw_domain}:${port}`, port)}>
+                  {liveInfo.raw_domain}:{port} {copiedKey === port ? '· copied' : '⧉'}
+                </button>
               {:else if liveInfo?.ports?.[port]}
                 <button class="copy-btn" onclick={() => copyText(`127.0.0.1:${liveInfo.ports[port]}`, port)}>
                   127.0.0.1:{liveInfo.ports[port]} {copiedKey === port ? '· copied' : '⧉'}
@@ -471,6 +497,10 @@
   }
   .ctrl-btn:disabled { opacity: 0.4; cursor: default; }
   .ctrl-btn.danger:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+  .ctrl-status {
+    display: flex; align-items: center; padding: 6px 12px; color: var(--ink-dim);
+    font: 700 10px var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em;
+  }
   .action-log {
     display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; padding: 8px 10px;
     background: var(--panel-2); border-radius: 6px; max-height: 140px; overflow-y: auto;

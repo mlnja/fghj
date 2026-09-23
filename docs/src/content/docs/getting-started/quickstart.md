@@ -78,13 +78,14 @@ system trust store on first start. No `-k`, no self-signed warning. See
 works, and [Node identity & domains](/concepts/node-identity-and-domains/)
 for exactly how that domain was derived.
 
-## Testing a specific branch
+## Starting a second, isolated run
 
-Need to test your checkout service against a teammate's in-progress branch
-of the payments service, without disturbing the shared default
-environment? Start a **named run** with a branch override from the
-**Actual** tab's run controls instead of touching the default run — it
-builds a disposable, throwaway checkout of that branch alongside the real
-one. See [Run lifecycle & registry](/concepts/run-lifecycle-and-registry/)
-and [Branch ownership model](/concepts/branch-ownership-model/) for why
-this is the only way to pin a dependency to a specific branch.
+Need a second environment alongside the shared default one — for example
+to try a config change without disturbing whatever's already running?
+Start a **named run** from the **Actual** tab's run controls: it stands up
+its own isolated set of containers on their own network, side by side with
+the default run. Every node still builds from the live workspace
+checkout, the same as the default run — see
+[Run lifecycle & registry](/concepts/run-lifecycle-and-registry/) and
+[Branch ownership model](/concepts/branch-ownership-model/) for why
+there's exactly one checkout, and one branch, per repo, workspace-wide.

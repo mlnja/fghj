@@ -21,7 +21,8 @@ use tokio::io::AsyncWriteExt;
 
 use crate::server::{self, WorkspaceState};
 use crate::{
-    ca, daemon_log, dns, docker, downloads, hosts_file, proxy, raw_net, resolver, runs, store,
+    action, actor, ca, daemon_log, dns, docker, downloads, effects, hosts_file, persistence, proxy,
+    raw_net, registry, resolver, run_view, runs, state,
 };
 
 /// How often the background reconciler re-inspects live containers. Kept in
@@ -54,26 +55,7 @@ pub fn socket_path() -> PathBuf {
 /// Keychain Access. `pub(crate)` so `runs.rs` can bind-mount it (read-only)
 /// into a run's sidecar proxy container.
 pub(crate) fn ca_dir() -> PathBuf {
-    store::fghjd_root().join("ca")
-}
-
-/// Tracks that the operator's last explicit `fghj daemon` call was `stop`,
-/// not just that `fghjd` currently happens to be idle in memory. Backed by
-/// `store::DaemonState` at `store::default_state_path()` — next to the CA
-/// (durable, survives a reboot) rather than under `/var/run`: "I told it to
-/// stop" is a standing instruction that should hold until countermanded by
-/// `fghj daemon start`, not something a crash or a reboot should silently
-/// discard by reactivating anyway. `idle_requested` is read-modify-write
-/// against the whole state file, same as every other field it may grow.
-fn is_idle_requested() -> bool {
-    store::load_daemon_state(&store::default_state_path()).idle_requested
-}
-
-fn set_idle_requested(idle_requested: bool) -> Result<()> {
-    let path = store::default_state_path();
-    let mut state = store::load_daemon_state(&path);
-    state.idle_requested = idle_requested;
-    store::save_daemon_state(&path, &state)
+    persistence::fghjd_root().join("ca")
 }
 
 /// Deterministic, URL-safe id for a canonicalized workspace path (FNV-1a of
@@ -121,6 +103,21 @@ pub struct WorkspaceRegistry {
     by_id: Mutex<HashMap<String, Arc<WorkspaceState>>>,
     index_path: PathBuf,
     docker: Arc<bollard::Docker>,
+    /// New-system actor for every workspace this registry knows about — the
+    /// redux-style migration's (rosy-soaring-teapot.md) canonical
+    /// `state::WorkspaceState`, authored entirely by the reducer and
+    /// converged to real Docker/DNS/hosts/raw-net state by the effects in
+    /// `docker_converge_tasks` and `effects::spawn_all`. Kept alongside
+    /// `by_id` rather than merged into it: `by_id`'s old `server::WorkspaceState`
+    /// still owns the real Docker orchestration (`RunRegistry`) this phase
+    /// reuses, persistence, and the live routing/DNS lookup paths that
+    /// haven't migrated yet.
+    actors: registry::ActorRegistry,
+    /// Per-workspace `effects::docker::DockerConvergeEffect` driver tasks —
+    /// the only thing that ever mutates a workspace's real containers now
+    /// that `effects::bridge` (a purely-mirroring, never-mutating stand-in)
+    /// is gone. Torn down in `stop`.
+    docker_converge_tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 impl WorkspaceRegistry {
@@ -128,12 +125,12 @@ impl WorkspaceRegistry {
     /// root-owned path. `load_from` does the actual work — split out so
     /// tests can point the index at a tempdir instead.
     pub async fn load(docker: Arc<bollard::Docker>) -> Self {
-        Self::load_from(store::default_index_path(), docker).await
+        Self::load_from(persistence::default_index_path(), docker).await
     }
 
     async fn load_from(index_path: PathBuf, docker: Arc<bollard::Docker>) -> Self {
         let mut by_id = HashMap::new();
-        for (id, path) in store::load_index(&index_path) {
+        for (id, path) in persistence::load_index(&index_path) {
             if !path.exists() {
                 daemon_log::warn(format!(
                     "fghjd: skipping missing workspace {id} ({})",
@@ -151,11 +148,64 @@ impl WorkspaceRegistry {
                 )),
             }
         }
-        Self {
+        let registry = Self {
             by_id: Mutex::new(by_id),
             index_path,
             docker,
+            actors: registry::ActorRegistry::new(),
+            docker_converge_tasks: Mutex::new(HashMap::new()),
+        };
+        let loaded: Vec<(String, Arc<WorkspaceState>)> = registry
+            .by_id
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, state)| (id.clone(), state.clone()))
+            .collect();
+        for (id, state) in loaded {
+            registry.wire_actor(&id, &state);
         }
+        registry
+    }
+
+    /// Spawns the new-system actor for `id`, seeded with a one-shot mirror
+    /// of `old`'s live `runs::RunRegistry` (via
+    /// `effects::docker::converge::mirror_runs`) so a freshly-wired
+    /// workspace with pre-existing/persisted runs doesn't start out looking
+    /// empty, then starts the `DockerConvergeEffect` task that's the only
+    /// thing driving real Docker calls from here on — `effects::bridge`,
+    /// which used to keep the new state live by re-polling
+    /// `RunRegistry::list()` roughly once a second, is gone as of migration
+    /// phase 5 (see `effects::docker::converge`'s module doc for the
+    /// "no more bridge" tradeoff this leaves open). Called from both
+    /// `load_from` (startup) and `resolve` (a fresh `fghj ui`/wire) — every
+    /// workspace this registry ever registers also gets a wired actor,
+    /// right at the exact place its old-system `Arc<WorkspaceState>` is
+    /// born.
+    fn wire_actor(&self, id: &str, old: &Arc<WorkspaceState>) {
+        let seed = state::WorkspaceState {
+            runs: effects::docker::converge::mirror_runs(&old.runs.list()),
+            ..Default::default()
+        };
+        let handle = actor::spawn(seed);
+        let docker_converge_task = tokio::spawn(effects::run_effect(
+            effects::docker::DockerConvergeEffect::new(old.clone(), handle.clone()),
+            handle.subscribe(),
+            "docker_converge",
+        ));
+        self.actors
+            .insert(id.to_string(), registry::WorkspaceHandle { actor: handle });
+        self.docker_converge_tasks
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), docker_converge_task);
+    }
+
+    /// The daemon-wide directory of new-system actors this registry has
+    /// wired — used by `DaemonControl::activate` to subscribe the raw-net
+    /// fanned-in effect.
+    pub fn actors(&self) -> &registry::ActorRegistry {
+        &self.actors
     }
 
     /// Resolves (cloning `entry` if needed) and registers a workspace,
@@ -167,7 +217,7 @@ impl WorkspaceRegistry {
         &self,
         entry: Option<String>,
         workspace: Option<PathBuf>,
-        owner: Option<store::WorkspaceOwner>,
+        owner: Option<persistence::WorkspaceOwner>,
     ) -> Result<(String, PathBuf)> {
         let entry_for_meta = entry.clone();
         let owner_for_clone = owner.clone();
@@ -204,10 +254,11 @@ impl WorkspaceRegistry {
                     .record_meta(id.clone(), entry_for_meta)
                     .await?;
                 self.by_id.lock().unwrap().insert(id.clone(), state.clone());
+                self.wire_actor(&id, &state);
 
-                let mut index = store::load_index(&self.index_path);
+                let mut index = persistence::load_index(&self.index_path);
                 index.insert(id.clone(), canonical.clone());
-                store::save_index(&self.index_path, &index)?;
+                persistence::save_index(&self.index_path, &index)?;
                 state
             }
         };
@@ -275,34 +326,14 @@ impl WorkspaceRegistry {
             })
     }
 
-    /// Every `#AdditionalHost` alias currently claimed by a `"running"`
-    /// container in any wired workspace, sorted and deduplicated — the input
-    /// to `hosts_file::sync`. Recomputed from scratch on every call (mirrors
-    /// `resolve_route`'s own linear scan) rather than tracked incrementally,
-    /// since it's only ever called once per reconciler tick.
-    pub fn active_additional_hosts(&self) -> Vec<String> {
-        let states: Vec<Arc<WorkspaceState>> =
-            self.by_id.lock().unwrap().values().cloned().collect();
-        let mut hosts: Vec<String> = states
-            .iter()
-            .flat_map(|state| {
-                state.runs.list().into_iter().flat_map(|run| {
-                    run.containers
-                        .into_iter()
-                        .filter(|c| c.status == "running")
-                        .flat_map(|c| c.additional_hosts)
-                })
-            })
-            .collect();
-        hosts.sort();
-        hosts.dedup();
-        hosts
-    }
-
     /// Every `wildcard_hosts` suffix currently claimed by a `"running"`
     /// container in any wired workspace, sorted and deduplicated — the input
-    /// to `dns::install_os_resolver_config`'s per-zone `/etc/resolver` sync.
-    /// Same recompute-from-scratch approach as `active_additional_hosts`.
+    /// to `dns::install_os_resolver_config`'s per-zone `/etc/resolver` sync,
+    /// still called from here by `dns::ZoneSource::answer_for` (a live query
+    /// path, not a converge effect — see `effects::dns`'s module doc for why
+    /// that one path stays on the old system for now). Recomputed from
+    /// scratch on every call (mirrors `resolve_route`'s own linear scan)
+    /// rather than tracked incrementally.
     pub fn active_wildcard_suffixes(&self) -> Vec<String> {
         let states: Vec<Arc<WorkspaceState>> =
             self.by_id.lock().unwrap().values().cloned().collect();
@@ -328,9 +359,11 @@ impl WorkspaceRegistry {
     }
 
     /// Every `"running"` container's `raw_domain` and published host ports
-    /// in any wired workspace — the input to `raw_net::reconcile`. Same
-    /// recompute-from-scratch approach as `active_additional_hosts`/
-    /// `active_wildcard_suffixes`.
+    /// in any wired workspace — used by `get_daemon_net_status` to map a
+    /// raw-net virtual IP back to the domain it belongs to for telemetry.
+    /// `effects::raw_net::RawNetEffect` computes its own equivalent
+    /// projection off the new-system state instead of calling this. Same
+    /// recompute-from-scratch approach as `active_wildcard_suffixes`.
     pub fn active_raw_endpoints(&self) -> Vec<raw_net::RawEndpoint> {
         let states: Vec<Arc<WorkspaceState>> =
             self.by_id.lock().unwrap().values().cloned().collect();
@@ -370,12 +403,16 @@ impl WorkspaceRegistry {
         let removed = self.by_id.lock().unwrap().remove(id);
         match removed {
             Some(state) => {
+                self.actors.remove(id);
+                if let Some(task) = self.docker_converge_tasks.lock().unwrap().remove(id) {
+                    task.abort();
+                }
                 for run in state.runs.list() {
                     let _ = state.runs.stop(&run.run_id).await;
                 }
-                let mut index = store::load_index(&self.index_path);
+                let mut index = persistence::load_index(&self.index_path);
                 index.remove(id);
-                let _ = store::save_index(&self.index_path, &index);
+                let _ = persistence::save_index(&self.index_path, &index);
                 true
             }
             None => false,
@@ -414,7 +451,7 @@ struct StartRequest {
     entry: Option<String>,
     workspace: Option<PathBuf>,
     #[serde(default)]
-    owner: Option<store::WorkspaceOwner>,
+    owner: Option<persistence::WorkspaceOwner>,
 }
 
 #[derive(Deserialize)]
@@ -471,6 +508,78 @@ impl FromRequestParts<Arc<WorkspaceRegistry>> for WorkspaceExtractor {
             )
                 .into_response()),
         }
+    }
+}
+
+/// Extracts the new-system `actor::ActorHandle` for the workspace named by
+/// `?workspace=<id>` — the migration-phase-4 counterpart of
+/// `WorkspaceExtractor` for handlers that dispatch an `Action` instead of
+/// calling `runs::RunRegistry` directly. Kept as its own extractor rather
+/// than folded into `WorkspaceExtractor` (which every other handler still
+/// uses unchanged) since only the three node-lifecycle handlers need it.
+struct ActorExtractor(actor::ActorHandle);
+
+impl FromRequestParts<Arc<WorkspaceRegistry>> for ActorExtractor {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<WorkspaceRegistry>,
+    ) -> Result<Self, Self::Rejection> {
+        let query = parts.uri.query().unwrap_or("");
+        match query_param(query, "workspace").and_then(|id| state.actors().get(id)) {
+            Some(handle) => Ok(ActorExtractor(handle.actor)),
+            None => Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "unknown or missing ?workspace=<id>; POST /workspaces first" })),
+            )
+                .into_response()),
+        }
+    }
+}
+
+/// Maps an `ActionRejected` from a dispatched node-lifecycle request to its
+/// HTTP response — the migration-phase-4 counterpart of `err_response` for
+/// handlers on the new `actor::ActorHandle::dispatch` path.
+/// `AlreadyInFlight` -> 409, matching today's `RunRegistry::begin_action`
+/// rejection exactly (see the architecture plan's "HTTP handler contract").
+/// `RunNotFound`/`NodeNotFound` -> 404: an improvement over the old path's
+/// blanket 500 (`bail!("no such run: ..")` via `err_response`), now that
+/// the reducer distinguishes the two cases explicitly.
+fn action_rejected_response(err: crate::action::ActionRejected) -> Response {
+    use crate::action::ActionRejected;
+    let status = match err {
+        ActionRejected::AlreadyInFlight => StatusCode::CONFLICT,
+        ActionRejected::RunNotFound | ActionRejected::NodeNotFound => StatusCode::NOT_FOUND,
+    };
+    (
+        status,
+        Json(serde_json::json!({ "error": err.to_string() })),
+    )
+        .into_response()
+}
+
+/// Builds the 200 response for a successful node-lifecycle dispatch: the
+/// freshly-published `ContainerInfo` for `run_id`/`node_id`, shimmed
+/// (`run_view::legacy_container`) into the same flat shape `run_response`/
+/// `get_runs` use, so every endpoint that ever returns a container serves
+/// one consistent JSON shape rather than the new nested one here and the old
+/// flat one everywhere else — per the architecture plan's "HTTP handler
+/// contract". Falls back to a bare `{"ok": true}` in the (practically
+/// unreachable, since `reduce` always leaves a container that hasn't been
+/// removed by `ContainerActionSettled` in place) case the container isn't
+/// found right after a successful dispatch.
+fn container_response(actor: &actor::ActorHandle, run_id: &str, node_id: &str) -> Response {
+    let current = actor.current();
+    match current
+        .runs
+        .get(run_id)
+        .and_then(|run| run.containers.get(node_id))
+    {
+        Some(container) => {
+            Json(serde_json::json!(run_view::legacy_container(container))).into_response()
+        }
+        None => Json(serde_json::json!({ "ok": true })).into_response(),
     }
 }
 
@@ -578,15 +687,51 @@ async fn get_pull_jobs(WorkspaceExtractor(state): WorkspaceExtractor) -> Respons
     Json(serde_json::json!(state.downloads.list())).into_response()
 }
 
-async fn get_runs(WorkspaceExtractor(state): WorkspaceExtractor) -> Response {
-    Json(serde_json::json!(state.runs.list())).into_response()
+async fn get_runs(ActorExtractor(actor): ActorExtractor) -> Response {
+    Json(serde_json::json!(run_view::legacy_runs(&actor.current()))).into_response()
 }
 
-async fn post_runs(WorkspaceExtractor(state): WorkspaceExtractor, body: Bytes) -> Response {
-    let spec: runs::RunSpec = if body.is_empty() {
-        runs::RunSpec {
+/// Builds the response for a successful `RunPlanned` dispatch: the shimmed
+/// flat view (`run_view::legacy_run`) of whatever `run_id` names in the
+/// actor's freshly-published state, per the same "respond once the reducer
+/// has recorded intent, not once Docker has actually finished" contract
+/// `dispatch_node_action` already uses (see the architecture plan's "HTTP
+/// handler contract"). `RunPlanned`'s reducer arm always inserts an entry
+/// under `run_id` (empty on a brand new run, top-up-preserved on an
+/// existing one), so the `None` branch is practically unreachable — kept
+/// only for symmetry with `container_response`.
+fn run_response(actor: &actor::ActorHandle, run_id: &str) -> Response {
+    match actor.current().runs.get(run_id) {
+        Some(run) => Json(serde_json::json!(run_view::legacy_run(run))).into_response(),
+        None => Json(serde_json::json!({ "ok": true, "run_id": run_id })).into_response(),
+    }
+}
+
+/// Dispatches `Action::RunPlanned` through the workspace actor instead of
+/// calling `runs::RunRegistry::start`/`ensure_running` directly — migration
+/// phase 5's HTTP cutover. Unlike the old synchronous handler, this returns
+/// as soon as the reducer has recorded the still-unfulfilled intent
+/// (`RunState::pending_create`); `effects::docker::converge`'s
+/// `DockerConvergeEffect` (already wired per-workspace, see
+/// `WorkspaceRegistry::wire_actor`) is what actually resolves the graph and
+/// calls Docker afterwards, reporting the result back via
+/// `Action::RunCreateSettled`. This is the same async contract migration
+/// phase 4 already gave node-lifecycle endpoints — run creation was the one
+/// endpoint still on the old fully-synchronous path, purely because of the
+/// JSON-shape mismatch `run_view` now closes, not because of anything about
+/// creation itself that needed different timing.
+///
+/// A freshly-created run's first response (and the `GET /runs` polls
+/// immediately after it) can therefore show 0 containers for as long as
+/// convergence takes, where the old handler always returned the fully
+/// populated result — the same "trust `pending_action`/poll for the rest"
+/// model the UI already applies to node start/stop/delete, just not
+/// something it has a "run is being created" affordance for yet
+/// (`pending_create` is deliberately never serialized — see its doc).
+async fn post_runs(ActorExtractor(actor): ActorExtractor, body: Bytes) -> Response {
+    let spec: state::RunSpec = if body.is_empty() {
+        state::RunSpec {
             run_id: None,
-            overrides: Default::default(),
             flow: None,
         }
     } else {
@@ -596,33 +741,29 @@ async fn post_runs(WorkspaceExtractor(state): WorkspaceExtractor, body: Bytes) -
         }
     };
 
-    let path = state.path.clone();
-    let graph = match tokio::task::spawn_blocking(move || resolver::resolve_universe(&path)).await {
-        Ok(Ok(g)) => g,
-        Ok(Err(e)) => return err_response(e),
-        Err(e) => return err_response(anyhow::anyhow!("resolve_universe task panicked: {e}")),
+    let run_id = runs::resolve_run_id(spec.run_id.as_deref());
+    let action = action::Action::RunPlanned {
+        run_id: run_id.clone(),
+        plan: spec,
     };
-
-    // A named run (review runs, with optional branch overrides) always
-    // starts fresh under its own run_id. Anything else — "start default
-    // environment" or a flow-scoped "run flow" click — targets the single
-    // shared default environment and only tops up what isn't already
-    // running, rather than tearing the whole thing down every click.
-    let result = if spec.run_id.is_some() {
-        state.runs.start(&graph, spec).await
-    } else {
-        state
-            .runs
-            .ensure_running(&graph, spec.flow.as_deref())
-            .await
-    };
-
-    match result {
-        Ok(s) => Json(serde_json::json!(s)).into_response(),
-        Err(e) => err_response(e),
+    match actor.dispatch(action).await {
+        Ok(()) => run_response(&actor, &run_id),
+        Err(e) => action_rejected_response(e),
     }
 }
 
+/// Deliberately left on the old `WorkspaceExtractor` / `RunRegistry::stop`
+/// path, unlike the three per-node handlers below — migration phase 4
+/// ("HTTP handler contract" in the architecture plan) only names
+/// `/nodes/{node}/start|stop|delete`, never whole-run stop, and for good
+/// reason: `RunRegistry::stop` tears down the run's network, sidecar and
+/// volumes and drops its `RunRegistry` entry outright, none of which the
+/// `pending_action`-per-container model that `effects::docker::converge`
+/// converges has any representation for. `Action::RunStopRequested`'s
+/// reducer arm only marks each idle container `Stopping`; routing this
+/// endpoint through it would leave the network/sidecar/volumes orphaned.
+/// Giving whole-run teardown its own first-class action/effect is later
+/// migration-phase work, not something to half-do here.
 async fn post_run_stop(
     AxumPath(run_id): AxumPath<String>,
     WorkspaceExtractor(state): WorkspaceExtractor,
@@ -633,44 +774,55 @@ async fn post_run_stop(
     }
 }
 
+/// Dispatches `action` against `actor` for `run_id`/`node_id` and replies
+/// per the architecture plan's "HTTP handler contract" — migration phase 4:
+/// this returns as soon as the (pure, in-memory) reducer has recorded the
+/// intent, not once Docker has actually finished; `effects::docker::converge`
+/// (wired per-workspace in `daemon::WorkspaceRegistry::wire_actor`) is what
+/// actually performs the Docker call afterwards, asynchronously.
+async fn dispatch_node_action(
+    actor: &actor::ActorHandle,
+    run_id: String,
+    node_id: String,
+    action: action::Action,
+) -> Response {
+    match actor.dispatch(action).await {
+        Ok(()) => container_response(actor, &run_id, &node_id),
+        Err(e) => action_rejected_response(e),
+    }
+}
+
 async fn post_run_node_start(
     AxumPath((run_id, node_id)): AxumPath<(String, String)>,
-    WorkspaceExtractor(state): WorkspaceExtractor,
+    ActorExtractor(actor): ActorExtractor,
 ) -> Response {
-    let path = state.path.clone();
-    let graph = match tokio::task::spawn_blocking(move || resolver::resolve_universe(&path)).await {
-        Ok(Ok(g)) => g,
-        Ok(Err(e)) => return err_response(e),
-        Err(e) => return err_response(anyhow::anyhow!("resolve_universe task panicked: {e}")),
+    let action = action::Action::RunNodeStartRequested {
+        run_id: run_id.clone(),
+        node_id: node_id.clone(),
     };
-    match state
-        .runs
-        .restart_container(&graph, &run_id, &node_id)
-        .await
-    {
-        Ok(info) => Json(serde_json::json!(info)).into_response(),
-        Err(e) => err_response(e),
-    }
+    dispatch_node_action(&actor, run_id, node_id, action).await
 }
 
 async fn post_run_node_stop(
     AxumPath((run_id, node_id)): AxumPath<(String, String)>,
-    WorkspaceExtractor(state): WorkspaceExtractor,
+    ActorExtractor(actor): ActorExtractor,
 ) -> Response {
-    match state.runs.stop_container(&run_id, &node_id).await {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => err_response(e),
-    }
+    let action = action::Action::RunNodeStopRequested {
+        run_id: run_id.clone(),
+        node_id: node_id.clone(),
+    };
+    dispatch_node_action(&actor, run_id, node_id, action).await
 }
 
 async fn post_run_node_delete(
     AxumPath((run_id, node_id)): AxumPath<(String, String)>,
-    WorkspaceExtractor(state): WorkspaceExtractor,
+    ActorExtractor(actor): ActorExtractor,
 ) -> Response {
-    match state.runs.remove_container(&run_id, &node_id).await {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => err_response(e),
-    }
+    let action = action::Action::RunNodeDeleteRequested {
+        run_id: run_id.clone(),
+        node_id: node_id.clone(),
+    };
+    dispatch_node_action(&actor, run_id, node_id, action).await
 }
 
 #[derive(Deserialize)]
@@ -731,7 +883,7 @@ async fn get_run_logs_stream(
 
 /// Lists the log generations `fghjd` has retained for this node (current and
 /// previous, per the two-generation retention policy — see
-/// `store::WorkspaceDb::begin_log_generation`), for the UI's generation
+/// `persistence::WorkspaceDb::begin_log_generation`), for the UI's generation
 /// picker. Reads straight from the db regardless of whether the run/node is
 /// still live, so history for a just-crashed or just-removed container
 /// stays browsable.
@@ -785,7 +937,7 @@ struct EventsQuery {
 /// The current cycle's step-by-step narration of what `fghjd` itself did
 /// for the last `start` or `stop` of this node — the ArgoCD-style "events"
 /// counterpart to the raw container-log history above. Only ever the most
-/// recent cycle of `action`: see `store::WorkspaceDb::begin_event_cycle`.
+/// recent cycle of `action`: see `persistence::WorkspaceDb::begin_event_cycle`.
 async fn get_run_node_events(
     AxumPath((run_id, node_id)): AxumPath<(String, String)>,
     Query(q): Query<EventsQuery>,
@@ -1035,13 +1187,13 @@ fn build_router(registry: Arc<WorkspaceRegistry>, daemon: Arc<DaemonControl>) ->
 /// `fghj daemon start` — reconciles `fghjd` back into the active state
 /// (rebinds DNS/80/443, resyncs `/etc/hosts`). Idempotent: calling it while
 /// already active just reports the current state back. Clears the
-/// `idle_requested` flag in `store::DaemonState` on success so a later
+/// `idle_requested` flag in `persistence::DaemonState` on success so a later
 /// crash/reboot restart comes back active too, instead of silently
 /// reverting to idle.
 async fn post_daemon_start(State(daemon): State<Arc<DaemonControl>>) -> Response {
     match daemon.activate().await {
         Ok(()) => {
-            if let Err(e) = set_idle_requested(false) {
+            if let Err(e) = daemon.set_idle_requested(false) {
                 daemon_log::warn(format!("fghjd: failed to persist daemon state: {e}"));
             }
             Json(serde_json::json!({ "active": true })).into_response()
@@ -1058,11 +1210,11 @@ async fn post_daemon_start(State(daemon): State<Arc<DaemonControl>>) -> Response
 /// touching the `fghjd` process itself (it keeps serving this control API so
 /// a later `fghj daemon start` can reach it). Docker containers already
 /// running are left alone. Also persists `idle_requested` in
-/// `store::DaemonState` so a crash or reboot before the next `start` doesn't
+/// `persistence::DaemonState` so a crash or reboot before the next `start` doesn't
 /// silently reactivate `fghjd` against the operator's wishes.
 async fn post_daemon_stop(State(daemon): State<Arc<DaemonControl>>) -> Response {
     daemon.deactivate();
-    if let Err(e) = set_idle_requested(true) {
+    if let Err(e) = daemon.set_idle_requested(true) {
         daemon_log::warn(format!("fghjd: failed to persist daemon state: {e}"));
     }
     Json(serde_json::json!({ "active": false })).into_response()
@@ -1094,12 +1246,13 @@ async fn get_daemon_logs(Query(q): Query<DaemonLogsQuery>) -> Response {
     Json(serde_json::json!({ "entries": daemon_log::tail(q.after_seq, q.limit) })).into_response()
 }
 
-/// Snapshot of the three native-OS integration mechanisms `spawn_reconciler`
-/// maintains — `/etc/hosts`, macOS's `/etc/resolver`, and the raw-zone
-/// virtual-IP NAT routes — read directly from their actual on-disk/live
-/// state (not from what was last *computed* as desired), so drift between
-/// "what fghjd wanted" and "what's actually installed" would show up here.
-/// Backs the telemetry drawer's "DNS / DNAT" tab.
+/// Snapshot of the three native-OS integration mechanisms
+/// `effects::spawn_all`'s fanned-in effects maintain — `/etc/hosts`, macOS's
+/// `/etc/resolver`, and the raw-zone virtual-IP NAT routes — read directly
+/// from their actual on-disk/live state (not from what was last *computed*
+/// as desired), so drift between "what fghjd wanted" and "what's actually
+/// installed" would show up here. Backs the telemetry drawer's "DNS / DNAT"
+/// tab.
 async fn get_daemon_net_status(State(daemon): State<Arc<DaemonControl>>) -> Response {
     let hosts = hosts_file::managed_hosts(&hosts_file::hosts_path());
     let resolver_zones: Vec<_> = dns::managed_resolver_zones(Path::new("/etc/resolver"))
@@ -1145,10 +1298,14 @@ struct ActiveResources {
     dns_task: tokio::task::JoinHandle<()>,
     http_task: tokio::task::JoinHandle<()>,
     https_task: tokio::task::JoinHandle<()>,
-    /// The port fghjd's DNS server bound to, kept around so the reconciler
-    /// can re-sync `/etc/resolver` files (one per active `wildcard_hosts`
-    /// zone) on every tick without re-deriving it.
-    dns_port: u16,
+    /// Drives `effects::raw_net::RawNetEffect`, `effects::dns::DnsEffect`,
+    /// and `effects::hosts::HostsEffect` for as long as `fghjd` is active —
+    /// the sole remaining callers of `raw_net::reconcile`,
+    /// `dns::install_os_resolver_config`, and `hosts_file::sync` (see
+    /// `spawn_reconciler`'s doc for why that function no longer calls any of
+    /// them directly). Aborted on `deactivate`, so an idle `fghjd` never
+    /// keeps converging pf routes, `/etc/resolver`, or `/etc/hosts`.
+    effect_tasks: effects::EffectTasks,
 }
 
 /// `fghjd` itself is meant to run forever — started at boot and restarted on
@@ -1166,17 +1323,48 @@ pub struct DaemonControl {
     provider: Arc<rustls::crypto::CryptoProvider>,
     control_port: u16,
     active: Mutex<Option<ActiveResources>>,
-    /// Epoch-millis timestamp of `spawn_reconciler`'s last completed sync of
-    /// `/etc/hosts`/`/etc/resolver`/raw-net routes — surfaced by
+    /// Epoch-millis timestamp of `spawn_reconciler`'s last completed
+    /// container-status refresh tick while active — surfaced by
     /// `/daemon/net-status` so the telemetry drawer can show how fresh that
-    /// state is, not just what it currently is. `None` until the first tick
-    /// after `fghjd` starts (or while idle — see `spawn_reconciler`).
+    /// data is. `/etc/hosts`/`/etc/resolver`/raw-net routes are no longer
+    /// synced on this tick (see `spawn_reconciler`'s doc) — they converge
+    /// continuously via `effects::spawn_all`'s fanned-in effects instead, so
+    /// this field no longer reflects their freshness. `None` until the
+    /// first tick after `fghjd` starts (or while idle).
     last_reconcile_ms: Mutex<Option<u64>>,
+    /// Tracks that the operator's last explicit `fghj daemon` call was
+    /// `stop`, not just that `fghjd` currently happens to be idle in memory.
+    /// Read once at construction from `persistence::DaemonState` at
+    /// `persistence::default_state_path()` — next to the CA (durable,
+    /// survives a reboot) rather than under `/var/run` — then kept in memory
+    /// and written through on every change via `set_idle_requested`; nothing
+    /// else reads or writes `daemon-state.json` directly. "I told it to
+    /// stop" is a standing instruction that should hold until countermanded
+    /// by `fghj daemon start`, not something a crash or a reboot should
+    /// silently discard by reactivating anyway. The path itself is a field
+    /// (defaulting to `persistence::default_state_path()` in production)
+    /// rather than hardcoded in `set_idle_requested`, so tests can point it
+    /// at a temp file instead of the real, root-owned, production path.
+    idle_requested: Mutex<bool>,
+    daemon_state_path: PathBuf,
 }
 
 impl DaemonControl {
     pub fn is_active(&self) -> bool {
         self.active.lock().unwrap().is_some()
+    }
+
+    pub fn is_idle_requested(&self) -> bool {
+        *self.idle_requested.lock().unwrap()
+    }
+
+    pub fn set_idle_requested(&self, idle_requested: bool) -> Result<()> {
+        let path = &self.daemon_state_path;
+        let mut state = persistence::load_daemon_state(path);
+        state.idle_requested = idle_requested;
+        persistence::save_daemon_state(path, &state)?;
+        *self.idle_requested.lock().unwrap() = idle_requested;
+        Ok(())
     }
 
     /// Binds the DNS server and the HTTP/HTTPS proxy, installs the OS
@@ -1195,7 +1383,6 @@ impl DaemonControl {
             .context("DNS socket has no local address")?
             .port();
         let dns_task = tokio::spawn(dns::serve(dns_socket, self.registry.clone(), None));
-        dns::install_os_resolver_config(dns_port, &self.registry.active_wildcard_suffixes())?;
 
         let http_listener = proxy::bind_http().await?;
         let https_listener = proxy::bind_https().await?;
@@ -1211,28 +1398,18 @@ impl DaemonControl {
             self.registry.clone(),
         ));
 
-        hosts_file::sync(
-            &hosts_file::hosts_path(),
-            &self.registry.active_additional_hosts(),
-        )?;
+        let effect_tasks = effects::spawn_all(dns_port, self.registry.actors().subscribe());
 
         *self.active.lock().unwrap() = Some(ActiveResources {
             dns_task,
             http_task,
             https_task,
-            dns_port,
+            effect_tasks,
         });
         Ok(())
     }
 
-    /// The port fghjd's DNS server is currently bound to, if active — used
-    /// by `spawn_reconciler` to re-sync `/etc/resolver` files without
-    /// needing to re-derive or re-bind anything. `None` while idle.
-    fn active_dns_port(&self) -> Option<u16> {
-        self.active.lock().unwrap().as_ref().map(|r| r.dns_port)
-    }
-
-    /// Epoch-millis of `spawn_reconciler`'s last completed sync attempt, or
+    /// Epoch-millis of `spawn_reconciler`'s last completed tick, or
     /// `None` if it hasn't run yet. See the field doc for what this does and
     /// doesn't cover.
     pub fn last_reconcile_ms(&self) -> Option<u64> {
@@ -1250,6 +1427,7 @@ impl DaemonControl {
             resources.dns_task.abort();
             resources.http_task.abort();
             resources.https_task.abort();
+            resources.effect_tasks.abort_all();
         }
         dns::clear_os_resolver_config();
         if let Err(e) = hosts_file::sync(&hosts_file::hosts_path(), &[]) {
@@ -1273,16 +1451,21 @@ impl DaemonControl {
 /// container to a different ephemeral host port on a restart it initiated
 /// (restart policy, `dockerd` restarting), shows up — and routes correctly —
 /// on its own, without a `fghjd` restart. It never recreates or restarts a
-/// container itself — no self-healing there. It does own side effects
-/// outside Docker, though: re-syncing `/etc/hosts` (`hosts_file::sync`) to
-/// exactly the `#AdditionalHost` aliases of whatever's currently
-/// `"running"`, and re-syncing the raw-zone virtual-IP NAT routes
-/// (`raw_net::reconcile`) to exactly its currently-published ports — so a
-/// container dying out-of-band (same drift this loop already detects) also
-/// drops its alias/route within one tick, not just its status. Skipped
-/// entirely while `fghjd` is idle (`daemon.is_active()` is false) so it
-/// doesn't fight `fghj daemon stop`'s clean-up by re-adding entries
-/// `deactivate` just removed.
+/// container itself — no self-healing there.
+///
+/// This used to also own re-syncing `/etc/hosts`, macOS's `/etc/resolver`,
+/// and raw-zone virtual-IP NAT routes directly off `daemon.registry`. All
+/// three have since moved to the daemon-wide fanned-in effects
+/// `effects::spawn_all` spawns from `DaemonControl::activate`
+/// (`effects::hosts::HostsEffect`, `effects::dns::DnsEffect`,
+/// `effects::raw_net::RawNetEffect`), driven off the new redux-style actor
+/// state instead (see `effects::bridge`'s module doc for how that state
+/// stays live) — see the architecture plan (rosy-soaring-teapot.md)'s
+/// "dns + hosts_file effects" step. This loop and those effects must never
+/// both write the same OS resource concurrently: two schedules touching the
+/// same `pf`/`/etc/hosts`/`/etc/resolver` state is the exact bug class
+/// documented in `raw_net::macos`'s module doc — that's why none of that
+/// sync happens here any more.
 fn spawn_reconciler(daemon: Arc<DaemonControl>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
@@ -1291,29 +1474,18 @@ fn spawn_reconciler(daemon: Arc<DaemonControl>) {
             for (id, _) in daemon.registry.list() {
                 if let Some(state) = daemon.registry.get(&id) {
                     state.runs.refresh().await;
+                    // Reports the freshly re-inspected status into the new
+                    // actor system — see `effects::docker::observe`'s
+                    // module doc for why this piggybacks on `refresh`'s
+                    // own tick rather than polling Docker a second time.
+                    if let Some(handle) = daemon.registry.actors().get(&id) {
+                        effects::docker::observe::report(&state.runs, &handle.actor).await;
+                    }
                 }
             }
-            if !daemon.is_active() {
-                continue;
+            if daemon.is_active() {
+                *daemon.last_reconcile_ms.lock().unwrap() = Some(now_ms());
             }
-            if let Err(e) = hosts_file::sync(
-                &hosts_file::hosts_path(),
-                &daemon.registry.active_additional_hosts(),
-            ) {
-                daemon_log::warn(format!("fghjd: failed to sync /etc/hosts: {e}"));
-            }
-            if let Some(dns_port) = daemon.active_dns_port()
-                && let Err(e) = dns::install_os_resolver_config(
-                    dns_port,
-                    &daemon.registry.active_wildcard_suffixes(),
-                )
-            {
-                daemon_log::warn(format!("fghjd: failed to sync /etc/resolver: {e}"));
-            }
-            if let Err(e) = raw_net::reconcile(&daemon.registry.active_raw_endpoints()) {
-                daemon_log::warn(format!("fghjd: failed to sync raw-net routes: {e}"));
-            }
-            *daemon.last_reconcile_ms.lock().unwrap() = Some(now_ms());
         }
     });
 }
@@ -1488,6 +1660,8 @@ pub async fn run_control_api() -> Result<()> {
         registry.clone(),
     ));
 
+    let daemon_state_path = persistence::default_state_path();
+    let idle_requested = persistence::load_daemon_state(&daemon_state_path).idle_requested;
     let daemon = Arc::new(DaemonControl {
         registry: registry.clone(),
         cert_resolver,
@@ -1495,21 +1669,23 @@ pub async fn run_control_api() -> Result<()> {
         control_port,
         active: Mutex::new(None),
         last_reconcile_ms: Mutex::new(None),
+        idle_requested: Mutex::new(idle_requested),
+        daemon_state_path,
     });
     spawn_reconciler(Arc::clone(&daemon));
     spawn_sync_reconciler(Arc::clone(&daemon));
 
     // `fghjd` starts active by default: it's meant to occupy 80/443 and
     // *.fghj.internal DNS from the moment the system boots. The one
-    // exception is `is_idle_requested()` — if the operator's last explicit
-    // `fghj daemon` call was `stop`, a crash or reboot in between must not
-    // silently override that by reactivating anyway; staying idle here is
-    // what makes `fghj daemon stop` a durable instruction rather than a
-    // one-shot action that a flaky Docker daemon or a reboot can undo behind
-    // the operator's back. A bind failure during activation (e.g.
+    // exception is `daemon.is_idle_requested()` — if the operator's last
+    // explicit `fghj daemon` call was `stop`, a crash or reboot in between
+    // must not silently override that by reactivating anyway; staying idle
+    // here is what makes `fghj daemon stop` a durable instruction rather
+    // than a one-shot action that a flaky Docker daemon or a reboot can undo
+    // behind the operator's back. A bind failure during activation (e.g.
     // "something else is already listening on 80/443") still fails startup
     // fast, before the control API ever serves a request.
-    if is_idle_requested() {
+    if daemon.is_idle_requested() {
         daemon_log::info(
             "fghjd: starting idle — last `fghj daemon` action was `stop`; run `fghj daemon start` to reconcile"
                 .to_string(),
@@ -1604,7 +1780,7 @@ mod tests {
         assert_eq!(registry.list().len(), 1);
 
         // the index on disk should reflect the single registered workspace
-        let persisted = store::load_index(&tmp.path().join("workspaces.json"));
+        let persisted = persistence::load_index(&tmp.path().join("workspaces.json"));
         assert_eq!(persisted.get(&id1), Some(&canonical));
 
         // registering a path inside an already-wired workspace must error
@@ -1620,6 +1796,66 @@ mod tests {
         );
     }
 
+    async fn test_daemon_control(state_path: PathBuf) -> Arc<DaemonControl> {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = Arc::new(
+            WorkspaceRegistry::load_from(tmp.path().join("workspaces.json"), test_docker()).await,
+        );
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let cert_resolver = Arc::new(ca::DynamicCertResolver::new(
+            ca::generate_ca_for_tests(),
+            provider.clone(),
+            registry.clone(),
+        ));
+        let idle_requested = persistence::load_daemon_state(&state_path).idle_requested;
+        Arc::new(DaemonControl {
+            registry,
+            cert_resolver,
+            provider,
+            control_port: 0,
+            active: Mutex::new(None),
+            last_reconcile_ms: Mutex::new(None),
+            idle_requested: Mutex::new(idle_requested),
+            daemon_state_path: state_path,
+        })
+    }
+
+    #[tokio::test]
+    async fn idle_requested_is_cached_in_memory_and_written_through_on_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("daemon-state.json");
+        let daemon = test_daemon_control(state_path.clone()).await;
+
+        // Read once at construction: a freshly-started daemon with no prior
+        // `daemon stop` comes back active, matching the on-disk default.
+        assert!(!daemon.is_idle_requested());
+
+        daemon.set_idle_requested(true).unwrap();
+        assert!(
+            daemon.is_idle_requested(),
+            "in-memory cache must reflect the change immediately"
+        );
+        assert!(
+            persistence::load_daemon_state(&state_path).idle_requested,
+            "the change must be written through to disk, not just cached in memory"
+        );
+
+        // Mutating the file directly (simulating some other process) must
+        // NOT be observed without going through `set_idle_requested` —
+        // `idle_requested` is read once at boot, not re-read live.
+        persistence::save_daemon_state(
+            &state_path,
+            &persistence::DaemonState {
+                idle_requested: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            daemon.is_idle_requested(),
+            "the in-memory cache must not silently pick up an out-of-band disk change"
+        );
+    }
+
     #[tokio::test]
     async fn stop_removes_workspace_from_registry_and_index() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1632,7 +1868,7 @@ mod tests {
 
         assert!(registry.stop(&id).await);
         assert!(registry.get(&id).is_none());
-        assert!(!store::load_index(&tmp.path().join("workspaces.json")).contains_key(&id));
+        assert!(!persistence::load_index(&tmp.path().join("workspaces.json")).contains_key(&id));
         // stopping an unknown id is reported, not a panic
         assert!(!registry.stop(&id).await);
     }

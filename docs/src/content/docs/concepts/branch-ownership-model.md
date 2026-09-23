@@ -18,10 +18,14 @@ distinct owners:
    repo, shared by every flow that happens to reference it. There's no
    per-flow copy of a dependency's checkout, so there's exactly one branch
    active per repo, workspace-wide, at any moment.
-3. **Per-run branch pin** — an ephemeral override scoped to a single run
-   (a `RunSpec` override). It builds from a throwaway mirror + checkout
-   under `.fghj/` and never touches the live workspace checkout or any
-   config. See [Run lifecycle & registry](/concepts/run-lifecycle-and-registry/).
+3. **Per-run branch pin** — this used to exist (a `RunSpec` override
+   building from a throwaway mirror + checkout under `.fghj/`, never
+   touching the live workspace checkout or config) but has been **removed
+   entirely**: its privilege-dropped mirror clone was never actually sound,
+   and it had no answer for an override branch whose own `.fghj.yaml`
+   structurally differs from the live graph. See
+   [Run lifecycle & registry](/concepts/run-lifecycle-and-registry/) for
+   the removal note. There is currently no per-run branch pin mechanism.
 
 ## Why this matters
 
@@ -30,11 +34,10 @@ not on a dependency edge, **a diamond dependency can never require two
 different branches of the same repo at once**. That failure mode is
 structurally impossible, not just avoided by convention: two flows (or two
 dependents) referencing the same repo are necessarily looking at the same
-checkout, on the same branch, because there's only one checkout. If you
-want a specific dependency built from a specific branch for one
-experiment, that's exactly what a named run's branch override is for —
-explicitly ephemeral and side-by-side with the live checkout, not a second
-"real" branch state for that repo.
+checkout, on the same branch, because there's only one checkout. (There's
+currently no supported way to build one dependency from a different branch
+for a single experiment without checking it out live — see the removal
+note above.)
 
 A repo can legitimately be a `main`-default dependency of one flow and a
 `develop`-default dependency of another; only one branch is ever actually

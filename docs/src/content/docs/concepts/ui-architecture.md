@@ -17,8 +17,8 @@ shared model, not three separately fetched datasets:
 - **Actual** — every node kind, services and backing dependencies
   together, overlaid with live container status from whichever run is
   currently selected. This is also where run controls live — starting the
-  default environment, running a specific flow, or starting a named run
-  with a branch override.
+  default environment, running a specific flow, or starting a second,
+  named review run.
 - **Config** — reserved for environment variables, the split-DNS table,
   and issued certs; not built out yet.
 

@@ -4,32 +4,40 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+pub mod action;
+pub mod actor;
 pub mod ca;
 pub mod daemon;
 pub mod daemon_log;
 pub mod dns;
 pub mod docker;
 pub mod downloads;
+pub mod effects;
 pub mod hosts_file;
+pub mod persistence;
 pub mod proxy;
 pub mod raw_net;
+pub mod reducer;
+pub mod registry;
 pub mod resolver;
+pub mod run_view;
 pub mod runs;
 pub mod server;
 pub mod sidecar_image;
-pub mod store;
+pub mod state;
 
 /// Resolves the workspace directory, cloning `entry` into it by convention if
 /// given and not already present.
 ///
 /// `owner` drops the clone's privileges back to the real user who ran
-/// `fghj wire` (see [`store::WorkspaceOwner`]) — `fghjd` runs as root and has
-/// no SSH credentials of its own for a private remote. Pass `None` when
-/// already running as the correct user (e.g. the plain `fghj graph` CLI).
+/// `fghj wire` (see [`persistence::WorkspaceOwner`]) — `fghjd` runs as root
+/// and has no SSH credentials of its own for a private remote. Pass `None`
+/// when already running as the correct user (e.g. the plain `fghj graph`
+/// CLI).
 pub fn resolve_workspace(
     entry: Option<String>,
     workspace: Option<PathBuf>,
-    owner: Option<&store::WorkspaceOwner>,
+    owner: Option<&persistence::WorkspaceOwner>,
 ) -> Result<PathBuf> {
     let workspace = workspace.unwrap_or_else(|| PathBuf::from("."));
     fs::create_dir_all(&workspace)
@@ -44,7 +52,7 @@ pub fn resolve_workspace(
             if let Some(owner) = owner {
                 owner.apply_to_command(&mut cmd);
             }
-            store::harden_git_ssh(&mut cmd);
+            persistence::harden_git_ssh(&mut cmd);
             let output = cmd
                 .output()
                 .with_context(|| format!("failed to run git clone for {url}"))?;

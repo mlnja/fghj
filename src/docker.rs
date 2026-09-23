@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::pin::Pin;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use bollard::Docker;
@@ -151,33 +150,29 @@ pub async fn remove_run_scoped_volumes(docker: &Docker, run_id: &str) {
     }
 }
 
-/// `docker build` needs a real working tree, not a bare mirror — clone the
-/// branch out of the local mirror into `dest` so it can be used as a build context.
-pub async fn materialize_checkout(
-    mirror_path: &Path,
-    branch: &str,
-    dest: &Path,
-) -> Result<PathBuf> {
-    let mirror_path = mirror_path.to_path_buf();
-    let branch = branch.to_string();
-    let dest = dest.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        if dest.exists() {
-            std::fs::remove_dir_all(&dest).context("failed to clear stale checkout dir")?;
-        }
-        let status = Command::new("git")
-            .args(["clone", "--quiet", "--branch", &branch, "--single-branch"])
-            .arg(&mirror_path)
-            .arg(&dest)
-            .status()
-            .with_context(|| format!("failed to run git clone --branch {branch}"))?;
-        if !status.success() {
-            bail!("git clone --branch {branch} failed");
-        }
-        Ok(dest)
-    })
-    .await
-    .context("materialize_checkout task panicked")?
+/// Lists the name of every Docker volume `ensure_volume` has ever labeled
+/// for `run_id`, regardless of `scope` — the read-only counterpart to
+/// `remove_run_scoped_volumes` (which deliberately restricts itself to
+/// `scope: "run"` only). Used by `effects::docker::observe` to discover
+/// what volumes actually exist for a run, since `state::RunState::volumes`
+/// starts out empty for every run (`effects::docker::converge::mirror_run`
+/// never had anything to populate it from) and there is no other source of
+/// truth for volume identity yet.
+pub async fn list_run_volumes(docker: &Docker, run_id: &str) -> Result<Vec<String>> {
+    let mut filters: HashMap<&str, Vec<String>> = HashMap::new();
+    filters.insert("label", vec![format!("fghj.run={run_id}")]);
+    let listed = docker
+        .list_volumes(Some(
+            ListVolumesOptionsBuilder::new().filters(&filters).build(),
+        ))
+        .await
+        .context("docker list_volumes failed")?;
+    Ok(listed
+        .volumes
+        .unwrap_or_default()
+        .into_iter()
+        .map(|v| v.name)
+        .collect())
 }
 
 pub async fn build_image(
@@ -676,6 +671,7 @@ pub async fn exec_exit_code(docker: &Docker, exec_id: &str) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use tokio::io::AsyncWriteExt;
 
     /// A throwaway `busybox` container, torn down on drop — exists purely so

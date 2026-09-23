@@ -12,8 +12,7 @@ unnecessarily or silently fail to start what the user asked for:
   graph is started fresh. This is what a **named/review run** always goes
   through: `POST /runs` with a non-empty `run_id` (`daemon::post_runs`
   routes on `spec.run_id.is_some()`). A review run is meant to be
-  reproducible from a clean slate every time you hit "start" again — e.g.
-  after changing which branch is overridden.
+  reproducible from a clean slate every time you hit "start" again.
 - **`ensure_running(graph, flow)`** — "top up the one shared default
   environment so everything reachable from `flow` (or the whole graph, if
   `flow` is `None`) is running; never touch a container that's already
@@ -36,25 +35,20 @@ unnecessarily or silently fail to start what the user asked for:
 these two to call, purely based on whether the request specified a
 `run_id`.
 
-## Branch overrides: a throwaway build, never the live checkout
+## Branch overrides: removed
 
-A `RunSpec.overrides` entry (`{node_id: branch}`) only affects how
-`start_node` decides what to build **from**:
+`start_node` always builds straight from the live workspace checkout at
+`node.local_path`, tagged `fghj/{sanitized-id}:{sanitized-branch-or-"local"}`
+— so local edits are picked up on every run without needing a commit first.
 
-- **No override** (the common case): builds straight from the live
-  workspace checkout at `node.local_path`, tagged
-  `fghj/{sanitized-id}:{sanitized-branch-or-"local"}` — so local edits are
-  picked up on every run without needing a commit first.
-- **Override present**: builds from a **throwaway mirror + checkout** under
-  `<workspace>/.fghj/`, never touching the live checkout. `ensure_mirror`
-  (`resolver.rs`) clones (or reuses) a bare `--mirror` of the repo so
-  `git show <branch>:.fghj.yaml`-style access to any branch works without a
-  full checkout per branch; `docker::materialize_checkout` then produces an
-  actual working tree for the requested branch. See
-  [[branch-ownership-model]] for the full rationale — this ephemeral,
-  side-by-side override is deliberately the *only* way to build a specific
-  branch of a dependency, precisely because there is exactly one live
-  checkout per repo, workspace-wide.
+This used to have a second mode: a `RunSpec.overrides` entry (`{node_id:
+branch}`) would build that node from a throwaway mirror + checkout under
+`<workspace>/.fghj/` instead, via `resolver::ensure_mirror` +
+`docker::materialize_checkout`, without touching the live checkout. It was
+removed — see [[branch-ownership-model]]'s per-run branch pin note for why
+(a real, structural permission bug in the mirror clone, plus no designed
+answer for an override branch whose own `.fghj.yaml` doesn't match the live
+graph's shape).
 
 ## The reconciler: read-only drift correction
 
@@ -101,7 +95,7 @@ state (see [[persistence-and-workspace-store]]), so routing survives a
 ## Status
 
 Implemented: `src/runs.rs` (`RunRegistry::start`/`ensure_running`/`stop`/
-`refresh`, branch-override build path, route derivation).
+`refresh`, route derivation).
 `daemon::spawn_reconciler` drives `refresh` on a 1s tick. Known gap (see
 `PROGRESS.md`): `resolve_route` filters on `status == "running"`, which
 excludes stopped containers but can briefly still return a route to a

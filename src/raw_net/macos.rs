@@ -1,16 +1,48 @@
 //! macOS `pf`/`ifconfig` implementation of [`super::RawNetBackend`].
 //!
-//! Piggybacks on stock macOS's default `/etc/pf.conf`, which already
-//! wildcard-hooks `rdr-anchor "com.apple/*"` / `nat-anchor "com.apple/*"` /
-//! `anchor "com.apple/*"` — the same trick Docker Desktop and various
-//! VPN/proxy tools use to load dynamic pf rules without ever editing
-//! `/etc/pf.conf` itself, and without risk of clobbering the user's own
-//! rules.
+//! Two earlier designs were tried and abandoned this cycle:
+//!
+//! 1. **Nested anchor under `com.apple/*`** (`pfctl -a com.apple/fghjd -f -`),
+//!    piggybacking on stock macOS's `rdr-anchor "com.apple/*"` wildcard hook.
+//!    Proved unreliable in practice: `rdr` rules loaded two levels under that
+//!    wildcard simply never fired — confirmed even on a completely fresh boot
+//!    (empty state table, pf enabled under 5 minutes). Neither re-issuing the
+//!    anchor's rules nor a full `pfctl -d && pfctl -e` cycle nor a real reboot
+//!    fixed it.
+//! 2. **Owning the top-level ruleset directly**: every tick, read
+//!    `/etc/pf.conf` fresh off disk, splice in our own `rdr` lines, and
+//!    `pfctl -f -` the result. This "fixed" (1) but caused a much worse
+//!    regression: on a real machine, Docker Desktop injects its own NAT/rdr
+//!    rules directly into the *live* kernel ruleset without ever writing them
+//!    to `/etc/pf.conf` (the same "invisible on disk, present live" pattern
+//!    already observed with `com.apple.internet-sharing`). Since our reload
+//!    only knew about what's on disk, every tick silently erased Docker's
+//!    live-only rules within a second of `fghjd` starting, breaking *all*
+//!    `127.0.0.1:<published-port>` connectivity — a direct violation of the
+//!    one hard rule for this feature: fghjd must never be the one who breaks
+//!    someone else's networking, even if someone else reloading pf is
+//!    allowed to transiently break *us*.
+//!
+//! This backend instead owns a **dedicated top-level named anchor**
+//! (`fghjd`, not nested under `com.apple`): a single idempotent one-time edit
+//! adds a bare `rdr-anchor "fghjd"` hook line to `/etc/pf.conf` (see
+//! `install_anchor_hook`) — the same, ordinary way most third-party pf-based
+//! tools (Little Snitch and friends) hook in. After that, every reconcile
+//! tick only ever runs `pfctl -a fghjd -f -`, which replaces *our own
+//! anchor's* content and nothing else — it cannot see or touch whatever
+//! Docker, `com.apple.internet-sharing`, or anything else has injected into
+//! the top-level ruleset or its own anchors, live or on disk. The one-time
+//! hook line is removed again on a clean `clear()` (see
+//! `remove_anchor_hook`), but is otherwise harmless to leave behind if fghjd
+//! is killed — an anchor hook with nothing loaded into it is a no-op, exactly
+//! like the dangling `com.apple/*` hooks already present by default.
 //!
 //! Every command-running function here is a thin wrapper around pure,
 //! independently-testable logic (`diff_ips`, `render_ruleset`,
-//! `parse_pool_aliases`, `in_pool`) — the actual `Command` calls are the only
-//! part that needs macOS and root to exercise for real.
+//! `parse_pool_aliases`, `in_pool`, `strip_managed_block`,
+//! `insert_after_translation_hooks`, `install_anchor_hook`) — the actual
+//! `Command`/filesystem calls are the only part that needs macOS and root to
+//! exercise for real.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -22,14 +54,19 @@ use anyhow::{Context, Result, bail};
 
 use super::{RawNetBackend, RouteSpec};
 
-/// Anchor path — see the module doc for why this exact name.
-const ANCHOR: &str = "com.apple/fghjd";
+const PF_CONF_PATH: &str = "/etc/pf.conf";
+const ANCHOR_NAME: &str = "fghjd";
+/// Bracket the one-time anchor-hook line spliced into `/etc/pf.conf` so it
+/// can be found and stripped again — same "own a managed block" pattern
+/// `hosts_file::sync` uses for `/etc/hosts`.
+const HOOK_MARKER_BEGIN: &str =
+    "# --- fghjd raw-net anchor hook (managed; do not edit — see raw_net::macos) ---";
+const HOOK_MARKER_END: &str = "# --- end fghjd raw-net anchor hook ---";
+const ANCHOR_HOOK_LINE: &str = "rdr-anchor \"fghjd\"";
 
 pub struct MacosPfBackend {
-    /// Last-applied route set, so `apply` can skip `pfctl`/`ifconfig`
-    /// entirely on a no-op tick — matches `hosts_file::sync`'s
-    /// write-only-if-changed idempotency, instead of touching live OS
-    /// firewall/interface state every reconcile tick for no reason.
+    /// Last-applied route set — used for `status()` and to diff which `lo0`
+    /// aliases actually need adding/removing.
     applied: Mutex<Vec<RouteSpec>>,
     /// Whether *this* process was the one that enabled pf (`pfctl -e`) —
     /// only ever `pfctl -d` on `clear()` if so, never force-disabling pf
@@ -90,9 +127,6 @@ impl RawNetBackend for MacosPfBackend {
         let mut desired = routes.to_vec();
         desired.sort();
         let mut applied = self.applied.lock().unwrap();
-        if *applied == desired {
-            return Ok(());
-        }
 
         let current_ips: BTreeSet<Ipv4Addr> = current_pool_aliases().into_iter().collect();
         let desired_ips: BTreeSet<Ipv4Addr> = desired.iter().map(|r| r.virtual_ip).collect();
@@ -107,7 +141,8 @@ impl RawNetBackend for MacosPfBackend {
         if !desired.is_empty() {
             self.ensure_pf_enabled()?;
         }
-        load_anchor_rules(&desired)?;
+        ensure_anchor_hook_installed()?;
+        load_named_anchor_ruleset(&desired)?;
 
         *applied = desired;
         Ok(())
@@ -117,7 +152,8 @@ impl RawNetBackend for MacosPfBackend {
         for ip in current_pool_aliases() {
             let _ = remove_lo0_alias(ip);
         }
-        let _ = flush_anchor();
+        let _ = load_named_anchor_ruleset(&[]);
+        let _ = remove_anchor_hook();
         let mut enabled_pf = self.enabled_pf.lock().unwrap();
         if *enabled_pf {
             let _ = disable_pf();
@@ -174,9 +210,12 @@ fn current_pool_aliases() -> Vec<Ipv4Addr> {
     parse_pool_aliases(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// Renders the anchor's full pf ruleset from scratch — a declarative
-/// full-rewrite, same as `hosts_file::sync`'s "own the whole managed block"
-/// approach, rather than incremental per-rule add/remove.
+/// Renders our anchor's full content from scratch — a declarative
+/// full-rewrite of *just our own anchor*, same as `hosts_file::sync`'s "own
+/// the whole managed block" approach, rather than incremental per-rule
+/// add/remove. Safe to fully rewrite every tick because `fghjd` is this
+/// anchor's sole owner by construction (nothing else loads into an anchor
+/// named `fghjd`).
 fn render_ruleset(routes: &[RouteSpec]) -> String {
     let mut out = String::new();
     for route in routes {
@@ -208,10 +247,119 @@ fn remove_lo0_alias(ip: Ipv4Addr) -> Result<()> {
     run(Command::new("ifconfig").args(["lo0", "-alias", &ip.to_string()]))
 }
 
-fn load_anchor_rules(routes: &[RouteSpec]) -> Result<()> {
+/// Removes a previously-spliced managed block (if any) from `pf.conf`
+/// content — used both to clear the way for a fresh splice and, on its own,
+/// to produce the "restore pf.conf to its unmodified state" content.
+fn strip_managed_block(conf: &str) -> String {
+    let mut out = Vec::new();
+    let mut in_block = false;
+    for line in conf.lines() {
+        if line == HOOK_MARKER_BEGIN {
+            in_block = true;
+            continue;
+        }
+        if line == HOOK_MARKER_END {
+            in_block = false;
+            continue;
+        }
+        if !in_block {
+            out.push(line);
+        }
+    }
+    out.join("\n") + "\n"
+}
+
+/// Inserts `insert_lines` right after the last existing `nat-anchor`/
+/// `rdr-anchor` line: pf requires `translation` rules (nat/rdr) to precede
+/// `filtering` rules (plain `anchor`, `block`, `pass`) in the ruleset text,
+/// so anywhere in the translation section works; falls back to just before
+/// the first filter-type `anchor` line, or the end of the file, if a
+/// customized `pf.conf` doesn't have the expected hooks.
+fn insert_after_translation_hooks(conf: &str, insert_lines: &[&str]) -> String {
+    let lines: Vec<&str> = conf.lines().collect();
+    let insert_at = lines
+        .iter()
+        .rposition(|l| {
+            let t = l.trim_start();
+            t.starts_with("nat-anchor") || t.starts_with("rdr-anchor")
+        })
+        .map(|i| i + 1)
+        .or_else(|| {
+            lines
+                .iter()
+                .position(|l| l.trim_start().starts_with("anchor"))
+        })
+        .unwrap_or(lines.len());
+
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len() + insert_lines.len());
+    out.extend_from_slice(&lines[..insert_at]);
+    out.extend_from_slice(insert_lines);
+    out.extend_from_slice(&lines[insert_at..]);
+    out.join("\n") + "\n"
+}
+
+/// Splices fghjd's one-time anchor hook line into a copy of `pf.conf`'s
+/// content — idempotent: stripping then reinserting an already-installed
+/// hook reproduces the same content, so callers can compare before/after and
+/// skip writing the file back when nothing changed.
+fn install_anchor_hook(conf: &str) -> String {
+    let cleaned = strip_managed_block(conf);
+    insert_after_translation_hooks(
+        &cleaned,
+        &[HOOK_MARKER_BEGIN, ANCHOR_HOOK_LINE, HOOK_MARKER_END],
+    )
+}
+
+/// Ensures the `rdr-anchor "fghjd"` hook exists in `/etc/pf.conf`, writing
+/// the file only the first time (or if something else stripped it since) —
+/// after that, every tick's `install_anchor_hook` output is byte-identical
+/// to what's already on disk, so no write happens.
+fn ensure_anchor_hook_installed() -> Result<()> {
+    let conf = std::fs::read_to_string(PF_CONF_PATH)
+        .with_context(|| format!("failed to read {PF_CONF_PATH}"))?;
+    let updated = install_anchor_hook(&conf);
+    if updated != conf {
+        std::fs::write(PF_CONF_PATH, &updated)
+            .with_context(|| format!("failed to write {PF_CONF_PATH}"))?;
+        reload_top_level_ruleset_from_disk()?;
+    }
+    Ok(())
+}
+
+/// Removes fghjd's anchor hook from `/etc/pf.conf`, restoring it to its
+/// pristine state — called on a clean `clear()` only; if fghjd is killed
+/// instead, the leftover hook is a harmless no-op anchor point.
+fn remove_anchor_hook() -> Result<()> {
+    let conf = std::fs::read_to_string(PF_CONF_PATH)
+        .with_context(|| format!("failed to read {PF_CONF_PATH}"))?;
+    let stripped = strip_managed_block(&conf);
+    if stripped != conf {
+        std::fs::write(PF_CONF_PATH, &stripped)
+            .with_context(|| format!("failed to write {PF_CONF_PATH}"))?;
+        reload_top_level_ruleset_from_disk()?;
+    }
+    Ok(())
+}
+
+/// Reloads the top-level ruleset straight from `/etc/pf.conf` on disk — used
+/// only right after *we* just edited that file (installing/removing our own
+/// hook line), so pf picks up the new hook point. This is the one place this
+/// backend still touches the top-level ruleset, and only ever mirrors
+/// whatever is already on disk (including our own just-written edit), never
+/// a synthesized/spliced-in-memory version — so it can't clobber any
+/// live-only state another tool injected, since it doesn't touch anything
+/// beyond what's already persisted.
+fn reload_top_level_ruleset_from_disk() -> Result<()> {
+    run(Command::new("pfctl").args(["-f", PF_CONF_PATH]))
+}
+
+/// Replaces fghjd's own named anchor's content — never touches the
+/// top-level ruleset or any other anchor, so it cannot clobber anything else
+/// on the system, live or on disk.
+fn load_named_anchor_ruleset(routes: &[RouteSpec]) -> Result<()> {
     let ruleset = render_ruleset(routes);
     let mut child = Command::new("pfctl")
-        .args(["-a", ANCHOR, "-f", "-"])
+        .args(["-a", ANCHOR_NAME, "-f", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -228,15 +376,11 @@ fn load_anchor_rules(routes: &[RouteSpec]) -> Result<()> {
         .context("failed to wait for pfctl")?;
     if !output.status.success() {
         bail!(
-            "pfctl -a {ANCHOR} -f - failed: {}",
+            "pfctl -a {ANCHOR_NAME} -f - failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
     Ok(())
-}
-
-fn flush_anchor() -> Result<()> {
-    run(Command::new("pfctl").args(["-a", ANCHOR, "-F", "all"]))
 }
 
 fn run(cmd: &mut Command) -> Result<()> {
@@ -310,5 +454,68 @@ mod tests {
         assert!(in_pool(Ipv4Addr::new(10, 222, 0, 1)));
         assert!(!in_pool(Ipv4Addr::new(10, 223, 0, 1)));
         assert!(!in_pool(Ipv4Addr::new(127, 0, 0, 1)));
+    }
+
+    const SAMPLE_PF_CONF: &str = "#\n\
+        # Default PF configuration file.\n\
+        #\n\
+        \n\
+        scrub-anchor \"com.apple/*\"\n\
+        nat-anchor \"com.apple/*\"\n\
+        rdr-anchor \"com.apple/*\"\n\
+        dummynet-anchor \"com.apple/*\"\n\
+        anchor \"com.apple/*\"\n\
+        load anchor \"com.apple\" from \"/etc/pf.anchors/com.apple\"\n";
+
+    #[test]
+    fn install_anchor_hook_inserts_after_the_last_translation_hook() {
+        let out = install_anchor_hook(SAMPLE_PF_CONF);
+        let lines: Vec<&str> = out.lines().collect();
+        let rdr_anchor_idx = lines
+            .iter()
+            .position(|l| *l == "rdr-anchor \"com.apple/*\"")
+            .unwrap();
+        let dummynet_idx = lines
+            .iter()
+            .position(|l| *l == "dummynet-anchor \"com.apple/*\"")
+            .unwrap();
+        assert_eq!(lines[rdr_anchor_idx + 1], HOOK_MARKER_BEGIN);
+        assert_eq!(lines[rdr_anchor_idx + 2], ANCHOR_HOOK_LINE);
+        assert_eq!(lines[rdr_anchor_idx + 3], HOOK_MARKER_END);
+        assert_eq!(lines[rdr_anchor_idx + 4], "dummynet-anchor \"com.apple/*\"");
+        assert!(dummynet_idx > rdr_anchor_idx);
+    }
+
+    #[test]
+    fn strip_managed_block_restores_pristine_content() {
+        let with_hook = install_anchor_hook(SAMPLE_PF_CONF);
+        let restored = strip_managed_block(&with_hook);
+        assert_eq!(restored, SAMPLE_PF_CONF);
+    }
+
+    #[test]
+    fn install_anchor_hook_reapplied_does_not_duplicate_the_block() {
+        let once = install_anchor_hook(SAMPLE_PF_CONF);
+        let twice = install_anchor_hook(&once);
+        assert_eq!(once, twice);
+        assert_eq!(twice.matches(HOOK_MARKER_BEGIN).count(), 1);
+    }
+
+    #[test]
+    fn install_anchor_hook_preserves_unrelated_content_around_the_block() {
+        let out = install_anchor_hook(SAMPLE_PF_CONF);
+        assert!(out.contains("# Default PF configuration file."));
+        assert!(out.contains("load anchor \"com.apple\" from \"/etc/pf.anchors/com.apple\""));
+    }
+
+    #[test]
+    fn install_anchor_hook_falls_back_to_before_the_first_anchor_line() {
+        let conf = "anchor \"com.apple/*\"\nload anchor \"com.apple\" from \"/etc/pf.anchors/com.apple\"\n";
+        let out = install_anchor_hook(conf);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], HOOK_MARKER_BEGIN);
+        assert_eq!(lines[1], ANCHOR_HOOK_LINE);
+        assert_eq!(lines[2], HOOK_MARKER_END);
+        assert_eq!(lines[3], "anchor \"com.apple/*\"");
     }
 }

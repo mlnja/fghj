@@ -7,8 +7,8 @@ use std::thread;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
+use crate::persistence::WorkspaceOwner;
 use crate::resolver::{self, Node};
-use crate::store::WorkspaceOwner;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct DownloadState {
@@ -204,7 +204,7 @@ fn run_git_clone_logged(
     if let Some(owner) = owner {
         owner.apply_to_command(&mut cmd);
     }
-    crate::store::harden_git_ssh(&mut cmd);
+    crate::persistence::harden_git_ssh(&mut cmd);
 
     let mut child = cmd
         .spawn()

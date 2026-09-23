@@ -41,9 +41,8 @@ layer: a bind mount is `"host/path:container/path"`, a named volume is
 whether the left side contains a `/`, so both are just formatted strings
 in the same list handed to the container create call.
 
-A bind mount's host path, if relative, resolves against the checkout
-`fghjd` actually built the image from — the branch-override checkout
-directory for a review run, or the live workspace path otherwise. It is
+A bind mount's host path, if relative, resolves against the live workspace
+checkout `fghjd` actually built the image from. It is
 **not** sandboxed to that repo: an absolute path, or one that walks up
 with `..`, passes straight through to Docker unchanged. That's a
 deliberate choice, not an oversight — it's what lets a service bind-mount
@@ -106,18 +105,13 @@ repeating until a pass finds nothing left to clone. Each pass either makes
 progress or terminates, so the loop can't spin forever short of a clone
 that never actually lands the repo at its expected path.
 
-## Privilege drop, shared with the branch-override build path
+## Privilege drop for clones
 
 The download path's own `git clone` runs as the real workspace owner
 rather than as root, using the identity-borrowing mechanism described in
 [Persistence & workspace store](/concepts/persistence-and-workspace-store/),
 as defense in depth against a clone subprocess hanging on an unanswerable
-interactive prompt. The branch-override build path (see [Run lifecycle &
-registry](/concepts/run-lifecycle-and-registry/)) shares this same
-privilege drop only for its first step — fetching/updating the shared
-bare mirror (`resolver::ensure_mirror`) — since that's the step that
-actually talks to the remote and could hang on a prompt. The second step,
-materializing that mirror into the throwaway working-tree checkout the
-build runs against (`docker::materialize_checkout`), is a purely local
-clone with no network access, and runs as whatever user `fghjd` itself
-runs as (root) rather than dropping privilege again.
+interactive prompt. (The now-removed branch-override build path — see
+[Run lifecycle & registry](/concepts/run-lifecycle-and-registry/)) — used
+to share this same privilege drop for its own mirror clone; that code no
+longer exists.)

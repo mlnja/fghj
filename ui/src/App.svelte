@@ -114,7 +114,7 @@
   }
 
   async function runFlow(flow) {
-    await startRun({ run_id: null, overrides: {}, flow });
+    await startRun({ run_id: null, flow });
   }
 
   async function listPullJobs() {
@@ -273,13 +273,12 @@
   // optimistic fill-in for the ~1s gap between firing a request and the
   // next `/runs` poll picking up the backend's own flag.
   let backendPending = $derived(selectedRun ? selectedRun.containers.filter((c) => c.pending_action) : []);
-  const ACTION_GERUNDS = { start: 'starting', stop: 'stopping', delete: 'removing' };
+  const ACTION_GERUNDS = { start: 'starting', stop: 'stopping', delete: 'removing', reset: 'resetting' };
   let displayPending = $derived.by(() => {
     if (backendPending.length) return backendPending.map((c) => ({ nodeId: c.node_id, action: c.pending_action }));
     if (activeAction) return [{ nodeId: activeAction.nodeId, action: ACTION_GERUNDS[activeAction.action] ?? activeAction.action }];
     return [];
   });
-  let workspaceBusy = $derived(activeAction !== null || actionQueue.length > 0 || backendPending.length > 0);
 
   function startNode(nodeId) {
     if (!selectedRunId) return;
@@ -294,6 +293,19 @@
   function deleteNode(nodeId) {
     if (!selectedRunId) return;
     enqueueNodeAction(nodeId, 'delete', `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/delete`);
+  }
+
+  // Container-only "Reset": force a fresh container in one click while the
+  // node is already Running, without touching its volumes. Same endpoint as
+  // `startNode` — `restart_container` on the backend always stops+removes
+  // the existing container and rebuilds/re-creates it regardless of whether
+  // one was already running — this button just exposes that while Running,
+  // which the Start control is deliberately hidden for (see
+  // `nodeLifecycle` in Drawer.svelte for the full state/action legality
+  // table).
+  function resetNode(nodeId) {
+    if (!selectedRunId) return;
+    enqueueNodeAction(nodeId, 'reset', `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/start`);
   }
 
   $effect(() => {
@@ -324,6 +336,21 @@
     return map;
   });
   let liveInfo = $derived(selectedNode ? runContainers[selectedNode.id] : null);
+  // Scoped to the selected node only, not the whole workspace: the backend
+  // already serializes lifecycle calls *execution-order-wise* per workspace
+  // (`RunRegistry::action_lock`, to avoid racing Docker calls against the
+  // same container name), but that's invisible latency, not a reason to
+  // stop the user from even queuing an action on an unrelated container.
+  // `liveInfo?.pending_action` is the backend's own per-node truth;
+  // `activeAction`/`actionQueue` fill the ~1s gap before the next `/runs`
+  // poll would otherwise reflect a just-fired request for *this* node.
+  let selectedNodeBusy = $derived(
+    selectedNode
+      ? liveInfo?.pending_action != null ||
+          activeAction?.nodeId === selectedNode.id ||
+          actionQueue.some((j) => j.nodeId === selectedNode.id)
+      : false
+  );
 
   let flowNames = $derived(universe ? [...new Set(universe.nodes.flatMap((n) => n.flows))].sort() : []);
 
@@ -444,11 +471,10 @@
       {:else if activeTab === 'containers'}
         <Placeholder
           eyebrow="Actual — live container state"
-          text="Start the default environment to build and run every service/infra as real Docker containers on an isolated workspace network, or start a named review run that overrides one service to a different branch alongside the rest running normally. Domain-based access from the browser still requires the future fghj daemon — for now, open a running service via its published localhost port below."
+          text="Start the default environment to build and run every service/infra as real Docker containers on an isolated workspace network, or start a second, named review run alongside the rest running normally. Domain-based access from the browser still requires the future fghj daemon — for now, open a running service via its published localhost port below."
         >
           <RunControls
             {runs}
-            serviceIds={universe.nodes.filter((n) => n.kind === 'service').map((n) => n.id)}
             onStart={startRun}
             onStop={stopRun}
             onOpenOperations={() => (opsOpen = true)}
@@ -480,7 +506,7 @@
       onClose={() => (selectedNode = null)}
       {liveInfo}
       actionLog={actionLog.filter((a) => a.nodeId === selectedNode.id)}
-      busy={workspaceBusy}
+      busy={selectedNodeBusy}
       runId={selectedRunId}
       onFetchLogs={fetchLogs}
       onFetchLogGenerations={fetchLogGenerations}
@@ -493,6 +519,7 @@
       onStartNode={startNode}
       onStopNode={stopNode}
       onDeleteNode={deleteNode}
+      onResetNode={resetNode}
     />
   {/if}
 

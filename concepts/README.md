@@ -43,7 +43,7 @@ snapshot of what's actually built and what's left, see `PROGRESS.md` itself.
 | [[node-identity-and-domains]] | How a node gets its `id`/`label`, how that id becomes a `*.fghj.internal` domain, `domain_scope`, and named/primary ports. |
 | [[local-ca-and-tls-proxy]] | The local root CA, on-the-fly per-SNI leaf certs, and the TLS-terminating reverse proxy that dispatches to real containers. |
 | [[split-dns]] | The hand-rolled authoritative DNS server for `*.fghj.internal` and how it's wired into the OS resolver. |
-| [[run-lifecycle-and-registry]] | Default vs. named/review runs, branch overrides, the reconciler, and how run state is kept honest against real Docker state. |
+| [[run-lifecycle-and-registry]] | Default vs. named/review runs, the reconciler, and how run state is kept honest against real Docker state. |
 | [[persistence-and-workspace-store]] | The per-workspace SQLite store, the root-owned workspace index, and the root-runs-as-root/clones-as-you privilege split. |
 | [[docker-and-downloads]] | Image builds, container lifecycle, and the background clone/pull job registry the UI polls. |
 | [[control-api-and-cli]] | The axum control API, the `fghj`/`fghjd` process split, and the CLI's own hand-rolled HTTP client. |
