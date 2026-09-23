@@ -264,15 +264,16 @@
     processQueue();
   }
 
-  // `ContainerInfo.pending_action` (from `RunRegistry.pending` on the
-  // backend) is the actual source of truth for "what is this node doing
-  // right now" — it's what `begin_action` itself checks before rejecting a
-  // duplicate call, so it can never disagree with reality the way a
-  // frontend-only guess could (e.g. after a page reload, or from a second
-  // browser tab). `activeAction`/`actionQueue` above stay only as an
-  // optimistic fill-in for the ~1s gap between firing a request and the
-  // next `/runs` poll picking up the backend's own flag.
-  let backendPending = $derived(selectedRun ? selectedRun.containers.filter((c) => c.pending_action) : []);
+  // `ContainerInfo.pending_action` is the actual source of truth for "what
+  // is this node doing right now" — the reducer sets it when it accepts a
+  // lifecycle request and clears it when the Docker call settles, and it's
+  // what the reducer itself checks before rejecting a duplicate call, so it
+  // can never disagree with reality the way a frontend-only guess could
+  // (e.g. after a page reload, or from a second browser tab).
+  // `activeAction`/`actionQueue` above stay only as an optimistic fill-in
+  // for the ~1s gap between firing a request and the next `/runs` poll
+  // picking up the backend's own flag.
+  let backendPending = $derived(Object.values(selectedRun?.containers ?? {}).filter((c) => c.pending_action));
   const ACTION_GERUNDS = { start: 'starting', stop: 'stopping', delete: 'removing', reset: 'resetting' };
   let displayPending = $derived.by(() => {
     if (backendPending.length) return backendPending.map((c) => ({ nodeId: c.node_id, action: c.pending_action }));
@@ -329,12 +330,9 @@
   });
 
   let selectedRun = $derived(runs.find((r) => r.run_id === selectedRunId) ?? null);
-  let runContainers = $derived.by(() => {
-    if (!selectedRun) return {};
-    const map = {};
-    for (const c of selectedRun.containers) map[c.node_id] = c;
-    return map;
-  });
+  // `RunState.containers` is already keyed by node id on the backend, so
+  // this is a rename, not an index build.
+  let runContainers = $derived(selectedRun?.containers ?? {});
   let liveInfo = $derived(selectedNode ? runContainers[selectedNode.id] : null);
   // Scoped to the selected node only, not the whole workspace: the backend
   // already serializes lifecycle calls *execution-order-wise* per workspace

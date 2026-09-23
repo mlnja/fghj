@@ -231,7 +231,8 @@ durable record, plans in `~/.claude/plans/` are not.
   `primary`). `primary` puts a port at the service's own derived domain;
   `name` gives one an additional nested domain (see the domain-naming entry
   below). Mirrored into `resolver::ServiceConfig`/`Node` (`PortConfig`), and
-  now actually wired into `proxy.rs`'s routing via `runs::ContainerInfo.routes`
+  now actually wired into `proxy.rs`'s routing via `state::ContainerInfo`'s
+  `desired.routes`
   (see the per-service-routing entry above) — no longer inert.
 - **Uniform, scoped `*.fghj.internal` domain derivation**: no node kind can
   declare its own raw domain anymore (`#Service.internal_domain` is gone,

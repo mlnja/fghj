@@ -58,7 +58,7 @@ pub enum Action {
         ip: Option<String>,
         /// The host-published port for every one of the container's
         /// declared ports, not just the routed/primary one — mirrors
-        /// `runs::ContainerInfo::ports`, since a plain TCP dependency
+        /// `state::ContainerObserved::ports`, since a plain TCP dependency
         /// (postgres, mysql) with no HTTP surface still needs its port
         /// drift visible even though it has no `status_port` of its own.
         ports: BTreeMap<String, Option<u16>>,
@@ -94,7 +94,8 @@ pub enum Action {
     },
     /// Addressed by `run_id`/`node_id`, unlike the architecture plan's
     /// literal `ConfigDriftObserved { drift: SyncStatus }` sketch —
-    /// `refresh_sync_status` (the pre-migration equivalent, `runs.rs`)
+    /// `RunRegistry::config_drift` (which computes the verdicts this
+    /// action reports)
     /// computes drift per-container, never once for a whole workspace, so
     /// this needs the same addressing `ContainerObserved` has, to know
     /// which container's `ContainerObserved::sync` to update. This is a

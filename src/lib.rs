@@ -20,11 +20,11 @@ pub mod raw_net;
 pub mod reducer;
 pub mod registry;
 pub mod resolver;
-pub mod run_view;
 pub mod runs;
 pub mod server;
 pub mod sidecar_image;
 pub mod state;
+pub mod util;
 
 /// Resolves the workspace directory, cloning `entry` into it by convention if
 /// given and not already present.

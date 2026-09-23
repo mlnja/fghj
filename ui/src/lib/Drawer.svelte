@@ -51,7 +51,7 @@
   }
 
   // Single source of truth for "what can this node's controls do right
-  // now" — replaces a scatter of ad hoc `liveInfo?.status === 'running'`
+  // now" — replaces a scatter of ad hoc `liveInfo?.observed.status === 'running'`
   // checks per button with one explicit state, so adding/auditing a
   // transition means touching one place. `liveInfo` is undefined once
   // `ContainerActionSettled` removes a deleted node's entry (or before it's
@@ -64,7 +64,7 @@
   function nodeLifecycle(info) {
     if (!info) return 'absent';
     if (info.pending_action) return info.pending_action;
-    return info.status === 'running' ? 'running' : 'stopped';
+    return info.observed.status === 'running' ? 'running' : 'stopped';
   }
   // Persisted log history (see `store::WorkspaceDb`'s `logs` table): a
   // generation picker (current vs. previous, per the two-generation
@@ -343,7 +343,7 @@
         {/if}
         {#each Object.entries(node.ports ?? {}) as [port, cfg]}
           {@const routeDomain = cfg.primary ? node.domain : cfg.name ? `${cfg.name}.${node.domain}` : null}
-          {@const isLive = routeDomain && liveInfo?.routes?.some((r) => r.domain === routeDomain)}
+          {@const isLive = routeDomain && liveInfo?.desired.routes?.some((r) => r.domain === routeDomain)}
           {@const role = cfg.primary ? 'main' : cfg.name ? 'additional' : 'tcp'}
           {@const displayDomain = cfg.wildcard ? `*.${routeDomain}` : routeDomain}
           <div class="port-row">
@@ -359,13 +359,13 @@
                 {:else}
                   <span class="muted">{displayDomain}</span>
                 {/if}
-              {:else if liveInfo?.ports?.[port] && liveInfo?.raw_domain}
-                <button class="copy-btn" onclick={() => copyText(`${liveInfo.raw_domain}:${port}`, port)}>
-                  {liveInfo.raw_domain}:{port} {copiedKey === port ? '· copied' : '⧉'}
+              {:else if liveInfo?.observed.ports?.[port] && liveInfo?.desired.raw_domain}
+                <button class="copy-btn" onclick={() => copyText(`${liveInfo.desired.raw_domain}:${port}`, port)}>
+                  {liveInfo.desired.raw_domain}:{port} {copiedKey === port ? '· copied' : '⧉'}
                 </button>
-              {:else if liveInfo?.ports?.[port]}
-                <button class="copy-btn" onclick={() => copyText(`127.0.0.1:${liveInfo.ports[port]}`, port)}>
-                  127.0.0.1:{liveInfo.ports[port]} {copiedKey === port ? '· copied' : '⧉'}
+              {:else if liveInfo?.observed.ports?.[port]}
+                <button class="copy-btn" onclick={() => copyText(`127.0.0.1:${liveInfo.observed.ports[port]}`, port)}>
+                  127.0.0.1:{liveInfo.observed.ports[port]} {copiedKey === port ? '· copied' : '⧉'}
                 </button>
               {:else}
                 <span class="muted">not running</span>
@@ -374,7 +374,7 @@
           </div>
         {/each}
         {#each node.additional_hosts ?? [] as host}
-          {@const liveRoute = liveInfo?.routes?.find((r) => r.domain === host)}
+          {@const liveRoute = liveInfo?.desired.routes?.find((r) => r.domain === host)}
           <div class="row">
             <span class="k">additional</span>
             <span class="v">
@@ -383,7 +383,7 @@
           </div>
         {/each}
         {#each node.wildcard_hosts ?? [] as host}
-          {@const liveRoute = liveInfo?.routes?.find((r) => r.domain === host)}
+          {@const liveRoute = liveInfo?.desired.routes?.find((r) => r.domain === host)}
           <div class="row">
             <span class="k">additional (wildcard)</span>
             <span class="v">
@@ -393,14 +393,14 @@
         {/each}
         <div class="row"><span class="k">flows</span><span class="v">{node.flows?.join(', ') || '—'}</span></div>
         {#if liveInfo && node.downloaded !== false}
-          <div class="row"><span class="k">container status</span><span class="v">{liveInfo.status}{liveInfo.pending_action ? ` (${liveInfo.pending_action}…)` : ''}</span></div>
-          <div class="row"><span class="k">container name</span><span class="v">{liveInfo.container_name}</span></div>
+          <div class="row"><span class="k">container status</span><span class="v">{liveInfo.observed.status}{liveInfo.pending_action ? ` (${liveInfo.pending_action}…)` : ''}</span></div>
+          <div class="row"><span class="k">container name</span><span class="v">{liveInfo.desired.container_name}</span></div>
           <div class="row">
             <span class="k">config sync</span>
             <span class="v">
-              {#if liveInfo.synced === false}
+              {#if liveInfo.observed.sync === 'drifted'}
                 <span class="pill unsynced" title="the running container's config no longer matches .fghj.yaml — restart this node to pick up the change">desired ≠ actual</span>
-              {:else if liveInfo.synced === true}
+              {:else if liveInfo.observed.sync === 'synced'}
                 <span class="pill synced">up to date</span>
               {:else}
                 <span class="muted">unknown</span>

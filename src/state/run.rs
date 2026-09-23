@@ -5,15 +5,11 @@ use serde::{Deserialize, Serialize};
 use super::container::ContainerInfo;
 use super::volume::VolumeInfo;
 
-/// Carried over unchanged from `runs::RunSpec` (`src/runs.rs`) — the
-/// caller-supplied scoping for a `RunPlanned` action ("this run only cares
-/// about the nodes reachable from this flow"), still deserialized straight
-/// off the `POST /runs` HTTP body the same way it is today. Named `RunSpec`
-/// here rather than the architecture plan's `RunPlan` (used in its
-/// `Action::RunPlanned { plan: RunPlan }` sketch): no `RunPlan` type exists
-/// anywhere in the codebase yet, and full `.fghj.yaml` graph resolution
-/// into a richer "plan" struct is out of scope for this groundwork phase —
-/// see the phase-1 report for this judgment call.
+/// The caller-supplied scoping for a `RunPlanned` action, deserialized
+/// straight off the `POST /runs` HTTP body: which run to (re)create, and
+/// optionally that only the nodes reachable from one flow (see
+/// `Node::flows`) should be started — e.g. just the checkout flow's
+/// services instead of every service fghj knows about.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct RunSpec {
     #[serde(default)]
@@ -23,23 +19,35 @@ pub struct RunSpec {
 }
 
 /// One run's canonical state: every container and volume fghj knows about
-/// for it. Keyed by `node_id` / volume name (`BTreeMap`) rather than
-/// `runs::RunState`'s `Vec<ContainerInfo>` — a pure reducer dispatches
-/// almost every action by `node_id` (`RunNodeStartRequested`,
-/// `ContainerObserved`, ...) and needs point lookup on essentially every
-/// action, not a linear scan; a map also structurally rules out the
-/// two-containers-same-`node_id` state a `Vec` never prevented.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// for it. Keyed by `node_id` / volume name (`BTreeMap`) rather than a
+/// `Vec<ContainerInfo>` — a pure reducer dispatches almost every action by
+/// `node_id` (`RunNodeStartRequested`, `ContainerObserved`, ...) and needs
+/// point lookup on essentially every action, not a linear scan; a map also
+/// structurally rules out the two-containers-same-`node_id` state a `Vec`
+/// never prevented.
+///
+/// The single representation of a run in fghj: the reducer owns the
+/// authoritative copy, `runs::RunRegistry` keeps a working copy of the same
+/// type while it drives Docker, and `persistence` stores it. There is
+/// deliberately no second, flatter "wire" or "engine" shape to translate
+/// to and from — two structs for one run is what let `desired` and
+/// `observed` silently disagree before they were unified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct RunState {
     pub run_id: String,
     pub network: String,
     pub containers: BTreeMap<String, ContainerInfo>,
     pub volumes: BTreeMap<String, VolumeInfo>,
-    /// The deterministic name of this run's in-network TLS proxy sidecar —
-    /// see `runs::RunState::sidecar_container_name`'s doc.
+    /// The deterministic name of this run's in-network TLS proxy sidecar
+    /// (see `RunRegistry::ensure_sidecar`) — one per run, never shared
+    /// across workspaces. Empty for a run persisted before this field
+    /// existed, until that run is next started/topped up.
     pub sidecar_container_name: String,
-    /// The sidecar's own address on `network` — see
-    /// `runs::RunState::sidecar_ip`'s doc.
+    /// The sidecar's own address on `network` — `None` until
+    /// `docker::inspect_network_ip` has actually resolved it (or for a
+    /// pre-sidecar persisted run). Cached here rather than re-inspected on
+    /// every node start so `start_node` doesn't need a Docker round-trip
+    /// just to set every node's `--dns`.
     pub sidecar_ip: Option<String>,
     /// Set by `RunPlanned` to record the caller's still-unfulfilled intent
     /// to (re)create/top-up this run; `effects::docker::converge` picks it

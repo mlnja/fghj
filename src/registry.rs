@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::actor::ActorHandle;
+use crate::state::WorkspaceState;
 
 /// Everything needed to reach one workspace's actor — currently just the
 /// handle itself, kept as its own type (rather than using `ActorHandle`
@@ -58,6 +59,19 @@ impl ActorRegistry {
 
     pub fn get(&self, id: &str) -> Option<WorkspaceHandle> {
         self.workspaces.borrow().get(id).cloned()
+    }
+
+    /// The latest published state of every currently-registered workspace.
+    /// Exactly the shape every `state::query` projection and every
+    /// `FannedInEffect::extract` takes, so a live read path (SNI routing,
+    /// answering a DNS query) and a converge loop can share one projection
+    /// instead of each walking the workspaces themselves.
+    pub fn states(&self) -> BTreeMap<String, Arc<WorkspaceState>> {
+        self.workspaces
+            .borrow()
+            .iter()
+            .map(|(id, handle)| (id.clone(), handle.actor.current()))
+            .collect()
     }
 
     /// A fresh receiver over the current *set* of registered workspaces —

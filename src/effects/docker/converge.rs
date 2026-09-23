@@ -21,41 +21,31 @@
 //! result directly, via the `*SettleGuard`s below, so nothing needs to
 //! re-derive it from a fresh snapshot a moment later.
 //!
-//! `mirror_run`/`mirror_container`/`mirror_route` (below) are the same pure
-//! translation functions `effects::bridge` used, relocated here rather than
-//! deleted with the rest of it — they're still exactly what's needed to
-//! turn a `runs::RunState` (the old system's real Docker-facing state) into
-//! the new system's `state::RunState` shape at the one-shot moments this
-//! effect actually observes fresh truth: right after `perform`/
-//! `perform_create` finish, and once at `daemon::WorkspaceRegistry::wire_actor`
-//! time to seed a freshly-wired actor with whatever the old system already
-//! knows about (see `mirror_runs`, `pub` for exactly that caller).
+//! There is also nothing to translate any more. `RunRegistry` builds the
+//! same `state::RunState`/`ContainerInfo` the reducer holds, so what
+//! `perform`/`perform_create` return is dispatched as-is. This module used
+//! to carry a set of `mirror_*` functions converting a second, flatter
+//! container shape into this one — and because that shape had no field for
+//! *intent*, the conversion had to reconstruct `desired.running` from the
+//! observed status, quietly making the two agree and hiding exactly the
+//! drift the split exists to surface.
 //!
-//! One known gap this leaves open: a container that changes state for a
-//! reason *neither* this effect nor an HTTP-dispatched request caused
-//! (Docker's own restart policy reviving a crashed container, an operator
-//! running `docker stop` by hand, `spawn_reconciler`'s drift correction)
-//! no longer has anything to notice and report it into the new system —
-//! `effects::bridge` used to catch that incidentally, just by re-polling
-//! everything every second. Closing that gap for real is `effects::docker::observe`,
-//! the dedicated Docker-status poller the plan's target module layout
-//! already reserves for a later migration phase; until it exists, the
-//! `hosts`/`dns`/`raw_net` effects (which do read `ContainerInfo::observed`)
-//! can go stale for a container whose state changed that way.
+//! A container that changes state for a reason *neither* this effect nor an
+//! HTTP-dispatched request caused (Docker's own restart policy reviving a
+//! crashed container, an operator running `docker stop` by hand) is picked
+//! up by `effects::docker::observe`, which reports
+//! `Action::ContainerObserved` off the reconciler's existing once-a-second
+//! inspection.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::action::Action;
 use crate::actor::ActorHandle;
 use crate::effects::Effect;
 use crate::resolver;
-use crate::runs;
 use crate::server;
-use crate::state::{
-    ContainerDesired, ContainerInfo, ContainerObserved, PendingAction, PortRoute, RunSpec,
-    RunState, SyncStatus, WorkspaceState,
-};
+use crate::state::{ContainerInfo, PendingAction, RunSpec, RunState, WorkspaceState};
 
 /// One container currently mid-start/stop/delete, as seen by this effect's
 /// `extract` — a plain projection of `ContainerInfo::pending_action`,
@@ -167,7 +157,7 @@ fn plan_creates(
 async fn perform(
     old: &server::WorkspaceState,
     entry: &PendingEntry,
-) -> anyhow::Result<Option<runs::ContainerInfo>> {
+) -> anyhow::Result<Option<ContainerInfo>> {
     match entry.action {
         PendingAction::Starting => {
             let path = old.path.clone();
@@ -187,11 +177,7 @@ async fn perform(
             let info = old
                 .runs
                 .get(&entry.run_id)
-                .and_then(|r| {
-                    r.containers
-                        .into_iter()
-                        .find(|c| c.node_id == entry.node_id)
-                })
+                .and_then(|mut r| r.containers.remove(&entry.node_id))
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "container {} vanished from run {} immediately after stopping",
@@ -227,98 +213,12 @@ async fn perform_create(
     let graph = tokio::task::spawn_blocking(move || resolver::resolve_universe(&path))
         .await
         .map_err(|e| anyhow::anyhow!("resolve_universe task panicked: {e}"))??;
-    let run = if entry.plan.run_id.is_some() {
-        old.runs
-            .start(
-                &graph,
-                runs::RunSpec {
-                    run_id: entry.plan.run_id.clone(),
-                    flow: entry.plan.flow.clone(),
-                },
-            )
-            .await?
+    if entry.plan.run_id.is_some() {
+        old.runs.start(&graph, entry.plan.clone()).await
     } else {
         old.runs
             .ensure_running(&graph, entry.plan.flow.as_deref())
-            .await?
-    };
-    Ok(mirror_run(&run))
-}
-
-/// Pure conversion from the old system's whole `runs::RunState` snapshot to
-/// the new system's `state::RunState` shape — used both by
-/// `daemon::WorkspaceRegistry::wire_actor` (to seed a freshly-wired actor
-/// with whatever the old system already has, e.g. runs reconciled from a
-/// previous `fghjd` lifetime) and, indirectly via `mirror_run`, by
-/// `perform_create`'s post-creation translation.
-pub fn mirror_runs(old_runs: &[runs::RunState]) -> BTreeMap<String, RunState> {
-    old_runs
-        .iter()
-        .map(|run| (run.run_id.clone(), mirror_run(run)))
-        .collect()
-}
-
-fn mirror_run(run: &runs::RunState) -> RunState {
-    RunState {
-        run_id: run.run_id.clone(),
-        network: run.network.clone(),
-        containers: run
-            .containers
-            .iter()
-            .map(|c| (c.node_id.clone(), mirror_container(c)))
-            .collect(),
-        // The old system never tracked volumes as state of their own (see
-        // `state::VolumeInfo`'s doc) — nothing to mirror them from yet.
-        volumes: BTreeMap::new(),
-        sidecar_container_name: run.sidecar_container_name.clone(),
-        sidecar_ip: run.sidecar_ip.clone(),
-        pending_create: None,
-    }
-}
-
-fn mirror_container(c: &runs::ContainerInfo) -> ContainerInfo {
-    ContainerInfo {
-        node_id: c.node_id.clone(),
-        desired: ContainerDesired {
-            running: c.status == "running",
-            container_name: c.container_name.clone(),
-            domain: c.domain.clone(),
-            raw_domain: c.raw_domain.clone(),
-            routes: c.routes.iter().map(mirror_route).collect(),
-            additional_hosts: c.additional_hosts.clone(),
-            status_port: c.status_port.clone(),
-            config_hash: c.config_hash.clone(),
-        },
-        observed: ContainerObserved {
-            status: c.status.clone(),
-            published_port: c.published_port,
-            // The old `runs::ContainerInfo` never tracked a container's
-            // network-internal IP — only `Action::ContainerObserved` (a
-            // real Docker-polling effect's future report) will ever set
-            // this for real.
-            ip: None,
-            ports: c.ports.clone(),
-            sync: match c.synced {
-                Some(true) => SyncStatus::Synced,
-                Some(false) => SyncStatus::Drifted,
-                None => SyncStatus::Unknown,
-            },
-        },
-        // Always `None`: every call site translating a `runs::ContainerInfo`
-        // this way is itself the moment an in-flight action just settled
-        // (or a fresh wire-time snapshot, which never has one in flight
-        // either) — never a mid-flight observation.
-        pending_action: None,
-    }
-}
-
-fn mirror_route(r: &runs::PortRoute) -> PortRoute {
-    PortRoute {
-        domain: r.domain.clone(),
-        host_port: r.host_port,
-        wildcard: r.wildcard,
-        container_port: r.container_port.clone(),
-        https: r.https,
+            .await
     }
 }
 
@@ -447,10 +347,7 @@ impl DockerConvergeEffect {
             outcome: None,
         };
         tokio::spawn(async move {
-            let result = perform(&old, &entry)
-                .await
-                .map(|maybe_info| maybe_info.map(|info| mirror_container(&info)))
-                .map_err(|e| format!("{e:#}"));
+            let result = perform(&old, &entry).await.map_err(|e| format!("{e:#}"));
             guard.settle(result);
         });
     }
@@ -500,6 +397,8 @@ impl Effect for DockerConvergeEffect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{ContainerDesired, ContainerObserved};
+    use std::collections::BTreeMap;
     use std::time::Duration;
 
     fn container(node_id: &str, pending: Option<PendingAction>) -> ContainerInfo {
@@ -683,110 +582,6 @@ mod tests {
         let (to_spawn, still_in_flight) = plan_creates(&in_flight, &[]);
         assert!(to_spawn.is_empty());
         assert!(still_in_flight.is_empty());
-    }
-
-    fn old_container(node_id: &str, status: &str) -> runs::ContainerInfo {
-        runs::ContainerInfo {
-            node_id: node_id.to_string(),
-            container_name: format!("fghj-{node_id}-1"),
-            status: status.to_string(),
-            published_port: Some(54321),
-            domain: format!("{node_id}.fghj.internal"),
-            raw_domain: format!("{node_id}.fghj.raw.internal"),
-            routes: vec![runs::PortRoute {
-                domain: format!("{node_id}.fghj.internal"),
-                host_port: 54321,
-                wildcard: false,
-                container_port: "80".to_string(),
-                https: true,
-            }],
-            additional_hosts: vec![],
-            ports: BTreeMap::from([("80".to_string(), Some(54321u16))]),
-            status_port: Some("80".to_string()),
-            config_hash: "hash".to_string(),
-            synced: None,
-            pending_action: None,
-        }
-    }
-
-    fn old_run(run_id: &str, containers: Vec<runs::ContainerInfo>) -> runs::RunState {
-        runs::RunState {
-            run_id: run_id.to_string(),
-            network: format!("fghj-net-{run_id}"),
-            containers,
-            sidecar_container_name: format!("fghj-sidecar-{run_id}"),
-            sidecar_ip: Some("172.20.0.2".to_string()),
-        }
-    }
-
-    #[test]
-    fn mirror_runs_carries_over_run_and_container_identity() {
-        let mirrored = mirror_runs(&[old_run("default", vec![old_container("web", "running")])]);
-        let run = &mirrored["default"];
-        assert_eq!(run.network, "fghj-net-default");
-        assert_eq!(run.sidecar_ip.as_deref(), Some("172.20.0.2"));
-        let container = &run.containers["web"];
-        assert_eq!(container.desired.raw_domain, "web.fghj.raw.internal");
-        assert_eq!(container.observed.status, "running");
-        assert_eq!(container.observed.ports["80"], Some(54321));
-        assert!(container.pending_action.is_none());
-        assert!(run.pending_create.is_none());
-    }
-
-    #[test]
-    fn mirror_runs_marks_a_running_container_as_desired_running() {
-        let mirrored = mirror_runs(&[old_run("default", vec![old_container("web", "running")])]);
-        assert!(mirrored["default"].containers["web"].desired.running);
-    }
-
-    #[test]
-    fn mirror_runs_marks_a_stopped_container_as_not_desired_running() {
-        let mirrored = mirror_runs(&[old_run("default", vec![old_container("web", "exited")])]);
-        assert!(!mirrored["default"].containers["web"].desired.running);
-    }
-
-    #[test]
-    fn mirror_runs_maps_synced_flag_to_sync_status() {
-        let mut synced = old_container("web", "running");
-        synced.synced = Some(true);
-        let mut drifted = old_container("api", "running");
-        drifted.synced = Some(false);
-        let mirrored = mirror_runs(&[old_run("default", vec![synced, drifted])]);
-        assert_eq!(
-            mirrored["default"].containers["web"].observed.sync,
-            SyncStatus::Synced
-        );
-        assert_eq!(
-            mirrored["default"].containers["api"].observed.sync,
-            SyncStatus::Drifted
-        );
-    }
-
-    #[test]
-    fn mirror_runs_handles_a_container_with_no_published_ports() {
-        let mut unpublished = old_container("db", "starting");
-        unpublished.ports = BTreeMap::from([("5432".to_string(), None)]);
-        let mirrored = mirror_runs(&[old_run("default", vec![unpublished])]);
-        assert_eq!(
-            mirrored["default"].containers["db"].observed.ports["5432"],
-            None
-        );
-    }
-
-    #[test]
-    fn mirror_runs_covers_multiple_runs_and_containers() {
-        let mirrored = mirror_runs(&[
-            old_run("default", vec![old_container("web", "running")]),
-            old_run("other", vec![old_container("api", "running")]),
-        ]);
-        assert_eq!(mirrored.len(), 2);
-        assert!(mirrored["default"].containers.contains_key("web"));
-        assert!(mirrored["other"].containers.contains_key("api"));
-    }
-
-    #[test]
-    fn mirror_runs_of_an_empty_snapshot_is_empty() {
-        assert!(mirror_runs(&[]).is_empty());
     }
 
     async fn wait_until(mut check: impl FnMut() -> bool) {

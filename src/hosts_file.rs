@@ -22,7 +22,7 @@ pub fn hosts_path() -> PathBuf {
 /// Called with the full set of `additional_hosts` declared by every
 /// currently-*running* container across every wired workspace (see
 /// `effects::hosts::HostsEffect`), so a host stops being claimed here the
-/// moment its container stops, same lifecycle as a `runs::PortRoute`.
+/// moment its container stops, same lifecycle as a `state::PortRoute`.
 /// `hosts` need not be sorted or deduped — `sync` does
 /// both, so repeated calls with the same logical set never produce a
 /// spurious rewrite (mirrors `dns::sync_macos_resolver`'s idempotent

@@ -4,9 +4,27 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::persistence::workspace_owner::WorkspaceOwner;
-use crate::runs::{ContainerInfo, RunState};
+use crate::state::{ContainerDesired, ContainerInfo, ContainerObserved, RunState, SyncStatus};
 
 use super::WorkspaceDb;
+
+/// Decodes one of the JSON-blob columns (`routes_json`, `ports_json`,
+/// `additional_hosts_json`), falling back to empty for a `NULL` column on a
+/// row written before it existed *and* for a blob that no longer parses
+/// into the current shape. Both are recoverable the next time the owning
+/// container is started through fghj, which rebuilds them from scratch —
+/// failing the whole load instead would lose every other run in the db too.
+fn json_column<T: serde::de::DeserializeOwned + Default>(raw: Option<String>) -> T {
+    raw.and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// `synced` is stored as the nullable bool it has always been rather than
+/// `SyncStatus`'s names, so an older `fghjd` reading this db still
+/// understands the column.
+fn sync_to_column(sync: SyncStatus) -> Option<bool> {
+    sync.into()
+}
 
 impl WorkspaceDb {
     /// Records the workspace's identity the first time it's wired; a no-op
@@ -88,24 +106,25 @@ impl WorkspaceDb {
                 ],
             )?;
             tx.execute("DELETE FROM containers WHERE run_id = ?1", rusqlite::params![state.run_id])?;
-            for c in &state.containers {
+            for c in state.containers.values() {
                 tx.execute(
-                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                     rusqlite::params![
                         state.run_id,
                         c.node_id,
-                        c.container_name,
-                        c.status,
-                        c.published_port,
-                        c.domain,
-                        serde_json::to_string(&c.routes)?,
-                        serde_json::to_string(&c.additional_hosts)?,
-                        serde_json::to_string(&c.ports)?,
-                        c.status_port,
-                        c.config_hash,
-                        c.synced,
-                        c.raw_domain,
+                        c.desired.container_name,
+                        c.observed.status,
+                        c.observed.published_port,
+                        c.desired.domain,
+                        serde_json::to_string(&c.desired.routes)?,
+                        serde_json::to_string(&c.desired.additional_hosts)?,
+                        serde_json::to_string(&c.observed.ports)?,
+                        c.desired.status_port,
+                        c.desired.config_hash,
+                        sync_to_column(c.observed.sync),
+                        c.desired.raw_domain,
+                        c.desired.running,
                     ],
                 )?;
             }
@@ -155,45 +174,54 @@ impl WorkspaceDb {
                     RunState {
                         run_id,
                         network,
-                        containers: Vec::new(),
                         sidecar_container_name: sidecar_container_name.unwrap_or_default(),
                         sidecar_ip,
+                        ..Default::default()
                     },
                 );
             }
             drop(stmt);
 
             let mut stmt = conn.prepare(
-                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain FROM containers",
+                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running FROM containers",
             )?;
             let rows = stmt.query_map([], |row| {
-                let routes_json: Option<String> = row.get(6)?;
-                let routes = routes_json
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default();
-                let additional_hosts_json: Option<String> = row.get(7)?;
-                let additional_hosts = additional_hosts_json
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default();
-                let ports_json: Option<String> = row.get(8)?;
-                let ports = ports_json
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default();
+                let status: String = row.get(3)?;
                 Ok((
                     row.get::<_, String>(0)?,
                     ContainerInfo {
                         node_id: row.get(1)?,
-                        container_name: row.get(2)?,
-                        status: row.get(3)?,
-                        published_port: row.get::<_, Option<i64>>(4)?.map(|p| p as u16),
-                        domain: row.get(5)?,
-                        routes,
-                        additional_hosts,
-                        ports,
-                        status_port: row.get(9)?,
-                        config_hash: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
-                        synced: row.get::<_, Option<i64>>(11)?.map(|v| v != 0),
-                        raw_domain: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                        desired: ContainerDesired {
+                            // A row written before `desired_running`
+                            // existed only recorded the outcome, so the
+                            // intent behind it has to be inferred from
+                            // that one last time. Self-corrects the first
+                            // time anything acts on the container.
+                            running: row
+                                .get::<_, Option<i64>>(13)?
+                                .map(|v| v != 0)
+                                .unwrap_or(status == "running"),
+                            container_name: row.get(2)?,
+                            domain: row.get(5)?,
+                            raw_domain: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                            routes: json_column(row.get(6)?),
+                            additional_hosts: json_column(row.get(7)?),
+                            status_port: row.get(9)?,
+                            config_hash: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                        },
+                        observed: ContainerObserved {
+                            status,
+                            published_port: row.get::<_, Option<i64>>(4)?.map(|p| p as u16),
+                            // Never persisted: a container's address on its
+                            // Docker network is only meaningful for the
+                            // network it is currently attached to.
+                            ip: None,
+                            ports: json_column(row.get(8)?),
+                            sync: row.get::<_, Option<i64>>(11)?.map(|v| v != 0).into(),
+                        },
+                        // Never a column: an action in flight belongs to
+                        // the process that started it, and cannot still be
+                        // in flight across a restart.
                         pending_action: None,
                     },
                 ))
@@ -201,7 +229,7 @@ impl WorkspaceDb {
             for row in rows {
                 let (run_id, container) = row?;
                 if let Some(run) = runs.get_mut(&run_id) {
-                    run.containers.push(container);
+                    run.containers.insert(container.node_id.clone(), container);
                 }
             }
             Ok(runs)
@@ -214,6 +242,37 @@ impl WorkspaceDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::PortRoute;
+
+    fn container() -> ContainerInfo {
+        ContainerInfo {
+            node_id: "svc-a".to_string(),
+            desired: ContainerDesired {
+                running: true,
+                container_name: "fghj-demo-default-svc-a".to_string(),
+                domain: "svc-a.demo.fghj".to_string(),
+                raw_domain: "svc-a.demo.fghj.raw.internal".to_string(),
+                routes: vec![PortRoute {
+                    domain: "svc-a.demo.fghj".to_string(),
+                    host_port: 8080,
+                    wildcard: false,
+                    https: true,
+                    container_port: "8080".to_string(),
+                }],
+                additional_hosts: Vec::new(),
+                status_port: Some("8080".to_string()),
+                config_hash: "deadbeef".to_string(),
+            },
+            observed: ContainerObserved {
+                status: "running".to_string(),
+                published_port: Some(8080),
+                ip: None,
+                ports: BTreeMap::from([("8080".to_string(), Some(8080))]),
+                sync: SyncStatus::Synced,
+            },
+            pending_action: None,
+        }
+    }
 
     #[tokio::test]
     async fn workspace_db_round_trips_meta_and_runs() {
@@ -239,44 +298,72 @@ mod tests {
         let state = RunState {
             run_id: "default".to_string(),
             network: "fghj-demo-default".to_string(),
-            containers: vec![ContainerInfo {
-                node_id: "svc-a".to_string(),
-                container_name: "fghj-demo-default-svc-a".to_string(),
-                status: "running".to_string(),
-                published_port: Some(8080),
-                domain: "svc-a.demo.fghj".to_string(),
-                routes: vec![crate::runs::PortRoute {
-                    domain: "svc-a.demo.fghj".to_string(),
-                    host_port: 8080,
-                    wildcard: false,
-                    https: true,
-                    container_port: "8080".to_string(),
-                }],
-                additional_hosts: Vec::new(),
-                ports: BTreeMap::from([("8080".to_string(), Some(8080))]),
-                status_port: Some("8080".to_string()),
-                config_hash: "deadbeef".to_string(),
-                synced: Some(true),
-                raw_domain: "svc-a.demo.fghj.raw.internal".to_string(),
-                pending_action: None,
-            }],
+            containers: BTreeMap::from([("svc-a".to_string(), container())]),
             sidecar_container_name: "fghj-demo-default-sidecar".to_string(),
             sidecar_ip: Some("172.20.0.5".to_string()),
+            ..Default::default()
         };
-        db.clone().save_run(state).await.unwrap();
+        db.clone().save_run(state.clone()).await.unwrap();
 
         let loaded = db.clone().load_runs().await.unwrap();
         assert_eq!(loaded.len(), 1);
-        let restored = &loaded["default"];
-        assert_eq!(restored.network, "fghj-demo-default");
-        assert_eq!(restored.containers.len(), 1);
-        assert_eq!(restored.containers[0].published_port, Some(8080));
-        assert_eq!(restored.containers[0].routes.len(), 1);
-        assert_eq!(restored.containers[0].routes[0].host_port, 8080);
-        assert_eq!(restored.sidecar_container_name, "fghj-demo-default-sidecar");
-        assert_eq!(restored.sidecar_ip, Some("172.20.0.5".to_string()));
+        assert_eq!(loaded["default"], state);
 
         db.clone().delete_run("default".to_string()).await.unwrap();
         assert!(db.load_runs().await.unwrap().is_empty());
+    }
+
+    /// The whole reason `desired` and `observed` are stored in separate
+    /// columns: a container fghj wants running but Docker reports as
+    /// `exited` has to come back out of the db still saying both of those
+    /// things. Round-tripping it through the flat shape this replaced would
+    /// have restored it as `desired.running: false` — silently agreeing
+    /// with the crash instead of reporting it as drift.
+    #[tokio::test]
+    async fn a_crashed_container_reloads_still_wanting_to_be_running() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
+
+        let mut crashed = container();
+        crashed.observed.status = "exited".to_string();
+        crashed.observed.sync = SyncStatus::Drifted;
+        db.clone()
+            .save_run(RunState {
+                run_id: "default".to_string(),
+                containers: BTreeMap::from([("svc-a".to_string(), crashed)]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let restored = &db.load_runs().await.unwrap()["default"].containers["svc-a"];
+        assert!(restored.desired.running);
+        assert_eq!(restored.observed.status, "exited");
+        assert_eq!(restored.observed.sync, SyncStatus::Drifted);
+    }
+
+    /// A row written by a `fghjd` from before `desired_running` existed has
+    /// only the outcome to go on, so intent is inferred from it once.
+    #[tokio::test]
+    async fn a_row_predating_desired_running_infers_intent_from_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
+        db.clone()
+            .save_run(RunState {
+                run_id: "default".to_string(),
+                containers: BTreeMap::from([("svc-a".to_string(), container())]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE containers SET desired_running = NULL", [])
+            .unwrap();
+
+        let restored = &db.load_runs().await.unwrap()["default"].containers["svc-a"];
+        assert!(restored.desired.running);
+        assert_eq!(restored.observed.status, "running");
     }
 }

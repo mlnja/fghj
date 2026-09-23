@@ -109,8 +109,8 @@
     {@const inFlow = n.flows.includes(currentFlow)}
     {@const dimmed = currentFlow && !inFlow}
     {@const live = runContainers?.[n.id]}
-    {@const containerState = mode === 'containers' && n.kind !== 'flow' ? (live ? (live.pending_action ?? (live.status === 'running' ? 'running' : 'stopped')) : 'none') : null}
-    {@const syncKnown = live && live.synced != null}
+    {@const containerState = mode === 'containers' && n.kind !== 'flow' ? (live ? (live.pending_action ?? (live.observed.status === 'running' ? 'running' : 'stopped')) : 'none') : null}
+    {@const synced = live && live.observed.sync !== 'unknown' ? live.observed.sync === 'synced' : null}
     <div
       class="node"
       class:not-downloaded={n.downloaded === false}
@@ -135,10 +135,10 @@
 
       <!-- Docker half: only ever populated in containers mode, since
            there's nothing runtime-related to show for a plain repo view. -->
-      {#if syncKnown}
+      {#if synced !== null}
         <div class="node-meta live-row">
-          <span class="pill" class:drifted={!live.synced} class:synced={live.synced} title="{live.synced ? 'running container matches .fghj.yaml' : 'running container config no longer matches .fghj.yaml — reset to pick up the change'}">
-            {live.synced ? 'SYNCED' : 'DRIFTED'}
+          <span class="pill" class:drifted={!synced} class:synced={synced} title="{synced ? 'running container matches .fghj.yaml' : 'running container config no longer matches .fghj.yaml — reset to pick up the change'}">
+            {synced ? 'SYNCED' : 'DRIFTED'}
           </span>
         </div>
       {/if}

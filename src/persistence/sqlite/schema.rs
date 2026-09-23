@@ -67,6 +67,11 @@ pub const ADD_COLUMN_MIGRATIONS: &[&str] = &[
     "ALTER TABLE runs ADD COLUMN sidecar_container_name TEXT",
     "ALTER TABLE runs ADD COLUMN sidecar_ip TEXT",
     "ALTER TABLE containers ADD COLUMN raw_domain TEXT",
+    // Whether fghj wants this container up, as opposed to whether it
+    // happened to be up when the row was written. Before it existed the two
+    // were the same column (`status`), so a restored container's desired
+    // state had to be guessed from its last observed one.
+    "ALTER TABLE containers ADD COLUMN desired_running INTEGER",
 ];
 
 pub fn init(conn: &Connection) -> Result<()> {

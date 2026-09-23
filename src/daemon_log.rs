@@ -12,9 +12,10 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+
+use crate::util::time::now_ms;
 
 /// Caps memory use — at this size, even a busy `fghjd` takes a long time to
 /// wrap around, while the buffer never grows unbounded across a long-lived
@@ -43,13 +44,6 @@ fn state() -> &'static State {
         entries: Mutex::new(VecDeque::with_capacity(CAPACITY)),
         next_seq: AtomicU64::new(1),
     })
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 fn push(level: &'static str, message: String) {

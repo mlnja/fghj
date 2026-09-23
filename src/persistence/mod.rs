@@ -34,8 +34,8 @@
 //! For the same reason, `rehydrate::rehydrate` is *not* independently wired
 //! into the new actor system's seeding path — `RunRegistry::new` is its
 //! sole caller. The new-system actor (`daemon.rs`'s `wire_actor`) seeds
-//! itself by mirroring `RunRegistry`'s own already-reconciled `.list()`
-//! (see `effects::docker::converge::mirror_runs`), not by reading SQLite a
+//! itself by re-keying `RunRegistry`'s own already-reconciled `.list()`
+//! (see `daemon::WorkspaceRegistry::wire_actor`), not by reading SQLite a
 //! second time — `rehydrate` doesn't just read rows, it also reconciles
 //! each container against live Docker status and prunes dead ones, so a
 //! second, independent caller would either have to duplicate that

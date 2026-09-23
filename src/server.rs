@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use include_dir::{Dir, include_dir};
 
+use crate::util::mime::content_type_for;
 use crate::{downloads, persistence, runs};
 
 /// `pub(crate)` so `sidecar_image` can reuse this same embedded copy when
@@ -38,22 +39,6 @@ impl WorkspaceState {
     }
 }
 
-pub fn content_type_for(path: &str) -> &'static str {
-    if path.ends_with(".html") {
-        "text/html; charset=utf-8"
-    } else if path.ends_with(".js") || path.ends_with(".mjs") {
-        "application/javascript; charset=utf-8"
-    } else if path.ends_with(".css") {
-        "text/css; charset=utf-8"
-    } else if path.ends_with(".json") {
-        "application/json"
-    } else if path.ends_with(".svg") {
-        "image/svg+xml"
-    } else {
-        "application/octet-stream"
-    }
-}
-
 /// Serves the embedded UI bundle, falling back to `index.html` for
 /// unmatched routes (SPA-style).
 pub fn static_response(route: &str) -> (Vec<u8>, &'static str, u16) {
@@ -69,23 +54,5 @@ pub fn static_response(route: &str) -> (Vec<u8>, &'static str, u16) {
             Some(f) => (f.contents().to_vec(), "text/html; charset=utf-8", 200),
             None => (b"UI not built".to_vec(), "text/plain", 500),
         },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn content_type_matches_extension() {
-        assert_eq!(content_type_for("index.html"), "text/html; charset=utf-8");
-        assert_eq!(
-            content_type_for("app.js"),
-            "application/javascript; charset=utf-8"
-        );
-        assert_eq!(content_type_for("styles.css"), "text/css; charset=utf-8");
-        assert_eq!(content_type_for("universe.json"), "application/json");
-        assert_eq!(content_type_for("logo.svg"), "image/svg+xml");
-        assert_eq!(content_type_for("unknown.bin"), "application/octet-stream");
     }
 }

@@ -3,7 +3,7 @@
 //! `nftables` on Linux, not yet implemented) to the node's already-published
 //! `127.0.0.1:<host_port>` (every declared container port is already
 //! published there — see `docker.rs`). `raw_domain`/`ports` already exist on
-//! `runs::ContainerInfo`; this module is purely additive on top of them.
+//! `state::ContainerInfo`; this module is purely additive on top of them.
 //!
 //! Structure: this file holds the platform-agnostic core (virtual IP
 //! allocation, the desired-state shape, the `RawNetBackend` trait, and the
@@ -79,9 +79,12 @@ fn slot_of(ip: Ipv4Addr) -> u32 {
 }
 
 /// One node's raw-zone identity and its currently-published raw ports —
-/// gathered by `daemon::WorkspaceRegistry::active_raw_endpoints` from
-/// `runs::ContainerInfo::raw_domain`/`ports` (already-existing fields; this
-/// module needs no new data-model changes upstream).
+/// projected out of `state::ContainerInfo`'s `desired.raw_domain` and
+/// `observed.ports` by `state::query::raw_endpoints`. Comparable and
+/// cloneable so `effects::raw_net` can use it directly as its
+/// `FannedInEffect::Snapshot` (the "did anything actually change" check)
+/// rather than keeping a parallel struct of the same three fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawEndpoint {
     pub raw_domain: String,
     /// container port -> published host port (`127.0.0.1:<host_port>`).

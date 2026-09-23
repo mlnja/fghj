@@ -10,9 +10,9 @@
 //! a volume's identity threaded through `RunSpec`/`Action::RunPlanned` from
 //! the resolved `.fghj.yaml` graph, which `RunSpec` doesn't carry (see
 //! `state::run::RunSpec`'s doc — it's deliberately thin, `{run_id, flow}`)
-//! and `effects/docker/converge.rs::mirror_run` doesn't populate either
-//! (`volumes: BTreeMap::new()` — "the old system never tracked volumes as
-//! state of their own"). Plumbing real volume specs through would mean
+//! and `runs::orchestrate` doesn't populate either (it builds every
+//! `RunState` with `volumes: BTreeMap::new()`). Plumbing real volume specs
+//! through would mean
 //! reaching into `RunRegistry::start`'s graph-resolution internals, which
 //! is out of scope for this phase and risky to touch given how sidecar-
 //! routing-sensitive that code path is. What this module gives instead:
