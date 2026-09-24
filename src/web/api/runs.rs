@@ -5,8 +5,8 @@ use axum::body::Bytes;
 use axum::extract::Path as AxumPath;
 use axum::response::{IntoResponse, Response};
 
-use crate::web::api::error::{action_rejected_response, bad_request, err_response};
-use crate::web::api::extract::{ActorExtractor, WorkspaceExtractor};
+use crate::web::api::error::{action_rejected_response, bad_request};
+use crate::web::api::extract::ActorExtractor;
 use crate::{action, actor, runs, state};
 
 /// Builds the 200 response for a successful node-lifecycle dispatch: the
@@ -105,25 +105,28 @@ pub(crate) async fn post_runs(ActorExtractor(actor): ActorExtractor, body: Bytes
     }
 }
 
-/// Deliberately left on the old `WorkspaceExtractor` / `RunRegistry::stop`
-/// path, unlike the three per-node handlers below — migration phase 4
-/// ("HTTP handler contract" in the architecture plan) only names
-/// `/nodes/{node}/start|stop|delete`, never whole-run stop, and for good
-/// reason: `RunRegistry::stop` tears down the run's network, sidecar and
-/// volumes and drops its `RunRegistry` entry outright, none of which the
-/// `pending_action`-per-container model that `effects::docker::converge`
-/// converges has any representation for. `Action::RunStopRequested`'s
-/// reducer arm only marks each idle container `Stopping`; routing this
-/// endpoint through it would leave the network/sidecar/volumes orphaned.
-/// Giving whole-run teardown its own first-class action/effect is later
-/// migration-phase work, not something to half-do here.
+/// Whole-run teardown, on the same dispatch-and-return contract as every
+/// other mutating handler: the reducer records the intent
+/// (`RunState::pending_teardown`) and `effects::docker::converge` performs
+/// the actual Docker teardown afterwards, dropping the run from state via
+/// `Action::RunTeardownSettled` — which is in turn what makes
+/// `effects::persist` delete the database row and `effects::routes` remove
+/// the sidecar route table.
+///
+/// This used to be the one mutating endpoint still calling `RunRegistry`
+/// directly, because whole-run teardown (network, sidecar, volumes) has no
+/// representation in the per-container `pending_action` model. Giving it a
+/// run-level flag of its own is what closed that gap.
 pub(crate) async fn post_run_stop(
     AxumPath(run_id): AxumPath<String>,
-    WorkspaceExtractor(state): WorkspaceExtractor,
+    ActorExtractor(actor): ActorExtractor,
 ) -> Response {
-    match state.runs.stop(&run_id).await {
+    match actor
+        .dispatch(action::Action::RunStopRequested { run_id })
+        .await
+    {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => err_response(e),
+        Err(e) => action_rejected_response(e),
     }
 }
 

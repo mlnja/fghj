@@ -67,6 +67,7 @@ mod tests {
                 sidecar_container_name: "fghj-sidecar".into(),
                 sidecar_ip: None,
                 pending_create: None,
+                pending_teardown: false,
             },
         );
         let handle = crate::actor::spawn(state);

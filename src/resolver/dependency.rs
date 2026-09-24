@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use super::config::{Environment, Healthcheck, default_domain_scope, default_restart};
+use super::name::Name;
 use super::port::BackingPorts;
 use super::volume::VolumeMount;
 use serde::Deserialize;
@@ -14,7 +15,7 @@ use serde::Deserialize;
 /// otherwise.
 #[derive(Debug, Deserialize, Clone)]
 pub struct BackingDependencyConfig {
-    pub(crate) name: String,
+    pub(crate) name: Name,
     pub(crate) image: String,
     #[serde(default)]
     pub(crate) environment: Environment,
@@ -60,7 +61,7 @@ pub enum Dependency {
         #[serde(default)]
         default_branch: Option<String>,
         #[serde(default)]
-        services: Vec<String>,
+        services: Vec<Name>,
     },
     #[serde(rename = "backing")]
     Backing(Box<BackingDependencyConfig>),
@@ -68,7 +69,7 @@ pub enum Dependency {
     SharedBacking {
         #[serde(default)]
         repo: Option<String>,
-        service: String,
-        name: String,
+        service: Name,
+        name: Name,
     },
 }

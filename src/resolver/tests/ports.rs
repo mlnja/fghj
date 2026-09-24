@@ -46,7 +46,9 @@ fn warns_when_more_than_one_port_is_primary() {
         graph
             .warnings
             .iter()
-            .any(|w| w.contains("myservice") && w.contains("8080") && w.contains("9090"))
+            .any(|w| w.message.contains("myservice")
+                && w.message.contains("8080")
+                && w.message.contains("9090"))
     );
 }
 
@@ -112,12 +114,9 @@ fn warns_when_backing_dependency_declares_more_than_one_primary_port() {
 
     let graph = resolve_universe(tmp.path()).unwrap();
 
-    assert!(
-        graph
-            .warnings
-            .iter()
-            .any(|w| w.contains("grafana") && w.contains("3000") && w.contains("3100"))
-    );
+    assert!(graph.warnings.iter().any(|w| w.message.contains("grafana")
+        && w.message.contains("3000")
+        && w.message.contains("3100")));
 }
 
 #[test]
@@ -160,6 +159,6 @@ fn warns_when_port_wildcard_set_without_primary_or_name() {
         graph
             .warnings
             .iter()
-            .any(|w| w.contains("myservice") && w.contains("wildcard"))
+            .any(|w| w.message.contains("myservice") && w.message.contains("wildcard"))
     );
 }

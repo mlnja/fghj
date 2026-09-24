@@ -18,20 +18,40 @@ pub fn resolve_run_id(run_id: Option<&str>) -> String {
 
 /// Derives the real Docker volume name for a `VolumeMount::Named` entry —
 /// reuses `derive_domain`'s exact run/stable folding logic (a named
-/// volume's `scope` is the same knob as `domain_scope`), keyed by the
-/// volume's own declared `name` instead of a node id. Two nodes anywhere in
-/// the graph that declare the same `name` + `scope` therefore land on the
-/// same derived value here and transparently share one Docker volume.
+/// volume's `scope` is the same knob as `domain_scope`).
+///
+/// `owner` is the id of the node that declared the volume, and passing it is
+/// what makes the label private to that node: `data` declared by
+/// `db.cart.shop` and `data` declared by `db.orders.warehouse` are two
+/// volumes, the same way two services both named `api` are two nodes. This
+/// is the leaf-first qualification the rest of the system applies
+/// everywhere, finally applied here too.
+///
+/// `None` means the author set `#Volume.shared`, dropping the
+/// qualification so the label alone decides identity. That is a real feature
+/// — but the default has to be the other way around. An unqualified volume
+/// namespace lets two repos that each declare `{name: data, scope: stable}`
+/// on their own Postgres end up with one volume and two engines writing to
+/// it: silent corruption, from two individually valid configs, written by
+/// teams who have never spoken. See `concepts/AUDIT.md` B3.
 pub(crate) fn derive_volume_name(
     name: &str,
     scope: &str,
+    owner: Option<&str>,
     workspace_name: &str,
     run_id: &str,
 ) -> String {
+    // Qualifying by appending the owner id mirrors how a backing node's own
+    // id is built (`{dep.name}.{owner_id}`), so the derived volume name
+    // reads as a path down the same tree rather than as a mangled label.
+    let key = match owner {
+        Some(owner) => format!("{name}.{owner}"),
+        None => name.to_string(),
+    };
     format!(
         "fghj-vol-{}",
         sanitize_label(&derive_domain(
-            name,
+            &key,
             scope,
             workspace_name,
             run_id,
@@ -57,21 +77,46 @@ mod tests {
     }
 
     #[test]
-    fn two_nodes_sharing_a_named_volume_derive_the_same_docker_name() {
-        // Keyed by the declared `name`, not any node id — two unrelated
-        // nodes (service or backing) that declare the same `name` + `scope`
-        // land on the same derived value and therefore the same Docker volume.
-        let a = derive_volume_name("cache", "run", "shop", "preview-1");
-        let b = derive_volume_name("cache", "run", "shop", "preview-1");
+    fn scope_and_run_id_fold_in_the_same_way_they_do_for_a_domain() {
+        let a = derive_volume_name("cache", "run", Some("web.shop"), "shop", "preview-1");
+        let b = derive_volume_name("cache", "run", Some("web.shop"), "shop", "preview-1");
         assert_eq!(a, b);
 
         // "stable" never folds in the run id, so it must differ from a
         // "run"-scoped name for the same non-default run.
-        let stable = derive_volume_name("cache", "stable", "shop", "preview-1");
+        let stable = derive_volume_name("cache", "stable", Some("web.shop"), "shop", "preview-1");
         assert_ne!(a, stable);
 
         // A different named run gets its own fresh "run"-scoped volume.
-        let other_run = derive_volume_name("cache", "run", "shop", "preview-2");
+        let other_run = derive_volume_name("cache", "run", Some("web.shop"), "shop", "preview-2");
         assert_ne!(a, other_run);
+    }
+
+    /// B3: the same label declared by two unrelated nodes used to be one
+    /// Docker volume — two engines, one data directory, no warning.
+    #[test]
+    fn the_same_label_on_two_nodes_is_two_volumes_by_default() {
+        let a = derive_volume_name("data", "stable", Some("db.cart.shop"), "ws", "default");
+        let b = derive_volume_name(
+            "data",
+            "stable",
+            Some("db.orders.warehouse"),
+            "ws",
+            "default",
+        );
+        assert_ne!(a, b);
+    }
+
+    /// ...and opting in still gets you exactly one.
+    #[test]
+    fn shared_volumes_ignore_the_owner_and_collapse_onto_one_name() {
+        let a = derive_volume_name("data", "stable", None, "ws", "default");
+        let b = derive_volume_name("data", "stable", None, "ws", "default");
+        assert_eq!(a, b);
+        // And a shared volume is never the same name as a private one,
+        // so opting in mid-life is a visible migration, not a silent
+        // adoption of somebody else's data.
+        let private = derive_volume_name("data", "stable", Some("db.cart.shop"), "ws", "default");
+        assert_ne!(a, private);
     }
 }

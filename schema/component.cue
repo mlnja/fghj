@@ -48,16 +48,29 @@ package fghj
 	host: string
 } | {
 	// Named volume: a bare label, like `#Port.name` — the real Docker
-	// volume name is derived (never author-declared), folding in
-	// workspace/run the same way a node's domain is. Two nodes anywhere in
-	// the graph (service or backing, related or not) that declare the same
-	// `name` + `scope` share the same underlying storage.
+	// volume name is derived (never author-declared), folding in the
+	// declaring node's id plus workspace/run, the same way a node's domain
+	// is. The node id is what keeps this label private to the node that
+	// declared it: `data` in one repo and `data` in another are two
+	// volumes, not one, exactly as two services both called `api` are two
+	// nodes.
 	name: string & =~"^[a-z0-9][a-z0-9-]*$"
 	// Same semantics as `domain_scope` below: "run" (the default) folds the
 	// run id into the derived volume name, so a preview run gets its own
 	// fresh empty storage. "stable" drops it, giving the volume one fixed
 	// identity shared across every run.
 	scope: *"run" | "stable"
+	// Opt in to sharing this volume with any other node that declares the
+	// same `name` + `scope` + `shared: true`, anywhere in the workspace.
+	// Drops the node-id qualification, so the label alone decides identity.
+	//
+	// Off by default, and deliberately awkward to reach for: two engines
+	// with one data directory between them is silent corruption, and the
+	// pair of configs that produce it can be written by two teams who have
+	// never spoken. Sharing a *backing dependency* — the usual reason to
+	// want this — is already expressible as #SharedBackingDependency, which
+	// gives you one node and therefore one volume without any of this.
+	shared: bool | *false
 })
 
 // A literal hostname alias for a service, alongside its derived
@@ -133,7 +146,15 @@ package fghj
 }
 
 #ComponentConfig: {
-	version: "1.0"
+	// Any 1.x. fghj treats major as a compatibility barrier and minor as
+	// not one: a different major is refused outright, while a newer minor
+	// is accepted and merely noted, so one repo can adopt a 1.1 feature
+	// while its peers stay on 1.0 and they still resolve together. Pinning
+	// the literal "1.0" here would reject a file the daemon accepts, which
+	// would make this schema lie to the person running `fghj validate` and
+	// would put back the flag-day coordination the federated model exists
+	// to avoid. See `src/resolver/version.rs`.
+	version: string & =~"^1\\.[0-9]+$"
 	// Keyed by service name (was a singular `service:` field) — a repo can
 	// build more than one independent container from its own source (e.g. a
 	// dev-server process and a backend API process, each with their own

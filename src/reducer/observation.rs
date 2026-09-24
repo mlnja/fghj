@@ -12,7 +12,9 @@
 //! retry or log loudly about for no reason.
 
 use crate::action::{Action, ActionRejected};
-use crate::state::{VolumeDesired, VolumeInfo, VolumeObserved, WorkspaceState};
+use crate::state::{
+    PendingAction, RunCreateError, VolumeDesired, VolumeInfo, VolumeObserved, WorkspaceState,
+};
 
 pub(super) fn reduce(
     state: &WorkspaceState,
@@ -75,13 +77,87 @@ pub(super) fn reduce(
 
         Action::RunCreateSettled { run_id, result } => {
             let mut next = state.clone();
+            // Every branch writes through the existing entry rather than
+            // inserting, for the same reason `RunCreateProgress` below
+            // does: `RunPlanned` already created it, and a run torn down
+            // while its create was still in flight (`RunStopRequested` ->
+            // `RunTeardownSettled`, which removes it) must stay gone. An
+            // unconditional insert here would resurrect a run whose
+            // containers have just been deleted, leaving `GET /runs` and
+            // the route table advertising containers that no longer exist.
+            let present = next.runs.contains_key(&run_id);
             match result {
                 Ok(run) => {
-                    next.runs.insert(run_id, run);
+                    if present {
+                        next.runs.insert(run_id, run);
+                    }
+                }
+                // A top-up that failed partway still left containers
+                // running; taking its partial state is the only way they
+                // become visible to `GET /runs` and routable from the host.
+                // `pending_create` is cleared explicitly rather than relying
+                // on the partial carrying `None`, since it is a snapshot of
+                // a working copy, not a freshly-built run.
+                Err(RunCreateError {
+                    partial: Some(mut run),
+                    ..
+                }) => {
+                    if present {
+                        run.pending_create = None;
+                        next.runs.insert(run_id, run);
+                    }
                 }
                 Err(_) => {
                     if let Some(run) = next.runs.get_mut(&run_id) {
                         run.pending_create = None;
+                    }
+                }
+            }
+            Ok(next)
+        }
+
+        Action::RunCreateProgress {
+            run_id,
+            network,
+            sidecar_container_name,
+            sidecar_ip,
+            info,
+        } => {
+            let mut next = state.clone();
+            // `RunPlanned` already created the entry, but a progress report
+            // for a run that has since been dropped (torn down mid-create)
+            // must not resurrect it — hence `get_mut` rather than `entry`.
+            if let Some(run) = next.runs.get_mut(&run_id) {
+                run.network = network;
+                run.sidecar_container_name = sidecar_container_name;
+                run.sidecar_ip = sidecar_ip;
+                run.containers.insert(info.node_id.clone(), info);
+            }
+            Ok(next)
+        }
+
+        Action::RunTeardownSettled { run_id, result } => {
+            let mut next = state.clone();
+            match result {
+                // Dropping the run is the whole point: `effects::persist`
+                // and `effects::routes` both key off its absence to clean
+                // up the database row and the sidecar route table.
+                Ok(()) => {
+                    next.runs.remove(&run_id);
+                }
+                // Teardown failed, so the run is still there in some form.
+                // Clearing the flag lets a later attempt re-request it
+                // instead of the effect respawning against a stale intent;
+                // the containers' own `Stopping` marks are cleared too, or
+                // they would sit mid-action forever.
+                Err(_) => {
+                    if let Some(run) = next.runs.get_mut(&run_id) {
+                        run.pending_teardown = false;
+                        for container in run.containers.values_mut() {
+                            if container.pending_action == Some(PendingAction::Stopping) {
+                                container.pending_action = None;
+                            }
+                        }
                     }
                 }
             }
@@ -170,6 +246,7 @@ mod tests {
                 sidecar_container_name: "fghj-sidecar".into(),
                 sidecar_ip: None,
                 pending_create: None,
+                pending_teardown: false,
             },
         );
         state
@@ -313,9 +390,13 @@ mod tests {
         assert!(c.pending_action.is_none());
     }
 
+    /// The success path replaces the placeholder `RunPlanned` left behind
+    /// with the real, fully-built run. It writes *through* that entry
+    /// rather than inserting unconditionally — see
+    /// `a_create_that_settles_after_its_run_was_torn_down_does_not_resurrect_it`.
     #[test]
-    fn run_create_settled_inserts_the_freshly_created_run_on_success() {
-        let state = WorkspaceState::default();
+    fn run_create_settled_replaces_the_planned_entry_on_success() {
+        let state = state_with_run("default", vec![]);
         let created = RunState {
             run_id: "default".into(),
             network: "fghj-net-default".into(),
@@ -324,6 +405,7 @@ mod tests {
             sidecar_container_name: "fghj-sidecar".into(),
             sidecar_ip: Some("172.20.0.2".into()),
             pending_create: None,
+            pending_teardown: false,
         };
         let next = reduce(
             &state,
@@ -347,13 +429,67 @@ mod tests {
             &existing,
             Action::RunCreateSettled {
                 run_id: "default".into(),
-                result: Err("docker daemon unreachable".into()),
+                result: Err(RunCreateError::bare("docker daemon unreachable")),
             },
         )
         .unwrap();
         let run = &next.runs["default"];
         assert!(run.pending_create.is_none());
         assert!(run.containers.contains_key("web"));
+    }
+
+    /// B7: a top-up that fails on node 3 leaves nodes 1-2 running. They are
+    /// already in Docker and in SQLite; without adopting the partial they
+    /// would be absent from reducer state, which is what `GET /runs` and
+    /// `state::query::resolve_route` both read.
+    #[test]
+    fn run_create_settled_adopts_the_partial_state_of_a_failed_top_up() {
+        let mut existing = state_with_run("default", vec![container("web")]);
+        existing.runs.get_mut("default").unwrap().pending_create = Some(crate::state::RunSpec {
+            run_id: None,
+            flow: None,
+        });
+
+        // `web` was already up; `api` came up during this top-up before
+        // `worker` failed.
+        let partial = RunState {
+            run_id: "default".into(),
+            network: "fghj-net-default".into(),
+            containers: BTreeMap::from([
+                ("web".to_string(), container("web")),
+                ("api".to_string(), container("api")),
+            ]),
+            volumes: BTreeMap::new(),
+            sidecar_container_name: "fghj-sidecar".into(),
+            sidecar_ip: Some("172.20.0.2".into()),
+            // A working copy, not a freshly-built run — the reducer must
+            // clear this itself rather than assume it arrives clear.
+            pending_create: Some(crate::state::RunSpec {
+                run_id: None,
+                flow: None,
+            }),
+            pending_teardown: false,
+        };
+
+        let next = reduce(
+            &existing,
+            Action::RunCreateSettled {
+                run_id: "default".into(),
+                result: Err(RunCreateError {
+                    message: "worker: image pull failed".into(),
+                    partial: Some(partial),
+                }),
+            },
+        )
+        .unwrap();
+
+        let run = &next.runs["default"];
+        assert!(run.pending_create.is_none());
+        assert!(run.containers.contains_key("web"));
+        assert!(
+            run.containers.contains_key("api"),
+            "the container that did come up must be visible"
+        );
     }
 
     #[test]
@@ -418,5 +554,127 @@ mod tests {
             next.runs["default"].containers["web"].observed.sync,
             SyncStatus::Drifted
         );
+    }
+
+    /// A successful teardown is the one action that *removes* a run:
+    /// `effects::persist` and `effects::routes` both key off its absence to
+    /// clean up the database row and the sidecar's route directory, so
+    /// leaving an emptied-out husk behind would keep both alive.
+    #[test]
+    fn run_teardown_settled_ok_drops_the_run_entirely() {
+        let mut state = state_with_run("default", vec![container("web")]);
+        state.runs.get_mut("default").unwrap().pending_teardown = true;
+        let next = reduce(
+            &state,
+            Action::RunTeardownSettled {
+                run_id: "default".into(),
+                result: Ok(()),
+            },
+        )
+        .unwrap();
+        assert!(next.runs.is_empty());
+    }
+
+    /// A teardown that failed left the containers where they were. Clearing
+    /// both the run-level flag and the per-container `Stopping` marks is
+    /// what lets the user press Stop again — without it the reducer's own
+    /// dedup would reject the retry as already in flight, and the run would
+    /// be permanently stuck mid-teardown.
+    #[test]
+    fn run_teardown_settled_err_unsticks_the_run_for_a_retry() {
+        let mut state = state_with_run("default", vec![container("web")]);
+        {
+            let run = state.runs.get_mut("default").unwrap();
+            run.pending_teardown = true;
+            run.containers.get_mut("web").unwrap().pending_action = Some(PendingAction::Stopping);
+        }
+        let next = reduce(
+            &state,
+            Action::RunTeardownSettled {
+                run_id: "default".into(),
+                result: Err("docker refused".into()),
+            },
+        )
+        .unwrap();
+        let run = &next.runs["default"];
+        assert!(!run.pending_teardown);
+        assert_eq!(run.containers["web"].pending_action, None);
+    }
+
+    /// Per-node crash safety: a create reports each container the moment it
+    /// comes up, so a daemon that dies halfway still has every
+    /// already-running container written down. Without it those containers
+    /// would be running unrecorded — fghj manufacturing the very
+    /// `Orphaned` state its observer exists to surface.
+    #[test]
+    fn run_create_progress_records_a_node_as_soon_as_it_comes_up() {
+        let state = state_with_run("default", vec![]);
+        let next = reduce(
+            &state,
+            Action::RunCreateProgress {
+                run_id: "default".into(),
+                network: "fghj-default".into(),
+                sidecar_container_name: "fghj-default-sidecar".into(),
+                sidecar_ip: Some("172.30.0.2".into()),
+                info: container("web"),
+            },
+        )
+        .unwrap();
+        let run = &next.runs["default"];
+        assert_eq!(run.network, "fghj-default");
+        assert_eq!(run.sidecar_ip.as_deref(), Some("172.30.0.2"));
+        assert!(run.containers.contains_key("web"));
+    }
+
+    /// The race the presence checks in both `RunCreateProgress` and
+    /// `RunCreateSettled` exist for: a run torn down while its create was
+    /// still in flight. The teardown already removed its containers, so
+    /// re-inserting the run would leave `GET /runs` and the route table
+    /// advertising things that no longer exist.
+    #[test]
+    fn a_create_that_settles_after_its_run_was_torn_down_does_not_resurrect_it() {
+        let state = WorkspaceState::default();
+
+        let after_progress = reduce(
+            &state,
+            Action::RunCreateProgress {
+                run_id: "default".into(),
+                network: "fghj-default".into(),
+                sidecar_container_name: "fghj-default-sidecar".into(),
+                sidecar_ip: None,
+                info: container("web"),
+            },
+        )
+        .unwrap();
+        assert!(after_progress.runs.is_empty());
+
+        let after_ok = reduce(
+            &state,
+            Action::RunCreateSettled {
+                run_id: "default".into(),
+                result: Ok(RunState {
+                    run_id: "default".into(),
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+        assert!(after_ok.runs.is_empty());
+
+        let after_partial = reduce(
+            &state,
+            Action::RunCreateSettled {
+                run_id: "default".into(),
+                result: Err(RunCreateError {
+                    message: "node 2 of 3 failed".into(),
+                    partial: Some(RunState {
+                        run_id: "default".into(),
+                        ..Default::default()
+                    }),
+                }),
+            },
+        )
+        .unwrap();
+        assert!(after_partial.runs.is_empty());
     }
 }

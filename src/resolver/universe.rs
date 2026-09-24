@@ -1,13 +1,14 @@
 //! `resolve_universe` — the orchestrator that scans the workspace, walks
 //! every component, then annotates the result with flows and domains.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::git::git_remote_and_branch;
 use super::graph::{Graph, Node};
 use super::repo_url::normalize_repo_url;
 use super::visit::ResolveCtx;
+use super::warning::Warning;
 use super::workspace_scan::scan_workspace;
 use anyhow::Result;
 
@@ -19,6 +20,10 @@ use anyhow::Result;
 /// call `pull_all` to clone everything reachable and try again.
 pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     let scanned = scan_workspace(workspace)?;
+    // Held aside and folded in at the end alongside every other finding —
+    // a repo fghj could not read is a graph problem, not a scan crash.
+    let scan_warnings = scanned.warnings;
+    let scanned = scanned.components;
 
     let mut repo_index: HashMap<String, String> = HashMap::new();
     for local_path in scanned.keys() {
@@ -72,10 +77,13 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     let known_ids: HashSet<&str> = ctx.nodes.keys().map(|s| s.as_str()).collect();
     for edge in &ctx.edges {
         if edge.kind == "shared-backing" && !known_ids.contains(edge.to.as_str()) {
-            ctx.warnings.push(format!(
+            // Blocking: the author declared a dependency on a backing node
+            // that does not exist, so whatever starts is a graph missing an
+            // edge its config says is there.
+            ctx.warnings.push(Warning::blocking(format!(
                 "dangling shared-backing reference: '{}' points at '{}', which was never resolved as a backing dependency",
                 edge.from, edge.to
-            ));
+            )));
         }
     }
 
@@ -180,28 +188,15 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
         edge.flows = fl;
     }
 
-    // A wildcard suffix claims a whole subtree of names, not just one, so a
-    // collision between two nodes here is worse than an `additional_hosts`
-    // collision — worth its own warning rather than only being discoverable
-    // by noticing traffic silently going to the wrong container.
-    let mut wildcard_owners: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for node in &nodes {
-        for suffix in &node.wildcard_hosts {
-            wildcard_owners
-                .entry(suffix.as_str())
-                .or_default()
-                .push(node.id.as_str());
-        }
-    }
-    let mut warnings = ctx.warnings;
-    for (suffix, owners) in wildcard_owners {
-        if owners.len() > 1 {
-            warnings.push(format!(
-                "wildcard_hosts suffix '{suffix}' is declared by more than one node ({}); only one will actually receive its traffic",
-                owners.join(", ")
-            ));
-        }
-    }
+    // Node ids are unique by construction; the names *derived* from them
+    // are not. This pass runs here rather than inside the traversal because
+    // it needs `node.domain`, which isn't known until the workspace name is.
+    // It subsumes the duplicate-`wildcard_hosts` check that used to live
+    // inline here — that was one special case of the same collision.
+    let mut warnings = scan_warnings;
+    warnings.extend(ctx.warnings);
+    warnings.extend(super::uniqueness::check_derived_name_collisions(&nodes));
+    warnings.extend(super::cycles::check_cycles(&edges));
 
     Ok(Graph {
         workspace_name,

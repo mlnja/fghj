@@ -16,14 +16,24 @@ pub struct WorkspaceState {
     pub docker: Arc<bollard::Docker>,
     pub runs: runs::RunRegistry,
     pub downloads: downloads::DownloadRegistry,
+    /// What a previous `fghjd` lifetime left running, reconciled against
+    /// real Docker state once, here, at the moment this workspace is
+    /// constructed. Read exactly once — by `daemon::WorkspaceRegistry::wire_actor`,
+    /// to seed the actor — and never consulted again: from that point the
+    /// actor's published `WorkspaceState` is the only record of what runs
+    /// exist. It lives here rather than inside `RunRegistry` because
+    /// `RunRegistry` deliberately holds no run state at all.
+    pub rehydrated: std::collections::BTreeMap<String, crate::state::RunState>,
 }
 
 impl WorkspaceState {
     pub async fn new(path: PathBuf, docker: Arc<bollard::Docker>) -> Result<Self> {
         let db = Arc::new(persistence::WorkspaceDb::open(&path)?);
-        let runs = runs::RunRegistry::new(path.clone(), db.clone(), docker.clone()).await?;
+        let rehydrated = persistence::rehydrate(db.clone(), docker.clone()).await?;
+        let runs = runs::RunRegistry::new(path.clone(), db.clone(), docker.clone());
         Ok(Self {
             runs,
+            rehydrated,
             downloads: downloads::DownloadRegistry::new(),
             db,
             docker,

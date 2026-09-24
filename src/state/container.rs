@@ -123,7 +123,7 @@ pub struct ContainerDesired {
     /// `primary` (see the selection logic in `start_node`). `None` for a
     /// node with no declared ports at all, matching
     /// `docker::inspect_status`'s own "inspect status only" mode. Kept
-    /// around rather than re-derived so `RunRegistry::refresh` can
+    /// around rather than re-derived so `RunRegistry::inspect_containers` can
     /// re-inspect the same port `start_node` picked without needing the
     /// original `Node` config back.
     pub status_port: Option<String>,
@@ -140,7 +140,7 @@ pub struct ContainerDesired {
 /// Everything about a container Docker itself last reported — the
 /// convergence-target-agnostic half of `ContainerInfo`; see
 /// `ContainerDesired`'s doc for why the split exists. Only ever written
-/// from a real inspection (`RunRegistry::refresh`,
+/// from a real inspection (`RunRegistry::inspect_containers`,
 /// `Action::ContainerObserved`), never from what fghj asked for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct ContainerObserved {

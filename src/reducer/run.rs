@@ -44,6 +44,7 @@ pub(super) fn reduce(
                 sidecar_container_name: String::new(),
                 sidecar_ip: None,
                 pending_create: None,
+                pending_teardown: false,
             });
             if run.pending_create.is_some() {
                 return Err(ActionRejected::AlreadyInFlight);
@@ -58,11 +59,17 @@ pub(super) fn reduce(
                 .runs
                 .get_mut(&run_id)
                 .ok_or(ActionRejected::RunNotFound)?;
-            // Best-effort per-container, not atomic across the whole run:
-            // a node someone's already starting/stopping/deleting is left
-            // alone rather than failing the entire request, since making
-            // this all-or-nothing would let one in-flight node block
-            // stopping every other idle one.
+            // The run-level intent is what `effects::docker::converge`
+            // acts on: tearing down the network, the sidecar and (for a
+            // named run) the volumes has no per-container representation,
+            // so marking containers alone would orphan all three.
+            run.pending_teardown = true;
+            // Containers are still marked so the UI shows them stopping
+            // rather than sitting at "running" until the whole teardown
+            // lands. Best-effort per container, not atomic across the run:
+            // a node someone is already acting on is left alone rather than
+            // failing the request, since making this all-or-nothing would
+            // let one in-flight node block tearing the run down at all.
             for container in run.containers.values_mut() {
                 if container.pending_action.is_none() {
                     container.desired.running = false;
@@ -219,6 +226,7 @@ mod tests {
                 sidecar_container_name: "fghj-sidecar".into(),
                 sidecar_ip: None,
                 pending_create: None,
+                pending_teardown: false,
             },
         );
         state

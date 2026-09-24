@@ -416,15 +416,53 @@
   });
 
   // Actual tab: services + infra, everything the daemon would eventually run.
+  //
+  // Plus one class of node the resolver can't produce: a container that is
+  // still running for a node the freshly-resolved graph no longer contains
+  // (`SyncStatus::Orphaned` — almost always a `git switch` to a branch where
+  // the service isn't declared). The backend deliberately doesn't reconcile
+  // those away, so if this tab only drew `universe.nodes` the container would
+  // be running, holding its ports and its domain, and invisible. Synthesizing
+  // a node for it is what makes it selectable — and therefore stoppable —
+  // from the drawer.
   let containersGraph = $derived.by(() => {
     if (!universe) return null;
-    const nodes = universe.nodes;
+    const declared = new Set(universe.nodes.map((n) => n.id));
+    const orphans = Object.values(runContainers)
+      .filter((c) => c.observed.sync === 'orphaned' && !declared.has(c.node_id))
+      .map((c) => ({
+        id: c.node_id,
+        // The id's leaf is the service name; the rest is the owner path,
+        // which is exactly what `crate-tag` would show if this still had a
+        // repo to point at.
+        label: c.node_id.split('.')[0],
+        kind: 'service',
+        domain: c.desired.domain,
+        domain_scope: 'run',
+        downloaded: true,
+        dirty: false,
+        flows: [],
+        ports: {},
+        environment: [],
+        command: [],
+        volumes: [],
+        additional_hosts: [],
+        wildcard_hosts: [],
+        orphaned: true,
+      }));
+    const nodes = [...universe.nodes, ...orphans];
     const ids = new Set(nodes.map((n) => n.id));
     const edges = universe.edges.filter((e) => e.kind !== 'shared-infra' && ids.has(e.from) && ids.has(e.to));
     return { nodes, edges };
   });
 
-  let hasWarnings = $derived(universe ? universe.warnings.length > 0 : false);
+  // Only blocking warnings light the header's conflict indicator. An
+  // advisory ("this repo declares no services") is information; a blocking
+  // one is the reason the next start attempt will be refused, and the two
+  // shouldn't look the same.
+  let hasWarnings = $derived(
+    universe ? universe.warnings.some((w) => w.severity === 'blocking') : false,
+  );
 </script>
 
 <div style="position:relative;height:100vh;width:100vw;overflow:auto;background:var(--bg);color:var(--ink)">
@@ -459,7 +497,10 @@
       {#if universe.warnings.length}
         <div style="padding:0 40px;display:flex;flex-direction:column;gap:6px;margin-bottom:4px">
           {#each universe.warnings as w}
-            <div class="warning-banner"><span class="tag">warning</span><span>{w}</span></div>
+            <div class="warning-banner" class:advisory={w.severity !== 'blocking'}>
+              <span class="tag">{w.severity === 'blocking' ? 'blocks start' : 'advisory'}</span>
+              <span>{w.message}</span>
+            </div>
           {/each}
         </div>
       {/if}
@@ -552,6 +593,12 @@
     display: flex; align-items: center; gap: 10px; background: var(--warning-bg); border: 1px solid var(--warning);
     color: var(--warning); padding: 8px 12px; border-radius: 6px; font: 500 11.5px var(--font-mono); max-width: 760px;
   }
+  /* Advisories are worth reading, not worth alarming over — the loud
+     treatment is reserved for the ones that will refuse a start. */
+  :global(.warning-banner.advisory) {
+    background: var(--panel); border-color: var(--line); color: var(--muted);
+  }
+  :global(.warning-banner.advisory .tag) { background: var(--muted); }
   :global(.warning-banner .tag) {
     font: 700 9.5px/1 var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; background: var(--danger);
     color: var(--bg); padding: 3px 6px; border-radius: 3px; flex: 0 0 auto;

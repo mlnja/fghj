@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use crate::persistence::WorkspaceOwner;
-use crate::state::{ContainerInfo, RunSpec, RunState, SyncStatus};
+use crate::state::{ContainerInfo, RunCreateError, RunSpec, RunState, SyncStatus};
 
 /// Split into two families by who originates them: `Run*`/`OwnerSet` are
 /// *requests* — dispatched by an HTTP handler (or, later, an internal
@@ -79,13 +79,49 @@ pub enum Action {
     /// (`RunState::pending_create`) actually finishes being created/topped
     /// up against real Docker. `Ok(run)` wholesale-replaces the run's entry
     /// with the freshly re-observed state (mirroring how `RunRegistry::start`/
-    /// `ensure_running` return the whole `RunState` they just produced);
-    /// `Err` just clears `pending_create`, leaving whatever was already
-    /// there (a fresh empty run, or an existing run's last-known-good state
-    /// for a failed top-up) untouched rather than guessing at what's real.
+    /// `ensure_running` return the whole `RunState` they just produced).
+    /// `Err` clears `pending_create` and, when the failure left containers
+    /// actually running (`RunCreateError::partial` — an `ensure_running`
+    /// top-up that got part way), replaces the run's entry with that partial
+    /// state rather than guessing. Without it, those containers are running
+    /// and persisted but invisible to `GET /runs` and to host routing. With
+    /// no partial (nothing started, or a path like `start` that rolled
+    /// itself back) the run's last-known-good state is left untouched, which
+    /// is still the right answer.
     RunCreateSettled {
         run_id: String,
-        result: Result<RunState, String>,
+        result: Result<RunState, RunCreateError>,
+    },
+    /// Reported by `effects::docker::converge` for each node that comes up
+    /// during a still-in-flight create/top-up, so progress is recorded as it
+    /// happens rather than only when the whole run settles.
+    ///
+    /// Persistence is derived from published state
+    /// (`effects::persist`), so without this a daemon that died mid-create
+    /// would leave running containers nothing had recorded — fghj
+    /// manufacturing the very `Orphaned` state its observer exists to
+    /// surface. Carries the run-level facts (`network`, sidecar) alongside
+    /// the container because they are only known once the run's network and
+    /// sidecar exist, which is also when the first node can come up.
+    ///
+    /// Deliberately leaves `pending_create` set: the run is still in
+    /// flight, and only `RunCreateSettled` ends that.
+    RunCreateProgress {
+        run_id: String,
+        network: String,
+        sidecar_container_name: String,
+        sidecar_ip: Option<String>,
+        info: ContainerInfo,
+    },
+    /// Reported by `effects::docker::converge` once a `RunStopRequested`
+    /// intent (`RunState::pending_teardown`) has actually torn the run down
+    /// against real Docker. `Ok` drops the run from state outright — which
+    /// is what makes `effects::persist` delete its database row and
+    /// `effects::routes` remove its sidecar route table, rather than either
+    /// being done by hand mid-teardown.
+    RunTeardownSettled {
+        run_id: String,
+        result: Result<(), String>,
     },
     VolumeObserved {
         run_id: String,

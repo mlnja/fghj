@@ -28,6 +28,17 @@ places — see the CLI-surface mismatch called out in
 [[control-api-and-cli]] and in `PROGRESS.md`'s "Known gaps"). For a running
 snapshot of what's actually built and what's left, see `PROGRESS.md` itself.
 
+## Audit
+
+[[AUDIT]] is a third kind of document: not a design decision, but a punch list.
+It reads this whole folder against `schema/*.cue` and `src/` and asks whether
+the language and capability surface are enough to describe an arbitrary local
+dev environment — recording where they aren't, which invariants the docs assert
+but nothing enforces, and which claims here have gone stale. Findings carry
+stable ids (`E1`…, `B1`…, `D1`…) so they can be closed one at a time. When one
+is closed, fold the resulting decision into the relevant concept file and mark
+it in the audit's tracker — the concept files stay the durable record.
+
 ## Design decisions
 
 | File | What it settles |
@@ -44,6 +55,8 @@ snapshot of what's actually built and what's left, see `PROGRESS.md` itself.
 | [[local-ca-and-tls-proxy]] | The local root CA, on-the-fly per-SNI leaf certs, and the TLS-terminating reverse proxy that dispatches to real containers. |
 | [[split-dns]] | The hand-rolled authoritative DNS server for `*.fghj.internal` and how it's wired into the OS resolver. |
 | [[run-lifecycle-and-registry]] | Default vs. named/review runs, the reconciler, and how run state is kept honest against real Docker state. |
+| [[state-and-effects]] | The actor/action/reducer/effects architecture: one store of state, one writer, and why an effect is `extract` + `converge`. |
+| [[concurrency-model]] | What may run at the same time, what may not: per-node locks, merging writes, and the run-wide health budget. |
 | [[persistence-and-workspace-store]] | The per-workspace SQLite store, the root-owned workspace index, and the root-runs-as-root/clones-as-you privilege split. |
 | [[docker-and-downloads]] | Image builds, container lifecycle, and the background clone/pull job registry the UI polls. |
 | [[control-api-and-cli]] | The axum control API, the `fghj`/`fghjd` process split, and the CLI's own hand-rolled HTTP client. |
@@ -56,9 +69,10 @@ snapshot of what's actually built and what's left, see `PROGRESS.md` itself.
 | `src/resolver/` | [[node-identity-and-domains]], [[flat-workspace-model]], [[fog-of-war-visibility]], [[branch-ownership-model]] |
 | `src/web/ca.rs`, `src/web/proxy.rs` | [[local-ca-and-tls-proxy]] |
 | `src/dns.rs` | [[split-dns]] |
-| `src/runs/`, `src/state/`, `src/reducer/`, `src/effects/` | [[run-lifecycle-and-registry]], [[node-identity-and-domains]] |
+| `src/actor.rs`, `src/action.rs`, `src/reducer/`, `src/state/`, `src/effects/` | [[state-and-effects]] |
+| `src/runs/` | [[run-lifecycle-and-registry]], [[concurrency-model]], [[node-identity-and-domains]] |
 | `src/persistence/` | [[persistence-and-workspace-store]] |
 | `src/docker.rs`, `src/downloads.rs` | [[docker-and-downloads]] |
 | `src/web/api/`, `src/daemon/`, `src/main.rs`, `src/bin/fghjd.rs` | [[control-api-and-cli]] |
 | `src/web/ui.rs`, `ui/src/**` | [[ui-architecture]] |
-| `schema/*.cue` | referenced throughout — the CUE shapes are the source of truth for `.fghj.yaml`, cross-checked against the Rust structs that deserialize it in [[node-identity-and-domains]] |
+| `schema/*.cue` | referenced throughout — an authoring aid for `.fghj.yaml` (editors, agents, CI, `fghj validate`), **not** what the daemon trusts. The Rust types that deserialize it are the enforcing boundary; the schema's obligation is only to never accept something the daemon would reject, which `resolver::name`'s drift test checks by reading these files |

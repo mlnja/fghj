@@ -47,6 +47,7 @@ pub mod node_spec;
 pub mod observe;
 pub mod orchestrate;
 pub mod order;
+pub mod progress;
 pub mod registry;
 pub mod route_table;
 pub mod sidecar;

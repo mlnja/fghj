@@ -26,12 +26,16 @@ pub struct RunSpec {
 /// structurally rules out the two-containers-same-`node_id` state a `Vec`
 /// never prevented.
 ///
-/// The single representation of a run in fghj: the reducer owns the
-/// authoritative copy, `runs::RunRegistry` keeps a working copy of the same
-/// type while it drives Docker, and `persistence` stores it. There is
-/// deliberately no second, flatter "wire" or "engine" shape to translate
-/// to and from — two structs for one run is what let `desired` and
-/// `observed` silently disagree before they were unified.
+/// The single representation of a run in fghj, and — since migration
+/// phase 5 — held in a single place: the actor's `WorkspaceState`.
+/// `runs::RunRegistry` used to keep a working copy of the same type while
+/// it drove Docker; it now takes whatever prior state a call needs as an
+/// argument and reports the result back as an `Action`. `persistence`
+/// stores it, derived from published state by `effects::persist`.
+///
+/// There is deliberately no second, flatter "wire" or "engine" shape to
+/// translate to and from either — two structs for one run is what let
+/// `desired` and `observed` silently disagree before they were unified.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct RunState {
     pub run_id: String,
@@ -59,6 +63,61 @@ pub struct RunState {
     /// affordance yet).
     #[serde(skip)]
     pub pending_create: Option<RunSpec>,
+    /// Set by `RunStopRequested` to record an unfulfilled intent to tear
+    /// this whole run down — containers, network, sidecar, and (for a named
+    /// run) its volumes. `effects::docker::converge` picks it up and clears
+    /// it by way of `Action::RunTeardownSettled`, whose success arm drops
+    /// the run from state entirely.
+    ///
+    /// Whole-run teardown needs its own flag because it is not expressible
+    /// as per-container `pending_action`s: the network, the sidecar and the
+    /// volumes belong to the run, not to any node, and marking every
+    /// container `Stopping` would leave all three orphaned.
+    #[serde(skip)]
+    pub pending_teardown: bool,
+}
+
+/// Why a whole-run create/top-up failed, and what came up anyway.
+///
+/// The `partial` field exists because the two create paths fail in opposite
+/// ways and both are correct for what they do. `RunRegistry::start` builds a
+/// *named* run from nothing, so a failure halfway leaves a half-run nobody
+/// asked for and it rolls the whole thing back — `partial` is `None`.
+/// `ensure_running` tops up the one shared default environment, where
+/// containers 1 and 2 coming up is a real, wanted outcome that a failure on
+/// container 3 must not undo; it persists after every node precisely so that
+/// progress survives.
+///
+/// What used to be missing is that the *reducer* never heard about that
+/// progress: a bare `Err(String)` cleared `pending_create` and nothing else,
+/// so those containers were running, persisted to SQLite and the sidecar
+/// route table, and simultaneously absent from `GET /runs`, from the UI, and
+/// from host routing (`state::query::resolve_route` reads reducer state
+/// only). Carrying the partial state is what keeps the stores of truth from
+/// disagreeing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunCreateError {
+    pub message: String,
+    /// What is actually up now. `None` when nothing came up, or when the
+    /// path that failed rolled back.
+    pub partial: Option<RunState>,
+}
+
+impl RunCreateError {
+    /// The common case: something went wrong before any node started, or in
+    /// a path that cleans up after itself.
+    pub fn bare(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            partial: None,
+        }
+    }
+}
+
+impl From<anyhow::Error> for RunCreateError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::bare(format!("{e:#}"))
+    }
 }
 
 #[cfg(test)]
@@ -90,6 +149,7 @@ mod tests {
             sidecar_container_name: "fghj-sidecar-default".into(),
             sidecar_ip: None,
             pending_create: None,
+            pending_teardown: false,
         };
         assert!(state.containers.is_empty());
         assert!(state.volumes.is_empty());
@@ -108,6 +168,7 @@ mod tests {
                 run_id: None,
                 flow: None,
             }),
+            pending_teardown: false,
         };
         let json = serde_json::to_value(&state).unwrap();
         assert!(json.get("pending_create").is_none());

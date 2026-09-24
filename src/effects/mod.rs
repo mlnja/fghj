@@ -18,7 +18,9 @@ use crate::state::WorkspaceState;
 pub mod dns;
 pub mod docker;
 pub mod hosts;
+pub mod persist;
 pub mod raw_net;
+pub mod routes;
 
 /// Converges some external resource (a file, an OS firewall table, Docker)
 /// to match a workspace's desired state — the "make reality match state"
@@ -34,6 +36,49 @@ pub trait Effect: Send {
     fn extract(&self, state: &WorkspaceState) -> Self::Snapshot;
 
     fn converge(&mut self, snapshot: &Self::Snapshot) -> anyhow::Result<()>;
+}
+
+/// `Effect` for a resource whose convergence is itself asynchronous — the
+/// database, principally, whose writes go through `spawn_blocking`.
+///
+/// A separate trait rather than making `Effect::converge` async: the three
+/// OS-resource effects (`dns`, `hosts`, `raw_net`) converge by writing a
+/// file or reloading a table, with nothing to await, and making them async
+/// would buy them nothing while costing every one of them a desugaring.
+/// The two drivers are otherwise identical, including the "skip converge
+/// when the snapshot is unchanged" rule that is the whole point of
+/// splitting `extract` from `converge`.
+pub trait AsyncEffect: Send {
+    type Snapshot: PartialEq + Clone + Send;
+
+    fn extract(&self, state: &WorkspaceState) -> Self::Snapshot;
+
+    fn converge(
+        &mut self,
+        snapshot: Self::Snapshot,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+}
+
+/// `run_effect` for an `AsyncEffect`. Same contract, including leaving
+/// `last` untouched on failure so the next state change retries.
+pub async fn run_async_effect<E: AsyncEffect>(
+    mut effect: E,
+    mut rx: watch::Receiver<Arc<WorkspaceState>>,
+    name: &str,
+) {
+    let mut last: Option<E::Snapshot> = None;
+    loop {
+        let snapshot = effect.extract(&rx.borrow());
+        if last.as_ref() != Some(&snapshot) {
+            match effect.converge(snapshot.clone()).await {
+                Ok(()) => last = Some(snapshot),
+                Err(e) => eprintln!("fghjd: effect {name} failed to converge: {e:#}"),
+            }
+        }
+        if rx.changed().await.is_err() {
+            break;
+        }
+    }
 }
 
 /// The daemon-wide counterpart of `Effect`, for an effect that renders one

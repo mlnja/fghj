@@ -72,7 +72,7 @@ fn warns_when_wildcard_hosts_declared_without_a_primary_port() {
         graph
             .warnings
             .iter()
-            .any(|w| w.contains("myservice") && w.contains("additional_hosts"))
+            .any(|w| w.message.contains("myservice") && w.message.contains("additional_hosts"))
     );
 }
 
@@ -106,7 +106,7 @@ fn warns_when_two_nodes_declare_the_same_wildcard_hosts_suffix() {
         graph
             .warnings
             .iter()
-            .any(|w| w.contains("shared.local") && w.contains("more than one"))
+            .any(|w| w.message.contains("shared.local") && w.message.contains("more than one"))
     );
 }
 
@@ -126,6 +126,6 @@ fn warns_when_additional_hosts_declared_without_a_primary_port() {
         graph
             .warnings
             .iter()
-            .any(|w| w.contains("myservice") && w.contains("additional_hosts"))
+            .any(|w| w.message.contains("myservice") && w.message.contains("additional_hosts"))
     );
 }

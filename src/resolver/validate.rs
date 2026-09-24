@@ -10,6 +10,7 @@ use super::port::PortConfig;
 use super::service::ServiceConfig;
 
 use super::visit::ResolveCtx;
+use super::warning::Warning;
 
 impl<'a> ResolveCtx<'a> {
     /// Warns (non-fatally) when a node declares more than one `primary` port
@@ -27,16 +28,20 @@ impl<'a> ResolveCtx<'a> {
             .map(|(port, _)| port.as_str())
             .collect();
         if primaries.len() > 1 {
-            self.warnings.push(format!(
+            // Blocking: exactly one port can sit at the node's own domain,
+            // so a second `primary` is an instruction that cannot be carried
+            // out — and which of the two wins is not something the author
+            // chose.
+            self.warnings.push(Warning::blocking(format!(
                 "'{id}' declares more than one primary port ({}); only one can sit at its own domain",
                 primaries.join(", ")
-            ));
+            )));
         }
         for (port, cfg) in ports {
             if cfg.wildcard && !cfg.primary && cfg.name.is_none() {
-                self.warnings.push(format!(
+                self.warnings.push(Warning::advisory(format!(
                     "'{id}' port {port} sets wildcard but is neither primary nor named; there's no domain to wildcard"
-                ));
+                )));
             }
         }
     }
@@ -45,9 +50,9 @@ impl<'a> ResolveCtx<'a> {
         self.check_port_config(service_id, &service.ports);
         let has_primary = service.ports.values().any(|cfg| cfg.primary);
         if !service.additional_hosts.is_empty() && !has_primary {
-            self.warnings.push(format!(
+            self.warnings.push(Warning::advisory(format!(
                 "'{service_id}' declares additional_hosts but no primary port; those hosts won't be routed to anything"
-            ));
+            )));
         }
     }
 }

@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 
 use crate::web::api::error::{bad_request, err_response};
-use crate::web::api::extract::WorkspaceExtractor;
+use crate::web::api::extract::{ActorExtractor, WorkspaceExtractor};
 use crate::{docker, runs};
 
 #[derive(Deserialize)]
@@ -23,10 +23,11 @@ pub(crate) async fn get_run_logs(
     AxumPath((run_id, node_id)): AxumPath<(String, String)>,
     Query(q): Query<TailQuery>,
     WorkspaceExtractor(state): WorkspaceExtractor,
+    ActorExtractor(actor): ActorExtractor,
 ) -> Response {
     let tail = q.tail.unwrap_or(200);
-    match state.runs.get(&run_id) {
-        Some(s) => match runs::logs_for_tail(&state.docker, &s, &node_id, tail).await {
+    match actor.current().runs.get(&run_id) {
+        Some(s) => match runs::logs_for_tail(&state.docker, s, &node_id, tail).await {
             Ok(text) => Json(serde_json::json!({ "logs": text })).into_response(),
             Err(e) => err_response(e),
         },
@@ -41,8 +42,9 @@ pub(crate) async fn get_run_logs(
 pub(crate) async fn get_run_logs_stream(
     AxumPath((run_id, node_id)): AxumPath<(String, String)>,
     WorkspaceExtractor(state): WorkspaceExtractor,
+    ActorExtractor(actor): ActorExtractor,
 ) -> Response {
-    let run_state = match state.runs.get(&run_id) {
+    let run_state = match actor.current().runs.get(&run_id).cloned() {
         Some(s) => s,
         None => {
             return (

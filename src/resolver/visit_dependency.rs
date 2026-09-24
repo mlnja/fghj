@@ -12,6 +12,7 @@ use super::graph::{Edge, Node};
 use super::repo_url::{normalize_repo_url, repo_name_from_url};
 
 use super::visit::ResolveCtx;
+use super::warning::Warning;
 
 impl<'a> ResolveCtx<'a> {
     /// Resolves a `Dependency::Service` reference to its conventional local
@@ -112,9 +113,9 @@ impl<'a> ResolveCtx<'a> {
         let component = self.scanned.get(local_path)?;
         let child_id = self.visit_local_service(local_path, component, wanted_service)?;
         if child_id == owner_id {
-            self.warnings.push(format!(
+            self.warnings.push(Warning::blocking(format!(
                 "'{owner_id}' declares a same-repo `kind: service` dependency on itself"
-            ));
+            )));
             return None;
         }
         self.edges.push(Edge {
@@ -212,7 +213,7 @@ impl<'a> ResolveCtx<'a> {
                     .entry(backing_id.clone())
                     .or_insert_with(|| Node {
                         id: backing_id.clone(),
-                        label: name.clone(),
+                        label: name.to_string(),
                         kind: "backing".into(),
                         image: Some(image),
                         branch: owner_branch,

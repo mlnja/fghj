@@ -402,6 +402,13 @@
                 <span class="pill unsynced" title="the running container's config no longer matches .fghj.yaml — restart this node to pick up the change">desired ≠ actual</span>
               {:else if liveInfo.observed.sync === 'synced'}
                 <span class="pill synced">up to date</span>
+              {:else if liveInfo.observed.sync === 'orphaned'}
+                <!-- The container outlived its own declaration — almost always
+                     a `git switch` to a branch where this node isn't declared.
+                     fghj deliberately doesn't act on it (stopping a container
+                     because a branch moved would be a surprise), so the whole
+                     point of this row is that the user gets told. -->
+                <span class="pill orphaned" title="this node is no longer declared in the workspace — most likely a branch switch. The container is still running; nothing will reconcile it until you stop it or switch back.">no longer declared</span>
               {:else}
                 <span class="muted">unknown</span>
               {/if}
@@ -544,6 +551,7 @@
   }
   .pill.unsynced { background: var(--warning-bg); color: var(--warning); }
   .pill.synced { background: var(--success-bg); color: var(--success); }
+  .pill.orphaned { background: var(--danger-bg); color: var(--danger); }
   .port-target { color: var(--ink); word-break: break-all; }
   .copy-btn {
     background: none; border: none; padding: 0; margin: 0; font: 500 12px var(--font-mono);

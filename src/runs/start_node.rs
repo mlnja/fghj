@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 
-use super::health::wait_for_healthy;
+use super::health::{HealthBudget, HealthOutcome, wait_for_healthy};
 use super::spec::spec_hash;
 use crate::dns;
 use crate::docker;
@@ -30,6 +30,7 @@ impl RunRegistry {
         run_id: &str,
         network: &str,
         sidecar_ip: Option<&str>,
+        budget: &HealthBudget,
     ) -> Result<ContainerInfo> {
         self.begin_event_cycle(run_id, &node.id, "start").await;
         self.record_event(
@@ -265,14 +266,49 @@ impl RunRegistry {
                 None,
             )
             .await;
-            wait_for_healthy(&self.docker, &spec.container_name).await;
+            let allowance = budget.allowance();
+            // Once the run's budget is spent there is nothing to wait with,
+            // so don't pretend to wait — say so instead of logging a
+            // zero-second "gave up".
+            let outcome = if budget.is_exhausted() {
+                HealthOutcome::TimedOut
+            } else {
+                wait_for_healthy(&self.docker, &spec.container_name, allowance).await
+            };
+            // A wait that ran out of budget is recorded as such rather than
+            // as a clean pass. The container is still running and the node
+            // still comes up — this is the same best-effort call
+            // `wait_for_healthy` has always made at its own limit — but a
+            // node that fghj never actually saw report healthy should not
+            // look identical in the event stream to one that did.
+            let (status, detail) = match outcome {
+                HealthOutcome::Healthy => ("ok", None),
+                HealthOutcome::Settled => (
+                    "ok",
+                    Some("container settled without reporting healthy; continuing".to_string()),
+                ),
+                HealthOutcome::TimedOut if budget.is_exhausted() => (
+                    "ok",
+                    Some(
+                        "the run's health-wait budget is spent; not waiting on this node"
+                            .to_string(),
+                    ),
+                ),
+                HealthOutcome::TimedOut => (
+                    "ok",
+                    Some(format!(
+                        "gave up after {}s without a healthy report; continuing",
+                        allowance.as_secs()
+                    )),
+                ),
+            };
             self.record_event(
                 run_id,
                 &node.id,
                 "start",
                 "waiting for healthcheck",
-                "ok",
-                None,
+                status,
+                detail,
             )
             .await;
         }

@@ -16,6 +16,15 @@
   const SERVICE_ICON = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M8 1.6 13.8 5v6L8 14.4 2.2 11V5Z"/><path d="M2.2 5 8 8.2 13.8 5M8 8.2v6.2"/></svg>`;
   const BACKING_ICON = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.3"><ellipse cx="8" cy="3.4" rx="5.4" ry="1.9"/><path d="M2.6 3.4v9.2c0 1.05 2.42 1.9 5.4 1.9s5.4-.85 5.4-1.9V3.4"/><path d="M2.6 8c0 1.05 2.42 1.9 5.4 1.9s5.4-.85 5.4-1.9"/></svg>`;
 
+  // Keyed by `ContainerObserved::sync` (Rust `SyncStatus`, snake_case).
+  // `unknown` is absent on purpose: it never renders a pill, so it never
+  // needs a tooltip.
+  const SYNC_TITLE = {
+    synced: 'running container matches .fghj.yaml',
+    drifted: 'running container config no longer matches .fghj.yaml — reset to pick up the change',
+    orphaned: 'this node is no longer declared in the workspace (usually a branch switch) — the container is still running and nothing will reconcile it',
+  };
+
   function layout(g) {
     const edges = g.edges.filter((e) => e.kind !== 'shared-infra').map((e) => [e.from, e.to]);
 
@@ -110,7 +119,11 @@
     {@const dimmed = currentFlow && !inFlow}
     {@const live = runContainers?.[n.id]}
     {@const containerState = mode === 'containers' && n.kind !== 'flow' ? (live ? (live.pending_action ?? (live.observed.status === 'running' ? 'running' : 'stopped')) : 'none') : null}
-    {@const synced = live && live.observed.sync !== 'unknown' ? live.observed.sync === 'synced' : null}
+    <!-- `unknown` is the one verdict with nothing to say (no drift check has
+         run yet, or the last one failed to re-resolve), so it renders no pill
+         at all. `orphaned` does have something to say — the node is gone from
+         the graph — so it gets its own. -->
+    {@const sync = live && live.observed.sync !== 'unknown' ? live.observed.sync : null}
     <div
       class="node"
       class:not-downloaded={n.downloaded === false}
@@ -135,10 +148,10 @@
 
       <!-- Docker half: only ever populated in containers mode, since
            there's nothing runtime-related to show for a plain repo view. -->
-      {#if synced !== null}
+      {#if sync !== null}
         <div class="node-meta live-row">
-          <span class="pill" class:drifted={!synced} class:synced={synced} title="{synced ? 'running container matches .fghj.yaml' : 'running container config no longer matches .fghj.yaml — reset to pick up the change'}">
-            {synced ? 'SYNCED' : 'DRIFTED'}
+          <span class="pill" class:drifted={sync === 'drifted'} class:synced={sync === 'synced'} class:orphaned={sync === 'orphaned'} title={SYNC_TITLE[sync]}>
+            {sync.toUpperCase()}
           </span>
         </div>
       {/if}
@@ -226,4 +239,5 @@
   .pill.clean { background: var(--success-bg); color: var(--success); }
   .pill.drifted { background: var(--warning-bg); color: var(--warning); }
   .pill.synced { background: var(--success-bg); color: var(--success); }
+  .pill.orphaned { background: var(--danger-bg); color: var(--danger); }
 </style>

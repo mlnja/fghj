@@ -24,7 +24,7 @@ pub(crate) const SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(15);
 /// Background loop, analogous to a Kubernetes controller's reconcile loop
 /// but read-only with respect to Docker: on each tick it re-inspects every
 /// workspace's live containers and updates their recorded status, published
-/// port, and routes (see `RunRegistry::refresh`) so drift caused by someone
+/// port, and routes (see `RunRegistry::inspect_containers`) so drift caused by someone
 /// `docker stop`/`rm`-ing a container by hand, or Docker itself moving a
 /// container to a different ephemeral host port on a restart it initiated
 /// (restart policy, `dockerd` restarting), shows up — and routes correctly —
@@ -37,8 +37,7 @@ pub(crate) const SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(15);
 /// `effects::spawn_all` spawns from `DaemonControl::activate`
 /// (`effects::hosts::HostsEffect`, `effects::dns::DnsEffect`,
 /// `effects::raw_net::RawNetEffect`), driven off the new redux-style actor
-/// state instead (see `effects::bridge`'s module doc for how that state
-/// stays live) — see the architecture plan (rosy-soaring-teapot.md)'s
+/// state instead — see the architecture plan (rosy-soaring-teapot.md)'s
 /// "dns + hosts_file effects" step. This loop and those effects must never
 /// both write the same OS resource concurrently: two schedules touching the
 /// same `pf`/`/etc/hosts`/`/etc/resolver` state is the exact bug class
@@ -51,11 +50,10 @@ pub(crate) fn spawn_reconciler(daemon: Arc<DaemonControl>) {
             interval.tick().await;
             for (id, _) in daemon.registry.list() {
                 if let Some(state) = daemon.registry.get(&id) {
-                    state.runs.refresh().await;
-                    // Reports the freshly re-inspected status into the new
-                    // actor system — see `effects::docker::observe`'s
-                    // module doc for why this piggybacks on `refresh`'s
-                    // own tick rather than polling Docker a second time.
+                    // Re-inspects every recorded container and reports what
+                    // Docker actually says into the actor — see
+                    // `effects::docker::observe`'s module doc for why this
+                    // is the loop's only Docker read.
                     if let Some(handle) = daemon.registry.actors().get(&id) {
                         effects::docker::observe::report(&state.runs, &handle.actor).await;
                     }

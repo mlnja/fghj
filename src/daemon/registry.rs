@@ -11,6 +11,20 @@ use crate::daemon::workspace_id::workspace_id;
 use crate::server::WorkspaceState;
 use crate::{actor, daemon_log, effects, persistence, registry, state};
 
+/// The segment a workspace at `path` contributes to every domain its nodes
+/// derive — `resolve_universe` takes the canonical path's `file_name` as the
+/// workspace name and `runs::derive_domain` runs it through `sanitize_label`.
+/// Duplicated here as one small function rather than by calling into the
+/// resolver, because this needs the answer for a workspace that has not been
+/// resolved yet (and must not be, if it is about to be rejected).
+fn domain_label(path: &std::path::Path) -> String {
+    crate::util::label::sanitize_label(
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("workspace"),
+    )
+}
+
 /// In-memory registry of workspaces the daemon knows about, keyed by id.
 /// Holds only data (path + per-workspace registries) — there is no thread or
 /// listener tied to a workspace; all of them are served off the single axum
@@ -24,10 +38,11 @@ pub struct WorkspaceRegistry {
     /// `state::WorkspaceState`, authored entirely by the reducer and
     /// converged to real Docker/DNS/hosts/raw-net state by the effects in
     /// `docker_converge_tasks` and `effects::spawn_all`. Kept alongside
-    /// `by_id` rather than merged into it: `by_id`'s old `server::WorkspaceState`
-    /// still owns the real Docker orchestration (`RunRegistry`) this phase
-    /// reuses, persistence, and the live routing/DNS lookup paths that
-    /// haven't migrated yet.
+    /// `by_id` rather than merged into it: `by_id`'s `server::WorkspaceState`
+    /// still owns the Docker-facing machinery (`RunRegistry`, the Docker
+    /// client, the database handle) that carries these actions out. It no
+    /// longer owns any *state* — that all lives behind these handles now —
+    /// so the two are expected to merge.
     actors: registry::ActorRegistry,
     /// Per-workspace `effects::docker::DockerConvergeEffect` driver tasks —
     /// the only thing that ever mutates a workspace's real containers now
@@ -85,26 +100,23 @@ impl WorkspaceRegistry {
     }
 
     /// Spawns the actor for `id`, seeded with a one-shot snapshot of
-    /// `old`'s live `runs::RunRegistry` so a freshly-wired workspace with
-    /// pre-existing/persisted runs doesn't start out looking empty, then
-    /// starts the `DockerConvergeEffect` task that's the only thing driving
-    /// real Docker calls from here on — `effects::bridge`, which used to
-    /// keep this state live by re-polling `RunRegistry::list()` roughly
-    /// once a second, is gone as of migration phase 5.
+    /// `old.rehydrated` — what a previous `fghjd` lifetime left running,
+    /// reconciled against real Docker once when the workspace was
+    /// constructed — so a freshly-wired workspace with pre-existing runs
+    /// doesn't start out looking empty, then starts the
+    /// `DockerConvergeEffect` task that's the only thing driving real
+    /// Docker calls from here on. `effects::bridge`, which used to keep
+    /// this state live by re-polling a second copy of it in
+    /// `RunRegistry`, is gone as of migration phase 5, and so is that
+    /// second copy: from here the actor is the only store.
     ///
-    /// The seed is a plain re-keying, not a conversion: `RunRegistry` holds
-    /// the same `state::RunState` the actor does. Called from both
+    /// Called from both
     /// `load_from` (startup) and `resolve` (a fresh `fghj ui`/wire) — every
     /// workspace this registry ever registers also gets a wired actor,
     /// right at the exact place its `Arc<WorkspaceState>` is born.
     fn wire_actor(&self, id: &str, old: &Arc<WorkspaceState>) {
         let seed = state::WorkspaceState {
-            runs: old
-                .runs
-                .list()
-                .into_iter()
-                .map(|run| (run.run_id.clone(), run))
-                .collect(),
+            runs: old.rehydrated.clone(),
             ..Default::default()
         };
         let handle = actor::spawn(seed);
@@ -112,6 +124,21 @@ impl WorkspaceRegistry {
             effects::docker::DockerConvergeEffect::new(old.clone(), handle.clone()),
             handle.subscribe(),
             "docker_converge",
+        ));
+        // Persistence and the sidecar route table are both pure functions
+        // of published state, so they are derived here rather than written
+        // by hand at the end of every lifecycle call in `runs/`. See
+        // `effects::persist` and `effects::routes` for why that move fixes
+        // a real class of stale write, not just tidiness.
+        tokio::spawn(effects::run_async_effect(
+            effects::persist::PersistEffect::new(old.db.clone()),
+            handle.subscribe(),
+            "persist",
+        ));
+        tokio::spawn(effects::run_effect(
+            effects::routes::RouteTableEffect::new(),
+            handle.subscribe(),
+            "route_table",
         ));
         self.actors
             .insert(id.to_string(), registry::WorkspaceHandle { actor: handle });
@@ -132,7 +159,9 @@ impl WorkspaceRegistry {
     /// reusing the existing entry if this path is already known. Errors if
     /// the path is nested inside an already-wired workspace — a workspace
     /// root covers its whole subtree, so a second registration underneath it
-    /// would just be an alias for part of the same tree.
+    /// would just be an alias for part of the same tree — or if its folder
+    /// name collides with another workspace's in the domain namespace (see
+    /// [`domain_label`]).
     pub async fn resolve(
         &self,
         entry: Option<String>,
@@ -156,6 +185,25 @@ impl WorkspaceRegistry {
                         "{} is inside the already-wired workspace {}",
                         canonical.display(),
                         state.path.display()
+                    );
+                }
+                // Workspaces are keyed by *id* here but by *name* in every
+                // derived domain, and `resolve_route` scans all of them. Two
+                // workspaces whose folder names sanitize alike — `~/work/shop`
+                // and `~/scratch/shop`, which review runs make a normal thing
+                // to want — produce byte-identical domains for their nodes,
+                // and traffic goes to whichever the `BTreeMap` yields first.
+                // There is no way to disambiguate after the fact, so the only
+                // place to catch it is here, before the second one exists.
+                if canonical != state.path && domain_label(&canonical) == domain_label(&state.path)
+                {
+                    bail!(
+                        "{} and the already-wired workspace {} both derive the \
+                         domain segment '{}', so their services would claim \
+                         identical *.fghj.internal names. Rename one folder.",
+                        canonical.display(),
+                        state.path.display(),
+                        domain_label(&canonical),
                     );
                 }
             }
@@ -223,12 +271,21 @@ impl WorkspaceRegistry {
         let removed = self.by_id.lock().unwrap().remove(id);
         match removed {
             Some(state) => {
+                // Read the run states *before* deregistering: the actor's
+                // published `WorkspaceState` is the only record of what is
+                // running, so dropping the handle first would leave nothing
+                // to tear down and strand the containers.
+                let runs = self
+                    .actors
+                    .get(id)
+                    .map(|handle| handle.actor.current().runs.clone())
+                    .unwrap_or_default();
                 self.actors.remove(id);
                 if let Some(task) = self.docker_converge_tasks.lock().unwrap().remove(id) {
                     task.abort();
                 }
-                for run in state.runs.list() {
-                    let _ = state.runs.stop(&run.run_id).await;
+                for run in runs.values() {
+                    let _ = state.runs.stop(&run.run_id, run).await;
                 }
                 let mut index = persistence::load_index(&self.index_path);
                 index.remove(id);
@@ -247,6 +304,50 @@ pub(crate) mod tests {
 
     pub(crate) fn test_docker() -> Arc<bollard::Docker> {
         Arc::new(connect_docker().expect("docker client construction"))
+    }
+
+    #[test]
+    fn domain_label_matches_what_derive_domain_would_produce() {
+        // Same folder name, two parents — the whole point is that the parent
+        // contributes nothing, which is exactly why these collide.
+        assert_eq!(
+            domain_label(std::path::Path::new("/home/me/work/shop")),
+            domain_label(std::path::Path::new("/home/me/scratch/shop"))
+        );
+        // And that it really is `sanitize_label`'s output, not the raw name.
+        assert_eq!(
+            domain_label(std::path::Path::new("/tmp/My Shop")),
+            "my-shop"
+        );
+    }
+
+    /// B4: workspaces are keyed by id but named by folder in every derived
+    /// domain, and `resolve_route` scans all of them.
+    #[tokio::test]
+    async fn resolve_rejects_a_workspace_whose_name_collides_with_a_wired_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry =
+            WorkspaceRegistry::load_from(tmp.path().join("workspaces.json"), test_docker()).await;
+
+        registry
+            .resolve(None, Some(tmp.path().join("work/shop")), None)
+            .await
+            .unwrap();
+        let err = registry
+            .resolve(None, Some(tmp.path().join("scratch/shop")), None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("identical *.fghj.internal names"),
+            "unexpected error message: {err}"
+        );
+
+        // A differently-named sibling is still fine — the check must not have
+        // turned into "one workspace at a time".
+        registry
+            .resolve(None, Some(tmp.path().join("scratch/other")), None)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

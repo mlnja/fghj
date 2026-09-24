@@ -12,7 +12,7 @@ use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 
 use crate::web::api::error::bad_request;
-use crate::web::api::extract::WorkspaceExtractor;
+use crate::web::api::extract::{ActorExtractor, WorkspaceExtractor};
 use crate::{docker, runs};
 
 /// First message a client must send once the socket is upgraded — everything
@@ -49,9 +49,11 @@ pub(crate) enum ExecControl {
 pub(crate) async fn get_run_exec_ws(
     AxumPath((run_id, node_id)): AxumPath<(String, String)>,
     WorkspaceExtractor(state): WorkspaceExtractor,
+    ActorExtractor(actor): ActorExtractor,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let run_state = match state.runs.get(&run_id) {
+    // Run state comes from the reducer, the only place that keeps it.
+    let run_state = match actor.current().runs.get(&run_id).cloned() {
         Some(s) => s,
         None => {
             return (

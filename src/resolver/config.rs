@@ -4,7 +4,9 @@
 use std::collections::BTreeMap;
 
 use super::dependency::Dependency;
+use super::name::Name;
 use super::service::ServiceConfig;
+use super::version::Version;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Clone)]
@@ -12,15 +14,16 @@ pub struct FlowConfig {
     #[allow(dead_code)]
     pub(crate) description: Option<String>,
     #[serde(default)]
-    pub(crate) service: Option<String>,
+    pub(crate) service: Option<Name>,
     pub(crate) dependencies: Vec<Dependency>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ComponentConfig {
-    #[allow(dead_code)]
-    pub(crate) version: String,
-    pub(crate) services: BTreeMap<String, ServiceConfig>,
+    /// Checked, not decoration — see [`super::version`] for why major is
+    /// a barrier and minor is not.
+    pub(crate) version: Version,
+    pub(crate) services: BTreeMap<Name, ServiceConfig>,
     #[serde(default)]
     pub(crate) flows: BTreeMap<String, FlowConfig>,
 }

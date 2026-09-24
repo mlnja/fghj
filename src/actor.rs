@@ -3,7 +3,9 @@
 //! serially, and publishes the result for effects to observe. See the
 //! architecture plan (rosy-soaring-teapot.md)'s "Per-workspace canonical
 //! state + actor" section — this is the concrete implementation of that
-//! design, still unused by the rest of the daemon in this phase.
+//! design, and as of migration phase 5 the only store of run state in the
+//! daemon: everything that used to keep its own copy (`runs::RunRegistry`,
+//! `effects::bridge`) now reads this one and reports back to it.
 
 use std::sync::Arc;
 

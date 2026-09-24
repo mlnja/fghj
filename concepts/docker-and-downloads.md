@@ -56,16 +56,35 @@ pattern of bind-mounting a sibling repo's checkout directly (e.g.
 
 A `Named` volume's real Docker name is *derived*, never author-declared —
 same invariant as a node's domain (see [[node-identity-and-domains]]).
-`runs::derive_volume_name` reuses `derive_domain` itself, keyed by the
-volume's own `name` instead of a node id: `scope: "run"` (default) folds
-in the run id exactly like `domain_scope: "run"` does, `"stable"` doesn't.
-Because the key is the author-chosen `name`, not any node id, two
-unrelated nodes — two services, or a service and a `kind: backing` — that
-declare the same `name` + `scope` derive the same value and transparently
-share one Docker volume. This is what makes `kind: shared-backing` refs
-automatically get a backing dependency's persisted volume for free too:
-there's only ever one owning container regardless of how many
-`shared-backing` refs point at it, so nothing extra needed to plumb.
+`runs::derive_volume_name` reuses `derive_domain` itself: `scope: "run"`
+(default) folds in the run id exactly like `domain_scope: "run"` does,
+`"stable"` doesn't. It also folds in **the declaring node's id**, which is
+what makes the author-chosen `name` private to the node that wrote it —
+`data` in one repo and `data` in another are two volumes, exactly as two
+services both called `api` are two nodes.
+
+That qualification is newer than the rest of this page, and the reasoning
+is worth keeping. Volume names were originally keyed on the bare `name`,
+described here as transparent sharing. The sharing is genuinely useful, but
+it was *unbounded and cross-repo*: two peer repos each declaring
+`{name: data, scope: stable}` on their own Postgres got one volume with two
+database engines writing to it. Silent data corruption, reachable from two
+individually valid configs written by teams who have never spoken — the exact
+scenario the whole id-qualification scheme exists to prevent, in the one
+namespace that wasn't qualified, and the only one with a destructive failure
+mode. See `concepts/AUDIT.md` B3.
+
+Sharing is still expressible, now as `#Volume.shared: true`, which drops the
+node-id qualification so the label alone decides identity. Reach for it
+rarely. The usual reason to want it — several services behind one database —
+is already `kind: shared-backing`, which gives you one *node*, and therefore
+one container and one volume, without any cross-node name coincidence being
+load-bearing.
+
+Note that `shared: true` and `shared: false` derive different names, so
+flipping it is a visible migration rather than a silent adoption of somebody
+else's data. The same is true of the qualification change itself: volumes
+created before it are orphaned, not re-pointed.
 
 Named volumes are otherwise Docker-implicit — the daemon auto-creates one,
 unlabeled, the first time a container's `Binds` references a name that

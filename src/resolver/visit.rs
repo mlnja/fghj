@@ -7,6 +7,7 @@ use std::path::Path;
 use super::config::ComponentConfig;
 use super::git::{git_remote_and_branch, git_status_dirty};
 use super::graph::{Edge, Node, NodeBuild};
+use super::warning::Warning;
 
 pub struct ResolveCtx<'a> {
     pub(crate) workspace: &'a Path,
@@ -23,7 +24,7 @@ pub struct ResolveCtx<'a> {
     pub(crate) edges: Vec<Edge>,
     /// local paths already fully expanded, to avoid re-walking / infinite loops.
     pub(crate) visited: HashSet<String>,
-    pub(crate) warnings: Vec<String>,
+    pub(crate) warnings: Vec<Warning>,
 }
 
 impl<'a> ResolveCtx<'a> {
@@ -49,11 +50,11 @@ impl<'a> ResolveCtx<'a> {
         let ids: BTreeMap<String, String> = component
             .services
             .keys()
-            .map(|name| (name.clone(), format!("{name}.{local_path}")))
+            .map(|name| (name.to_string(), format!("{name}.{local_path}")))
             .collect();
 
         for (name, service_id) in &ids {
-            let service = &component.services[name];
+            let service = &component.services[name.as_str()];
             self.nodes.entry(service_id.clone()).or_insert_with(|| {
                 let dir = self.workspace.join(local_path);
                 let (repo, branch) = git_remote_and_branch(&dir);
@@ -112,7 +113,7 @@ impl<'a> ResolveCtx<'a> {
         }
 
         for (name, service_id) in &ids {
-            let service = &component.services[name];
+            let service = &component.services[name.as_str()];
             self.check_ports(service_id, service);
             for dep in service.dependencies.clone() {
                 self.visit_dependency(service_id, local_path, dep);
@@ -140,15 +141,16 @@ impl<'a> ResolveCtx<'a> {
             None => match ids.len() {
                 1 => return ids.into_values().next(),
                 0 => {
-                    self.warnings
-                        .push(format!("'{local_path}' declares no services"));
+                    self.warnings.push(Warning::advisory(format!(
+                        "'{local_path}' declares no services"
+                    )));
                     return None;
                 }
                 _ => {
-                    self.warnings.push(format!(
+                    self.warnings.push(Warning::blocking(format!(
                         "'{local_path}' declares multiple services ({}); specify which one with `service:`",
                         ids.keys().cloned().collect::<Vec<_>>().join(", ")
-                    ));
+                    )));
                     return None;
                 }
             },
@@ -156,8 +158,9 @@ impl<'a> ResolveCtx<'a> {
         match ids.get(&name) {
             Some(id) => Some(id.clone()),
             None => {
-                self.warnings
-                    .push(format!("'{local_path}' has no service named '{name}'"));
+                self.warnings.push(Warning::blocking(format!(
+                    "'{local_path}' has no service named '{name}'"
+                )));
                 None
             }
         }

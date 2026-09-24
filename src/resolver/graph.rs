@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use super::config::Healthcheck;
 use super::port::PortConfig;
 use super::volume::VolumeMount;
+use super::warning::Warning;
 use serde::Serialize;
 
 #[derive(Debug, Serialize, Clone)]
@@ -131,5 +132,109 @@ pub struct Graph {
     pub workspace_name: String,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Warning>,
+}
+
+impl Graph {
+    /// The warnings that must stop a start, in declaration order.
+    ///
+    /// Resolution never fails: a workspace that can't be fully understood
+    /// still resolves into whatever *was* understood, because the UI has to
+    /// be able to show you a broken workspace in order for you to fix it.
+    /// That is right for a *view* and wrong for an *actuation* — before
+    /// this, `resolve_universe` would happily hand a graph containing "'a'
+    /// depends on a service name that does not exist" straight to
+    /// `RunRegistry::start`, which would then bring up a subset of the
+    /// environment that nobody asked for and report success.
+    ///
+    /// So the severity split lives on the warning and the refusal lives at
+    /// the start path: see [`super::warning::Severity`].
+    pub fn blocking_warnings(&self) -> Vec<&Warning> {
+        self.warnings.iter().filter(|w| w.is_blocking()).collect()
+    }
+
+    /// `Err` with every blocking warning listed when this graph must not be
+    /// started. One error naming all of them, not the first — they are
+    /// usually independent config mistakes, and fixing them one round-trip
+    /// at a time is miserable.
+    pub fn refuse_if_blocked(&self) -> anyhow::Result<()> {
+        let blocking = self.blocking_warnings();
+        if blocking.is_empty() {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "refusing to start: the workspace has {} unresolved configuration \
+             {}:\n{}",
+            blocking.len(),
+            if blocking.len() == 1 {
+                "problem"
+            } else {
+                "problems"
+            },
+            blocking
+                .iter()
+                .map(|w| format!("  - {}", w.message))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resolver::Severity;
+
+    fn graph(warnings: Vec<Warning>) -> Graph {
+        Graph {
+            workspace_name: "ws".into(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            warnings,
+        }
+    }
+
+    /// Advisories are the common case — a workspace with a cycle, or a repo
+    /// that declares no services, must still start.
+    #[test]
+    fn advisories_alone_do_not_block_a_start() {
+        let g = graph(vec![
+            Warning::advisory("declares no services"),
+            Warning::advisory("dependency cycle: a -> b -> a"),
+        ]);
+        assert!(g.blocking_warnings().is_empty());
+        assert!(g.refuse_if_blocked().is_ok());
+    }
+
+    #[test]
+    fn a_blocking_warning_refuses_the_start() {
+        let g = graph(vec![Warning::blocking("no such service 'api'")]);
+        let err = g.refuse_if_blocked().unwrap_err().to_string();
+        assert!(err.contains("no such service 'api'"), "{err}");
+        assert!(err.contains("1 unresolved configuration problem"), "{err}");
+    }
+
+    /// All of them, not just the first: they are usually independent
+    /// mistakes, and reporting one per attempt turns fixing a workspace
+    /// into a guessing game.
+    #[test]
+    fn every_blocking_warning_is_named_and_advisories_are_not() {
+        let g = graph(vec![
+            Warning::blocking("no such service 'api'"),
+            Warning::advisory("declares no services"),
+            Warning::blocking("'web' depends on itself"),
+        ]);
+        assert_eq!(g.blocking_warnings().len(), 2);
+        let err = g.refuse_if_blocked().unwrap_err().to_string();
+        assert!(err.contains("no such service 'api'"), "{err}");
+        assert!(err.contains("'web' depends on itself"), "{err}");
+        assert!(!err.contains("declares no services"), "{err}");
+        assert!(err.contains("2 unresolved configuration problems"), "{err}");
+    }
+
+    #[test]
+    fn a_clean_graph_starts() {
+        assert!(graph(Vec::new()).refuse_if_blocked().is_ok());
+        assert_eq!(Warning::blocking("x").severity, Severity::Blocking);
+    }
 }

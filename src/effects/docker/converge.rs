@@ -42,10 +42,14 @@ use std::sync::Arc;
 
 use crate::action::Action;
 use crate::actor::ActorHandle;
+use crate::daemon_log;
 use crate::effects::Effect;
 use crate::resolver;
+use crate::runs::progress::{ProgressSink, RunProgress};
 use crate::server;
-use crate::state::{ContainerInfo, PendingAction, RunSpec, RunState, WorkspaceState};
+use crate::state::{
+    ContainerInfo, PendingAction, RunCreateError, RunSpec, RunState, WorkspaceState,
+};
 
 /// One container currently mid-start/stop/delete, as seen by this effect's
 /// `extract` — a plain projection of `ContainerInfo::pending_action`,
@@ -93,6 +97,35 @@ fn extract_pending_creates(state: &WorkspaceState) -> Vec<PendingCreate> {
             })
         })
         .collect()
+}
+
+/// Every run whose teardown has been requested but not yet performed — a
+/// plain projection of `RunState::pending_teardown`.
+fn extract_pending_teardowns(state: &WorkspaceState) -> Vec<String> {
+    state
+        .runs
+        .iter()
+        .filter(|(_, run)| run.pending_teardown)
+        .map(|(run_id, _)| run_id.clone())
+        .collect()
+}
+
+/// `plan_creates` for teardown jobs, deduped by `run_id` for the same
+/// reason: tearing one run down twice concurrently would have the second
+/// call racing the first over the same network and sidecar.
+fn plan_teardowns(
+    in_flight: &HashSet<String>,
+    snapshot: &[String],
+) -> (Vec<String>, HashSet<String>) {
+    let mut still_in_flight = HashSet::with_capacity(snapshot.len());
+    let mut to_spawn = Vec::new();
+    for run_id in snapshot {
+        if !in_flight.contains(run_id) {
+            to_spawn.push(run_id.clone());
+        }
+        still_in_flight.insert(run_id.clone());
+    }
+    (to_spawn, still_in_flight)
 }
 
 /// Decides which of `snapshot`'s entries need a fresh Docker call spawned —
@@ -157,39 +190,49 @@ fn plan_creates(
 async fn perform(
     old: &server::WorkspaceState,
     entry: &PendingEntry,
+    run: &RunState,
 ) -> anyhow::Result<Option<ContainerInfo>> {
+    let container = run.containers.get(&entry.node_id);
     match entry.action {
         PendingAction::Starting => {
             let path = old.path.clone();
             let graph = tokio::task::spawn_blocking(move || resolver::resolve_universe(&path))
                 .await
                 .map_err(|e| anyhow::anyhow!("resolve_universe task panicked: {e}"))??;
+            // Starting one node still reads the whole graph (that is how it
+            // learns what to link to), so a blocking problem anywhere in
+            // the workspace is a blocking problem here too.
+            graph.refuse_if_blocked()?;
             let info = old
                 .runs
-                .restart_container(&graph, &entry.run_id, &entry.node_id)
+                .restart_container(
+                    &graph,
+                    &entry.run_id,
+                    &entry.node_id,
+                    &run.network,
+                    run.sidecar_ip.as_deref(),
+                )
                 .await?;
             Ok(Some(info))
         }
         PendingAction::Stopping => {
-            old.runs
-                .stop_container(&entry.run_id, &entry.node_id)
-                .await?;
+            let container = container.ok_or_else(|| {
+                anyhow::anyhow!("no such node in run {}: {}", entry.run_id, entry.node_id)
+            })?;
+            // Returns the stopped container directly, so there is no
+            // read-back from a second copy of the run to disagree with.
             let info = old
                 .runs
-                .get(&entry.run_id)
-                .and_then(|mut r| r.containers.remove(&entry.node_id))
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "container {} vanished from run {} immediately after stopping",
-                        entry.node_id,
-                        entry.run_id
-                    )
-                })?;
+                .stop_container(&entry.run_id, &entry.node_id, container)
+                .await?;
             Ok(Some(info))
         }
         PendingAction::Removing => {
+            let container = container.ok_or_else(|| {
+                anyhow::anyhow!("no such node in run {}: {}", entry.run_id, entry.node_id)
+            })?;
             old.runs
-                .remove_container(&entry.run_id, &entry.node_id)
+                .remove_container(&entry.run_id, &entry.node_id, container)
                 .await?;
             Ok(None)
         }
@@ -208,16 +251,27 @@ async fn perform(
 async fn perform_create(
     old: &server::WorkspaceState,
     entry: &PendingCreate,
-) -> anyhow::Result<RunState> {
+    prior: Option<&RunState>,
+    progress: Option<&ProgressSink>,
+) -> Result<RunState, RunCreateError> {
     let path = old.path.clone();
     let graph = tokio::task::spawn_blocking(move || resolver::resolve_universe(&path))
         .await
         .map_err(|e| anyhow::anyhow!("resolve_universe task panicked: {e}"))??;
+    // Nothing has been created yet, so there is no partial state to carry:
+    // the `From<anyhow::Error>` conversion's `partial: None` is correct.
+    graph.refuse_if_blocked()?;
     if entry.plan.run_id.is_some() {
-        old.runs.start(&graph, entry.plan.clone()).await
+        // `start` rolls its own half-built run back, so there is never a
+        // partial state to carry — the `From<anyhow::Error>` conversion's
+        // `partial: None` is the whole truth here.
+        Ok(old
+            .runs
+            .start(&graph, entry.plan.clone(), prior, progress)
+            .await?)
     } else {
         old.runs
-            .ensure_running(&graph, entry.plan.flow.as_deref())
+            .ensure_running(&graph, entry.plan.flow.as_deref(), prior, progress)
             .await
     }
 }
@@ -273,11 +327,11 @@ impl Drop for SettleGuard {
 struct CreateSettleGuard {
     actor: ActorHandle,
     run_id: String,
-    outcome: Option<Result<RunState, String>>,
+    outcome: Option<Result<RunState, RunCreateError>>,
 }
 
 impl CreateSettleGuard {
-    fn settle(mut self, outcome: Result<RunState, String>) {
+    fn settle(mut self, outcome: Result<RunState, RunCreateError>) {
         self.outcome = Some(outcome);
     }
 }
@@ -287,14 +341,47 @@ impl Drop for CreateSettleGuard {
         let actor = self.actor.clone();
         let run_id = std::mem::take(&mut self.run_id);
         let outcome = self.outcome.take().unwrap_or_else(|| {
+            Err(RunCreateError::bare(
+                "run creation task ended without reporting a result (likely a panic or cancellation)",
+            ))
+        });
+        tokio::spawn(async move {
+            let _ = actor
+                .dispatch(Action::RunCreateSettled {
+                    run_id,
+                    result: outcome,
+                })
+                .await;
+        });
+    }
+}
+
+/// `SettleGuard` for a whole-run teardown job.
+struct TeardownSettleGuard {
+    actor: ActorHandle,
+    run_id: String,
+    outcome: Option<Result<(), String>>,
+}
+
+impl TeardownSettleGuard {
+    fn settle(mut self, outcome: Result<(), String>) {
+        self.outcome = Some(outcome);
+    }
+}
+
+impl Drop for TeardownSettleGuard {
+    fn drop(&mut self) {
+        let actor = self.actor.clone();
+        let run_id = std::mem::take(&mut self.run_id);
+        let outcome = self.outcome.take().unwrap_or_else(|| {
             Err(
-                "run creation task ended without reporting a result (likely a panic or cancellation)"
+                "teardown task ended without reporting a result (likely a panic or cancellation)"
                     .to_string(),
             )
         });
         tokio::spawn(async move {
             let _ = actor
-                .dispatch(Action::RunCreateSettled {
+                .dispatch(Action::RunTeardownSettled {
                     run_id,
                     result: outcome,
                 })
@@ -312,6 +399,7 @@ impl Drop for CreateSettleGuard {
 pub struct ConvergeSnapshot {
     pending: Vec<PendingEntry>,
     creates: Vec<PendingCreate>,
+    teardowns: Vec<String>,
 }
 
 /// Per-workspace `Effect` driving real Docker lifecycle and creation calls.
@@ -326,6 +414,7 @@ pub struct DockerConvergeEffect {
     actor: ActorHandle,
     in_flight: HashSet<(String, String)>,
     creates_in_flight: HashSet<String>,
+    teardowns_in_flight: HashSet<String>,
 }
 
 impl DockerConvergeEffect {
@@ -335,6 +424,7 @@ impl DockerConvergeEffect {
             actor,
             in_flight: HashSet::new(),
             creates_in_flight: HashSet::new(),
+            teardowns_in_flight: HashSet::new(),
         }
     }
 
@@ -346,8 +436,17 @@ impl DockerConvergeEffect {
             node_id: entry.node_id.clone(),
             outcome: None,
         };
+        // The run as the reducer currently has it — the only copy there is.
+        // Taken at spawn time rather than read back out of `RunRegistry`,
+        // which no longer keeps one.
+        let run = self.actor.current().runs.get(&entry.run_id).cloned();
         tokio::spawn(async move {
-            let result = perform(&old, &entry).await.map_err(|e| format!("{e:#}"));
+            let result = match run {
+                Some(run) => perform(&old, &entry, &run)
+                    .await
+                    .map_err(|e| format!("{e:#}")),
+                None => Err(format!("no such run: {}", entry.run_id)),
+            };
             guard.settle(result);
         });
     }
@@ -359,10 +458,75 @@ impl DockerConvergeEffect {
             run_id: entry.run_id.clone(),
             outcome: None,
         };
+        let run_id = entry.run_id.clone();
+        let actor = self.actor.clone();
+        let prior = self.actor.current().runs.get(&entry.run_id).cloned();
         tokio::spawn(async move {
-            let result = perform_create(&old, &entry)
+            // Per-node progress is translated into actions here rather than
+            // in `runs/`, which deliberately knows nothing about actors.
+            // The draining task ends when `perform_create` drops its sender.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RunProgress>();
+            let progress_actor = actor.clone();
+            let drain = tokio::spawn(async move {
+                while let Some(p) = rx.recv().await {
+                    let _ = progress_actor
+                        .dispatch(Action::RunCreateProgress {
+                            run_id: p.run_id,
+                            network: p.network,
+                            sidecar_container_name: p.sidecar_container_name,
+                            sidecar_ip: p.sidecar_ip,
+                            info: p.info,
+                        })
+                        .await;
+                }
+            });
+            let result = perform_create(&old, &entry, prior.as_ref(), Some(&tx)).await;
+            // Dropped so the drain task sees the channel close and finishes
+            // applying whatever is still queued before the settle below
+            // lands — otherwise a late progress report could arrive *after*
+            // `RunCreateSettled` and re-add a container the settle dropped.
+            drop(tx);
+            let _ = drain.await;
+            // The HTTP caller already had its `200` long before this ran, so
+            // without a log line here a failed create leaves no trace outside
+            // the per-node events table — including the case where part of a
+            // top-up succeeded and the rest didn't, which is exactly when
+            // someone will be looking for an explanation.
+            if let Err(e) = &result {
+                let came_up = e.partial.as_ref().map(|p| p.containers.len()).unwrap_or(0);
+                daemon_log::warn(format!(
+                    "fghjd: run '{run_id}' failed to come up fully ({came_up} \
+                     container(s) running): {}",
+                    e.message
+                ));
+            }
+            guard.settle(result);
+        });
+    }
+
+    fn spawn_teardown(&self, run_id: String) {
+        let old = self.old.clone();
+        let guard = TeardownSettleGuard {
+            actor: self.actor.clone(),
+            run_id: run_id.clone(),
+            outcome: None,
+        };
+        // The state to tear down is read here rather than in `runs/`, which
+        // no longer keeps a copy of anything. A run the reducer has already
+        // forgotten has nothing left to stop, so that settles clean.
+        let Some(state) = self.actor.current().runs.get(&run_id).cloned() else {
+            guard.settle(Ok(()));
+            return;
+        };
+        tokio::spawn(async move {
+            let result = old
+                .runs
+                .stop(&run_id, &state)
                 .await
                 .map_err(|e| format!("{e:#}"));
+            if let Err(e) = &result {
+                daemon_log::warn(format!("fghjd: run '{run_id}' failed to tear down: {e}"));
+            }
             guard.settle(result);
         });
     }
@@ -375,6 +539,7 @@ impl Effect for DockerConvergeEffect {
         ConvergeSnapshot {
             pending: extract_pending(state),
             creates: extract_pending_creates(state),
+            teardowns: extract_pending_teardowns(state),
         }
     }
 
@@ -389,6 +554,13 @@ impl Effect for DockerConvergeEffect {
         self.creates_in_flight = still_creating;
         for entry in to_create {
             self.spawn_create(entry);
+        }
+
+        let (to_tear_down, still_tearing_down) =
+            plan_teardowns(&self.teardowns_in_flight, &snapshot.teardowns);
+        self.teardowns_in_flight = still_tearing_down;
+        for run_id in to_tear_down {
+            self.spawn_teardown(run_id);
         }
         Ok(())
     }
@@ -431,6 +603,7 @@ mod tests {
             sidecar_container_name: "fghj-sidecar".into(),
             sidecar_ip: None,
             pending_create,
+            pending_teardown: false,
         }
     }
 

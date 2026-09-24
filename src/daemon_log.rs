@@ -10,7 +10,6 @@
 //! `fghjd` restart — not a durable audit log.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
@@ -33,27 +32,49 @@ pub struct LogEntry {
     pub message: String,
 }
 
+/// The buffer and its sequence counter live behind **one** lock, together,
+/// on purpose.
+///
+/// They used to be a `Mutex<VecDeque<_>>` beside an `AtomicU64`, with `push`
+/// allocating the seq before taking the lock. Two concurrent writers could
+/// then take seq 5 and 6 and append them in the other order, leaving the
+/// buffer holding `[.., 6, 5]`. Out-of-order display was the harmless half:
+/// `tail(Some(after), ..)` filters on `e.seq > after`, so a poller that had
+/// already seen 6 would drop 5 forever — a log line silently lost, which is
+/// the one thing a log must not do. `fghjd` has several concurrent writers
+/// (converge tasks, DNS, `raw_net`), so this was reachable in normal
+/// operation, not just under test.
+///
+/// Allocating the seq under the same lock that does the append makes seq
+/// order and insertion order the same thing by construction, rather than by
+/// remembering to keep them that way.
+struct Log {
+    entries: VecDeque<LogEntry>,
+    next_seq: u64,
+}
+
 struct State {
-    entries: Mutex<VecDeque<LogEntry>>,
-    next_seq: AtomicU64,
+    log: Mutex<Log>,
 }
 
 fn state() -> &'static State {
     static STATE: OnceLock<State> = OnceLock::new();
     STATE.get_or_init(|| State {
-        entries: Mutex::new(VecDeque::with_capacity(CAPACITY)),
-        next_seq: AtomicU64::new(1),
+        log: Mutex::new(Log {
+            entries: VecDeque::with_capacity(CAPACITY),
+            next_seq: 1,
+        }),
     })
 }
 
 fn push(level: &'static str, message: String) {
-    let state = state();
-    let seq = state.next_seq.fetch_add(1, Ordering::Relaxed);
-    let mut entries = state.entries.lock().unwrap();
-    if entries.len() == CAPACITY {
-        entries.pop_front();
+    let mut log = state().log.lock().unwrap();
+    let seq = log.next_seq;
+    log.next_seq += 1;
+    if log.entries.len() == CAPACITY {
+        log.entries.pop_front();
     }
-    entries.push_back(LogEntry {
+    log.entries.push_back(LogEntry {
         seq,
         ts_ms: now_ms(),
         level,
@@ -84,7 +105,8 @@ pub fn warn(message: impl Into<String>) {
 /// recent" load and then incremental "give me what's new since `seq`"
 /// follow-ups with the same call.
 pub fn tail(after_seq: Option<u64>, limit: usize) -> Vec<LogEntry> {
-    let entries = state().entries.lock().unwrap();
+    let log = state().log.lock().unwrap();
+    let entries = &log.entries;
     match after_seq {
         Some(after) => entries
             .iter()
@@ -122,6 +144,33 @@ mod tests {
         let recent = tail(None, 3);
         assert_eq!(recent.len(), 3);
         assert!(recent.windows(2).all(|w| w[0].seq < w[1].seq));
+    }
+
+    /// The invariant the whole `after_seq` protocol rests on: a poller that
+    /// asks for everything after the highest seq it has seen must never be
+    /// able to skip past an entry that is still to be appended. That only
+    /// holds if seq order and buffer order are the same, which in turn only
+    /// holds if the seq is allocated under the same lock as the append.
+    ///
+    /// Asserted globally rather than over this test's own markers, because
+    /// it is a global property — and it stays true no matter what else in
+    /// the binary is logging concurrently, which is the point.
+    #[test]
+    fn concurrent_writers_cannot_append_out_of_seq_order() {
+        std::thread::scope(|scope| {
+            for t in 0..8 {
+                scope.spawn(move || {
+                    for i in 0..50 {
+                        info(format!("daemon_log test race-marker {t}-{i}"));
+                    }
+                });
+            }
+        });
+        let all = tail(None, CAPACITY);
+        assert!(
+            all.windows(2).all(|w| w[0].seq < w[1].seq),
+            "buffer order disagrees with seq order, so `tail(Some(seq), ..)` can drop entries"
+        );
     }
 
     #[test]

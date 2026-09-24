@@ -4,24 +4,34 @@ use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
 
+use super::health::HealthBudget;
 use super::naming::{DEFAULT_RUN_ID, resolve_run_id};
 use super::order::topological_start_order;
-use super::route_table::write_route_table;
+use super::progress::{ProgressSink, RunProgress, report};
 use crate::docker;
 use crate::resolver::{Graph, Node};
-use crate::state::{RunSpec, RunState};
+use crate::state::{RunCreateError, RunSpec, RunState};
 use crate::util::label::sanitize_label;
 
 use super::registry::RunRegistry;
 
 impl RunRegistry {
-    pub async fn start(&self, graph: &Graph, spec: RunSpec) -> Result<RunState> {
+    /// `prior` is whatever the reducer already had for this run id, if
+    /// anything — passed in rather than looked up, since the reducer owns
+    /// the only copy. A named run always starts clean, so an existing one
+    /// is torn down first.
+    pub async fn start(
+        &self,
+        graph: &Graph,
+        spec: RunSpec,
+        prior: Option<&RunState>,
+        progress: Option<&ProgressSink>,
+    ) -> Result<RunState> {
         let run_id = resolve_run_id(spec.run_id.as_deref());
 
         // starting an already-running run replaces it cleanly
-        let already_running = self.runs.lock().unwrap().contains_key(&run_id);
-        if already_running {
-            self.stop(&run_id).await?;
+        if let Some(prior) = prior {
+            self.stop(&run_id, prior).await?;
         }
 
         let network = format!("fghj-{}-{}", sanitize_label(&graph.workspace_name), run_id);
@@ -54,13 +64,30 @@ impl RunRegistry {
         let ordered_ids = topological_start_order(&target_ids, &graph.edges);
 
         let mut containers = BTreeMap::new();
+        // One budget for the whole run, not one per node: nodes start
+        // sequentially, so a per-node limit bounded nothing an impatient
+        // person cares about. See `HealthBudget`.
+        let budget = HealthBudget::default();
         for node_id in &ordered_ids {
             let node = node_map[node_id.as_str()];
             match self
-                .start_node(graph, node, &run_id, &network, Some(&sidecar_ip))
+                .start_node(graph, node, &run_id, &network, Some(&sidecar_ip), &budget)
                 .await
             {
                 Ok(info) => {
+                    // Reported before being folded into the local map so a
+                    // daemon that dies on the *next* node still leaves a
+                    // record of this one.
+                    report(
+                        progress,
+                        RunProgress {
+                            run_id: run_id.clone(),
+                            network: network.clone(),
+                            sidecar_container_name: sidecar_container_name.clone(),
+                            sidecar_ip: Some(sidecar_ip.clone()),
+                            info: info.clone(),
+                        },
+                    );
                     containers.insert(info.node_id.clone(), info);
                 }
                 Err(e) => {
@@ -82,11 +109,6 @@ impl RunRegistry {
             sidecar_ip: Some(sidecar_ip),
             ..Default::default()
         };
-        self.db.clone().save_run(state.clone()).await?;
-        if let Err(e) = write_route_table(&state) {
-            eprintln!("fghjd: failed to write sidecar route table for run {run_id}: {e:#}");
-        }
-        self.runs.lock().unwrap().insert(run_id, state.clone());
         Ok(state)
     }
 
@@ -100,7 +122,22 @@ impl RunRegistry {
     /// Liveness is checked directly against docker on every call rather than
     /// trusting the persisted `RunState`, since a container can be
     /// stopped/removed out-of-band between calls (see `refresh`).
-    pub async fn ensure_running(&self, graph: &Graph, flow: Option<&str>) -> Result<RunState> {
+    ///
+    /// Deliberately does *not* roll back the way `start` does when a node
+    /// fails partway: this tops up the one shared default environment, so
+    /// tearing down the three containers that came up because the fourth
+    /// didn't would destroy exactly the progress the per-node reporting
+    /// below exists to keep. Each node is reported through `progress` as it
+    /// comes up, and the error additionally carries the whole partial state
+    /// (`RunCreateError::partial`), so the containers stay visible and
+    /// routable instead of running unseen.
+    pub async fn ensure_running(
+        &self,
+        graph: &Graph,
+        flow: Option<&str>,
+        prior: Option<&RunState>,
+        progress: Option<&ProgressSink>,
+    ) -> Result<RunState, RunCreateError> {
         let run_id = DEFAULT_RUN_ID.to_string();
         let network = format!("fghj-{}-{}", sanitize_label(&graph.workspace_name), run_id);
         docker::ensure_network(&self.docker, &network, &network).await?;
@@ -108,34 +145,15 @@ impl RunRegistry {
             .ensure_sidecar(&graph.workspace_name, &run_id, &network)
             .await?;
 
-        let mut state = self
-            .runs
-            .lock()
-            .unwrap()
-            .get(&run_id)
-            .cloned()
-            .unwrap_or_else(|| RunState {
-                run_id: run_id.clone(),
-                network: network.clone(),
-                sidecar_container_name: sidecar_container_name.clone(),
-                sidecar_ip: Some(sidecar_ip.clone()),
-                ..Default::default()
-            });
+        let mut state = prior.cloned().unwrap_or_else(|| RunState {
+            run_id: run_id.clone(),
+            network: network.clone(),
+            sidecar_container_name: sidecar_container_name.clone(),
+            sidecar_ip: Some(sidecar_ip.clone()),
+            ..Default::default()
+        });
         state.sidecar_container_name = sidecar_container_name;
         state.sidecar_ip = Some(sidecar_ip);
-        // Persisted unconditionally, not just when a node below actually
-        // needs (re)starting — otherwise a call where every node is already
-        // alive would compute a fresh sidecar IP but never actually publish
-        // it into `self.runs`/the DB/the route table, leaving a later
-        // `restart_container` to see a stale `sidecar_ip: None`.
-        self.db.clone().save_run(state.clone()).await?;
-        if let Err(e) = write_route_table(&state) {
-            eprintln!("fghjd: failed to write sidecar route table for run {run_id}: {e:#}");
-        }
-        self.runs
-            .lock()
-            .unwrap()
-            .insert(run_id.clone(), state.clone());
 
         let node_map: HashMap<&str, &Node> =
             graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
@@ -147,6 +165,7 @@ impl RunRegistry {
             .map(|n| n.id.clone())
             .collect();
         let ordered_ids = topological_start_order(&target_ids, &graph.edges);
+        let budget = HealthBudget::default();
 
         for node_id in &ordered_ids {
             let node = node_map[node_id.as_str()];
@@ -176,21 +195,39 @@ impl RunRegistry {
             // otherwise collide with create_container's fixed name.
             docker::stop_and_remove(&self.docker, &container_name).await;
 
-            let info = self
-                .start_node(graph, node, &run_id, &network, state.sidecar_ip.as_deref())
-                .await?;
+            let info = match self
+                .start_node(
+                    graph,
+                    node,
+                    &run_id,
+                    &network,
+                    state.sidecar_ip.as_deref(),
+                    &budget,
+                )
+                .await
+            {
+                Ok(info) => info,
+                Err(e) => {
+                    return Err(RunCreateError {
+                        message: format!("{e:#}"),
+                        partial: Some(state),
+                    });
+                }
+            };
+            // Reported after every node, not just at the end, so a later
+            // failure — or a daemon that dies outright — doesn't lose track
+            // of containers that did start successfully.
+            report(
+                progress,
+                RunProgress {
+                    run_id: run_id.clone(),
+                    network: network.clone(),
+                    sidecar_container_name: state.sidecar_container_name.clone(),
+                    sidecar_ip: state.sidecar_ip.clone(),
+                    info: info.clone(),
+                },
+            );
             state.containers.insert(info.node_id.clone(), info);
-            // Saved after every node, not just at the end, so a later
-            // failure in this same call doesn't lose track of containers
-            // that did start successfully.
-            self.db.clone().save_run(state.clone()).await?;
-            if let Err(e) = write_route_table(&state) {
-                eprintln!("fghjd: failed to write sidecar route table for run {run_id}: {e:#}");
-            }
-            self.runs
-                .lock()
-                .unwrap()
-                .insert(run_id.clone(), state.clone());
         }
 
         Ok(state)

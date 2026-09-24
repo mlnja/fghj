@@ -6,47 +6,40 @@ use std::collections::BTreeMap;
 use super::spec::spec_hash;
 use crate::docker;
 use crate::resolver::Graph;
-use crate::state::{ContainerInfo, ContainerObserved, RunState};
+use crate::state::{ContainerObserved, RunState, SyncStatus};
 
 use super::registry::RunRegistry;
 
 impl RunRegistry {
-    /// Re-inspects every live run's containers against real docker state and
-    /// updates their recorded status, published port, and per-port host
-    /// bindings — including flagging any container that's vanished (e.g.
-    /// `docker rm`'d by hand, outside fghj) as `"removed"` — so the next
-    /// `/runs` poll (and `web::proxy::serve_https`'s routing, via
-    /// `state::query::resolve_route`) reflects reality instead of a snapshot
-    /// frozen at whenever the run last started or was persisted. Purely
-    /// observational with respect to Docker: it only re-reads state Docker
-    /// already changed on its own, and never starts, stops, or recreates a
-    /// container itself.
+    /// Re-inspects every container in `runs` against real docker state and
+    /// reports its status, published port, and per-port host bindings —
+    /// including flagging any container that's vanished (e.g. `docker rm`'d
+    /// by hand, outside fghj) as `"removed"`. Purely observational with
+    /// respect to Docker: it only re-reads state Docker already changed on
+    /// its own, and never starts, stops, or recreates a container itself.
     ///
-    /// Writes into `observed` only, never `desired` — that asymmetry is the
-    /// entire reason the two are separate fields. A container Docker
-    /// restarted onto a different ephemeral host port needs no route
-    /// rewriting either: `state::query::live_host_port` re-joins each stored
-    /// route against these freshly-observed `ports` at read time, so there
-    /// is one correction, at the point of use, instead of a stored copy to
-    /// keep in step.
+    /// Reports rather than writes, and reports `observed` only, never
+    /// `desired` — that asymmetry is the entire reason the two are separate
+    /// fields. The verdicts go to `effects::docker::observe::report`, which
+    /// dispatches them as `Action::ContainerObserved`; the reducer is the
+    /// only thing that writes them down. Until migration phase 5 this also
+    /// folded them into a second copy of the run state kept right here,
+    /// which is how an observation could reach the database ahead of the
+    /// reducer that was supposed to own it.
     ///
-    /// Snapshots each container's inspectable identity (name, the port key
-    /// `status`/`published_port` are read from) while holding the lock,
-    /// inspects it all without holding it (inspection is an async docker call
-    /// per port), then re-locks to write results back — the lock is never
-    /// held across an `.await`.
-    pub async fn refresh(&self) {
-        let snapshot: Vec<(String, BTreeMap<String, ContainerInfo>)> = {
-            let runs = self.runs.lock().unwrap();
-            runs.iter()
-                .map(|(run_id, state)| (run_id.clone(), state.containers.clone()))
-                .collect()
-        };
-
+    /// A container Docker restarted onto a different ephemeral host port
+    /// needs no route rewriting either: `state::query::live_host_port`
+    /// re-joins each stored route against these freshly-observed `ports` at
+    /// read time, so there is one correction, at the point of use, instead
+    /// of a stored copy to keep in step.
+    pub async fn inspect_containers(
+        &self,
+        runs: &BTreeMap<String, RunState>,
+    ) -> Vec<(String, BTreeMap<String, ContainerObserved>)> {
         let mut results: Vec<(String, BTreeMap<String, ContainerObserved>)> = Vec::new();
-        for (run_id, containers) in snapshot {
+        for (run_id, state) in runs {
             let mut updated = BTreeMap::new();
-            for (node_id, c) in containers {
+            for (node_id, c) in &state.containers {
                 let name = &c.desired.container_name;
                 let inspected = match c.desired.status_port.as_deref() {
                     Some(p) => docker::inspect_status(&self.docker, name, p).await,
@@ -75,7 +68,7 @@ impl RunRegistry {
                 }
 
                 updated.insert(
-                    node_id,
+                    node_id.clone(),
                     ContainerObserved {
                         status,
                         published_port,
@@ -84,36 +77,13 @@ impl RunRegistry {
                         // verdict is something this inspection looks at;
                         // carrying the previous readings forward keeps this
                         // from clobbering whoever does own them.
-                        ..c.observed
+                        ..c.observed.clone()
                     },
                 );
             }
-            results.push((run_id, updated));
+            results.push((run_id.clone(), updated));
         }
-
-        let mut changed_states: Vec<RunState> = Vec::new();
-        {
-            let mut runs = self.runs.lock().unwrap();
-            for (run_id, updated) in results {
-                if let Some(state) = runs.get_mut(&run_id) {
-                    let mut changed = false;
-                    for (node_id, observed) in updated {
-                        if let Some(c) = state.containers.get_mut(&node_id)
-                            && c.observed != observed
-                        {
-                            c.observed = observed;
-                            changed = true;
-                        }
-                    }
-                    if changed {
-                        changed_states.push(state.clone());
-                    }
-                }
-            }
-        }
-        for state in changed_states {
-            let _ = self.db.clone().save_run(state).await;
-        }
+        results
     }
 
     /// The read-only Docker-volume counterpart to `refresh` — lists what
@@ -130,7 +100,7 @@ impl RunRegistry {
             .unwrap_or_default()
     }
 
-    /// A separate, slower-cadence counterpart to `refresh`, driven by
+    /// A separate, slower-cadence counterpart to `inspect_containers`, driven by
     /// `daemon::spawn_sync_reconciler` rather than the 1-second liveness
     /// loop: recomputes each live container's *desired* hash from the
     /// current `.fghj.yaml` (`resolve_node_spec(..., side_effects: false)`,
@@ -147,28 +117,39 @@ impl RunRegistry {
     /// a separate `synced` field on its own copy of the container and
     /// re-persist the run, which meant two records of the same fact that
     /// could — and did — disagree.
-    pub async fn config_drift(&self, graph: &Graph) -> Vec<DriftReport> {
-        let snapshot: Vec<(String, BTreeMap<String, ContainerInfo>)> = {
-            let runs = self.runs.lock().unwrap();
-            runs.iter()
-                .map(|(run_id, state)| (run_id.clone(), state.containers.clone()))
-                .collect()
-        };
-
+    pub async fn config_drift(
+        &self,
+        graph: &Graph,
+        runs: &BTreeMap<String, RunState>,
+    ) -> Vec<DriftReport> {
         let mut reports = Vec::new();
-        for (run_id, containers) in snapshot {
-            for c in containers.values() {
-                let synced = match graph.nodes.iter().find(|n| n.id == c.node_id) {
-                    Some(node) => match self.resolve_node_spec(graph, node, &run_id, false).await {
-                        Ok(Some(spec)) => Some(spec_hash(node, &spec) == c.desired.config_hash),
-                        Ok(None) | Err(_) => None,
+        for (run_id, state) in runs {
+            for c in state.containers.values() {
+                let sync = match graph.nodes.iter().find(|n| n.id == c.node_id) {
+                    Some(node) => match self.resolve_node_spec(graph, node, run_id, false).await {
+                        Ok(Some(spec)) => {
+                            if spec_hash(node, &spec) == c.desired.config_hash {
+                                SyncStatus::Synced
+                            } else {
+                                SyncStatus::Drifted
+                            }
+                        }
+                        // Re-resolving this node's spec failed. Genuinely
+                        // inconclusive — the node is still *there*, we just
+                        // can't say whether it matches — so it must not
+                        // read as `Orphaned`.
+                        Ok(None) | Err(_) => SyncStatus::Unknown,
                     },
-                    None => None,
+                    // The node is gone from the freshly-resolved graph
+                    // while its container is still running. Reported as its
+                    // own verdict rather than folded into `Unknown`: see
+                    // `SyncStatus::Orphaned`.
+                    None => SyncStatus::Orphaned,
                 };
                 reports.push(DriftReport {
                     run_id: run_id.clone(),
                     node_id: c.node_id.clone(),
-                    synced,
+                    sync,
                 });
             }
         }
@@ -177,22 +158,23 @@ impl RunRegistry {
 }
 
 /// One container's config-drift verdict, as of the `Graph` it was computed
-/// against. `synced: None` means there was nothing meaningful to compare —
-/// either the node is gone from `.fghj.yaml` entirely, or re-resolving its
-/// spec failed. Deliberately not `false`, which would read as "confirmed
-/// drifted."
+/// against. Carries `SyncStatus` directly rather than a nullable bool: the
+/// two cases that bool collapsed — "the node is gone from `.fghj.yaml`" and
+/// "we couldn't work out an answer" — are different things a user would act
+/// on differently, and only the first is `Orphaned`. Neither is ever
+/// `Drifted`, which means "compared, and it does not match."
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriftReport {
     pub run_id: String,
     pub node_id: String,
-    pub synced: Option<bool>,
+    pub sync: SyncStatus,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::persistence::WorkspaceDb;
-    use crate::state::{ContainerDesired, PortRoute};
+    use crate::state::{ContainerDesired, ContainerInfo, PortRoute};
     use std::sync::Arc;
 
     /// A throwaway container publishing one port to a Docker-picked
@@ -251,12 +233,12 @@ mod tests {
     /// `published_port`/`ports` permanently stale, since the old `refresh`
     /// only ever wrote back `status`. Simulates that by seeding the registry
     /// with a deliberately wrong port for a real, running container, then
-    /// asserting `refresh` corrects it to the port Docker actually
+    /// asserting `inspect_containers` reports the port Docker actually
     /// published. The route pointing at the stale port needs no correcting
     /// here — `state::query::live_host_port` joins it against these
     /// observed ports at read time, which that module's own tests cover.
     #[tokio::test]
-    async fn refresh_corrects_observed_ports_after_docker_moves_the_published_port() {
+    async fn inspect_reports_the_real_port_after_docker_moves_the_published_one() {
         let container = DriftingPortContainer::start();
         let docker = Arc::new(crate::daemon::connect_docker().expect("docker client"));
         let real_port = docker::inspect_status(&docker, &container.name, "8080")
@@ -267,9 +249,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
-        let registry = RunRegistry::new(tmp.path().to_path_buf(), db, docker)
-            .await
-            .expect("RunRegistry::new failed");
+        let registry = RunRegistry::new(tmp.path().to_path_buf(), db, docker);
 
         let stale_port = real_port.wrapping_add(1).max(1);
         let run_id = "default".to_string();
@@ -299,32 +279,28 @@ mod tests {
             },
             pending_action: None,
         };
-        {
-            let mut runs = registry.runs.lock().unwrap();
-            runs.insert(
-                run_id.clone(),
-                RunState {
-                    run_id: run_id.clone(),
-                    network: "bridge".to_string(),
-                    containers: BTreeMap::from([("svc".to_string(), stale_container)]),
-                    ..Default::default()
-                },
-            );
-        }
+        let runs = BTreeMap::from([(
+            run_id.clone(),
+            RunState {
+                run_id: run_id.clone(),
+                network: "bridge".to_string(),
+                containers: BTreeMap::from([("svc".to_string(), stale_container.clone())]),
+                ..Default::default()
+            },
+        )]);
 
-        registry.refresh().await;
+        let reports = registry.inspect_containers(&runs).await;
 
-        let state = registry.get(&run_id).expect("run must still be tracked");
-        let c = &state.containers["svc"];
-        assert_eq!(c.observed.published_port, Some(real_port));
-        assert_eq!(
-            c.observed.ports.get("8080").copied().flatten(),
-            Some(real_port)
-        );
-        // `desired` is untouched by an observation, including the route
-        // still recording the port the container was published on when it
-        // was started.
-        assert!(c.desired.running);
-        assert_eq!(c.desired.routes[0].host_port, stale_port);
+        let (reported_run, observed) = reports.first().expect("run must be reported");
+        assert_eq!(reported_run, &run_id);
+        let o = &observed["svc"];
+        assert_eq!(o.published_port, Some(real_port));
+        assert_eq!(o.ports.get("8080").copied().flatten(), Some(real_port));
+        // An observation is all that comes back: `desired` — including the
+        // route still recording the port the container was published on
+        // when it was started — is not this call's to touch, and it has no
+        // way to say anything about it.
+        assert!(stale_container.desired.running);
+        assert_eq!(stale_container.desired.routes[0].host_port, stale_port);
     }
 }

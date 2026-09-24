@@ -7,11 +7,11 @@
 //! the new system's state, only in the old one.
 //!
 //! Deliberately does **not** run its own independent Docker-inspection
-//! timer. `daemon::spawn_reconciler` already inspects every container's
-//! real status once a second via `runs::RunRegistry::refresh`; a second,
-//! independent Docker-polling loop here would double the real Docker API
-//! load for the exact same information `refresh` already just fetched, with
-//! no benefit. The "never leave two mechanisms driving the same resource
+//! timer. `daemon::spawn_reconciler` calls `report` once a second, and
+//! `report` does the inspecting itself (`RunRegistry::inspect_containers`);
+//! a second, independent Docker-polling loop here would double the real
+//! Docker API load for the exact same information. The "never leave two
+//! mechanisms driving the same resource
 //! concurrently" rule from the migration plan is about *actuation* (two
 //! things deciding to start/stop the same container), not about a single
 //! read being reported to two readers, so reusing `refresh`'s already-fresh
@@ -41,18 +41,29 @@ use crate::actor::ActorHandle;
 use crate::resolver::Graph;
 use crate::runs::RunRegistry;
 use crate::runs::observe::DriftReport;
-use crate::state::ContainerInfo;
+use crate::state::ContainerObserved;
 
 use super::volumes;
 
-/// Reports every container and volume `runs` (just refreshed by the
-/// caller) currently knows about into `actor`'s new-system state.
+/// Re-inspects every container the actor currently records and reports
+/// what Docker actually says about it — plus each run's real volumes —
+/// back into the actor's state.
+///
+/// Both halves of that used to be separate steps: `RunRegistry::refresh`
+/// inspected Docker and wrote the answers into its own copy of the run
+/// state, and this function then re-read that copy and forwarded it. The
+/// copy is gone (migration phase 5), so the inspection now takes the
+/// actor's state as its input and its results go straight out as actions
+/// — one read, one writer.
 pub async fn report(runs: &RunRegistry, actor: &ActorHandle) {
-    for run in runs.list() {
-        for c in run.containers.values() {
-            let _ = actor.dispatch(container_observed(&run.run_id, c)).await;
+    let state = actor.current();
+    for (run_id, observed) in runs.inspect_containers(&state.runs).await {
+        for (node_id, observed) in observed {
+            let _ = actor
+                .dispatch(container_observed(&run_id, &node_id, &observed))
+                .await;
         }
-        volumes::observe_run_volumes(runs, actor, &run.run_id).await;
+        volumes::observe_run_volumes(runs, actor, &run_id).await;
     }
 }
 
@@ -66,7 +77,8 @@ pub async fn report(runs: &RunRegistry, actor: &ActorHandle) {
 /// into the *old* state only, so `ContainerObserved::sync` stayed `Unknown`
 /// forever and the UI's "desired ≠ actual" badge never lit up.
 pub async fn report_config_drift(runs: &RunRegistry, actor: &ActorHandle, graph: &Graph) {
-    for report in runs.config_drift(graph).await {
+    let state = actor.current();
+    for report in runs.config_drift(graph, &state.runs).await {
         let _ = actor.dispatch(config_drift_observed(&report)).await;
     }
 }
@@ -78,33 +90,34 @@ fn config_drift_observed(report: &DriftReport) -> Action {
     Action::ConfigDriftObserved {
         run_id: report.run_id.clone(),
         node_id: report.node_id.clone(),
-        drift: report.synced.into(),
+        drift: report.sync,
     }
 }
 
-/// Pure projection of the `observed` half of `RunRegistry`'s freshly
-/// re-inspected container into the report `Action` the reducer understands
-/// — split out from `report` so it's unit-testable without a real
-/// `RunRegistry`/Docker client. Deliberately carries nothing from
-/// `desired`: this is an observation, and the reducer must never learn what
-/// fghj wants from something claiming to say what Docker did.
-fn container_observed(run_id: &str, c: &ContainerInfo) -> Action {
+/// Pure projection of a freshly re-inspected container into the report
+/// `Action` the reducer understands — split out from `report` so it's
+/// unit-testable without a real `RunRegistry`/Docker client. Takes a
+/// `ContainerObserved`, not a whole `ContainerInfo`, so it is structurally
+/// incapable of carrying anything from `desired`: this is an observation,
+/// and the reducer must never learn what fghj wants from something
+/// claiming to say what Docker did.
+fn container_observed(run_id: &str, node_id: &str, observed: &ContainerObserved) -> Action {
     Action::ContainerObserved {
         run_id: run_id.to_string(),
-        node_id: c.node_id.clone(),
-        status: c.observed.status.clone(),
-        published_port: c.observed.published_port,
-        // `RunRegistry::refresh` doesn't inspect a container's
+        node_id: node_id.to_string(),
+        status: observed.status.clone(),
+        published_port: observed.published_port,
+        // `RunRegistry::inspect_containers` doesn't inspect a container's
         // network-internal address, so there's none to report here.
         ip: None,
-        ports: c.observed.ports.clone(),
+        ports: observed.ports.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ContainerDesired, ContainerObserved};
+    use crate::state::{ContainerDesired, ContainerInfo};
     use std::collections::BTreeMap;
 
     fn container(node_id: &str, status: &str) -> ContainerInfo {
@@ -132,7 +145,7 @@ mod tests {
     #[test]
     fn container_observed_translates_status_and_ports_without_touching_desired() {
         let c = container("web", "running");
-        let action = container_observed("default", &c);
+        let action = container_observed("default", &c.node_id, &c.observed);
         match action {
             Action::ContainerObserved {
                 run_id,
@@ -153,19 +166,28 @@ mod tests {
         }
     }
 
+    /// Every verdict reaches the reducer unchanged — `Orphaned` included.
+    /// It used to arrive as `Unknown`, which is what made a vanished node
+    /// invisible downstream no matter what the drift check had decided.
     #[test]
-    fn config_drift_observed_widens_every_verdict() {
-        let verdict = |synced| match config_drift_observed(&DriftReport {
+    fn config_drift_observed_carries_every_verdict_through() {
+        use crate::state::SyncStatus;
+        let verdict = |sync| match config_drift_observed(&DriftReport {
             run_id: "default".into(),
             node_id: "web".into(),
-            synced,
+            sync,
         }) {
             Action::ConfigDriftObserved { drift, .. } => drift,
             other => panic!("expected ConfigDriftObserved, got {other:?}"),
         };
-        assert_eq!(verdict(Some(true)), crate::state::SyncStatus::Synced);
-        assert_eq!(verdict(Some(false)), crate::state::SyncStatus::Drifted);
-        assert_eq!(verdict(None), crate::state::SyncStatus::Unknown);
+        for sync in [
+            SyncStatus::Synced,
+            SyncStatus::Drifted,
+            SyncStatus::Unknown,
+            SyncStatus::Orphaned,
+        ] {
+            assert_eq!(verdict(sync), sync);
+        }
     }
 
     #[tokio::test]
@@ -203,11 +225,13 @@ mod tests {
                 sidecar_container_name: "fghj-sidecar".into(),
                 sidecar_ip: None,
                 pending_create: None,
+                pending_teardown: false,
             },
         );
         let handle = crate::actor::spawn(state);
 
-        let action = container_observed("default", &container("web", "exited"));
+        let observed = container("web", "exited");
+        let action = container_observed("default", &observed.node_id, &observed.observed);
         handle.dispatch(action).await.unwrap();
 
         let current = handle.current();

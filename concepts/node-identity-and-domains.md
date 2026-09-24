@@ -39,9 +39,12 @@ scope after:
 
 - **Service**: `{service.name}.{repo's workspace folder name}` — e.g.
   `bff.dept-a-repo`. Built in `resolver::visit_local_service`. The folder
-  name (`local_path`) is guaranteed unique because `scan_workspace` can't
-  have produced two components under the same folder — it's a real
-  directory listing. This qualification is applied **unconditionally**, not
+  name is unique because `scan_workspace` can't have produced two components
+  under the same folder — it's a real directory listing. Note what that does
+  and doesn't buy: uniqueness holds because a colliding repo *cannot be
+  present*, not because the repo→folder map is injective. It isn't — org and
+  host are dropped — so `org-a/api` and `org-b/api` compete for one folder and
+  the second one to be pulled is refused (see [[flat-workspace-model]]). This qualification is applied **unconditionally**, not
   only when a collision is actually detected: if it were conditional, adding
   a second same-named peer repo later would change the *first* one's id
   retroactively (or silently rehost its domain), which is far worse than
@@ -132,8 +135,10 @@ The other opt-out is per-node, not per-run: `domain_scope: *"run" | "stable"`
 drops the run id for that one node regardless of which run it's in — a
 deliberate CUE-author choice (e.g. a postgres meant to keep one fixed
 identity across every run of the graph), not an implicit bypass. Only one
-run can actually own a `"stable"`-scoped name from the host at a time, but
-it's always the same name.
+run can actually *serve* a `"stable"`-scoped name from the host at a time, but
+it's always the same name — and note that nothing enforces the "only one":
+both runs register the route, and `resolve_route` returns whichever comes
+first in map order. Which run you reach is unspecified.
 
 `start_node` calls `derive_domain` when it actually launches a container,
 and uses the result as **the sole Docker network alias** registered for that
@@ -144,6 +149,93 @@ host (via `fghjd`'s own DNS server, which answers anything in the zone; see
 `{name}.{domain}` is pushed onto the same alias list, closing what used to
 be a gap where a named port resolved from the host but not from sibling
 containers.
+
+## Unique ids do not make unique names
+
+Everything above is about making `node.id` injective. The names *derived*
+from it are a separate question, and the answer is no: uniqueness does not
+survive the projections.
+
+Two distinct ways it breaks, and they fail differently.
+
+**Concatenation without a discriminator.** A backing dependency's domain is
+`{dep.name}.{owner_domain}`; a named port's alias is `{port.name}.{domain}`.
+Same shape, built by two independent pieces of code, landing in one flat DNS
+codomain. A service `cart` with a backing dependency named `minio` *and* a
+port named `minio` claims `minio.cart.shop.<ws>.fghj.internal` twice — one
+network alias, one DNS name, one cert, one route. `state::query::resolve_route`
+is a `find_map` over a `BTreeMap`: first match by key order wins, silently.
+Nothing about the formula is wrong; the codomain is just shared.
+
+**Escaping that destroys the separator.** `derive_domain` keeps the id's dots.
+`container_name` runs the same id through `sanitize_label`, which collapses
+every non-alphanumeric run to `-`. Service names may contain hyphens, so `a-b.c`
+and `a.b.c` — two genuinely different nodes with two different domains — both
+become `a-b-c`. Docker refuses the duplicate name and the second node fails to
+start, with an error that never mentions naming. The two projections of one id
+have opposite escaping rules, which is the whole bug.
+
+`resolver::uniqueness::check_derived_name_collisions` warns on both, running at
+the end of `resolve_universe` (it needs `Node.domain`, so it can't live in the
+traversal). It reconstructs the codomain `resolve_route` actually scans — node
+domains, named-port aliases, `additional_hosts`, `wildcard_hosts` — and reports
+any name claimed twice along with *what* made each node claim it, which is the
+part that can't be guessed from the string.
+
+One more namespace with the same shape, checked elsewhere because the resolver
+can't see it: the workspace segment is `sanitize_label(folder_name)`, while
+`resolve_route` walks *every* wired workspace. `~/work/shop` and
+`~/scratch/shop` derive byte-identical domains. `daemon::registry` refuses to
+wire the second one — a hard error, not a warning, because after both are wired
+there is nothing left to disambiguate with.
+
+## What a name is, and who enforces it
+
+Every argument above assumes names are well-behaved: that a service name can go
+into a node id, a derived domain, and a Docker network alias without anything in
+between having to escape it. For a long time nothing checked that. The CUE said
+`=~"^[a-z0-9][a-z0-9-]*$"`, but CUE is enforced only by `fghj validate` — an
+opt-in command shelling out to an external binary that may not be installed, and
+which the daemon never runs. The real boundary was serde, and serde was strictly
+more permissive.
+
+So a service called `My Service!` parsed fine, flowed unsanitized into
+`node.id`, and from there into a DNS name and a network alias that are simply
+invalid — while the *container* name, which goes through `sanitize_label`,
+worked. One unvalidated input reaching three namespaces with three different
+escaping disciplines.
+
+`resolver::name::Name` is where that stops. It is a newtype whose `Deserialize`
+enforces the pattern, applied to every field that reaches an id: service map
+keys, flow `service`, backing `name`, a `kind: service` dependency's `services:`
+list, shared-backing `service`/`name`, port `name`, volume `name`. There is no
+`From<&str>` — the only ways to build one are `Deserialize` and `Name::parse`,
+both of which validate — so holding a `Name` is proof it is safe in all three
+namespaces unescaped.
+
+That last part is why the pattern is what it is: it is the *intersection* of
+what a DNS label, a network alias and a container name accept, not the union.
+Nothing downstream needs to escape, so no two escapings can disagree.
+
+### CUE is for the author, not the daemon
+
+The schema is a convenience for whoever is writing the file — their editor,
+their agent, their CI, `fghj validate`. It is not what the daemon trusts, and
+the daemon does not consult it. Enforcing it at load would mean a `cue`
+subprocess per `.fghj.yaml` on every resolve (and the daemon re-resolves on a
+poll), plus a hard runtime dependency on a binary most machines do not have.
+
+Which leaves the schema one obligation: **never accept what the daemon would
+reject.** A file that passes `fghj validate` and then fails to resolve is the
+schema lying to its only audience. `rust_and_cue_agree_on_what_a_name_is` holds
+it to that by reading `schema/*.cue`, pulling out every `=~"…"` identifier
+constraint, and failing if any of them differs from the Rust pattern — a checked
+fact rather than a comment asking people to remember.
+
+An invalid name makes its repo unreadable, which lands as a blocking warning
+naming the repo, file and line while every other repo resolves normally (see
+[[flat-workspace-model]]). That is the right severity: a name *is* the identity,
+so a service whose name is invalid has no id to be represented by.
 
 ## `Node.domain`: the default-run address, known ahead of time
 

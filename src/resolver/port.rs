@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use super::name::Name;
 use serde::{Deserialize, Serialize};
 
 /// A declared container port and its role. `primary` (at most one per node)
@@ -16,7 +17,7 @@ pub struct PortConfig {
     #[serde(default)]
     pub primary: bool,
     #[serde(default)]
-    pub name: Option<String>,
+    pub name: Option<Name>,
     #[serde(default)]
     pub host_port: Option<u16>,
     /// When `primary` and/or `name` is set, also match every subdomain of

@@ -3,27 +3,26 @@
 use anyhow::{Result, bail};
 
 use super::naming::DEFAULT_RUN_ID;
-use super::route_table::{sidecar_routes_dir, write_route_table};
 use crate::docker;
 use crate::resolver::Graph;
 use crate::state::{ContainerInfo, RunState};
 use crate::util::label::sanitize_label;
 
+use super::health::HealthBudget;
 use super::registry::RunRegistry;
+use super::route_table::sidecar_routes_dir;
 
 impl RunRegistry {
-    pub fn get(&self, run_id: &str) -> Option<RunState> {
-        self.runs.lock().unwrap().get(run_id).cloned()
-    }
-
-    pub async fn stop(&self, run_id: &str) -> Result<()> {
-        let state = {
-            let mut runs = self.runs.lock().unwrap();
-            let Some(state) = runs.remove(run_id) else {
-                bail!("no such run: {run_id}");
-            };
-            state
-        };
+    /// Tears a whole run down: every container, the sidecar, the network,
+    /// and — for a named run only — its volumes.
+    ///
+    /// Takes the run rather than looking it up: the reducer owns the only
+    /// copy, and the caller (`effects::docker::converge`) already has it.
+    /// Removing it from state is that caller's job too, by way of
+    /// `Action::RunTeardownSettled`, which is in turn what makes
+    /// `effects::persist` drop the database row and `effects::routes`
+    /// delete the sidecar route table.
+    pub async fn stop(&self, run_id: &str, state: &RunState) -> Result<()> {
         for c in state.containers.values() {
             self.begin_event_cycle(run_id, &c.node_id, "stop").await;
             self.record_event(
@@ -52,7 +51,6 @@ impl RunRegistry {
         if run_id != DEFAULT_RUN_ID {
             docker::remove_run_scoped_volumes(&self.docker, run_id).await;
         }
-        self.db.clone().delete_run(run_id.to_string()).await?;
         Ok(())
     }
 
@@ -67,15 +65,11 @@ impl RunRegistry {
         graph: &Graph,
         run_id: &str,
         node_id: &str,
+        network: &str,
+        sidecar_ip: Option<&str>,
     ) -> Result<ContainerInfo> {
-        let _guard = self.action_lock.lock().await;
-        let mut state = {
-            let runs = self.runs.lock().unwrap();
-            let Some(state) = runs.get(run_id) else {
-                bail!("no such run: {run_id}");
-            };
-            state.clone()
-        };
+        let lock = self.node_lock(run_id, node_id);
+        let _guard = lock.lock().await;
         let Some(node) = graph.nodes.iter().find(|n| n.id == node_id) else {
             bail!("no such node: {node_id}");
         };
@@ -87,40 +81,36 @@ impl RunRegistry {
         );
         docker::stop_and_remove(&self.docker, &container_name).await;
 
-        let info = self
-            .start_node(
-                graph,
-                node,
-                run_id,
-                &state.network,
-                state.sidecar_ip.as_deref(),
-            )
-            .await?;
-        state.containers.insert(info.node_id.clone(), info.clone());
-        self.db.clone().save_run(state.clone()).await?;
-        if let Err(e) = write_route_table(&state) {
-            eprintln!("fghjd: failed to write sidecar route table for run {run_id}: {e:#}");
-        }
-        self.runs.lock().unwrap().insert(run_id.to_string(), state);
-        Ok(info)
+        // Restarting one node is not sharing a budget with anything, so it
+        // gets a full per-node health allowance.
+        self.start_node(
+            graph,
+            node,
+            run_id,
+            network,
+            sidecar_ip,
+            &HealthBudget::single_node(),
+        )
+        .await
     }
 
     /// Stops a single node's container without removing it or touching the
     /// rest of the run — the Drawer's "Stop" button. Unlike `stop` (whole
     /// run), this leaves the container itself and its named volumes in
     /// place; a subsequent "Start" click just recreates it.
-    pub async fn stop_container(&self, run_id: &str, node_id: &str) -> Result<()> {
-        let _guard = self.action_lock.lock().await;
-        let mut state = {
-            let runs = self.runs.lock().unwrap();
-            let Some(state) = runs.get(run_id) else {
-                bail!("no such run: {run_id}");
-            };
-            state.clone()
-        };
-        let Some(c) = state.containers.get_mut(node_id) else {
-            bail!("no such node in run {run_id}: {node_id}");
-        };
+    ///
+    /// Returns the container as it now stands rather than `()`: the caller
+    /// reports that straight into the reducer, so there is no read-back
+    /// from a second copy of the run to disagree with.
+    pub async fn stop_container(
+        &self,
+        run_id: &str,
+        node_id: &str,
+        container: &ContainerInfo,
+    ) -> Result<ContainerInfo> {
+        let lock = self.node_lock(run_id, node_id);
+        let _guard = lock.lock().await;
+        let container_name = container.desired.container_name.clone();
         self.begin_event_cycle(run_id, node_id, "stop").await;
         self.record_event(
             run_id,
@@ -131,24 +121,20 @@ impl RunRegistry {
             None,
         )
         .await;
-        let container_name = c.desired.container_name.clone();
         docker::stop_container(&self.docker, &container_name).await;
-        // Stopping is itself the recorded intent, so `desired` moves too —
-        // this is the one place a stopped container is *supposed* to be
-        // stopped, as opposed to having died on its own.
-        c.desired.running = false;
-        c.observed.status = match docker::inspect_status(&self.docker, &container_name, "").await {
+        let status = match docker::inspect_status(&self.docker, &container_name, "").await {
             Ok(Some(s)) => s.status,
             _ => "exited".to_string(),
         };
         self.record_event(run_id, node_id, "stop", "stopping container", "ok", None)
             .await;
-        self.db.clone().save_run(state.clone()).await?;
-        if let Err(e) = write_route_table(&state) {
-            eprintln!("fghjd: failed to write sidecar route table for run {run_id}: {e:#}");
-        }
-        self.runs.lock().unwrap().insert(run_id.to_string(), state);
-        Ok(())
+        let mut updated = container.clone();
+        // Stopping is itself the recorded intent, so `desired` moves too —
+        // this is the one place a stopped container is *supposed* to be
+        // stopped, as opposed to having died on its own.
+        updated.desired.running = false;
+        updated.observed.status = status;
+        Ok(updated)
     }
 
     /// Stops and removes a single node's container, dropping it from the
@@ -156,18 +142,15 @@ impl RunRegistry {
     /// (same reasoning as `stop`'s default-run carve-out: a volume's whole
     /// point is to outlive any one container), so a later "Start" click
     /// picks the data back up in a fresh container.
-    pub async fn remove_container(&self, run_id: &str, node_id: &str) -> Result<()> {
-        let _guard = self.action_lock.lock().await;
-        let mut state = {
-            let runs = self.runs.lock().unwrap();
-            let Some(state) = runs.get(run_id) else {
-                bail!("no such run: {run_id}");
-            };
-            state.clone()
-        };
-        let Some(c) = state.containers.remove(node_id) else {
-            bail!("no such node in run {run_id}: {node_id}");
-        };
+    pub async fn remove_container(
+        &self,
+        run_id: &str,
+        node_id: &str,
+        container: &ContainerInfo,
+    ) -> Result<()> {
+        let lock = self.node_lock(run_id, node_id);
+        let _guard = lock.lock().await;
+        let container_name = container.desired.container_name.clone();
         self.begin_event_cycle(run_id, node_id, "stop").await;
         self.record_event(
             run_id,
@@ -178,14 +161,9 @@ impl RunRegistry {
             None,
         )
         .await;
-        docker::stop_and_remove(&self.docker, &c.desired.container_name).await;
+        docker::stop_and_remove(&self.docker, &container_name).await;
         self.record_event(run_id, node_id, "stop", "removing container", "ok", None)
             .await;
-        self.db.clone().save_run(state.clone()).await?;
-        if let Err(e) = write_route_table(&state) {
-            eprintln!("fghjd: failed to write sidecar route table for run {run_id}: {e:#}");
-        }
-        self.runs.lock().unwrap().insert(run_id.to_string(), state);
         Ok(())
     }
 }

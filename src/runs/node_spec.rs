@@ -227,9 +227,14 @@ impl RunRegistry {
                     scope,
                     container,
                     read_only,
+                    shared,
                 } => {
+                    // `shared` drops the node-id qualification, which is the
+                    // only way two nodes can land on one volume — see
+                    // `derive_volume_name` for why that's opt-in.
+                    let owner = (!shared).then_some(node.id.as_str());
                     let volume_name =
-                        derive_volume_name(name, scope, &graph.workspace_name, run_id);
+                        derive_volume_name(name, scope, owner, &graph.workspace_name, run_id);
                     if side_effects {
                         docker::ensure_volume(
                             &self.docker,

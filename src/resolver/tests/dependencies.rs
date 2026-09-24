@@ -283,5 +283,5 @@ fn git_dependency_without_repo_on_itself_warns_instead_of_crashing() {
     let graph = resolve_universe(tmp.path()).unwrap();
 
     assert!(!graph.edges.iter().any(|e| e.kind == "depends-on"));
-    assert!(graph.warnings.iter().any(|w| w.contains("itself")));
+    assert!(graph.warnings.iter().any(|w| w.message.contains("itself")));
 }

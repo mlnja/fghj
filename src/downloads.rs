@@ -169,6 +169,36 @@ fn stream_to_log(mut pipe: impl Read, state: Arc<Mutex<DownloadState>>) {
     }
 }
 
+/// Confirms a checkout already sitting at the requested folder really is the
+/// requested repo, comparing `origin` under `normalize_repo_url` so the same
+/// repo spelled `git@host:org/x.git` and `https://host/org/x` still matches.
+///
+/// Returns `Ok(())` for a match — the clone is genuinely already done and the
+/// caller can skip it — and an error for anything else. "Anything else"
+/// includes a directory with no readable `origin` at all: an empty folder or a
+/// half-finished clone can't be vouched for either, and treating it as the
+/// requested repo is the same mistake in a quieter form.
+fn ensure_checkout_is(dest: &Path, repo: &str) -> Result<()> {
+    let (origin, _) = resolver::git_remote_and_branch(dest);
+    let Some(origin) = origin else {
+        bail!(
+            "{} already exists but is not a git checkout with an `origin` \
+             remote; fghj cannot confirm it is {repo}. Remove or rename it, \
+             then pull again.",
+            dest.display()
+        );
+    };
+    if resolver::normalize_repo_url(&origin) == resolver::normalize_repo_url(repo) {
+        return Ok(());
+    }
+    bail!(
+        "{} is a checkout of {origin}, not {repo}. Both repos want the same \
+         workspace folder because it is named after the last segment of the \
+         URL. fghj cannot hold both; rename or remove the existing checkout.",
+        dest.display()
+    )
+}
+
 fn run_git_clone_logged(
     workspace: &Path,
     repo: &str,
@@ -179,7 +209,15 @@ fn run_git_clone_logged(
 ) -> Result<()> {
     let dest = workspace.join(local_path);
     if dest.exists() {
-        return Ok(());
+        // A workspace folder is named after the last path segment of the repo
+        // URL, so `org-a/api` and `org-b/api` both want `<ws>/api`. This used
+        // to return `Ok(())` on sight of an existing folder, which meant
+        // pulling the second one *reported success* and the resolver then read
+        // the first one's `.fghj.yaml` as though it were the second's — a
+        // silently wrong graph that `pull_all`'s fixpoint converges on
+        // confidently, because `downloaded` does flip true. Refusing is the
+        // only honest answer: fghj has no way to hold both under one name.
+        return ensure_checkout_is(&dest, repo);
     }
 
     append_log(
@@ -292,5 +330,76 @@ fn pull_all_logged(
         for node in &missing {
             clone_stub_logged(workspace, node, owner, state)?;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checkout_with_origin(origin: Option<&str>) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .arg("init")
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git init failed");
+        if let Some(origin) = origin {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(tmp.path())
+                .args(["remote", "add", "origin", origin])
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git remote add failed");
+        }
+        tmp
+    }
+
+    #[test]
+    fn an_existing_checkout_of_the_same_repo_is_accepted() {
+        let tmp = checkout_with_origin(Some("https://github.com/org-a/api.git"));
+        ensure_checkout_is(tmp.path(), "https://github.com/org-a/api.git").unwrap();
+    }
+
+    /// The whole point of normalizing: the same repo wired once over SSH and
+    /// once over HTTPS must not read as two repos fighting over one folder.
+    #[test]
+    fn spelling_of_the_url_does_not_matter() {
+        let tmp = checkout_with_origin(Some("git@github.com:org-a/api.git"));
+        ensure_checkout_is(tmp.path(), "https://github.com/org-a/api").unwrap();
+    }
+
+    /// E6: `github.com/org-a/api` and `github.com/org-b/api` both derive the
+    /// folder `api`. This used to be a silent `Ok(())` and a wrong graph.
+    #[test]
+    fn a_different_repo_in_the_same_folder_is_refused() {
+        let tmp = checkout_with_origin(Some("https://github.com/org-a/api.git"));
+        let err = ensure_checkout_is(tmp.path(), "https://github.com/org-b/api.git")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("org-a"), "{err}");
+        assert!(err.contains("org-b"), "{err}");
+    }
+
+    #[test]
+    fn a_folder_with_no_origin_is_refused_rather_than_assumed() {
+        let tmp = checkout_with_origin(None);
+        let err = ensure_checkout_is(tmp.path(), "https://github.com/org-a/api.git")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("origin"), "{err}");
+    }
+
+    #[test]
+    fn a_plain_directory_that_is_not_a_checkout_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(ensure_checkout_is(tmp.path(), "https://github.com/org-a/api.git").is_err());
     }
 }
