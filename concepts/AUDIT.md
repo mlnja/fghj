@@ -48,13 +48,25 @@ No to both — but only one of them is a design problem.
 **Q1** fails in a bounded, enumerable way: roughly twenty missing Docker knobs
 (mechanical, already tracked in `PROGRESS.md`) plus **eight structural holes**
 that need a new concept in the language, not a new field. Two of those (E1, E2)
-rule out entire categories of dev environment.
+rule out entire categories of dev environment. (E1 is since closed — see
+[[terminating-nodes]]; so is E3, the one most likely to block the stated
+audience outright — see [[build-inputs]].)
 
 **Q2** fails more seriously, because `concepts/` states several invariants as
 *proven* that are in fact only *emergent* — true of the current code by accident
 of iteration order, unenforced, and uncheckable. Four confirmed name collisions
 that the docs' own stated conventions create, and one state pair
 (`desired=running` ∧ `observed=exited`) that nothing in the system can converge.
+(The collisions are since closed — `resolver::uniqueness` checks them and
+[[node-identity-and-domains]]'s projection table states which namespaces have
+an enforcer at all. The folder's own drift, D1–D3, is closed too.)
+
+**Q3 — Delivery**, added later. Both questions above are about the language and
+the running system, and both assume an artifact exists to run. That assumption
+was wrong: see [§6](#6-delivery). It failed for reasons of a completely
+different character — not "the boundary is in the wrong place" but "the build
+was broken and nobody could tell, because the thing it was missing is present
+on every developer's disk."
 
 ---
 
@@ -62,37 +74,45 @@ that the docs' own stated conventions create, and one state pair
 
 Severity: **S** = structural (needs a new concept, not a field) · **U** =
 unsound (reachable bad state or false invariant) · **K** = knob (enumerable,
-mechanical) · **D** = doc drift.
+mechanical) · **D** = doc drift · **R** = release/delivery (the artifact, not
+the language — added in [§6](#6-delivery)).
 
 | id | sev | finding | status |
 |---|---|---|---|
-| [E1](#e1) | S | No terminating node kind — seeds/migrations not expressible | open |
+| [E1](#e1) | S | No terminating node kind — seeds/migrations not expressible | **closed** |
 | [E2](#e2) | S | Config→run map is a constant function (no parameterization, no local secrets) | open |
-| [E3](#e3) | S | Builds cannot carry credentials (`target`/`ssh`/`secrets` absent) | open |
+| [E3](#e3) | S | Builds cannot carry credentials (`target`/`ssh`/`secrets` absent) | **closed** |
 | [E4](#e4) | S | No external / unmanaged dependency kind | open |
 | [E5](#e5) | S | No network topology (one network per run, no isolation) | open |
 | [E6](#e6) | S | repo→folder map non-injective; `local_path` deleted; silent wrong-repo substitution | **partial** |
 | [E7](#e7) | S | Flow names unqualified in a language that qualifies everything else | open |
 | [E8](#e8) | S | `version: "1.0"` literal in a federated language — no version negotiation | closed |
-| [K1](#k1) | K | ~20 absent Docker knobs (incl. TCP-only ports, no `entrypoint`, no resource limits) | open |
+| [K1](#k1) | K | ~20 absent Docker knobs (incl. TCP-only ports, no `entrypoint`, no resource limits) | open — `stop_signal`/`stop_grace_period` **closed**; the rest want accept-or-close calls |
 | [B1](#b1) | U | Named port and backing dependency can claim the identical domain | **closed** |
 | [B2](#b2) | U | `container_name` collapses the dots that made `node.id` injective | **closed** |
 | [B3](#b3) | U | Volume names are a flat cross-repo namespace — silent data sharing | **closed** |
 | [B4](#b4) | U | Workspace identity in domains is the folder name; routing scans all workspaces | **closed** |
 | [B5](#b5) | U | "The service disappeared" has no representation (`Orphaned` ≡ `Unknown`) | **closed** |
-| [B6](#b6) | U | `desired=running` ∧ `observed=exited` is a permanently stuck pair | open |
+| [B6](#b6) | U | `desired=running` ∧ `observed=exited` is a permanently stuck pair | **closed** |
 | [B7](#b7) | U | `ensure_running` partial failure leaves containers invisible to the host | **closed** |
 | [B8](#b8) | U | CUE is a linter, not a type system — runtime runs a more permissive language | closed |
 | [B9](#b9) | U | Nine resolver warnings, none fatal, none read before a start | closed |
 | [B10](#b10) | U | Dependency cycles detected nowhere at start time | closed |
 | [B11](#b11) | U | One malformed `.fghj.yaml` aborts resolution for the whole workspace | closed |
 | [B12](#b12) | U | Workspace-wide `action_lock` held across a 120 s health wait | closed |
-| [B13](#b13) | U | A new commit on the same branch is invisible to drift detection | open |
-| [B14](#b14) | U | `ensure_running` never reconciles configuration, only liveness | open |
+| [B13](#b13) | U | A new commit on the same branch is invisible to drift detection | **closed** |
+| [B14](#b14) | U | `ensure_running` never reconciles configuration, only liveness | **closed** |
 | [B15](#b15) | U | `daemon_log` could drop a log line under concurrent writers | closed |
-| [D1](#d1) | D | Four stale claims in `concepts/` (see §4.1) | partly closed |
-| [D2](#d2) | D | Five subsystems in code with no concept doc (see §4.2) | partly closed |
-| [D3](#d3) | D | Five concepts that never existed (failure semantics, identity algebra, …) | open |
+| [B16](#b16) | U | A `scope: stable` volume is mounted by two concurrent runs at once | open — documented, not enforced |
+| [D1](#d1) | D | Four stale claims in `concepts/` (see §4.1) | **closed** |
+| [D2](#d2) | D | Five subsystems in code with no concept doc (see §4.2) | **closed** |
+| [D3](#d3) | D | Five concepts that never existed (failure semantics, identity algebra, …) | **closed** |
+| [D4](#d4) | D | No documentation for anyone who isn't reading `src/` or `concepts/` | **closed** |
+| [R1](#r1) | R | `ui/dist` is compile-required and gitignored; no CI job built it, so no workflow could compile the crate at all | **closed** |
+| [R2](#r2) | R | CI's own gates (`clippy -D warnings`, `cargo test`) could not pass on the runner CI uses | **closed** |
+| [R3](#r3) | R | The sidecar image was compiled from scratch on every user's machine on first need | **closed** |
+| [R4](#r4) | R | The 14 Docker-backed tests run on no CI runner | open |
+| [R5](#r5) | R | No `LICENSE` and no `license` field; the Homebrew formula asserts MIT with a `TODO: confirm` | open |
 
 Suggested order of attack is in [§5](#5-suggested-order).
 
@@ -125,6 +145,17 @@ ordering algebra — not a field.
 
 > `src/runs/health.rs:14` · `src/runs/start_node.rs:258` · `src/daemon/api/exec.rs:49`
 > · exhaustive search for `seed|migrate|job|hook|post_start` returns nothing
+
+**Closed.** `#Task` is that third kind, declared inline by the service that
+needs it; `runs::health::wait_for_exit` is that second termination predicate.
+A task starts after its `after` targets and before its owner, and is not
+considered started until it has *finished* — a non-zero exit blocks every node
+downstream of it. Default re-run policy is `on_start` (idempotence is the task
+author's contract), with `run: once` as the opt-in; deliberately not keyed on
+the config hash — not because the hash cannot see a new commit (since
+[B13](#b13) it can) but because `once` means at most once per run, and an
+author reaches for it when re-running is destructive. Written up in
+[[terminating-nodes]].
 
 <a id="e2"></a>
 #### E2 · The config→run map is a constant function
@@ -167,6 +198,25 @@ multi-stage Dockerfile is the standard pattern, and here it forces a second
 Dockerfile.
 
 > `src/resolver/config.rs:29` · `src/runs/node_spec.rs:146` (`build_image` takes only dir, dockerfile, tag, platform)
+
+**Closed.** `#Build` gained `target`, `ssh` and `secrets` (with `#BuildSecret`),
+and `build_image` dispatches on whether the build actually needs BuildKit —
+classic builder otherwise, so every repo that builds today keeps the classic
+path's much better errors. `ssh: true` forwards the workspace owner's live
+agent, re-derived per build, which is the mechanism this entry called out as
+ironically absent. Written up in [[build-inputs]].
+
+Two live bugs turned up that this entry did not name, both now fixed:
+`build.args` was parsed and carried into the graph but **never reached the
+daemon**, and `build` was absent from `spec_hash`, so editing it was invisible
+to drift detection. The second is a narrow fix, not a general one —
+[B13](#b13) (the hash covers the image *tag*, not its contents) is now
+**closed** for commits and the clean→dirty transition; content-awareness
+stays out of scope.
+
+`secrets: env:` is explicitly **not** closed here: BuildKit supports it, but
+`fghjd` is a root daemon with no host environment to read one from, which is
+[E2](#e2). `cache_from` is likewise still absent.
 
 <a id="e4"></a>
 #### E4 · No external or unmanaged dependency
@@ -316,13 +366,18 @@ Every one confirmed absent from both `schema/*.cue` and the serde structs. Most
 are already on `PROGRESS.md`'s "eventually" list; none require a design
 decision.
 
+One row is struck below: `stop_signal`/`stop_grace_period` was not really a
+knob gap at all but a correctness bug wearing one as a disguise — the missing
+fields were the symptom, and `force(true)` on every ordinary teardown path was
+the actual defect. The rest of this table stands.
+
 | capability | consequence for a real dev env |
 |---|---|
 | `entrypoint` | Only `CMD` is overridable; changing `ENTRYPOINT` requires editing the Dockerfile. |
 | cpu / memory limits | No `HostConfig.Memory` or `NanoCpus` anywhere. A JVM service can OOM the laptop; "this env fits in 8 GB" is unsayable. |
 | `tmpfs`, `ulimits`, `sysctls`, `shm_size` | `shm_size` in particular blocks stock Chrome/Postgres images. |
 | `devices`, GPU | Any ML/CUDA dev env is out. |
-| `stop_signal`, `stop_grace_period` | `stop_and_remove` is unconditional `force(true)`. No graceful shutdown; a DB can be SIGKILLed mid-write. |
+| ~~`stop_signal`, `stop_grace_period`~~ | ~~`stop_and_remove` is unconditional `force(true)`. No graceful shutdown; a DB can be SIGKILLed mid-write.~~ **Closed.** `stop_and_remove` now stops then removes; both knobs are on `#RunOptions` (so `#Service`, `#BackingDependency` and `#Task` all get them) and are stamped onto the container at create time as `StopSignal`/`StopTimeout`, so orphans, post-daemon-restart containers and a hand-typed `docker stop` honour them too. In `spec_hash`. Written up in [[docker-and-downloads]]. |
 | ports: no protocol | `ports` keys match `^[0-9]+$` — **TCP only, no `/udp`**. DNS-based apps, statsd, syslog, QUIC, game/VoIP servers cannot publish. |
 | external named volume | Every volume name is *derived*; no way to reference a volume that already exists. |
 | `security_opt`, `read_only`, `init`, pid/ipc/uts mode, `logging`, `dns_search`, `pull_policy`, `hostname`, `stdin_open`/`tty` | Individually minor; collectively the long tail. |
@@ -331,7 +386,8 @@ decision.
 (`PROGRESS.md`, 2026-09-07) is a legitimate domain restriction with a stated
 rationale, not a gap. It should be written up in `concepts/` as a boundary of
 the language rather than left as a changelog line — it is exactly what a reader
-needs to find when asking this audit's question. Tracked under [D3](#d3).
+needs to find when asking this audit's question. Tracked under [D3](#d3) —
+**closed** by [[language-boundaries]].
 
 ---
 
@@ -495,7 +551,8 @@ refactor only by luck.
 The code is now *ahead* of the docs here: `config_drift` / `DriftReport` /
 `SyncStatus` exist, a second reconciler re-resolves every 15 s, and the UI has a
 desired-vs-actual indicator. `concepts/` documents none of it, and `PROGRESS.md`
-still lists it as an open gap. Tracked under [D2](#d2).
+still lists it as an open gap. Tracked under [D2](#d2) — **closed** by
+[[config-drift]], which also records the deliberate observer-only policy.
 
 What drift detection does *not* cover is the branch-switch case:
 
@@ -547,6 +604,27 @@ SHA component. Commit, don't switch branches, and the running container stays li
 as `Synced` while serving a stale image. A branch *switch* is caught only
 incidentally, because the tag changes.
 
+**Resolution.** `Node.head` — the checkout's commit SHA, from a new
+`resolver::git_head_sha` — plus the already-resolved `Node.dirty`, hashed
+into `spec_hash` as a `source` block. Gated on `build.is_some()`: a node
+running a published `image:` must *not* move when the repo that declares it
+gets a commit, or every `postgres:16` in the workspace would read as drifted
+on every commit, which is the constant-signal failure the hash's exclusion
+rules already exist to avoid. Backing dependencies and tasks inherit the
+owner's `head` exactly as they inherit `repo`/`branch`/`dirty` — which matters
+for an image-less task, since it runs the owner's own built image.
+
+This also completes [B14](#b14): a top-up only recreates what the hash says
+changed, so without a commit-aware hash "my edits take effect" would still
+have been false for the most ordinary case of all.
+
+Not closed by this: the hash is still not content-aware, and `dirty` is one
+bit, so it catches the clean → dirty transition and not a second edit to an
+already-dirty tree. Left open deliberately, with the argument written out in
+[[config-drift]] — the short version is that "am I drifted" is not the
+question you are asking about a file you are actively editing, and the answer
+there is Restart, which rebuilds unconditionally.
+
 <a id="b14"></a>
 #### B14 · `ensure_running` never reconciles configuration
 
@@ -555,6 +633,26 @@ recreated by "Run flow" — the top-up skips it because it is alive. Drift is
 observed and then, by explicit policy, ignored. That policy is defensible; it
 should be written down in `concepts/`, because right now the only place it exists
 is a comment.
+
+**Resolution.** Writing the policy down is what showed it to be two policies
+wearing one name. "Never act on drift" is correct for the reconciler — a
+`git switch` changes the graph under a live environment constantly, and a
+background loop recreating containers would fight the user. It is not correct
+for `ensure_running`, which only ever runs because someone pressed "Run flow"
+or ran `fghj up`; there the expectation is `compose up`'s, and skipping a
+drifted container precisely *because* it was alive meant editing
+`.fghj.yaml` and pressing the button did nothing at all. The distinction is
+not whether drift should be healed but **who asked**.
+
+`runs::orchestrate::top_up_may_skip` now holds all three skip conditions
+(alive, described, unchanged) as one pure, tested function; an inconclusive
+re-resolve counts as unchanged, since bouncing a healthy container on a guess
+is the worse mistake. The recreate is narrated as a `create` event with its
+reason. It is only safe to do on an ordinary action because the
+`stop_signal`/`stop_grace_period` work above replaced `force(true)` with a
+graceful stop first — otherwise the answer to "my edit didn't apply" would
+have been to SIGKILL the user's database. Written up in [[config-drift]] and
+[[run-lifecycle-and-registry]].
 
 <a id="b15"></a>
 #### B15 · `daemon_log` could silently drop a line under concurrent writers
@@ -586,6 +684,51 @@ are the same thing by construction rather than by remembering to keep them so.
 globally across 8 threads; it was confirmed to fail against the old
 implementation before being kept.
 
+<a id="b16"></a>
+#### B16 · `scope: stable` shares one volume across concurrent runs
+
+**Severity: U. Status: open — documented, not enforced.**
+
+Surfaced while writing [tutorial chapter 6](../docs/src/content/docs/tutorial/06-two-runs.md),
+which walks through what changes once a second run is up. Two of the three
+escape hatches from run-scoping behave badly under a second run and *say so*:
+`domain_scope: stable` produces a route collision that is not enforced (which
+run you reach is unspecified), and `host_port` simply fails to bind twice. The
+third is worse and is silent.
+
+`scope: stable` on a volume means one Docker volume with one fixed identity,
+by design — that is the whole point, and [B3](#b3) already made the *name*
+non-colliding across repos. But "one volume across every run" includes "across
+two runs that are up simultaneously". The default run's Postgres and a review
+run's Postgres then mount the same data directory with two engines, which
+Postgres does not survive gracefully — and neither does most of what anyone
+would reach for `scope: stable` for, since the reason to want it is almost
+always a database.
+
+Nothing prevents it. Volumes are attached at create time from the node spec;
+no one asks whether another run already has this volume mounted, and the
+per-node locks in [[concurrency-model]] are keyed by `(run_id, node_id)` — two
+runs are *different* lock keys by construction, so serialization that works
+within a run does nothing here.
+
+This is the same shape as `domain_scope: stable`'s route collision, one layer
+down: an opt-out of run scoping whose cost only appears once the feature run
+scoping exists for is actually used. The difference is that a wrong route
+resolves to a working container and a wrong data directory can corrupt.
+
+**Not resolved here, deliberately.** Three candidate answers, none obviously
+right: refuse to start a second run's node when a `stable` volume of its is
+already mounted elsewhere (safe, but breaks the read-only-sharing case that
+works fine today); warn at resolve time whenever a `stable` volume exists at
+all (noisy — it's correct in the single-run case, which is most of them); or
+attach it read-only to every run but the first (surprising, and "first" isn't
+well-defined). What *was* done is to stop it being invisible: it is written up
+as a caution in the [`.fghj.yaml`
+reference](../docs/src/content/docs/reference/fghj-yaml.md#volumes) and worked
+through with the other two hatches in tutorial chapter 6, so an author meets
+it before their data does. Closing this properly means picking one of the
+three, and that is a scope decision like [E5](#e5), not a bug fix.
+
 <a id="b6"></a>
 #### B6 · A permanently stuck state pair
 
@@ -604,6 +747,26 @@ Related: Docker states `restarting`, `paused`, `dead`, `created` are reachable
 but nothing branches on them; every consumer tests `== "running"`, so a
 restarting container is silently de-routed and indistinguishable from an exited
 one.
+
+**Resolution.** The policy was never the problem — read-only-by-default stays,
+`AutoHeal` is still constructed nowhere, and the user still has to press Start.
+What was missing was a word for the situation, exactly as with [B5](#b5).
+
+`state::NodeCondition` is that word: a derived reading of the
+`desired`/`observed` pair (`ContainerInfo::condition`), with `Crashed` as the
+variant it exists for. `Restarting` and `Paused` close the "related" note
+above — both meant "not serving" and both rendered as `stopped`. `Finishing`
+covers a task that has exited but has not been re-inspected, which must not
+read as success.
+
+Derived, not stored: a cached reading of two adjacent fields is a bug waiting
+for the one path that updates `status` without it. That is why `ContainerInfo`
+now has a hand-written `Serialize` — the field has to reach the UI without
+becoming state. `GraphView.svelte` paints `crashed` with the same weight as a
+failed task (both mean "you have to do something"), `restarting` pulses, and
+`Drawer.svelte` shows Docker's raw word and fghj's reading of it as two
+separate rows, since the raw one is what you quote in a bug report. Written up
+in [[run-lifecycle-and-registry]].
 
 ### 3.4 Partial failure
 
@@ -899,6 +1062,15 @@ record" and "required reading before proposing an architecture change." It has
 drifted, and the drift is load-bearing because the folder is meant to be read
 *instead of* the code.
 
+**All three findings below are now closed** (§5 item 12). What the pass
+actually produced is worth recording, because it was not what this section
+predicted: most of D1's stale claims had already been corrected by the
+earlier items that fixed the underlying code, and most of D3's "never
+existed" concepts turned out to be *policies that were already consistent in
+the code and simply unstated*. The two exceptions — the projection table and
+the composite security model — were the ones where writing the document
+changed what was known, not just where it was recorded.
+
 <a id="d1"></a>
 ### 4.1 D1 · Stale — states things that are no longer true
 
@@ -907,25 +1079,44 @@ drifted, and the drift is load-bearing because the folder is meant to be read
   (split into directories).~~ **Closed.** The map now names the real paths, and
   the run row was split in two so `src/runs/` and the actor stack point at
   different guides.
-- [[flat-workspace-model]]: "overridable via `local_path`" — `local_path` is gone
-  from the schema entirely.
-- [[node-identity-and-domains]]: rests its uniqueness argument on `local_path`;
+- ~~[[flat-workspace-model]]: "overridable via `local_path`" — `local_path` is gone
+  from the schema entirely.~~ **Closed.** The claim is gone; the file now
+  argues uniqueness from the workspace folder listing instead.
+- ~~[[node-identity-and-domains]]: rests its uniqueness argument on `local_path`;
   the `derive_domain` signature quoted in the doc is missing the `zone`
-  parameter.
-- [[docker-and-downloads]]: the named-volume-leak gap it describes was closed.
+  parameter.~~ **Closed.** Both `derive_domain` code blocks now carry
+  `DomainZone`, and the "sole Docker network alias" paragraph was wrong in a
+  second way nobody had recorded — `raw_domain` is the alias, `domain` is
+  deliberately not one, because the sidecar owns it
+  ([[in-network-sidecar]]). The uniqueness argument already reads off the
+  workspace folder name, which still exists; only the term was ambiguous.
+- ~~[[docker-and-downloads]]: the named-volume-leak gap it describes was closed.~~
+  **Closed.** The file describes the qualified-by-default scheme and the
+  `shared: true` opt-in.
+
+**D1 closed.** One correction found along the way that the audit had not
+listed: `Node.domain`'s pre-computation snippet was missing the same `zone`
+argument.
 
 <a id="d2"></a>
 ### 4.2 D2 · Missing — subsystems in code with no concept doc
 
-- The **in-network TLS sidecar** (one proxy container per run) — documented in
+- ~~The **in-network TLS sidecar** (one proxy container per run) — documented in
   `docs/src/content/docs/concepts/sidecar.md` but absent from `concepts/`. The
-  two folders have forked.
-- The **dual DNS zone** split (`fghj.internal` vs `fghj.raw.internal`) — this
+  two folders have forked.~~ **Closed** by [[in-network-sidecar]]. Note the
+  fork itself is *not* closed: `docs/` remains a separately-worded Starlight
+  copy of this folder, and keeping two hand-maintained sets in sync is its
+  own open question, recorded here rather than resolved.
+- ~~The **dual DNS zone** split (`fghj.internal` vs `fghj.raw.internal`) — this
   changes the central story of [[split-dns]] and [[node-identity-and-domains]],
-  both of which still describe one zone.
-- **`raw_net`**: per-node virtual IPs NAT'd via `pf`, with a hash-based allocator
+  both of which still describe one zone.~~ **Closed** by
+  [[two-zones-and-raw-ports]], with [[split-dns]] and
+  [[node-identity-and-domains]] both corrected to point at it.
+- ~~**`raw_net`**: per-node virtual IPs NAT'd via `pf`, with a hash-based allocator
   that can collide and a sticky in-memory reconciler on top. A substantial new
-  invariant surface with zero concept coverage.
+  invariant surface with zero concept coverage.~~ **Closed** by
+  [[two-zones-and-raw-ports]], including the two abandoned `pf` designs and
+  the "fghjd must never break someone else's networking" rule they produced.
 - ~~The **actor / action / reducer / effects architecture** (`src/action.rs`,
   `src/reducer/`, `src/effects/`, `src/state/`) — the single largest structural
   change in the codebase, described nowhere. [[run-lifecycle-and-registry]] still
@@ -962,32 +1153,96 @@ drifted, and the drift is load-bearing because the folder is meant to be read
   its run was torn down would have resurrected it, so `RunCreateSettled` now
   writes through the existing entry instead of inserting, matching what
   `RunCreateProgress` already did.
-- **Config drift / `SyncStatus`**, `fghj exec`, wildcard hosts, FQDN templating,
-  telemetry.
+- ~~**Config drift / `SyncStatus`**, `fghj exec`, wildcard hosts, FQDN templating,
+  telemetry.~~ **Closed**, split by where each belongs rather than as one
+  file: [[config-drift]] (drift and `SyncStatus`), [[host-aliases]] (wildcard
+  and literal hosts, plus `cert_eligible`, which had no home before),
+  [[control-api-and-cli]] (`fghj exec`'s WebSocket and raw-termios story, and
+  the `daemon_log`/`net-status` telemetry pair), [[two-zones-and-raw-ports]]
+  (FQDN templating).
 
 <a id="d3"></a>
 ### 4.3 D3 · Never existed — concepts the folder has no file for
 
-- **Failure semantics.** What is fatal vs. advisory, what rolls back vs. what
-  persists, where an error surfaces. Currently: nine non-fatal checks, one fatal
-  parse error with workspace-wide blast radius, two start paths with opposite
-  rollback behaviour, and errors dropped after a `200`. All policy, none written
-  down.
-- **The identity algebra.** [[node-identity-and-domains]] covers ids beautifully
-  and then stops. The projections — DNS names, container names, volume names,
-  network names, virtual IPs — each have their own escaping rules and their own
-  collision domains, and nobody has written the table.
-- **The config language's own semantics**: CUE vs serde, what validates where,
-  what `version` means, how the language evolves.
-- **The security model.** A root daemon, a CA in the system trust store,
-  unsandboxed bind mounts by explicit decision, `privileged: true` available to
-  any repo you clone, `pf` rules. Each is individually reasoned in its own file;
-  the composite threat model — *cloning a repo grants its author these
-  capabilities on your machine* — is stated nowhere.
-- **The concurrency model**: what `action_lock` protects, what may run
-  concurrently across runs and workspaces, which locks are held across `await`.
-- **The boundaries of the language**: the no-host-process decision and what else
-  is deliberately out of scope (see [K1](#k1)).
+- ~~**Failure semantics.**~~ **Closed** by [[failure-semantics]]. Three of the
+  four listed symptoms had already been fixed by earlier items (per-repo
+  isolation by B11, severity by B9/B10, the two rollback policies by B7) —
+  what was missing was the *rule* behind them, now stated as: roll back a
+  thing requested as a unit, keep a thing requested as an increment. One
+  genuine gap survives and is recorded there rather than hidden: the settle
+  error string is dropped by the reducer, so the reason a per-node action
+  failed lives only in the events table and the daemon log.
+- ~~**The identity algebra.**~~ **Closed** by the projection table in
+  [[node-identity-and-domains]] — eight namespaces, each with its formula,
+  escaping rule, collision domain, and enforcer. Writing it as a table made
+  the actual finding legible: only some rows have an enforcer at all, and a
+  volume-name collision is the one that is completely silent.
+- ~~**The config language's own semantics**~~ **Closed** by
+  [[config-language]], including the direction of the CUE/Rust obligation
+  (CUE must never accept what the daemon rejects, which `resolver::name`'s
+  drift test checks) and a six-step process for adding to the language.
+- ~~**The security model.**~~ **Closed** by [[security-model]], stated as the
+  composite grant rather than as a list of mechanisms, with an explicit
+  "deliberately not defended against" section so silence is never mistaken
+  for a guarantee.
+- ~~**The concurrency model**~~ **Closed** by [[concurrency-model]].
+- ~~**The boundaries of the language**~~ **Closed** by
+  [[language-boundaries]], which also generalizes the no-host-process
+  argument into a test for future requests: a capability requiring a second
+  implementation of something fghj has exactly one of is a boundary, not a
+  feature.
+
+<a id="d4"></a>
+### 4.4 D4 · Documentation for someone who is not reading the source
+
+**Severity: D. Status: closed.**
+
+Not in the original pass, because §4 asked whether `concepts/` was a faithful
+record of the design — and by the end of item 12 it was. The question it did
+not ask is who else the project has anything to read. The answer was: nobody.
+There was no `README.md` at all; the docs site's landing page still showed a
+singular `service:` with a `name:` field in a file called `fghj.yaml`, a shape
+the schema had stopped accepting; `getting-started/installation.md` opened by
+stating there is "no installer, no Homebrew tap, and no prebuilt binaries" —
+by then two of the three existed in some form; and two clone URLs pointed at
+the wrong GitHub org. `concepts/` is written for someone changing fghj, and
+reads that way; there was no path in for someone trying to *use* it.
+
+**Resolution.** A seven-chapter tutorial
+(`docs/src/content/docs/tutorial/`), built as a single worked example: two
+repos, five nodes, taken from an empty directory to two concurrent runs. Each
+chapter introduces one mechanism at the point the example needs it, and every
+command output, JSON fragment, warning string and UI label quoted in it was
+captured from a real run against this tree rather than written from memory.
+Chapter 7 is the part that usually goes unwritten — the eight node conditions
+and four sync verdicts in the words the UI actually uses, and what each one
+means you should do. Plus a root `README.md`, a rewritten install page
+(Homebrew as the intended path, source as the working one, stated as such), a
+corrected landing page, and two more concept guides ported to the site
+([[terminating-nodes]], [[concurrency-model]]) because the tutorial wanted to
+link to them.
+
+Writing it functioned as a fifth audit pass, which is the part worth recording
+here: prose has to name things, and naming them found three defects that
+reading the code had not.
+
+- `#Service.dependencies` had no CUE default while the Rust side has
+  `#[serde(default)]`, so `cue vet -c` rejected a leaf service with no
+  dependencies that the daemon accepts happily — a direct violation of
+  [[config-language]]'s one obligation (CUE must never reject what the daemon
+  takes). Fixed by `| *[]`, with a comment saying why `#Flow.dependencies`
+  is deliberately the other way round.
+- The ambiguous-service warning told the author to disambiguate with
+  `service:` in both places it fires, but that field only exists on a flow —
+  a `kind: service` dependency spells it `services:`. Found by trying to write
+  the sentence "and then you add" and having to check which. Fixed by passing
+  the caller's own field name in, with a test asserting the two call sites
+  produce the two different strings.
+- [B16](#b16) above.
+
+The fix for the second one is the pattern worth keeping: the temptation was to
+document the field the warning named. Documentation that agrees with a wrong
+error message is worse than none, because it makes the error look intentional.
 
 ---
 
@@ -1006,10 +1261,162 @@ Cheap-and-high-value first; design work last.
 | ~~7~~ | ~~Per-repo error isolation in `scan_workspace`~~ — **done** | [B11](#b11) |
 | ~~8~~ | ~~Decide: enforce CUE at load, or move constraints into the Rust types~~ — **done** | [B8](#b8) [E8](#e8) |
 | ~~9~~ | ~~Narrow `action_lock` scope / add an overall start timeout~~ — **done** | [B12](#b12) |
-| 10 | Design a terminating node kind | [E1](#e1) |
-| 11 | Build secrets / ssh forwarding | [E3](#e3) |
-| 12 | Refresh `concepts/` — *partly done: the codebase map and the actor-architecture gap are closed by [[state-and-effects]]* | [D1](#d1) [D2](#d2) [D3](#d3) |
+| ~~10~~ | ~~Design a terminating node kind~~ — **done**, see [[terminating-nodes]] | [E1](#e1) |
+| ~~11~~ | ~~Build secrets / ssh forwarding~~ — **done**, see [[build-inputs]] | [E3](#e3) |
+| ~~12~~ | ~~Refresh `concepts/`~~ — **done**; eight new files ([[two-zones-and-raw-ports]], [[in-network-sidecar]], [[config-drift]], [[host-aliases]], [[failure-semantics]], [[config-language]], [[security-model]], [[language-boundaries]]) plus the projection table and corrections to [[node-identity-and-domains]], [[split-dns]] and [[control-api-and-cli]] | [D1](#d1) [D2](#d2) [D3](#d3) |
+
+| ~~13~~ | ~~Graceful stop: `stop_signal`/`stop_grace_period`, stamped at create time~~ — **done**, see [[docker-and-downloads]] | part of [K1](#k1) |
+| ~~14~~ | ~~`ensure_running` reconciles configuration; a new commit drifts a built node; name the stuck pair~~ — **done**, see [[run-lifecycle-and-registry]] | [B14](#b14) [B13](#b13) [B6](#b6) |
+| ~~15~~ | ~~Make the release buildable, gate it on a prebuilt sidecar~~ — **done**, see [[release-and-delivery]] | [R1](#r1) [R2](#r2) [R3](#r3) |
+| ~~16~~ | ~~Write documentation for users, not just for maintainers: a seven-chapter tutorial, a `README`, a truthful install page~~ — **done**, see [§4.4](#d4) | [D4](#d4) |
 
 Remaining structural items ([E2](#e2), [E4](#e4), [E5](#e5), [E7](#e7)) and the
 knob list ([K1](#k1)) are scope decisions rather than defects — each wants an
 explicit accept-or-close call recorded in a concept file, not necessarily code.
+[R4](#r4) and [R5](#r5) are real work, just not language work. So is
+[B16](#b16), which is now written down in two places a user will meet but still
+has no mechanism behind it — it wants one of its three candidate answers
+chosen, not more prose.
+
+---
+
+## 6. Delivery
+
+Sections 2–4 read the *language* against the code. This one reads the
+*artifact*: what a person actually installs, and whether the machinery that
+produces it works. It was added after the audit's original pass, when the
+question "can we release this?" turned out to have a shorter answer than
+expected.
+
+The durable record for everything here is [[release-and-delivery]].
+
+### R1 · Nothing in CI could compile the crate
+
+**Severity: R. Status: closed.**
+
+`web::ui` embeds the built Svelte app with
+`include_dir!("$CARGO_MANIFEST_DIR/ui/dist")`. `ui/dist` is gitignored by
+`ui/.gitignore`, and `include_dir!` is a proc macro that panics at compile time
+when its directory is absent:
+
+```
+error: proc macro panicked
+  = help: message: ".../ui/dist" is not a directory
+```
+
+Neither `ci.yml` nor `release.yml` ran the UI build. A clean checkout — which
+is what every runner gets — therefore could not compile `cargo check`,
+`cargo build`, `cargo test`, or the sidecar's Docker build. Not "the release
+was subtly wrong": there could never have been one from CI.
+
+This was invisible locally because a developer's tree has `ui/dist` sitting
+there from the last `npm run build`.
+
+**Resolution.** Both workflows now run `npm ci && npm run build` in `ui/`
+before any cargo or docker step, with a comment at each site saying it is a
+prerequisite rather than a frontend convenience — it reads like an optional
+step and is not one. Committing `ui/dist` was considered and rejected:
+generated bundles in git conflict on every UI branch, and the failure they'd
+prevent is loud and immediate.
+
+### R2 · CI's own gates could not pass on CI's own runner
+
+**Severity: R. Status: closed.**
+
+Two separate problems, both only reachable once R1 was fixed and the jobs got
+far enough to run.
+
+**`clippy -D warnings`.** The check job denies all warnings.
+`src/effects/docker/converge.rs` carried a standing
+`clippy::result_large_err`: `RunCreateError` holds `Option<RunState>` inline,
+making every `Result<_, RunCreateError>` at least 224 bytes wide — the success
+path paying for the rare partial-failure case. Fixed by boxing
+`RunCreateError::partial`, which is the borrow-checker-free version of what
+clippy asks for and costs one allocation on a path that is already failing.
+
+**`cargo test` needs Docker.** Fourteen tests start real containers or run
+real builds. GitHub's macOS runners cannot run Docker — no nested
+virtualization — and the check job is macOS because that is the only platform
+`fghjd`'s own code paths are written for. Those two facts are in direct
+conflict.
+
+**Resolution.** The fourteen are marked
+`#[ignore = "needs a Docker daemon: …"]` and run with
+`cargo test -- --ignored` wherever Docker exists. `cargo test` under an
+unreachable `DOCKER_HOST` is the check that the split is honest.
+
+Running that check surfaced eight *more* failures with nothing to do with
+Docker: `runs::registry`'s node-lock tests and
+`daemon::registry`/`daemon::control`'s workspace-index tests are pure
+bookkeeping, but they sit behind types that own a `bollard::Docker`, and
+`connect_with_local_defaults` resolves the unix socket at **construction** —
+no socket, `SocketNotFoundError`, panic, before any request is sent. Eight
+tests about mutexes and JSON files required Docker to be installed.
+`docker::undialled_client()` builds an http-transport client pointed at a port
+nothing listens on: no filesystem check, and a request that shouldn't happen
+still fails loudly.
+
+Result: `cargo test` is 343 passing with no Docker at all,
+`cargo test -- --ignored` is the 14 that need it.
+
+### R3 · Every user compiled the sidecar themselves
+
+**Severity: R. Status: closed.**
+
+`sidecar_image::ensure_built` built `ghcr.io/mlnja/fghj-sidecar`'s Dockerfile
+locally the first time any run needed a sidecar. That Dockerfile is a
+two-stage `rust:1-bookworm` → `debian:bookworm-slim` build that compiles the
+whole crate. So a first run meant pulling a ~1.5GB toolchain image and a cold
+release build of every dependency — minutes at best, and failing entirely
+without a route to crates.io, for an image whose content depends only on the
+version of fghj the user installed.
+
+**Resolution.** `release.yml` now builds it natively on `ubuntu-latest` and
+`ubuntu-24.04-arm`, pushes each by digest, and merges them into one manifest
+list tagged with the **crate** version (not the git tag — `image_tag()` is
+built from `CARGO_PKG_VERSION`, so `Cargo.toml` is the only source that cannot
+drift from what the shipped binary asks Docker for). `ensure_built` tries
+inspect, then pull, then the local build.
+
+The local build is kept rather than replaced: `cargo run` from any working
+tree between two releases is an unreleased version with nothing to pull, and
+that is all development. `FGHJ_SIDECAR_LOCAL_BUILD=1` forces it for anyone
+editing the sidecar itself. `create-release` is gated on the manifest job,
+because a release whose sidecar is missing still *works* — the fallback
+catches it — while silently handing every new user the slow first run the job
+exists to remove. See [[in-network-sidecar]] for the full rationale, including
+why the registry is in the tag and why the architectures are built natively
+rather than under QEMU.
+
+`ci.yml` also builds the Dockerfile on every PR, on one architecture, without
+pushing: it is embedded in `fghjd` and only exercised on a fallback path, so a
+break in it would otherwise stay invisible until it reached a user.
+
+### R4 · The Docker-backed suite runs nowhere automatically
+
+**Severity: R. Status: open.**
+
+R2's resolution is honest but incomplete: fourteen tests covering exec
+streaming, BuildKit secrets, task exit-code handling, published-port
+observation and dead-container rehydration now run only when a developer
+remembers `cargo test -- --ignored`.
+
+The obvious move is a Linux job with Docker, which `ubuntu-latest` has
+preinstalled. The lib is known to compile on Linux — the sidecar image is
+proof, since it builds the whole crate on `rust:1-bookworm` — but the *tests*
+have never been run there and some may carry macOS assumptions (paths, the
+`security` CLI, `/etc/resolver`). That makes this a real piece of work rather
+than a config line, which is why it is recorded here instead of guessed at.
+
+### R5 · No license
+
+**Severity: R. Status: open.**
+
+There is no `LICENSE` file and no `license` field in `Cargo.toml`.
+`mlnja/homebrew-tap`'s formula says `license "MIT"` with a
+`# TODO: confirm — fghj has no LICENSE file / Cargo.toml license field yet`
+beside it. A tap that asserts a license the repo doesn't state is the tap
+guessing on the author's behalf.
+
+This is a decision, not an implementation: it wants an answer from whoever owns
+the project, after which it is two files.

@@ -75,6 +75,12 @@ recover a working socket even when the original hint has gone dead. On
 other platforms there's no equivalent well-known path, so a dead hint is
 simply unusable there.
 
+The agent is borrowed for `docker build` too, not just `git clone` — but by a
+different mechanism, because there is no subprocess to configure. bollard reads
+`SSH_AUTH_SOCK` out of `fghjd`'s own environment, so the path
+`live_ssh_auth_sock` returns has to be set process-globally around the build
+rather than handed to a `Command`. See [[build-inputs]].
+
 `harden_git_ssh` is applied to every git subprocess regardless — it forces
 `BatchMode=yes` and auto-accepts unknown host keys via `GIT_SSH_COMMAND`,
 so a clone either succeeds or fails fast and *visibly* (in the captured

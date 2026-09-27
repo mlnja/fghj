@@ -100,6 +100,14 @@ than logged as a clean pass. A node fghj never actually saw report healthy
 must not look identical to one it did — that difference is exactly what
 someone debugging a flaky start needs to see.
 
+A run actually carries **two** such deadlines, side by side in `RunBudget`.
+The second bounds waits on terminating nodes (`kind: "task"` — seeds,
+migrations), and it is deliberately not the same clock: running out of the
+health budget means fghj stops waiting and carries on, while running out of
+the task budget *fails* the task and blocks everything downstream of it. One
+shared deadline would let a slow healthcheck early in a run escalate into a
+hard failure somewhere else entirely. See [[terminating-nodes]].
+
 ## What is *not* guarded
 
 Stated plainly, because these are choices and not oversights:
@@ -118,5 +126,10 @@ Stated plainly, because these are choices and not oversights:
 
 `src/runs/registry.rs` (`node_locks`, `node_lock`, `commit`) ·
 `src/runs/lifecycle.rs` (the three per-node commands) ·
-`src/runs/health.rs` (`HealthBudget`, `wait_for_healthy`, `HealthOutcome`) ·
+`src/runs/health.rs` (`HealthBudget`, `RunBudget`, `wait_for_healthy`,
+`HealthOutcome`, `wait_for_exit`, `TaskOutcome`) ·
 `src/runs/orchestrate.rs` (one budget per whole-run call)
+
+A version of this page rewritten for a reader who has not read `src/` lives
+at `docs/src/content/docs/concepts/concurrency-model.md`; this one stays the
+durable record.

@@ -70,6 +70,7 @@ mod tests {
     /// after every one of a run's containers was removed out-of-band would
     /// keep presenting it to the UI as a run with zero containers forever.
     #[tokio::test]
+    #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
     async fn drops_dead_containers_and_prunes_now_empty_runs() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());

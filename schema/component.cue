@@ -1,9 +1,33 @@
 package fghj
 
+// One `--mount=type=secret` source for a BuildKit build. `id` is what the
+// Dockerfile names (`RUN --mount=type=secret,id=npmrc`); `file` is where the
+// bytes come from, resolved against the repo checkout root exactly like
+// `#Volume`'s bind `host` and `#RunOptions.env_file`.
+//
+// There is deliberately no `env:` variant, which BuildKit itself supports:
+// `fghjd` is a root daemon with no access to the developer's shell
+// environment, so there is no env to read one from. That is the same gap
+// `concepts/AUDIT.md` E2 records, and it has to close first.
+#BuildSecret: {
+	id:   string & =~"^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+	file: string
+}
+
 #Build: {
 	context:    string | *"."
 	dockerfile: string | *"Dockerfile"
 	args:       {[string]: string} | *{}
+	// Which stage of a multi-stage Dockerfile to build, `docker build
+	// --target`. Omitted builds the final stage, as Docker does.
+	target?: string & =~"^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+	// Forward the workspace owner's ssh-agent into the build as BuildKit's
+	// `default` socket, for a Dockerfile doing `RUN --mount=type=ssh` —
+	// cloning a private sibling repo, a private Go module, a private Cargo
+	// registry. The same agent fghj already forwards to `git clone` (see
+	// `concepts/persistence-and-workspace-store.md`).
+	ssh: bool | *false
+	secrets: [...#BuildSecret] | *[]
 }
 
 // A single declared container port and its role. `primary` (at most one per
@@ -130,7 +154,13 @@ package fghj
 	// hostname (exact match) or `{host: ..., wildcard: true}` (also matches
 	// every subdomain of it). See `#HostAlias`.
 	additional_hosts: [...#HostAlias] | *[]
-	dependencies: [...#Dependency]
+	// Defaulted to empty like every other list field here, because the Rust
+	// side defaults it too (`#[serde(default)]` on `resolver::Service`): a
+	// leaf service that depends on nothing is an ordinary, valid config, and
+	// leaving this non-concrete would make `cue vet -c` reject a file the
+	// daemon happily accepts. `#Flow.dependencies` below is deliberately the
+	// other way round — a flow with no dependencies describes no journey.
+	dependencies: [...#Dependency] | *[]
 }
 
 // A user-facing journey through the graph, e.g. "simple login flow". Any repo

@@ -28,9 +28,11 @@ pub fn write_component(workspace: &Path, local_path: &str, service_yaml: &str) {
     .unwrap();
 }
 
+mod build;
 mod dependencies;
 mod domains;
 mod hosts;
 mod ports;
 mod run_options;
+mod tasks;
 mod volumes;

@@ -14,7 +14,9 @@ pub mod sync_status;
 pub mod volume;
 pub mod workspace;
 
-pub use container::{ContainerDesired, ContainerInfo, ContainerObserved, PendingAction, PortRoute};
+pub use container::{
+    ContainerDesired, ContainerInfo, ContainerObserved, NodeCondition, PendingAction, PortRoute,
+};
 pub use run::{RunCreateError, RunSpec, RunState};
 pub use sync_status::SyncStatus;
 pub use volume::{VolumeDesired, VolumeInfo, VolumeObserved};

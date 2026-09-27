@@ -72,6 +72,12 @@ pub const ADD_COLUMN_MIGRATIONS: &[&str] = &[
     // were the same column (`status`), so a restored container's desired
     // state had to be guessed from its last observed one.
     "ALTER TABLE containers ADD COLUMN desired_running INTEGER",
+    // Whether this container's desired terminal state is "exited 0" rather
+    // than "running", and the code it exited with. Without them a restored
+    // task would read back as a service that had crashed — see
+    // `state::ContainerDesired::terminating`.
+    "ALTER TABLE containers ADD COLUMN terminating INTEGER",
+    "ALTER TABLE containers ADD COLUMN exit_code INTEGER",
 ];
 
 pub fn init(conn: &Connection) -> Result<()> {

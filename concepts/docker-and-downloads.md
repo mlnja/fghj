@@ -15,7 +15,12 @@ is lower-level than `docker build`/`docker run`:
 - **`build_image`** has to hand the Docker daemon a tar stream of the build
   context itself — there's no "build from this directory" call at the API
   level. It builds that tar in a blocking task (`tar::Builder::append_dir_all`)
-  before ever touching the async `docker.build_image` call.
+  before ever touching the async `docker.build_image` call. It then picks one
+  of *two* builders off that same tar: the classic one, or BuildKit when the
+  build declares secrets or ssh forwarding. See [[build-inputs]] for why the
+  split exists rather than one uniform path, and for the two things bollard's
+  BuildKit driver forces on the caller (a process-global `SSH_AUTH_SOCK` and a
+  `!Send` solve future).
 - **`run_container`** has to construct the create/start sequence manually,
   and — because a failed `start_container` can leave a container behind in
   `Created` state — always best-effort force-removes on any error in that
@@ -74,6 +79,19 @@ scenario the whole id-qualification scheme exists to prevent, in the one
 namespace that wasn't qualified, and the only one with a destructive failure
 mode. See `concepts/AUDIT.md` B3.
 
+B3's fix closed the *cross-repo* half of that hazard and left the
+*cross-run* half open, which is worth stating plainly rather than leaving as
+an implication of the paragraph above. `scope: "stable"` means one volume
+across every run **including two runs that are up at the same time** — the
+default run's Postgres and a review run's Postgres mounting one data
+directory is again two engines on one directory. The per-node locks in
+[[concurrency-model]] don't help: they're keyed by `(run_id, node_id)`, so
+two runs are different keys by construction. Nothing checks whether another
+run already has the volume mounted, and none of the three plausible fixes is
+obviously right (see `concepts/AUDIT.md` B16, which records all three). It is
+documented where an author will meet it — the `.fghj.yaml` reference's volume
+table and tutorial chapter 6 — and not enforced anywhere.
+
 Sharing is still expressible, now as `#Volume.shared: true`, which drops the
 node-id qualification so the label alone decides identity. Reach for it
 rarely. The usual reason to want it — several services behind one database —
@@ -100,6 +118,77 @@ default run's own `"run"`-scoped volumes derive the exact same name on
 every start (the run id only gets folded in for a *named* run), so deleting
 them on stop would wipe data a subsequent default-run start expects to
 still be there.
+
+## Stopping a container is not the same as deleting it
+
+Every teardown path in `fghj` goes through `docker::stop_and_remove`: the
+whole-run `RunRegistry::stop`, the per-node `restart_container`, `start`'s
+own rollback when a later node fails, and the sidecar. For a long time that
+function was a single call — `remove_container` with `force: true`.
+
+`force: true` is SIGKILL with no grace period at all. That is defensible for
+a container you are deleting *because* it is broken, and indefensible for
+every other caller on that list: stopping a run, or restarting one node, is
+an ordinary action a user takes several times a day. A dev Postgres with an
+hour of seeded state in a `scope: stable` volume was being killed mid-write
+by a routine click — which directly contradicts what a stable volume
+promises. The whole point of the scope distinction above is that some data
+outlives the run; killing the writer without warning throws that away one
+`fsync` at a time.
+
+So `stop_and_remove` is now two calls: stop, then remove. The remove still
+passes `force`, because a container that somehow survived the stop must not
+hold its name, network or volumes hostage from the next start — but by then
+the process has already had its chance to exit cleanly.
+
+### Why the policy lives on the container, not on the call
+
+The signal and the grace period are declarable — `#RunOptions.stop_signal`
+and `#RunOptions.stop_grace_period`, available on `#Service`,
+`#BackingDependency` and `#Task` alike. The obvious implementation is to
+pass them to each `stop_container` call. fghj does the opposite: it stamps
+them onto the container at **create** time, as
+`ContainerCreateBody.StopSignal` / `StopTimeout`, and then calls
+`stop_container` with no options at all.
+
+The reason is that the set of things that stop a container is larger than the
+set of things holding a `Node`:
+
+- an **orphan** — the node was deleted from `.fghj.yaml`, so there is no
+  config left to read a grace period out of, but the container is still
+  running and will still eventually be stopped;
+- a container that **outlived a daemon restart**, or whose SQLite row is
+  gone;
+- `docker stop` typed **by hand**, or Docker Desktop's stop button, or
+  `docker compose down` against the project label fghj sets;
+- fghj code added later that stops a container from a path nobody thought to
+  thread the options through.
+
+Recording the policy on the container makes every one of those honour it,
+including the ones that are not fghj's code. This is the same reasoning as
+the `com.docker.compose.*` labels a few sections up: state the intent where
+Docker itself will act on it, rather than where only fghj can see it.
+
+The cost is that changing either knob in `.fghj.yaml` does nothing until the
+container is recreated. That is drift in the exact sense
+[[config-drift]] means, so both fields are in `spec_hash` — see
+`changing_a_stop_knob_changes_the_hash`.
+
+The grace period defaults to Docker's own 10 seconds, so a config that says
+nothing about stopping behaves exactly as it did before the fields existed.
+The run's sidecar is the one container that asks for *less* (2s): it holds no
+state worth flushing, since it is rebuilt from `routes.json` on the next
+start, and a whole-run teardown should not spend ten seconds waiting on a
+proxy.
+
+`stop_signal` is validated in the resolver rather than left to Docker.
+`resolver::validate::check_stop_signal` requires the `SIG`-prefixed
+uppercase form and raises a **blocking** warning otherwise. Docker itself
+would also accept `TERM` or a bare number, and `#RunOptions.stop_signal`'s
+CUE pattern does not — so rather than have the two disagree, the Rust check
+enforces exactly what CUE accepts and the error names the field and the fix
+("write SIGTERM"), instead of Docker's own bare `invalid signal`. See
+[[config-language]] on which of the two is allowed to be stricter.
 
 ## Two log-reading modes
 
@@ -170,7 +259,8 @@ resolver used to have a second privilege-dropped clone path,
 
 ## Status
 
-Implemented: `src/docker.rs` (build/run/inspect/logs over `bollard`),
+Implemented: `src/docker.rs` (build/run/inspect/logs/`stop_and_remove` over
+`bollard`),
 `src/downloads.rs` (`DownloadRegistry`, single-node/pull-all/pull-flow
 jobs, log streaming). `daemon.rs` exposes all of it over HTTP (see
 [[control-api-and-cli]]); `OperationsDrawer.svelte` and `Drawer.svelte` are

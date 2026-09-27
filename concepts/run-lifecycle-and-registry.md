@@ -24,8 +24,9 @@ unnecessarily or silently fail to start what the user asked for:
   reproducible from a clean slate every time you hit "start" again.
 - **`ensure_running(graph, flow)`** — "top up the one shared default
   environment so everything reachable from `flow` (or the whole graph, if
-  `flow` is `None`) is running; never touch a container that's already
-  alive." This backs both "Start default environment"
+  `flow` is `None`) is running; leave alone any container that is already
+  alive *and still matches its config*." This backs both "Start default
+  environment"
   (`RunControls.svelte`'s `startDefault`) and "Run flow"
   (`Header.svelte`'s `runFlow`, on the Actual tab) — both are just different
   scopes of the same idempotent top-up. `fghj` models **one** shared set of
@@ -39,6 +40,15 @@ unnecessarily or silently fail to start what the user asked for:
   to the DB after *every* node started, not just at the end, so a failure
   partway through a multi-node top-up doesn't lose track of the containers
   that did start successfully.
+
+  "Already alive" is necessary but not sufficient to skip a node —
+  `runs::orchestrate::top_up_may_skip` holds the three conditions, and the
+  third is that the node's config hasn't drifted since it was started. A
+  top-up is an explicit user action, and the expectation people bring to one
+  is `compose up`'s: my edits take effect. Note the deliberate asymmetry with
+  the reconciler below, which sees the same drift verdict and never acts on
+  it — see [[config-drift]] for why "who asked" is the distinction that
+  matters.
 
 `daemon::post_runs` is the single HTTP entry point that decides which of
 these two to call, purely based on whether the request specified a
@@ -67,6 +77,14 @@ So the error carries the progress: `state::RunCreateError` is
 `{ message, partial: Option<RunState> }`, `ensure_running` fills `partial` at
 the point of failure, and the reducer adopts it. `start` leaves it `None` —
 it genuinely has nothing outstanding. One type, two honest answers.
+
+Stopping the loop on a node error is also what gives a **terminating node**
+its teeth: a task (a seed, a migration) is not considered started until its
+container has exited 0, and it is ordered before the service that owns it, so
+a failed migration leaves everything downstream of it unstarted rather than
+running against an unmigrated database. See [[terminating-nodes]] — including
+why a finished task deliberately reads as `desired.running == false` and so
+drops out of the liveness top-up entirely.
 
 ### Blocking warnings refuse the start
 
@@ -173,9 +191,43 @@ selectable, and therefore stoppable, after the declaration that created it is
 gone. Without that, the container would be running and unreachable from the only
 UI that can stop it.
 
-One deliberate asymmetry: drift is keyed on the resolved spec, so a *new commit
-on the same branch* is not `Drifted` (the image tag doesn't change). Only a
-config change or a branch switch is caught. See `concepts/AUDIT.md` B13.
+Drift is keyed on the resolved spec, which for a built node now includes the
+checkout's HEAD commit and its dirty bit — so a new commit on the same branch
+*is* `Drifted`, even though the image tag `fghj/<id>:<branch>` is unchanged.
+See [[config-drift]] for the whole hash and what it still misses.
+
+### The other vanishing side: asked to be up, observed down
+
+An orphan is the *desired* side disappearing. The mirror case is the desired
+side being perfectly intact and the observed side falling away:
+`desired.running == true` alongside an `exited` (or `dead`, or `removed`)
+observation. It is reachable in the most ordinary way possible — the process
+crashed, or someone ran `docker rm` — and, consistent with everything above,
+**nothing converges it**. Only an explicit Start does.
+
+That needed the same treatment `Orphaned` got, for the same reason: read-only
+by default only works if the user is *told*, and for a long time this pair
+rendered identically to a container the user had deliberately stopped. Both
+said "stopped". One of those is a state somebody chose and the other is a
+service that is down and staying down.
+
+`state::NodeCondition` is the vocabulary — one derived word for what a
+`desired`/`observed` pair means, computed by `ContainerInfo::condition` and
+serialized alongside the pair itself so the UI reads it rather than
+re-deriving it. `Crashed` is the variant the enum exists for. `Restarting`
+and `Paused` are there for a smaller version of the same problem: both are
+real Docker states, both mean the container is not serving (every route
+lookup filters on `status == "running"`), and before this both read as
+"stopped" too.
+
+It is derived, never stored, and that is deliberate — a cached reading of two
+fields sitting right next to it is a bug waiting for the one code path that
+sets `status` without updating it. `ContainerInfo` has a hand-written
+`Serialize` for exactly this reason, which is the only thing in the codebase
+that is not `#[derive]`d there.
+
+Note what did *not* change: nothing acts on `Crashed`. `AutoHeal` is still
+constructed nowhere. The gap was never the policy, it was the vocabulary.
 
 ## Reconciling at startup, not just steady-state
 

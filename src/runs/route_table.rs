@@ -138,6 +138,7 @@ mod tests {
                 additional_hosts: Vec::new(),
                 status_port: Some("8080".to_string()),
                 config_hash: String::new(),
+                terminating: false,
             },
             observed: ContainerObserved::default(),
             pending_action: None,

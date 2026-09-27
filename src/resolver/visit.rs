@@ -5,9 +5,26 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use super::config::ComponentConfig;
-use super::git::{git_remote_and_branch, git_status_dirty};
-use super::graph::{Edge, Node, NodeBuild};
+use super::git::{git_head_sha, git_remote_and_branch, git_status_dirty};
+use super::graph::{Edge, Node, NodeBuild, NodeBuildSecret};
 use super::warning::Warning;
+
+/// One unresolved `#Task.after` entry, parked until every node exists.
+///
+/// `after` names a *sibling dependency of the same owning service*, by
+/// whatever that sibling calls itself. Which id that is depends on what
+/// kind of dependency it turns out to be — `{target}.{owner_id}` for a
+/// sibling backing dependency or task, `{target}.{local_path}` for a
+/// sibling `kind: service` — and the sibling may not have been visited when
+/// the task is. So resolution waits for the one pass in `resolve_universe`
+/// that runs with the whole node set in hand, the same place dangling
+/// `shared-backing` references are caught.
+pub(crate) struct PendingAfter {
+    pub(crate) task_id: String,
+    pub(crate) owner_id: String,
+    pub(crate) local_path: String,
+    pub(crate) target: String,
+}
 
 pub struct ResolveCtx<'a> {
     pub(crate) workspace: &'a Path,
@@ -25,6 +42,9 @@ pub struct ResolveCtx<'a> {
     /// local paths already fully expanded, to avoid re-walking / infinite loops.
     pub(crate) visited: HashSet<String>,
     pub(crate) warnings: Vec<Warning>,
+    /// `#Task.after` entries awaiting the whole-graph resolution pass — see
+    /// [`PendingAfter`].
+    pub(crate) pending_after: Vec<PendingAfter>,
 }
 
 impl<'a> ResolveCtx<'a> {
@@ -59,6 +79,7 @@ impl<'a> ResolveCtx<'a> {
                 let dir = self.workspace.join(local_path);
                 let (repo, branch) = git_remote_and_branch(&dir);
                 let dirty = git_status_dirty(&dir);
+                let head = git_head_sha(&dir);
                 Node {
                     id: service_id.clone(),
                     label: name.clone(),
@@ -71,11 +92,22 @@ impl<'a> ResolveCtx<'a> {
                     domain: String::new(),
                     downloaded: true,
                     dirty,
+                    head,
                     flows: Vec::new(),
                     build: service.build.as_ref().map(|b| NodeBuild {
                         context: b.context.clone(),
                         dockerfile: b.dockerfile.clone(),
                         args: b.args.clone(),
+                        target: b.target.clone(),
+                        ssh: b.ssh,
+                        secrets: b
+                            .secrets
+                            .iter()
+                            .map(|s| NodeBuildSecret {
+                                id: s.id.clone(),
+                                file: s.file.clone(),
+                            })
+                            .collect(),
                     }),
                     ports: service.ports.clone(),
                     environment: service.environment.to_pairs(),
@@ -95,6 +127,8 @@ impl<'a> ResolveCtx<'a> {
                         .collect(),
                     env_file: service.env_file.clone(),
                     restart: service.restart.clone(),
+                    stop_signal: service.stop_signal.clone(),
+                    stop_grace_period: service.stop_grace_period,
                     user: service.user.clone(),
                     working_dir: service.working_dir.clone(),
                     labels: service.labels.clone(),
@@ -104,6 +138,7 @@ impl<'a> ResolveCtx<'a> {
                     extra_hosts: service.extra_hosts.clone(),
                     healthcheck: service.healthcheck.clone(),
                     platform: service.platform.clone(),
+                    run_policy: None,
                 }
             });
         }
@@ -129,11 +164,20 @@ impl<'a> ResolveCtx<'a> {
     /// if that's ambiguous (multiple services, no `wanted`), the repo
     /// declares none at all, or `wanted` names one that doesn't exist —
     /// same "warn, don't panic" style as `check_ports`.
+    ///
+    /// `disambiguator` is the name of the field the *caller's* own schema
+    /// offers for saying which service is meant — `services:` on a
+    /// `kind: service` dependency (a list, one entry per service wanted),
+    /// `service:` on a `#Flow` (a single name). Passed in rather than
+    /// hardcoded because this function can't see which of the two it is
+    /// resolving for, and naming the wrong field sends the reader looking
+    /// for a key that doesn't exist on the block they're editing.
     pub(crate) fn visit_local_service(
         &mut self,
         local_path: &str,
         component: &ComponentConfig,
         wanted: Option<&str>,
+        disambiguator: &str,
     ) -> Option<String> {
         let ids = self.visit_local_services(local_path, component);
         let name = match wanted {
@@ -148,7 +192,7 @@ impl<'a> ResolveCtx<'a> {
                 }
                 _ => {
                     self.warnings.push(Warning::blocking(format!(
-                        "'{local_path}' declares multiple services ({}); specify which one with `service:`",
+                        "'{local_path}' declares multiple services ({}); specify which one with `{disambiguator}`",
                         ids.keys().cloned().collect::<Vec<_>>().join(", ")
                     )));
                     return None;

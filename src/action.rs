@@ -62,6 +62,13 @@ pub enum Action {
         /// (postgres, mysql) with no HTTP surface still needs its port
         /// drift visible even though it has no `status_port` of its own.
         ports: BTreeMap<String, Option<u16>>,
+        /// What the container exited with, if it has. Only ever the
+        /// *outcome* for a terminating node (see
+        /// `state::ContainerDesired::terminating`) — for a service it is one
+        /// more detail of a crash — but it is observed the same way for
+        /// both, because nothing doing the observing holds the graph that
+        /// would say which kind this is.
+        exit_code: Option<i64>,
     },
     /// Reported by `effects::docker::converge` once a start/stop/delete call
     /// it triggered actually finishes. Carries the freshly re-observed

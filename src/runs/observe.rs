@@ -45,9 +45,9 @@ impl RunRegistry {
                     Some(p) => docker::inspect_status(&self.docker, name, p).await,
                     None => docker::inspect_status(&self.docker, name, "").await,
                 };
-                let (status, published_port) = match inspected {
-                    Ok(Some(s)) => (s.status, s.published_port),
-                    _ => ("removed".to_string(), None),
+                let (status, published_port, exit_code) = match inspected {
+                    Ok(Some(s)) => (s.status, s.published_port, s.exit_code),
+                    _ => ("removed".to_string(), None, None),
                 };
 
                 // Re-inspects every declared port, not just `status_port` —
@@ -73,6 +73,11 @@ impl RunRegistry {
                         status,
                         published_port,
                         ports,
+                        // Re-read rather than carried forward: a task fghj
+                        // never waited on (one Docker's own restart revived,
+                        // or one started before this `fghjd` lifetime) only
+                        // gets an exit code at all by being inspected here.
+                        exit_code,
                         // Neither the container's IP nor its config-drift
                         // verdict is something this inspection looks at;
                         // carrying the previous readings forward keeps this
@@ -238,6 +243,7 @@ mod tests {
     /// here — `state::query::live_host_port` joins it against these
     /// observed ports at read time, which that module's own tests cover.
     #[tokio::test]
+    #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
     async fn inspect_reports_the_real_port_after_docker_moves_the_published_one() {
         let container = DriftingPortContainer::start();
         let docker = Arc::new(crate::daemon::connect_docker().expect("docker client"));
@@ -270,6 +276,7 @@ mod tests {
                 additional_hosts: Vec::new(),
                 status_port: Some("8080".to_string()),
                 config_hash: String::new(),
+                terminating: false,
             },
             observed: ContainerObserved {
                 status: "running".to_string(),

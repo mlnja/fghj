@@ -52,6 +52,8 @@ services:
     platform: linux/arm64
     command: ["npm", "run", "dev"]
     restart: unless-stopped
+    stop_signal: SIGQUIT
+    stop_grace_period: 30
     user: "1000:1000"
     working_dir: /app
     labels:
@@ -81,6 +83,8 @@ services:
 | `platform` | string, optional | Pins the platform (`os[/arch[/variant]]`, e.g. `linux/arm64`) passed to `docker build --platform`, for cross-compiling this service's image to a specific architecture. Unset (the default) builds for the host's own platform. |
 | `command` | list of strings | Overrides the image's default `CMD`, Compose-`command`-style. Empty (the default) leaves the image's own `CMD`/`ENTRYPOINT` untouched. |
 | `restart` | `"no"` \| `"always"` \| `"on-failure"` \| `"unless-stopped"` | Compose-equivalent restart policy. Defaults to `"no"` — a stopped container stays stopped; `fghj daemon`'s own `ensure_running` is the usual way a container comes back, not Docker's own restart machinery. |
+| `stop_signal` | string matching `SIG[A-Z0-9]+`, optional | The signal Docker sends to stop this container — Compose's `stop_signal`. Unset (the default) uses whatever the image declares via `STOPSIGNAL`, or SIGTERM. Override it only for an image whose process listens for something else (nginx's graceful "quit" is `SIGQUIT`). |
+| `stop_grace_period` | non-negative integer (seconds) | How long Docker waits after the stop signal before following up with `SIGKILL`. Defaults to `10`, matching Docker's own. Raise it for anything that needs to finish writing before it dies — a database flushing to a `scope: stable` volume is the case this exists for. |
 | `user` | string, optional | Overrides the image's default container user, e.g. `"1000:1000"` or `"postgres"`. |
 | `working_dir` | string, optional | Overrides the image's default working directory. |
 | `labels` | map of string→string | Extra container labels, merged under fghj's own `com.docker.compose.*` labels — fghj's own always win on a key conflict. |
@@ -241,6 +245,17 @@ this way: a `"stable"` volume's entire point is to persist across every
 run, and the default run's own `"run"`-scoped volumes get the exact same
 derived name on every start, so stopping and restarting the default run
 must leave their data in place.
+
+:::caution[`scope: "stable"` plus a second run]
+`"stable"` means *one* volume, shared by every run — including two runs that
+are up at the same time. Two Postgres containers (the default run's and a
+review run's) mounting one `pgdata` is two engines on one data directory,
+which Postgres does not survive gracefully. Nothing stops you: fghj neither
+warns nor serialises access. Keep `scope: "stable"` for data that tolerates
+concurrent readers, or accept that you'll run one run at a time for that
+node. [Tutorial chapter 6](/tutorial/06-two-runs/) walks through this and the
+other two knobs that behave differently once a second run exists.
+:::
 
 ## Additional hosts
 
@@ -464,7 +479,7 @@ bind to the same instance via `kind: shared-backing` below.
 | `command` | Same shape as `service.command` — overrides the image's default `CMD`, e.g. to pass extra startup flags to a stock database image. |
 | `platform` | Pins the image's platform (`os[/arch[/variant]]`, e.g. `linux/amd64`) — for a backing image only published for one architecture, so Docker's platform-aware pull/lookup gets the right one. |
 | `env_file` | Same shape as `service.env_file`, but resolved differently: since a backing dependency has no checkout of its own, each path resolves against the *declaring* service's checkout root instead — the same rule Compose uses, resolving `env_file` against the compose file's own directory regardless of `build` vs `image`. |
-| `restart` / `user` / `working_dir` / `labels` / `cap_add` / `cap_drop` / `privileged` / `extra_hosts` / `healthcheck` | Same shape and meaning as the equally-named `service.*` fields above. |
+| `restart` / `stop_signal` / `stop_grace_period` / `user` / `working_dir` / `labels` / `cap_add` / `cap_drop` / `privileged` / `extra_hosts` / `healthcheck` | Same shape and meaning as the equally-named `service.*` fields above — they come from one shared `#RunOptions` definition, not two parallel ones. A stock database image is the most likely place you'll actually want `stop_grace_period`. |
 | `volumes` | Same shape as `service.volumes` — see [Volumes](#volumes). A volume's own `scope` (default `"run"`) governs its lifecycle independently of this backing dependency's `domain_scope`; a named volume here (like `pgdata` above) is what makes the data survive a restart. |
 
 ### `kind: shared-backing`

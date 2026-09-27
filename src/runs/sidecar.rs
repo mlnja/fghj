@@ -91,6 +91,12 @@ impl RunRegistry {
                 service_name: "fghj-sidecar",
                 binds: &binds,
                 restart_policy: "unless-stopped",
+                // The sidecar holds no state worth flushing — it is a proxy
+                // and a resolver, both rebuilt from `routes.json` on the next
+                // start — so it gets a short grace period rather than the
+                // 10s default, to keep teardown of a whole run snappy.
+                stop_signal: None,
+                stop_grace_period: 2,
                 user: None,
                 working_dir: None,
                 labels: &BTreeMap::new(),

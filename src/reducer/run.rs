@@ -161,6 +161,11 @@ fn start_node(
                         additional_hosts: Vec::new(),
                         status_port: None,
                         config_hash: String::new(),
+                        // A placeholder for a node nothing has resolved yet
+                        // — `start_node` overwrites the whole `desired` from
+                        // the real graph when it reports back, and that is
+                        // the only place `terminating` is ever decided.
+                        terminating: false,
                     },
                     observed: ContainerObserved::default(),
                     pending_action: Some(PendingAction::Starting),
@@ -205,6 +210,7 @@ mod tests {
                 additional_hosts: vec![],
                 status_port: None,
                 config_hash: "hash".into(),
+                terminating: false,
             },
             observed: ContainerObserved::default(),
             pending_action: None,

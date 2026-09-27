@@ -161,6 +161,7 @@ mod tests {
                 additional_hosts: vec![],
                 status_port: None,
                 config_hash: "hash".into(),
+                terminating: false,
             },
             observed: ContainerObserved {
                 status: status.to_string(),

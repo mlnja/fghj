@@ -118,9 +118,7 @@ mod tests {
     async fn empty_registry() -> (tempfile::TempDir, RunRegistry) {
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
-        let docker = Arc::new(
-            bollard::Docker::connect_with_local_defaults().expect("docker client construction"),
-        );
+        let docker = Arc::new(crate::docker::undialled_client());
         let registry = RunRegistry::new(tmp.path().to_path_buf(), db, docker);
         (tmp, registry)
     }

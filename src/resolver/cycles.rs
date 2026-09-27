@@ -26,14 +26,21 @@ use super::warning::Warning;
 /// depend on each other so the message reads as the loop it is
 /// (`a -> b -> c -> a`) rather than as an unordered set.
 ///
-/// Only `depends-on`/`owns` edges participate: `shared-backing` is a
-/// cross-reference, not a structural requirement, and including it would
-/// report cycles that never affect start order (which is derived from the
-/// same two kinds — see `runs::topological_start_order`).
+/// Only the edge kinds that constrain *start order* participate:
+/// `depends-on`, `owns`, and `after` (a `#Task`'s ordering edge to a
+/// sibling). `shared-backing` is excluded as a cross-reference rather than
+/// a structural requirement.
+///
+/// An `after` cycle has to be caught here because nothing downstream
+/// catches it: `runs::topological_start_order` deliberately cannot fail —
+/// it appends whatever is left in stable sorted order so a cyclic
+/// `.fghj.yaml` still starts *something* — so a task ordered after a task
+/// ordered after it would silently start in an arbitrary order rather than
+/// reporting the contradiction the author wrote.
 pub(crate) fn check_cycles(edges: &[Edge]) -> Vec<Warning> {
     let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
     for edge in edges {
-        if edge.kind == "depends-on" || edge.kind == "owns" {
+        if edge.kind == "depends-on" || edge.kind == "owns" || edge.kind == "after" {
             adjacency
                 .entry(edge.from.as_str())
                 .or_default()

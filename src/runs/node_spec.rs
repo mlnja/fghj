@@ -18,6 +18,103 @@ use crate::util::label::sanitize_label;
 use super::registry::RunRegistry;
 
 impl RunRegistry {
+    /// Builds `tag` from `build`, rooted at `repo_root`, recording the
+    /// attempt into `node_id`'s event stream so a failing build reads as a
+    /// failing step rather than an opaque start error.
+    ///
+    /// Shared by the service arm of `resolve_node_spec` and its image-less
+    /// task arm, which deliberately build the identical image under the
+    /// identical tag — see that arm for why.
+    async fn build_node_image(
+        &self,
+        run_id: &str,
+        node_id: &str,
+        repo_root: &Path,
+        build: &crate::resolver::NodeBuild,
+        tag: &str,
+        platform: Option<&str>,
+    ) -> Result<()> {
+        let build_dir = repo_root.join(&build.context);
+        self.record_event(
+            run_id,
+            node_id,
+            "start",
+            "building image",
+            "running",
+            Some(tag.to_string()),
+        )
+        .await;
+        let secrets = match resolve_build_secrets(repo_root, &build.secrets) {
+            Ok(secrets) => secrets,
+            Err(e) => {
+                self.record_event(
+                    run_id,
+                    node_id,
+                    "start",
+                    "building image",
+                    "error",
+                    Some(format!("{e:#}")),
+                )
+                .await;
+                return Err(e);
+            }
+        };
+        // Resolved here rather than passed in because the owner is ambient
+        // daemon state (`fghj wire`), not a property of the run — and
+        // re-derived on every build so a restarted agent is picked up, the
+        // same reason `WorkspaceOwner::apply_to_command` doesn't trust the
+        // stored path either.
+        let ssh_auth_sock = if build.ssh {
+            let owner = self.db.clone().load_owner().await.ok().flatten();
+            match owner.and_then(|o| o.live_ssh_auth_sock()) {
+                Some(sock) => Some(sock),
+                None => {
+                    let e = anyhow::anyhow!(
+                        "build.ssh is set but no live ssh-agent was found for the workspace owner; \
+                         run `fghj wire` from a shell with a running agent"
+                    );
+                    self.record_event(
+                        run_id,
+                        node_id,
+                        "start",
+                        "building image",
+                        "error",
+                        Some(format!("{e:#}")),
+                    )
+                    .await;
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
+        let opts = docker::BuildOpts {
+            context_dir: &build_dir,
+            dockerfile: &build.dockerfile,
+            tag,
+            platform,
+            args: &build.args,
+            target: build.target.as_deref(),
+            secrets: &secrets,
+            ssh_auth_sock: ssh_auth_sock.as_deref(),
+        };
+        if let Err(e) = docker::build_image(&self.docker, &opts).await {
+            self.record_event(
+                run_id,
+                node_id,
+                "start",
+                "building image",
+                "error",
+                Some(format!("{e:#}")),
+            )
+            .await;
+            return Err(e);
+        }
+        self.record_event(run_id, node_id, "start", "building image", "ok", None)
+            .await;
+        Ok(())
+    }
+
     /// The pure, side-effect-free half of resolving a node's config — image
     /// tag, env, port list, volume binds, domain aliases — shared between
     /// `start_node` (`side_effects: true`, which then actually builds the
@@ -113,11 +210,76 @@ impl RunRegistry {
                     None => bail!("backing node {} has no image", node.id),
                 }
             }
+            "task" => {
+                // Same "no checkout of its own" situation as a backing
+                // dependency, and resolved the same way: through the graph's
+                // `owns` edge back to the service that declared it inline.
+                let owner = graph
+                    .edges
+                    .iter()
+                    .find(|e| e.kind == "owns" && e.to == node.id)
+                    .and_then(|e| graph.nodes.iter().find(|n| n.id == e.from));
+                if let Some(local_path) = owner.and_then(|o| o.local_path.as_ref()) {
+                    volume_base = Some(self.workspace.join(local_path));
+                }
+                match node.image.clone() {
+                    Some(img) => img,
+                    None => {
+                        // The common case: a migration is the owning
+                        // service's own code run with a different command,
+                        // so it runs the owning service's image — built
+                        // under the *owner's* tag rather than one of its
+                        // own. The two builds are identical by construction
+                        // (the task inherited `build` wholesale from the
+                        // owner — see `resolver::visit_task_dependency`), and
+                        // a task starts *before* its owner, so a separate
+                        // tag would mean building the same image twice per
+                        // run under two names.
+                        let Some(owner) = owner else {
+                            bail!(
+                                "task node {} has no owning service to inherit an image from",
+                                node.id
+                            );
+                        };
+                        let (Some(build), Some(local_path)) =
+                            (node.build.clone(), owner.local_path.clone())
+                        else {
+                            bail!(
+                                "task node {} declares no image and {} has no build to inherit",
+                                node.id,
+                                owner.id
+                            );
+                        };
+                        let branch = owner.branch.clone().unwrap_or_else(|| "local".to_string());
+                        let tag = format!(
+                            "fghj/{}:{}",
+                            sanitize_label(&owner.id),
+                            sanitize_label(&branch)
+                        );
+                        let repo_root = self.workspace.join(&local_path);
+                        if side_effects {
+                            self.build_node_image(
+                                run_id,
+                                &node.id,
+                                &repo_root,
+                                &build,
+                                &tag,
+                                node.platform.as_deref(),
+                            )
+                            .await?;
+                        }
+                        tag
+                    }
+                }
+            }
             _ => {
                 let build = node.build.clone().unwrap_or(crate::resolver::NodeBuild {
                     context: ".".to_string(),
                     dockerfile: "Dockerfile".to_string(),
                     args: BTreeMap::new(),
+                    target: None,
+                    ssh: false,
+                    secrets: Vec::new(),
                 });
 
                 let local_path = match node.local_path.clone() {
@@ -133,38 +295,15 @@ impl RunRegistry {
                 let repo_root = self.workspace.join(&local_path);
                 volume_base = Some(repo_root.clone());
                 if side_effects {
-                    let build_dir = repo_root.join(&build.context);
-                    self.record_event(
+                    self.build_node_image(
                         run_id,
                         &node.id,
-                        "start",
-                        "building image",
-                        "running",
-                        Some(tag.clone()),
-                    )
-                    .await;
-                    if let Err(e) = docker::build_image(
-                        &self.docker,
-                        &build_dir,
-                        &build.dockerfile,
+                        &repo_root,
+                        &build,
                         &tag,
                         node.platform.as_deref(),
                     )
-                    .await
-                    {
-                        self.record_event(
-                            run_id,
-                            &node.id,
-                            "start",
-                            "building image",
-                            "error",
-                            Some(format!("{e:#}")),
-                        )
-                        .await;
-                        return Err(e);
-                    }
-                    self.record_event(run_id, &node.id, "start", "building image", "ok", None)
-                        .await;
+                    .await?;
                 }
                 tag
             }
@@ -289,5 +428,85 @@ impl RunRegistry {
             binds,
             env,
         }))
+    }
+}
+
+/// Turns `#Build.secrets` into the `(id, absolute path)` pairs
+/// `docker::BuildOpts` wants, resolving each `file` against the repo checkout
+/// root exactly like a bind mount's `host` side.
+///
+/// A missing file is an error rather than an empty secret, because the
+/// failure it would otherwise produce happens *inside* the Dockerfile — a
+/// `RUN` that reads an empty `/run/secrets/npmrc` and fails with a 401 from
+/// some registry, which is a long way from "you forgot to create the file".
+fn resolve_build_secrets(
+    repo_root: &Path,
+    secrets: &[crate::resolver::NodeBuildSecret],
+) -> Result<Vec<(String, std::path::PathBuf)>> {
+    secrets
+        .iter()
+        .map(|secret| {
+            let path = repo_root.join(&secret.file);
+            if !path.is_file() {
+                bail!(
+                    "build secret {} points at {}, which is not a file",
+                    secret.id,
+                    path.display()
+                );
+            }
+            Ok((secret.id.clone(), path))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resolver::NodeBuildSecret;
+
+    fn secret(id: &str, file: &str) -> NodeBuildSecret {
+        NodeBuildSecret {
+            id: id.to_string(),
+            file: file.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_secret_file_is_resolved_against_the_repo_checkout_root() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join("ci")).unwrap();
+        std::fs::write(repo.path().join("ci/npmrc"), "token").unwrap();
+
+        let resolved = resolve_build_secrets(repo.path(), &[secret("npmrc", "ci/npmrc")]).unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].0, "npmrc");
+        assert_eq!(resolved[0].1, repo.path().join("ci/npmrc"));
+    }
+
+    /// Fails before the build rather than during it — see
+    /// `resolve_build_secrets` for why a missing file can't be treated as an
+    /// empty secret. The message has to name the path, since "which file did
+    /// it look for" is the entire question the user has at that moment.
+    #[test]
+    fn a_missing_secret_file_fails_the_build_up_front() {
+        let repo = tempfile::tempdir().unwrap();
+
+        let err = resolve_build_secrets(repo.path(), &[secret("npmrc", "ci/npmrc")])
+            .expect_err("a secret pointing at nothing must not build");
+
+        let message = format!("{err:#}");
+        assert!(message.contains("npmrc"), "got: {message}");
+        assert!(message.contains("ci/npmrc"), "got: {message}");
+    }
+
+    /// A directory is the shape of mistake that would otherwise reach
+    /// BuildKit and fail there instead.
+    #[test]
+    fn a_secret_pointing_at_a_directory_is_rejected_too() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join("ci")).unwrap();
+
+        assert!(resolve_build_secrets(repo.path(), &[secret("npmrc", "ci")]).is_err());
     }
 }

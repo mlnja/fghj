@@ -111,6 +111,7 @@ fn container_observed(run_id: &str, node_id: &str, observed: &ContainerObserved)
         // network-internal address, so there's none to report here.
         ip: None,
         ports: observed.ports.clone(),
+        exit_code: observed.exit_code,
     }
 }
 
@@ -154,6 +155,7 @@ mod tests {
                 published_port,
                 ip,
                 ports,
+                exit_code: _,
             } => {
                 assert_eq!(run_id, "default");
                 assert_eq!(node_id, "web");
@@ -216,6 +218,7 @@ mod tests {
                             additional_hosts: vec![],
                             status_port: Some("http".into()),
                             config_hash: "hash".into(),
+                            terminating: false,
                         },
                         observed: ContainerObserved::default(),
                         pending_action: None,

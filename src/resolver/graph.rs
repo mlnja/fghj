@@ -12,7 +12,13 @@ use serde::Serialize;
 pub struct Node {
     pub id: String,
     pub label: String,
-    pub kind: String, // "service" | "backing" | "flow"
+    /// "service" | "backing" | "task". A `task` node is the terminating
+    /// kind: its container is *supposed* to exit, and exit 0 is success
+    /// rather than the drift the same observed status means for the other
+    /// two. See `schema/dependency.cue`'s `#Task` and
+    /// [[state-and-effects]]-adjacent `state::ContainerDesired::terminating`,
+    /// which is how that distinction survives into the run layer.
+    pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -47,6 +53,19 @@ pub struct Node {
     /// `concepts/branch-ownership-model.md`. Always `false` for stub
     /// (`downloaded: false`), backing, and flow nodes, which have no checkout.
     pub dirty: bool,
+    /// The commit the checkout is on, as a full SHA — `None` for a node with
+    /// no checkout of its own to read (a stub, a flow) or when the directory
+    /// isn't a git working tree. A backing dependency or task inherits its
+    /// owning service's, exactly as it inherits `repo`/`branch`/`dirty`.
+    ///
+    /// Hashed into `spec_hash` **only** for a node whose image fghj builds
+    /// itself (`build.is_some()`); that is what makes a new commit on the
+    /// same branch visible as drift, since the image tag
+    /// `fghj/{id}:{branch}` does not change. A node running a published
+    /// `image:` ignores it — a commit in the repo that happens to declare a
+    /// `postgres:16` dependency says nothing about that container.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub head: Option<String>,
     /// names of the flows this node is reachable from, in the full resolved universe
     pub flows: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,6 +105,16 @@ pub struct Node {
     /// Compose-equivalent restart policy — see `#RunOptions.restart`.
     #[serde(default = "default_restart")]
     pub restart: String,
+    /// `#RunOptions.stop_signal` — `None` leaves the image's own `STOPSIGNAL`
+    /// (SIGTERM unless the image says otherwise).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub stop_signal: Option<String>,
+    /// `#RunOptions.stop_grace_period` — seconds Docker waits after the stop
+    /// signal before SIGKILL. Both of these are stamped onto the container at
+    /// create time rather than passed with each stop call, so the policy
+    /// outlives the `Node` that asked for it.
+    #[serde(default = "default_stop_grace_period")]
+    pub stop_grace_period: u64,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub user: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -108,6 +137,11 @@ pub struct Node {
     /// lookup. Always `None` for stub nodes.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub platform: Option<String>,
+    /// `#Task.run` — "on_start" or "once". `None` for every kind that isn't
+    /// a task, which is the honest reading: a long-running service has no
+    /// re-run policy because it has nothing to re-run.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub run_policy: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -115,6 +149,23 @@ pub struct NodeBuild {
     pub context: String,
     pub dockerfile: String,
     pub args: BTreeMap<String, String>,
+    /// `docker build --target`. `None` builds the Dockerfile's final stage.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub target: Option<String>,
+    /// Forward the workspace owner's ssh-agent into the build — see
+    /// `concepts/build-inputs.md`.
+    #[serde(default)]
+    pub ssh: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub secrets: Vec<NodeBuildSecret>,
+}
+
+/// One `--mount=type=secret` source, resolved against the repo checkout root
+/// at build time — see `#BuildSecret` in `schema/component.cue`.
+#[derive(Debug, Serialize, Clone)]
+pub struct NodeBuildSecret {
+    pub id: String,
+    pub file: String,
 }
 
 #[derive(Debug, Serialize, Clone)]

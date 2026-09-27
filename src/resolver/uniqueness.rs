@@ -174,6 +174,7 @@ mod tests {
             domain: domain.into(),
             downloaded: true,
             dirty: false,
+            head: None,
             flows: vec![],
             build: None,
             ports: Default::default(),
@@ -184,6 +185,8 @@ mod tests {
             wildcard_hosts: vec![],
             env_file: vec![],
             restart: "no".into(),
+            stop_signal: None,
+            stop_grace_period: 10,
             user: None,
             working_dir: None,
             labels: Default::default(),
@@ -193,6 +196,7 @@ mod tests {
             extra_hosts: vec![],
             healthcheck: None,
             platform: None,
+            run_policy: None,
         }
     }
 

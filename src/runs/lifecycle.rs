@@ -8,7 +8,7 @@ use crate::resolver::Graph;
 use crate::state::{ContainerInfo, RunState};
 use crate::util::label::sanitize_label;
 
-use super::health::HealthBudget;
+use super::health::RunBudget;
 use super::registry::RunRegistry;
 use super::route_table::sidecar_routes_dir;
 
@@ -89,7 +89,7 @@ impl RunRegistry {
             run_id,
             network,
             sidecar_ip,
-            &HealthBudget::single_node(),
+            &RunBudget::single_node(),
         )
         .await
     }

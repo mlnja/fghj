@@ -20,9 +20,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Not optional, and not a convenience: `ui/dist` is gitignored, and
+      # `web::ui`'s `include_dir!("$CARGO_MANIFEST_DIR/ui/dist")` is a proc
+      # macro that panics at compile time when that directory is missing. With
+      # no UI build, nothing below this step compiles at all.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Check
         run: cargo check --all-targets
@@ -35,3 +53,58 @@ jobs:
 
       - name: Test
         run: cargo test
+
+  # The sidecar image is embedded in `fghjd` (`sidecar_image.rs`) and only
+  # built on a user's machine as a fallback, so a broken `sidecar/Dockerfile`
+  # would otherwise stay invisible until someone's first run — and then only
+  # on the fallback path. Build it on every PR, on one arch, without pushing.
+  sidecar:
+    name: Sidecar image
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: sidecar/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # `schema/*.cue` is an authoring aid, not the enforcing boundary (see
+  # concepts/config-language.md) — but its one obligation is to never accept
+  # something the daemon would reject, and a schema that doesn't even parse
+  # can't hold up its end.
+  schema:
+    name: Schema
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cue-lang/setup-cue@v2
+        with:
+          version: v0.17.1
+
+      # Only `vet`, deliberately not `fmt --check`: cue's formatter aligns
+      # values across adjacent lines, so one long field pads its neighbours
+      # into columns of whitespace and a comment edit can reflow lines it
+      # didn't touch. Gating on that buys churn, not correctness.
+      - name: Vet
+        run: cue vet schema/*.cue

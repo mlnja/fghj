@@ -36,20 +36,41 @@ resolver to point at it — see below.
 
 ## Wiring into the OS resolver
 
-`dns::install_os_resolver_config` (macOS: `install_macos_resolver`) writes
-`/etc/resolver/fghj.internal`, a config file macOS's resolver subsystem
-reads to route any query under that specific domain to a given
-nameserver/port — the "zero-overhead" native integration `SPEC.md` calls
-for, requiring no changes to `/etc/hosts` or the system-wide DNS
-configuration. Because the DNS server's port is only known after `dns::bind`
-actually runs, `run_control_api` calls `install_os_resolver_config` with
-that concrete port immediately afterward, every `fghjd` startup — cheap and
-idempotent (see `dns.rs`'s own test,
+`dns::install_os_resolver_config` writes `/etc/resolver/<zone>` files, the
+config macOS's resolver subsystem reads to route any query under that
+specific domain to a given nameserver/port — the "zero-overhead" native
+integration `SPEC.md` calls for, requiring no changes to `/etc/hosts` or the
+system-wide DNS configuration. Because the DNS server's port is only known
+after `dns::bind` actually runs, `run_control_api` calls
+`install_os_resolver_config` with that concrete port immediately afterward,
+every `fghjd` startup — cheap and idempotent (see `dns.rs`'s own test,
 `install_macos_resolver_is_idempotent_and_writes_expected_content`), so
 there's no harm in re-writing it even when nothing changed.
 
+It is a *sync*, not a single write, because the set of zones is not fixed.
+Two of them are: `fghj.internal` and `fghj.raw.internal`
+([[two-zones-and-raw-ports]] explains why there are two). The rest are
+whatever `wildcard_hosts` suffixes the currently-running containers declare,
+so they come and go — which is why `install_os_resolver_config` is called on
+every reconcile tick and not only at startup, and why
+`sync_macos_resolver` removes fghjd-authored files for zones that are no
+longer live. It only ever touches files it recognizes as its own
+(`is_fghjd_resolver_content`, which parses the port back out of fghjd's own
+template); a hand-written `/etc/resolver` file for some unrelated domain is
+left alone. `clear_os_resolver_config` removes all of them on a clean
+shutdown, so a stopped `fghjd` doesn't leave names pointed at a dead port.
+
 Linux (`systemd-resolved`) and Windows (NRPT) integration are described in
 `SPEC.md` §5 but not implemented — see `PROGRESS.md`'s "Known gaps".
+
+## Related
+
+- [[two-zones-and-raw-ports]] — what the second zone is for, and what a
+  query in each zone is actually answered with.
+- [[in-network-sidecar]] — the other DNS server in the system: this one
+  serves the host, the sidecar serves a run's own container network.
+- [[local-ca-and-tls-proxy]] — what the address this server hands back is
+  actually running.
 
 ## Status
 

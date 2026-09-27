@@ -45,8 +45,8 @@ mod tests;
 
 pub use config::{Build, ComponentConfig, Environment, FlowConfig, Healthcheck};
 pub use dependency::{BackingDependencyConfig, Dependency};
-pub use git::{git_remote_and_branch, git_status_dirty};
-pub use graph::{Edge, Graph, Node, NodeBuild};
+pub use git::{git_head_sha, git_remote_and_branch, git_status_dirty};
+pub use graph::{Edge, Graph, Node, NodeBuild, NodeBuildSecret};
 pub use name::Name;
 pub use port::{BackingPorts, PortConfig};
 pub use repo_url::{normalize_repo_url, repo_name_from_url};

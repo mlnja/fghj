@@ -585,6 +585,7 @@ mod tests {
                 additional_hosts: vec![],
                 status_port: None,
                 config_hash: "hash".into(),
+                terminating: false,
             },
             observed: ContainerObserved::default(),
             pending_action: pending,

@@ -111,15 +111,29 @@ No node kind can declare its own raw domain — there is no
 domain, services included, is derived the same way by `runs::derive_domain`:
 
 ```rust
-pub fn derive_domain(node_id: &str, domain_scope: &str, workspace_name: &str, run_id: &str) -> String {
+pub fn derive_domain(
+    node_id: &str,
+    domain_scope: &str,
+    workspace_name: &str,
+    run_id: &str,
+    zone: DomainZone,
+) -> String {
     let workspace = sanitize_label(workspace_name);
+    let suffix = zone.suffix();          // "fghj.internal" | "fghj.raw.internal"
     if domain_scope == "stable" || run_id == DEFAULT_RUN_ID {
-        format!("{node_id}.{workspace}.fghj.internal")
+        format!("{node_id}.{workspace}.{suffix}")
     } else {
-        format!("{node_id}.{run_id}.{workspace}.fghj.internal")
+        format!("{node_id}.{run_id}.{workspace}.{suffix}")
     }
 }
 ```
+
+Every node has a name in **two** zones, and this one function derives both —
+the zone is the only thing that differs. `fghj.internal` is the proxied,
+TLS-terminated, dispatch-by-name address; `fghj.raw.internal` is the direct
+one, for callers that need a real port. [[two-zones-and-raw-ports]] covers
+what each is for and who answers it; everything below applies to both, since
+the suffixes are disjoint.
 
 `run_id` is folded in for named/review runs, since more than one can be
 alive at once and each needs its own identity — but the **default run**
@@ -140,15 +154,58 @@ it's always the same name — and note that nothing enforces the "only one":
 both runs register the route, and `resolve_route` returns whichever comes
 first in map order. Which run you reach is unspecified.
 
-`start_node` calls `derive_domain` when it actually launches a container,
-and uses the result as **the sole Docker network alias** registered for that
-container — so the name resolves identically whether asked from inside the
-run's own docker network (via Docker's embedded per-network DNS) or from the
-host (via `fghjd`'s own DNS server, which answers anything in the zone; see
-[[split-dns]]). Named ports get their own alias the same way:
-`{name}.{domain}` is pushed onto the same alias list, closing what used to
-be a gap where a named port resolved from the host but not from sibling
-containers.
+`start_node` calls `derive_domain` when it actually launches a container, once
+per zone. The **raw** name is the Docker network alias registered on the
+container, so Docker's own embedded DNS resolves it to that container's IP for
+free. The **http** name is deliberately *not* an alias: the run's sidecar owns
+resolving it from inside the network ([[in-network-sidecar]]), so an
+in-network lookup and a host-side lookup agree on the shape of the answer — an
+address that terminates TLS and dispatches by name — even though the addresses
+differ. Named ports get their own alias the same way: `{name}.{raw_domain}` is
+pushed onto the same alias list, closing what used to be a gap where a named
+port resolved from the host but not from sibling containers.
+
+## The projection table
+
+`node.id` is not a name anybody uses. It is the argument to eight different
+naming functions, each of which produces a string in a *different* namespace,
+with its own escaping rule and its own collision domain. Almost every naming
+bug in this system has been a disagreement between two rows of this table, so
+here is the table.
+
+`W` = `sanitize_label(workspace folder name)`, `R` = the resolved run id,
+`Z` = the zone suffix (`fghj.internal` or `fghj.raw.internal`).
+
+| Projection | Formula | Escaping | Namespace it shares | Who catches a collision |
+|---|---|---|---|---|
+| **Domain** (both zones) | `{id}.{W}.{Z}`, or `{id}.{R}.{W}.{Z}` when the run isn't default and scope isn't `stable` — `runs::derive_domain` | none: the id's dots become DNS label separators | one flat DNS zone, across *every* wired workspace | `resolver::uniqueness` (warning) for in-workspace clashes; `daemon::registry` (hard error) refuses to wire a second workspace whose folder sanitizes the same |
+| **Named-port alias** | `{port.name}.{domain}` | none | the same DNS zone | `resolver::uniqueness` — this is the projection that can silently shadow a backing dependency's domain |
+| **`additional_hosts` / `wildcard_hosts`** | author-written, verbatim | none | the same DNS zone, plus whatever real domain the author typed | `resolver::uniqueness` for the in-zone part; nothing at all if the author claims a name they don't own |
+| **Container name** | `fghj-{W}-{R}-{sanitize_label(id)}` — `runs::node_spec` | `sanitize_label`: every non-alphanumeric run collapses to one `-` | the Docker daemon, machine-wide — shared with every other workspace *and* with containers fghj didn't create | Docker itself, by refusing a duplicate name — with an error that never says "naming" |
+| **Network name** | `fghj-{W}-{R}` — `runs::orchestrate` | `sanitize_label` on the workspace only | the Docker daemon, machine-wide | Docker; but this one is *meant* to be idempotent (`ensure_network` reuses an existing one), so a clash between two workspaces that sanitize alike silently merges their networks — the same case `daemon::registry` already refuses to wire |
+| **Volume name** | `fghj-vol-{sanitize_label(derive_domain({name}.{owner_id}, …))}` — `runs::naming::derive_volume_name`; `shared: true` drops the `.{owner_id}` | `sanitize_label` over the whole derived domain | the Docker daemon, machine-wide | nothing — a volume collision is *silent*, which is exactly why the owner qualification is unconditional (see [[docker-and-downloads]]) |
+| **Image tag** | `fghj/{sanitize_label(id)}:{sanitize_label(branch or "local")}` — `runs::node_spec` | `sanitize_label` on both halves | the local image store, machine-wide | nothing; and note the tag is deliberately stable across rebuilds, which is why `build` had to be folded into `spec_hash` instead ([[build-inputs]]) |
+| **Virtual IP** | `10.222.0.0/16` + SHA-256 of the raw-zone domain, then made sticky and collision-resolved by `raw_net::assign` | n/a — the name is hashed, not escaped | one /16 on the host | `raw_net::assign`, which probes forward on a real collision; see [[two-zones-and-raw-ports]] |
+
+Three things fall out of reading it as a table rather than one row at a time.
+
+**The escaping rules are not the same, and the divergence is the bug.** The
+domain keeps dots; everything Docker-facing collapses them. Two rows derived
+from one id can therefore be distinct in one namespace and identical in
+another — which is the concrete failure the next section opens with.
+
+**The collision domains are not the same either.** The DNS rows collide within
+one zone across all wired workspaces. The Docker rows collide across the whole
+machine, including with containers, networks and volumes fghj has never heard
+of. Only the virtual-IP row has a collision domain fghj fully owns, which is
+why it's the only one that can resolve a collision by moving rather than by
+refusing.
+
+**Only some rows have an enforcer.** Domains and aliases are checked, container
+names are checked by Docker for the wrong reason, and volume and image names
+are not checked at all. That asymmetry is the argument for `resolver::name`
+below: the cheapest place to make all eight rows safe is *before* the id
+exists, by restricting the alphabet to the intersection every row accepts.
 
 ## Unique ids do not make unique names
 
@@ -247,7 +304,10 @@ over the sorted node list, before any container for that node has ever
 started:
 
 ```rust
-node.domain = crate::runs::derive_domain(&node.id, &node.domain_scope, &workspace_name, crate::runs::DEFAULT_RUN_ID);
+node.domain = crate::runs::derive_domain(
+    &node.id, &node.domain_scope, &workspace_name,
+    crate::runs::DEFAULT_RUN_ID, DomainZone::Http,
+);
 ```
 
 This is what `Drawer.svelte`'s "domain" info row and its "open" link
@@ -267,10 +327,20 @@ run's actual one. Surfacing a run-scoped domain would need the frontend to
 ask for (or the backend to attach) a domain scoped to whichever run is
 currently selected, not the graph-wide default.
 
+## Related
+
+- [[two-zones-and-raw-ports]] — the second half of the domain story: what the
+  `zone` parameter is for, and who answers each name.
+- [[in-network-sidecar]] — why the http-zone name is not a Docker alias.
+- [[docker-and-downloads]] — the volume row of the projection table, in full.
+- [[flat-workspace-model]] — why ids must be qualified at all.
+
 ## Status
 
 Implemented: `resolver::visit_local_service`/`visit_dependency` (ids),
 `resolver::PortConfig`/`check_ports` (ports), `runs::derive_domain` (domain
 formula, shared by `runs::start_node` and `resolver::resolve_universe`),
-`Node.domain` (default-run address, pre-computed). See `PROGRESS.md` for the
-session history behind the leaf-first id flip and the `Node.domain` fix.
+`runs::naming::derive_volume_name` (volumes), `runs::node_spec` (container
+names, image tags), `raw_net` (virtual IPs), `resolver::uniqueness` (the
+collision pass), `resolver::name::Name` (the alphabet). See `PROGRESS.md` for
+the session history behind the leaf-first id flip and the `Node.domain` fix.

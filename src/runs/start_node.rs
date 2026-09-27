@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 
-use super::health::{HealthBudget, HealthOutcome, wait_for_healthy};
+use super::health::{HealthOutcome, RunBudget, TaskOutcome, wait_for_exit, wait_for_healthy};
 use super::spec::spec_hash;
 use crate::dns;
 use crate::docker;
@@ -30,7 +30,7 @@ impl RunRegistry {
         run_id: &str,
         network: &str,
         sidecar_ip: Option<&str>,
-        budget: &HealthBudget,
+        budget: &RunBudget,
     ) -> Result<ContainerInfo> {
         self.begin_event_cycle(run_id, &node.id, "start").await;
         self.record_event(
@@ -115,6 +115,8 @@ impl RunRegistry {
                 service_name: &node.id,
                 binds: &spec.binds,
                 restart_policy: &node.restart,
+                stop_signal: node.stop_signal.as_deref(),
+                stop_grace_period: node.stop_grace_period,
                 user: node.user.as_deref(),
                 working_dir: node.working_dir.as_deref(),
                 labels: &labels,
@@ -158,10 +160,14 @@ impl RunRegistry {
             Some(p) => docker::inspect_status(&self.docker, &spec.container_name, p).await?,
             None => docker::inspect_status(&self.docker, &spec.container_name, "").await?,
         };
-        let (status, published_port) = match inspected {
+        let (mut status, published_port) = match inspected {
             Some(s) => (s.status, s.published_port),
             None => ("unknown".to_string(), None),
         };
+        // Only ever set for a terminating node, and only by the wait below:
+        // a service's exit code, if it even has one yet, says nothing this
+        // moment after `run_container` returned.
+        let mut exit_code: Option<i64> = None;
 
         // Every declared port's actual host-published binding, not just the
         // routed ones — a plain TCP backing dependency (postgres, mysql)
@@ -256,7 +262,86 @@ impl RunRegistry {
             }
         }
 
-        if node.healthcheck.is_some() {
+        // A terminating node is not "started" until it has *finished*: its
+        // dependents (the owning service, via the `owns` edge — see
+        // `topological_start_order`, for which `to` is always the
+        // dependency) come after it in the start order precisely so a
+        // migration runs before the service that needs it. Waiting here,
+        // and failing the node if the wait doesn't end in a clean exit, is
+        // what makes that ordering mean anything: without it "started" would
+        // only mean "the container was created", and the service would come
+        // up against an unmigrated database.
+        //
+        // Mutually exclusive with the healthcheck wait below by
+        // construction, not just by this `else`: `TaskConfig` has no
+        // `healthcheck` field at all, because a container that has exited
+        // can never report Docker-healthy.
+        if node.kind == "task" {
+            self.record_event(
+                run_id,
+                &node.id,
+                "start",
+                "waiting for exit",
+                "running",
+                None,
+            )
+            .await;
+            let allowance = budget.tasks.allowance();
+            // Read *before* the wait, not after: waiting until the deadline
+            // exhausts the budget by definition, so asking afterwards would
+            // report every genuine timeout as "never waited on".
+            let spent_before_waiting = budget.tasks.is_exhausted();
+            // Unlike the health budget, an exhausted task budget is not a
+            // reason to shrug and continue — see `RunBudget` on why the two
+            // deadlines are separate.
+            let outcome = if spent_before_waiting {
+                TaskOutcome::TimedOut
+            } else {
+                wait_for_exit(&self.docker, &spec.container_name, allowance).await
+            };
+            // Whatever happened, the container is no longer the "running"
+            // that was inspected a moment ago — except on a timeout, where
+            // it demonstrably still is.
+            if outcome != TaskOutcome::TimedOut {
+                status = "exited".to_string();
+            }
+            let failure = match outcome {
+                TaskOutcome::Completed => {
+                    exit_code = Some(0);
+                    None
+                }
+                TaskOutcome::Failed { exit_code: code } => {
+                    exit_code = code;
+                    Some(match code {
+                        Some(code) => format!("task exited with code {code}"),
+                        None => {
+                            "task container disappeared before it reported an exit code".to_string()
+                        }
+                    })
+                }
+                TaskOutcome::TimedOut if spent_before_waiting => Some(
+                    "the run's task budget is spent; this task was never waited on".to_string(),
+                ),
+                TaskOutcome::TimedOut => Some(format!(
+                    "task was still running after {}s; a task is expected to exit",
+                    allowance.as_secs()
+                )),
+            };
+            if let Some(failure) = failure {
+                self.record_event(
+                    run_id,
+                    &node.id,
+                    "start",
+                    "waiting for exit",
+                    "error",
+                    Some(failure.clone()),
+                )
+                .await;
+                bail!("task {} failed: {failure}", node.id);
+            }
+            self.record_event(run_id, &node.id, "start", "waiting for exit", "ok", None)
+                .await;
+        } else if node.healthcheck.is_some() {
             self.record_event(
                 run_id,
                 &node.id,
@@ -266,11 +351,16 @@ impl RunRegistry {
                 None,
             )
             .await;
-            let allowance = budget.allowance();
+            let allowance = budget.health.allowance();
+            // Same reason as the task branch above: a wait that runs to the
+            // shared deadline leaves the budget exhausted, so this has to be
+            // read before the wait or a real timeout would be reported as a
+            // wait that never happened.
+            let spent_before_waiting = budget.health.is_exhausted();
             // Once the run's budget is spent there is nothing to wait with,
             // so don't pretend to wait — say so instead of logging a
             // zero-second "gave up".
-            let outcome = if budget.is_exhausted() {
+            let outcome = if spent_before_waiting {
                 HealthOutcome::TimedOut
             } else {
                 wait_for_healthy(&self.docker, &spec.container_name, allowance).await
@@ -287,7 +377,7 @@ impl RunRegistry {
                     "ok",
                     Some("container settled without reporting healthy; continuing".to_string()),
                 ),
-                HealthOutcome::TimedOut if budget.is_exhausted() => (
+                HealthOutcome::TimedOut if spent_before_waiting => (
                     "ok",
                     Some(
                         "the run's health-wait budget is spent; not waiting on this node"
@@ -321,7 +411,15 @@ impl RunRegistry {
                 // This call *is* the intent: fghj was just asked to run
                 // this container, whatever `status` says about it a
                 // millisecond later.
-                running: true,
+                //
+                // Except for a terminating node, whose intent was never for
+                // it to be up: it was asked to *run*, which for a task means
+                // to finish. Reaching here at all means it exited 0 — the
+                // failure paths above all bailed — so `running: true` would
+                // describe a container fghj deliberately let stop as
+                // drifted, and every projection in `state::query` would keep
+                // hunting for a route into it.
+                running: node.kind != "task",
                 container_name: spec.container_name,
                 domain: spec.domain,
                 raw_domain: spec.raw_domain,
@@ -329,6 +427,7 @@ impl RunRegistry {
                 additional_hosts: additional_hosts_active,
                 status_port,
                 config_hash,
+                terminating: node.kind == "task",
             },
             observed: ContainerObserved {
                 status,
@@ -340,8 +439,169 @@ impl RunRegistry {
                 // Started from the config that was just hashed into
                 // `config_hash`, so it cannot have drifted from it yet.
                 sync: SyncStatus::Synced,
+                exit_code,
             },
             pending_action: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::persistence::WorkspaceDb;
+    use crate::runs::testing::{test_graph, test_node};
+
+    /// A `RunRegistry` over a throwaway workspace/db plus a real, uniquely
+    /// named Docker network, torn down on drop along with every container
+    /// this test started on it.
+    struct TaskFixture {
+        registry: RunRegistry,
+        network: String,
+        run_id: String,
+        _tmp: tempfile::TempDir,
+    }
+
+    impl TaskFixture {
+        async fn new() -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let network = format!("fghj-task-test-{nonce}");
+            let tmp = tempfile::tempdir().unwrap();
+            let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
+            let docker = Arc::new(crate::daemon::connect_docker().expect("docker client"));
+            docker::ensure_network(&docker, &network, &network)
+                .await
+                .expect("ensure_network");
+            let registry = RunRegistry::new(tmp.path().to_path_buf(), db, docker);
+            TaskFixture {
+                registry,
+                network,
+                // Not "default": a run id folded into the domain keeps two
+                // concurrently running test binaries off each other's names.
+                run_id: format!("t{nonce}"),
+                _tmp: tmp,
+            }
+        }
+
+        /// A `busybox` task node running `command`. `image` is set, so
+        /// nothing here needs an owning service's build — the inheritance
+        /// path is the resolver's concern and is covered there.
+        fn task(&self, id: &str, command: &[&str]) -> crate::resolver::Node {
+            let mut node = test_node(id, id, "task");
+            node.image = Some("busybox".to_string());
+            node.command = command.iter().map(|s| s.to_string()).collect();
+            node.run_policy = Some("on_start".to_string());
+            node
+        }
+
+        async fn start(&self, node: &crate::resolver::Node) -> Result<crate::state::ContainerInfo> {
+            let graph = test_graph(vec![node.clone()], Vec::new());
+            self.registry
+                .start_node(
+                    &graph,
+                    node,
+                    &self.run_id,
+                    &self.network,
+                    None,
+                    &super::RunBudget::default(),
+                )
+                .await
+        }
+
+        async fn cleanup(&self, node_id: &str) {
+            let name = format!(
+                "fghj-shop-{}-{}",
+                self.run_id,
+                crate::util::label::sanitize_label(node_id)
+            );
+            docker::stop_and_remove(&self.registry.docker, &name).await;
+            docker::remove_network(&self.registry.docker, &self.network).await;
+        }
+    }
+
+    /// A finished task is not a stopped service. `running` records what fghj
+    /// wants to be true at rest, and for a task that is "finished" — so it
+    /// must come back `false` even though the start succeeded, or every
+    /// projection in `state::query` would treat the exited container as
+    /// drift and keep looking for a route into it.
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
+    async fn a_task_that_exits_zero_comes_back_finished_not_running() {
+        let fixture = TaskFixture::new().await;
+        let node = fixture.task("migrate.api", &["true"]);
+        let info = fixture.start(&node).await.expect("task should succeed");
+
+        assert!(info.desired.terminating);
+        assert!(!info.desired.running);
+        assert_eq!(info.observed.status, "exited");
+        assert_eq!(info.observed.exit_code, Some(0));
+        // A task declares no ports, so there is nothing to publish and
+        // nothing to route — the absence is what keeps a one-shot container
+        // out of DNS and out of the proxy's routing table.
+        assert!(info.desired.routes.is_empty());
+        assert!(info.desired.status_port.is_none());
+
+        fixture.cleanup("migrate.api").await;
+    }
+
+    /// The whole reason the kind exists: a failed migration must fail its
+    /// node, because `start`/`ensure_running` stop the start loop on an
+    /// error and the owning service comes *after* its task in
+    /// `topological_start_order`. Succeeding here would start the service
+    /// against an unmigrated database.
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
+    async fn a_task_that_exits_nonzero_fails_the_node() {
+        let fixture = TaskFixture::new().await;
+        let node = fixture.task("migrate.api", &["sh", "-c", "exit 3"]);
+        let err = fixture
+            .start(&node)
+            .await
+            .expect_err("a task exiting 3 must not report a healthy start");
+        let message = format!("{err:#}");
+        assert!(message.contains("exited with code 3"), "{message}");
+
+        fixture.cleanup("migrate.api").await;
+    }
+
+    /// A task that never exits is the failure `#Task`'s required `command`
+    /// exists to prevent, and it must not be waited on forever — the run's
+    /// task budget bounds it, and running out is a failure rather than the
+    /// shrug a truncated health wait gets.
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
+    async fn a_task_that_never_exits_fails_once_its_budget_runs_out() {
+        let fixture = TaskFixture::new().await;
+        let node = fixture.task("hangs.api", &["sleep", "60"]);
+        let graph = test_graph(vec![node.clone()], Vec::new());
+        // Generous on purpose: the budget's clock starts here, not at the
+        // wait, so pulling/creating the container spends some of it before
+        // `wait_for_exit` is ever reached. Too tight and this would assert
+        // the "budget already spent" branch instead of the timeout one.
+        let budget = super::RunBudget {
+            health: super::super::health::HealthBudget::default(),
+            tasks: super::super::health::HealthBudget::new(std::time::Duration::from_secs(12)),
+        };
+        let err = fixture
+            .registry
+            .start_node(
+                &graph,
+                &node,
+                &fixture.run_id,
+                &fixture.network,
+                None,
+                &budget,
+            )
+            .await
+            .expect_err("a task that never exits must fail its node");
+        let message = format!("{err:#}");
+        assert!(message.contains("still running"), "{message}");
+
+        fixture.cleanup("hangs.api").await;
     }
 }

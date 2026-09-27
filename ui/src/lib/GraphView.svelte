@@ -11,10 +11,41 @@
 
   // Kind is a git-repo'd, independently deployable service vs. a "backing"
   // dependency (a database, cache, ...) declared inline in some service's
-  // config with no repo of its own — shown as an icon before the name
-  // instead of a text pill so it reads at a glance without eating a row.
+  // config with no repo of its own vs. a "task" (a seed, a migration —
+  // inline like a backing dependency, but it exits) — shown as an icon
+  // before the name instead of a text pill so it reads at a glance without
+  // eating a row.
   const SERVICE_ICON = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M8 1.6 13.8 5v6L8 14.4 2.2 11V5Z"/><path d="M2.2 5 8 8.2 13.8 5M8 8.2v6.2"/></svg>`;
   const BACKING_ICON = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.3"><ellipse cx="8" cy="3.4" rx="5.4" ry="1.9"/><path d="M2.6 3.4v9.2c0 1.05 2.42 1.9 5.4 1.9s5.4-.85 5.4-1.9V3.4"/><path d="M2.6 8c0 1.05 2.42 1.9 5.4 1.9s5.4-.85 5.4-1.9"/></svg>`;
+  // A terminating node (a seed, a migration, any one-shot job): declared
+  // inline by a service like a backing dependency, but it runs to completion
+  // instead of staying up. A checkmark rather than a box — what matters
+  // about it is that it finished.
+  const TASK_ICON = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="6.2"/><path d="m5.2 8.2 2 2 3.6-4"/></svg>`;
+
+  // What the status bar says about a node's container. Two layers, and the
+  // order matters: a live `pending_action` always wins, because Docker
+  // hasn't settled yet and the settled reading would be stale. Otherwise
+  // it's `condition` — a derived field on `ContainerInfo` (Rust
+  // `state::NodeCondition`), *not* re-derived here, so the rule for what a
+  // desired/observed pair means lives in exactly one place. That rule is
+  // more than "is it running": a terminating node is read on its exit code,
+  // and a container fghj was asked to keep up but which Docker says is down
+  // is `crashed`, which is a different situation from one the user stopped.
+  function containerStateOf(live) {
+    if (!live) return 'none';
+    return live.pending_action ?? live.condition;
+  }
+
+  const STATE_TITLE = {
+    completed: 'task finished successfully — it is meant to exit, not stay up',
+    failed: 'task exited non-zero; everything that depends on it was not started',
+    finishing: 'task has exited but has not been re-inspected yet — no exit code read, so no verdict',
+    stopped: 'stopped, and fghj was not asked to keep it up — expected',
+    crashed: 'fghj was asked to keep this up and Docker says it is down. Nothing will restart it on its own — press Start',
+    restarting: "Docker is bouncing it under this node's own restart policy — not reachable while it does",
+    paused: 'paused from outside fghj (docker pause) — not reachable, and Start will not help; docker unpause will',
+  };
 
   // Keyed by `ContainerObserved::sync` (Rust `SyncStatus`, snake_case).
   // `unknown` is absent on purpose: it never renders a pill, so it never
@@ -118,7 +149,7 @@
     {@const inFlow = n.flows.includes(currentFlow)}
     {@const dimmed = currentFlow && !inFlow}
     {@const live = runContainers?.[n.id]}
-    {@const containerState = mode === 'containers' && n.kind !== 'flow' ? (live ? (live.pending_action ?? (live.observed.status === 'running' ? 'running' : 'stopped')) : 'none') : null}
+    {@const containerState = mode === 'containers' && n.kind !== 'flow' ? containerStateOf(live) : null}
     <!-- `unknown` is the one verdict with nothing to say (no drift check has
          run yet, or the last one failed to re-resolve), so it renders no pill
          at all. `orphaned` does have something to say — the node is gone from
@@ -138,6 +169,8 @@
             <span class="badge">not downloaded</span>
           {:else if n.kind === 'backing'}
             <span class="kind-icon backing" title="backing dependency">{@html BACKING_ICON}</span>
+          {:else if n.kind === 'task'}
+            <span class="kind-icon task" title="task (runs once and exits)">{@html TASK_ICON}</span>
           {:else if n.kind === 'service'}
             <span class="kind-icon service" title="service">{@html SERVICE_ICON}</span>
           {/if}
@@ -160,7 +193,7 @@
            the one fact that's neither a git nor a repo fact, so it gets the
            dividing line instead of living inside either half. -->
       {#if containerState}
-        <div class="status-bar state-{containerState}" title="container: {containerState}">
+        <div class="status-bar state-{containerState}" title={STATE_TITLE[containerState] ?? `container: ${containerState}`}>
           {containerState === 'none' ? 'absent' : containerState}
         </div>
       {/if}
@@ -209,6 +242,22 @@
   }
   .status-bar.state-running { background: var(--success); color: #ffffff; }
   .status-bar.state-stopped { background: var(--warning); color: #ffffff; }
+  /* Deliberately louder than `stopped`, and the same weight as a failed
+     task: both mean "this will not fix itself and you have to do
+     something". A stopped container is a state the user chose; this one
+     nobody chose. */
+  .status-bar.state-crashed { background: var(--danger); color: #ffffff; }
+  /* Pulsing like an in-flight action, because that is what it is — Docker's
+     own restart loop rather than one of fghj's, but equally "wait". */
+  .status-bar.state-restarting {
+    background: var(--warning); color: #ffffff; animation: status-pulse 1s ease-in-out infinite;
+  }
+  .status-bar.state-paused { background: var(--line-strong); color: var(--ink); }
+  .status-bar.state-finishing { background: var(--success-bg); color: var(--ink-faint); }
+  /* A finished task is a success, but a quieter one than a running service:
+     there is nothing there to reach, so it shouldn't read as "live". */
+  .status-bar.state-completed { background: var(--success-bg); color: var(--success); }
+  .status-bar.state-failed { background: var(--danger); color: #ffffff; }
   .status-bar.state-none { background: var(--line-strong); color: var(--ink-faint); }
   .status-bar.state-starting, .status-bar.state-stopping, .status-bar.state-removing {
     background: var(--accent); color: #ffffff; animation: status-pulse 1s ease-in-out infinite;
@@ -219,10 +268,12 @@
   .node-id { font: 600 13.5px var(--font-mono); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* service (git-backed, independently deployable) vs. backing (an inline
      dependency declared by some service, e.g. a database — no repo of its
-     own) — see resolver::Node::kind's doc for the exact two values. */
+     own) vs. task (likewise inline, but runs to completion instead of
+     staying up) — see resolver::Node::kind's doc for the exact values. */
   .kind-icon { display: inline-flex; flex: 0 0 auto; }
   .kind-icon.service { color: var(--accent); }
   .kind-icon.backing { color: var(--ink-faint); }
+  .kind-icon.task { color: var(--ink-faint); }
   .node-domain { font: 500 11px var(--font-mono); color: var(--ink-faint); word-break: break-all; }
   .node-meta { font: 500 10px var(--font-mono); color: var(--ink-faint); margin-top: 6px; }
   .live-row { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }

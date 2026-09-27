@@ -100,7 +100,13 @@ pub struct RunCreateError {
     pub message: String,
     /// What is actually up now. `None` when nothing came up, or when the
     /// path that failed rolled back.
-    pub partial: Option<RunState>,
+    ///
+    /// Boxed because this is the `Err` half of a `Result` that the whole
+    /// create path returns: a `RunState` inline makes every such `Result`
+    /// (including every success) at least 224 bytes wide, which is what
+    /// `clippy::result_large_err` objects to. A partial run is the rare case,
+    /// so one allocation on the failure path is the right trade.
+    pub partial: Option<Box<RunState>>,
 }
 
 impl RunCreateError {

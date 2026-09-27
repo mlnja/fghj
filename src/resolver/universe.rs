@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::git::git_remote_and_branch;
-use super::graph::{Graph, Node};
+use super::graph::{Edge, Graph, Node};
 use super::repo_url::normalize_repo_url;
 use super::visit::ResolveCtx;
 use super::warning::Warning;
@@ -44,6 +44,7 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
         edges: Vec::new(),
         visited: HashSet::new(),
         warnings: Vec::new(),
+        pending_after: Vec::new(),
     };
 
     // (flow_name, owner_service_id) — the flow's own repo is the BFS root for
@@ -53,7 +54,7 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     for (local_path, component) in &scanned {
         for (flow_name, flow) in &component.flows {
             let Some(owner_id) =
-                ctx.visit_local_service(local_path, component, flow.service.as_deref())
+                ctx.visit_local_service(local_path, component, flow.service.as_deref(), "service:")
             else {
                 continue;
             };
@@ -71,6 +72,42 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     // references) still show up, along with its own backing/service deps.
     for (local_path, component) in &scanned {
         ctx.visit_local_services(local_path, component);
+    }
+
+    // Resolve every `#Task.after` now that the whole node set exists — see
+    // `visit::PendingAfter` for why it can't happen during the traversal.
+    // A sibling backing dependency or task is `{target}.{owner_id}`; a
+    // sibling `kind: service` dependency is `{target}.{local_path}`.
+    for pending in std::mem::take(&mut ctx.pending_after) {
+        let sibling = format!("{}.{}", pending.target, pending.owner_id);
+        let service_sibling = format!("{}.{}", pending.target, pending.local_path);
+        let resolved = if ctx.nodes.contains_key(&sibling) {
+            Some(sibling)
+        } else if ctx.nodes.contains_key(&service_sibling) {
+            Some(service_sibling)
+        } else {
+            None
+        };
+        match resolved {
+            // Ordering-only, deliberately not `owns`/`depends-on`: the task
+            // does not own the database it waits for, and flow membership
+            // already reaches both through the owner.
+            Some(to) => ctx.edges.push(Edge {
+                from: pending.task_id,
+                to,
+                kind: "after".into(),
+                branch: None,
+                flows: Vec::new(),
+            }),
+            // Blocking for the same reason a dangling `shared-backing` is:
+            // the author declared an ordering constraint, and starting
+            // without it would run the task at a moment its config says is
+            // wrong — a seed against a database that isn't up yet.
+            None => ctx.warnings.push(Warning::blocking(format!(
+                "task '{}' declares `after: [{}]`, which names no sibling dependency of '{}'",
+                pending.task_id, pending.target, pending.owner_id
+            ))),
+        }
     }
 
     // Validate shared-backing references resolve to a real, resolved backing node.

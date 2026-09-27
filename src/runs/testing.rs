@@ -27,6 +27,7 @@ pub fn test_node(id: &str, label: &str, kind: &str) -> Node {
         domain: String::new(),
         downloaded: true,
         dirty: false,
+        head: None,
         flows: Vec::new(),
         build: None,
         ports: BTreeMap::new(),
@@ -37,6 +38,8 @@ pub fn test_node(id: &str, label: &str, kind: &str) -> Node {
         wildcard_hosts: Vec::new(),
         env_file: Vec::new(),
         restart: "no".to_string(),
+        stop_signal: None,
+        stop_grace_period: 10,
         user: None,
         working_dir: None,
         labels: BTreeMap::new(),
@@ -46,6 +49,7 @@ pub fn test_node(id: &str, label: &str, kind: &str) -> Node {
         extra_hosts: Vec::new(),
         healthcheck: None,
         platform: None,
+        run_policy: None,
     }
 }
 

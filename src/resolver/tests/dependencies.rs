@@ -285,3 +285,53 @@ fn git_dependency_without_repo_on_itself_warns_instead_of_crashing() {
     assert!(!graph.edges.iter().any(|e| e.kind == "depends-on"));
     assert!(graph.warnings.iter().any(|w| w.message.contains("itself")));
 }
+
+/// The "which service did you mean" warning has to name the field the
+/// *reader's own block* offers, and the two callers offer different ones: a
+/// `kind: service` dependency takes a `services:` list, a `#Flow` takes a
+/// single `service:`. Naming the wrong one sends them looking for a key that
+/// isn't in the schema for what they're editing.
+#[test]
+fn the_ambiguous_service_warning_names_the_field_the_caller_actually_has() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tmp.path().join("multi")).unwrap();
+    fs::write(
+        tmp.path().join("multi/.fghj.yaml"),
+        "version: \"1.0\"\n\
+         services:\n\
+         \x20 api: {}\n\
+         \x20 jobs: {}\n\
+         flows:\n\
+         \x20 onboarding:\n\
+         \x20   description: two services, no root named\n\
+         \x20   dependencies:\n\
+         \x20     - kind: backing\n\
+         \x20       name: cache\n\
+         \x20       image: redis:7\n\
+         \x20       ports: [\"6379\"]\n",
+    )
+    .unwrap();
+    write_component(
+        tmp.path(),
+        "caller",
+        "  dependencies:\n\
+         \x20   - kind: service\n\
+         \x20     repo: https://example.com/org/multi.git\n",
+    );
+
+    let graph = resolve_universe(tmp.path()).unwrap();
+
+    let messages: Vec<&str> = graph.warnings.iter().map(|w| w.message.as_str()).collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("declares multiple services") && m.contains("`services:`")),
+        "dependency case should point at `services:`, got {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("declares multiple services") && m.contains("`service:`")),
+        "flow case should point at `service:`, got {messages:?}"
+    );
+}

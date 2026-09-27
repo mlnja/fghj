@@ -300,10 +300,13 @@ impl WorkspaceRegistry {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::daemon::bootstrap::connect_docker;
 
+    /// Shared by `daemon::control`'s tests too. Never dialled — these tests
+    /// are about the workspace index and the resolve rules; the converge
+    /// effect a resolve spawns will fail its first request and go quiet,
+    /// which is the same thing it does when Docker isn't running.
     pub(crate) fn test_docker() -> Arc<bollard::Docker> {
-        Arc::new(connect_docker().expect("docker client construction"))
+        Arc::new(crate::docker::undialled_client())
     }
 
     #[test]

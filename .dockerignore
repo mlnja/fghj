@@ -1,0 +1,11 @@
+# Only consulted by `docker build`/buildx from this repo root — which today
+# means CI building `sidecar/Dockerfile` (see .github/workflows). The local
+# fallback build in `sidecar_image.rs` tars a scratch directory it wrote
+# itself, so it never sees this file and doesn't need to.
+.git
+target
+**/node_modules
+# The Astro docs site. `ui/dist` is deliberately *not* ignored: the sidecar
+# build needs it, because building the `fghj-sidecar` bin recompiles the whole
+# lib crate, `web::ui`'s `include_dir!` included.
+docs

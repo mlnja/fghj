@@ -108,8 +108,8 @@ impl WorkspaceDb {
             tx.execute("DELETE FROM containers WHERE run_id = ?1", rusqlite::params![state.run_id])?;
             for c in state.containers.values() {
                 tx.execute(
-                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running, terminating, exit_code)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                     rusqlite::params![
                         state.run_id,
                         c.node_id,
@@ -125,6 +125,8 @@ impl WorkspaceDb {
                         sync_to_column(c.observed.sync),
                         c.desired.raw_domain,
                         c.desired.running,
+                        c.desired.terminating,
+                        c.observed.exit_code,
                     ],
                 )?;
             }
@@ -183,7 +185,7 @@ impl WorkspaceDb {
             drop(stmt);
 
             let mut stmt = conn.prepare(
-                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running FROM containers",
+                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running, terminating, exit_code FROM containers",
             )?;
             let rows = stmt.query_map([], |row| {
                 let status: String = row.get(3)?;
@@ -208,6 +210,11 @@ impl WorkspaceDb {
                             additional_hosts: json_column(row.get(7)?),
                             status_port: row.get(9)?,
                             config_hash: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                            // A row written before this column existed
+                            // predates the task kind entirely, so there is
+                            // nothing to guess: it can only have been a
+                            // service.
+                            terminating: row.get::<_, Option<i64>>(14)?.is_some_and(|v| v != 0),
                         },
                         observed: ContainerObserved {
                             status,
@@ -218,6 +225,7 @@ impl WorkspaceDb {
                             ip: None,
                             ports: json_column(row.get(8)?),
                             sync: row.get::<_, Option<i64>>(11)?.map(|v| v != 0).into(),
+                            exit_code: row.get(15)?,
                         },
                         // Never a column: an action in flight belongs to
                         // the process that started it, and cannot still be
@@ -262,6 +270,7 @@ mod tests {
                 additional_hosts: Vec::new(),
                 status_port: Some("8080".to_string()),
                 config_hash: "deadbeef".to_string(),
+                terminating: false,
             },
             observed: ContainerObserved {
                 status: "running".to_string(),
@@ -269,6 +278,7 @@ mod tests {
                 ip: None,
                 ports: BTreeMap::from([("8080".to_string(), Some(8080))]),
                 sync: SyncStatus::Synced,
+                exit_code: None,
             },
             pending_action: None,
         }

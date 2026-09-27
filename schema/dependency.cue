@@ -56,6 +56,24 @@ package fghj
 	// container stopped — fghj's own `ensure_running` is the usual way a
 	// container comes back, not Docker's own restart machinery.
 	restart: *"no" | "always" | "on-failure" | "unless-stopped"
+	// The signal Docker sends to stop this container, and how long it waits
+	// for the process to exit before following up with SIGKILL — Compose's
+	// `stop_signal`/`stop_grace_period`, Docker's
+	// `ContainerCreateBody.StopSignal`/`StopTimeout`.
+	//
+	// Set on the container at *create* time rather than passed with each
+	// stop call, so the policy travels with the container: an orphan whose
+	// node was deleted from the graph, a container that outlived a daemon
+	// restart, and a plain `docker stop` by hand all honour it.
+	//
+	// The default grace period is 10s, matching Docker's own. Raise it for
+	// anything that needs to finish writing before it dies — a database
+	// flushing to a `scope: stable` volume is the case this exists for. The
+	// signal defaults to whatever the image declares (`STOPSIGNAL`, or
+	// SIGTERM); override it only for an image whose process listens for a
+	// different one (e.g. nginx's "quit" is SIGQUIT).
+	stop_signal?:      string & =~"^SIG[A-Z0-9]+$"
+	stop_grace_period: uint | *10
 	// Overrides the image's default container user — Compose's `user`,
 	// Docker's `ContainerCreateBody.User` (e.g. "1000:1000" or "postgres").
 	user?: string
@@ -110,9 +128,9 @@ package fghj
 // `#SharedBackingDependency` refs point at.
 #BackingDependency: {
 	#RunOptions
-	kind:        "backing"
-	name:        string & =~"^[a-z0-9][a-z0-9-]*$"
-	image:       string & =~"^[a-z0-9][a-z0-9._/-]*(:[a-zA-Z0-9._-]+)?$"
+	kind:  "backing"
+	name:  string & =~"^[a-z0-9][a-z0-9-]*$"
+	image: string & =~"^[a-z0-9][a-z0-9._/-]*(:[a-zA-Z0-9._-]+)?$"
 	environment: #Environment | *[]
 	// Overrides the image's default `CMD` — e.g. `["mysqld", "--sql_mode=..."]`
 	// to customize a stock database image's startup flags without a custom
@@ -156,4 +174,67 @@ package fghj
 	name:    string & =~"^[a-z0-9][a-z0-9-]*$"
 }
 
-#Dependency: #GitDependency | #BackingDependency | #SharedBackingDependency
+// A node that is *supposed to exit* — a database seed, a schema migration, a
+// fixture loader. The third node kind with a lifecycle, and it needs to be a
+// kind rather than a flag on #Service because `exited` means opposite things
+// for the two: for a service it is drift, for a task it is success. Nothing
+// downstream (the reconciler, the UI's status badge, `ensure_running`) can
+// tell those apart without knowing which kind it is looking at.
+//
+// Declared inline by the service that needs it, exactly like
+// #BackingDependency — the task is owned by that service, and the service
+// does not start until the task has exited 0. A task that exits non-zero
+// blocks its dependents rather than letting them start against a
+// half-migrated database.
+#Task: {
+	#RunOptions
+	kind: "task"
+	name: string & =~"^[a-z0-9][a-z0-9-]*$"
+	// Omit to run the *owning service's own built image* — the usual case,
+	// since a migration or seed is almost always that service's code with a
+	// different command (`rake db:migrate`, `alembic upgrade head`). Give an
+	// image only for a task that genuinely isn't the owner's code, e.g. a
+	// stock `postgres:16` running `psql -f fixtures.sql`. The owning service
+	// must declare a `build` if this is omitted — there is nothing to
+	// inherit otherwise.
+	image?: string & =~"^[a-z0-9][a-z0-9._/-]*(:[a-zA-Z0-9._-]+)?$"
+	// Required, and the reason a task exists: a task *is* its command. A
+	// container with no command to run would just re-run the image's own
+	// long-running `CMD`, which is a service, not a task.
+	command: [...string] & [_, ...]
+	environment: #Environment | *[]
+	volumes: [...#Volume] | *[]
+	// Order this task after other dependencies of the *same owning service*,
+	// named the way they name themselves: a sibling #BackingDependency's or
+	// #Task's `name`, or a sibling `kind: service` dependency's service name.
+	// A seed needs its database healthy first, and without this the only
+	// guaranteed ordering is "before the owner", which is not enough.
+	//
+	// Scoped to siblings deliberately. Ordering against an arbitrary node
+	// elsewhere in the workspace would be an edge between two repos that
+	// never agreed to one, which is the coupling [[flat-workspace-model]]
+	// exists to prevent.
+	after: [...string & =~"^[a-z0-9][a-z0-9-]*$"] | *[]
+	// "on_start" (the default) re-runs this task on every start and every
+	// top-up, which is what a migration wants: the task's own command is
+	// expected to be idempotent. "once" runs it at most once per run, for
+	// the expensive or destructive case.
+	//
+	// Note what "once" costs: it means *at most once per run*, full stop.
+	// It is not re-run when the code changes — a `git pull` that adds a
+	// migration will not cause a "once" task to run again, even though fghj
+	// can see that the commit moved. Reach for it only when re-running is
+	// expensive or destructive; that is why the default is the other way
+	// round.
+	run: *"on_start" | "once"
+	// A task's completion predicate is its exit code. A healthcheck is
+	// meaningless — an exited container can never report Docker-`healthy`,
+	// which is exactly the hole this kind fills — so declaring one here is
+	// an error rather than a silently ignored field.
+	healthcheck?: _|_
+	// Forced, not defaulted. A restart policy on a container whose whole
+	// purpose is to exit would restart it forever.
+	restart: "no"
+}
+
+#Dependency: #GitDependency | #BackingDependency | #SharedBackingDependency | #Task

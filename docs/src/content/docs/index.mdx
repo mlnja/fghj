@@ -5,12 +5,12 @@ template: splash
 hero:
   tagline: Local dev environments scoped to a user flow, not your whole microservice fleet.
   actions:
-    - text: Get Started
-      link: /getting-started/quickstart
+    - text: Start the tutorial
+      link: /tutorial/
       icon: right-arrow
       variant: primary
     - text: View on GitHub
-      link: https://github.com/virviil/fghj
+      link: https://github.com/mlnja/fghj
       icon: external
       variant: minimal
 ---
@@ -47,34 +47,40 @@ signed certs, and no `docker-compose.yml` to hand-maintain.
 ## At a glance
 
 ```bash
-# Wire a workspace into the running daemon
-fghj wire git@github.com:acme/checkout-service.git
+# Validate a repo's .fghj.yaml against the schema
+fghj validate ./.fghj.yaml
 
-# Validate a service's fghj.yaml against the schema
-fghj validate ./fghj.yaml
-
-# Resolve the full dependency graph and print it as JSON
+# Resolve the full dependency graph from any repo and print it as JSON
 fghj graph git@github.com:acme/checkout-service.git
+
+# Register a workspace with the running daemon, then drive it from the UI
+fghj wire git@github.com:acme/checkout-service.git
 ```
 
 ```yaml
-# fghj.yaml
+# .fghj.yaml
 version: "1.0"
-service:
-  name: checkout-service
-  build:
-    context: .
-  ports:
-    http:
-      primary: true
-  dependencies:
-    - kind: service
-      repo: git@github.com:acme/payments-service.git
-      default_branch: main
-    - kind: backing
-      name: postgres
-      image: postgres:16
-      ports: ["5432"]
+
+services:
+  checkout:
+    build:
+      context: .
+    ports:
+      "8080":
+        primary: true
+    environment:
+      DATABASE_URL: postgres://app:dev@${FGHJ_SERVICE_FQDN:postgres}:5432/app
+    dependencies:
+      - kind: backing
+        name: postgres
+        image: postgres:16
+        ports: ["5432"]
+        healthcheck:
+          test: ["CMD-SHELL", "pg_isready -U app"]
+          interval: 2
+          retries: 15
+      - kind: service
+        repo: git@github.com:acme/payments-service.git
 
 flows:
   checkout:
@@ -82,5 +88,11 @@ flows:
     dependencies:
       - kind: service
         repo: git@github.com:acme/payments-service.git
-        default_branch: main
 ```
+
+That repo now answers at `https://checkout.<workspace>.fghj.internal` with a
+certificate your system already trusts, and its Postgres at
+`postgres.checkout.<workspace>.fghj.raw.internal:5432`. Neither address is
+written down anywhere — both are derived.
+
+[Start the tutorial →](/tutorial/)

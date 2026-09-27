@@ -67,6 +67,7 @@ mod tests {
                 additional_hosts: additional_hosts.iter().map(|h| h.to_string()).collect(),
                 status_port: None,
                 config_hash: "hash".into(),
+                terminating: false,
             },
             observed: ContainerObserved {
                 status: status.to_string(),
@@ -74,6 +75,7 @@ mod tests {
                 ip: None,
                 ports: BTreeMap::new(),
                 sync: SyncStatus::Unknown,
+                exit_code: None,
             },
             pending_action: None,
         }

@@ -2,7 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use super::config::{Build, Environment, Healthcheck, default_domain_scope, default_restart};
+use super::config::{
+    Build, Environment, Healthcheck, default_domain_scope, default_restart,
+    default_stop_grace_period,
+};
 use super::dependency::Dependency;
 use super::port::PortConfig;
 use super::volume::{HostAliasConfig, VolumeMount};
@@ -28,6 +31,10 @@ pub struct ServiceConfig {
     pub(crate) additional_hosts: Vec<HostAliasConfig>,
     #[serde(default = "default_restart")]
     pub(crate) restart: String,
+    #[serde(default)]
+    pub(crate) stop_signal: Option<String>,
+    #[serde(default = "default_stop_grace_period")]
+    pub(crate) stop_grace_period: u64,
     #[serde(default)]
     pub(crate) user: Option<String>,
     #[serde(default)]

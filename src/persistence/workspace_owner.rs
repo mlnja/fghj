@@ -24,7 +24,7 @@ impl WorkspaceOwner {
     pub fn apply_to_command(&self, cmd: &mut std::process::Command) {
         use std::os::unix::process::CommandExt;
         cmd.uid(self.uid).gid(self.gid).env("HOME", &self.home);
-        match live_ssh_auth_sock(self.uid, self.ssh_auth_sock.as_deref()) {
+        match self.live_ssh_auth_sock() {
             Some(sock) => {
                 cmd.env("SSH_AUTH_SOCK", sock);
             }
@@ -32,6 +32,15 @@ impl WorkspaceOwner {
                 cmd.env_remove("SSH_AUTH_SOCK");
             }
         }
+    }
+
+    /// This user's ssh-agent socket, re-derived rather than read off
+    /// `ssh_auth_sock` — see `live_ssh_auth_sock`. Public because BuildKit
+    /// ssh forwarding needs the path itself rather than a configured
+    /// `Command`: bollard reads it out of `fghjd`'s own environment, so
+    /// `docker::build_image_buildkit` has to set it there directly.
+    pub fn live_ssh_auth_sock(&self) -> Option<String> {
+        live_ssh_auth_sock(self.uid, self.ssh_auth_sock.as_deref())
     }
 }
 

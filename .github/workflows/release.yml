@@ -9,6 +9,14 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Must stay in step with `SIDECAR_REPOSITORY` in `src/sidecar_image.rs` —
+  # that constant is what an installed `fghjd` pulls from, and it is
+  # deliberately a literal in both places rather than
+  # `github.repository_owner`. A fork that templated the owner here would push
+  # its sidecar to its own namespace while its `fghjd` kept pulling ours, and
+  # because the version would usually match, the wrong image would arrive
+  # without an error. Forking the sidecar means editing both.
+  SIDECAR_IMAGE: ghcr.io/mlnja/fghj-sidecar
 
 jobs:
   # ── fghj + fghjd: macOS only (fghjd shells out to macOS's `security` CLI
@@ -27,6 +35,21 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # `ui/dist` is gitignored and `web::ui`'s `include_dir!` panics at
+      # compile time without it, so this is a hard prerequisite of the cargo
+      # build below, not an extra.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -48,10 +71,145 @@ jobs:
           name: fghj-${{ matrix.suffix }}
           path: dist/
 
+  # ── fghj-sidecar: the in-network TLS/DNS proxy, one container per run ─────
+  #
+  # Without this, the first run on a freshly installed fghj compiles the whole
+  # crate inside a container (`sidecar_image.rs`'s fallback path) — minutes of
+  # rust:1-bookworm plus a cold cargo build, for an image the project can
+  # build once. It is published under the *crate* version, which is what
+  # `image_tag()` asks for; the git tag is not consulted.
+  #
+  # Built natively per architecture rather than with one QEMU-emulated buildx
+  # run: this is a full release compile of the crate, and emulating it on
+  # arm64 turns a few minutes into most of an hour.
+  sidecar:
+    name: Sidecar image (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            slug: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            slug: arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pushed by digest only, with no tag: a tag pushed from two runners in
+      # parallel would just be the loser overwriting the winner, leaving a
+      # single-arch image. The `merge` job below is what names them.
+      - name: Build and push by digest
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: sidecar/Dockerfile
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=sidecar-${{ matrix.slug }}
+          cache-to: type=gha,mode=max,scope=sidecar-${{ matrix.slug }}
+          outputs: type=image,name=${{ env.SIDECAR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Record digest
+        run: |
+          mkdir -p digests
+          echo "${{ steps.push.outputs.digest }}" > "digests/${{ matrix.slug }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sidecar-digest-${{ matrix.slug }}
+          path: digests/
+          retention-days: 1
+
+  # Turns the per-arch digests into one manifest list under the crate version,
+  # so `docker pull ghcr.io/mlnja/fghj-sidecar:x.y.z` resolves to whichever
+  # architecture the user's Docker is running.
+  sidecar-merge:
+    name: Sidecar manifest
+    needs: [sidecar]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sidecar-digest-*
+          merge-multiple: true
+          path: digests
+
+      # The crate version, not the git tag: `image_tag()` is built from
+      # `CARGO_PKG_VERSION`, so Cargo.toml is the only source of truth that
+      # can't drift away from what the shipped binary will ask for.
+      - name: Read crate version
+        id: version
+        run: |
+          version=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sidecar version: $version"
+
+      - name: Create manifest list
+        run: |
+          set -euo pipefail
+          refs=()
+          for f in digests/*; do
+            refs+=("$SIDECAR_IMAGE@$(cat "$f")")
+          done
+          echo "merging ${refs[*]}"
+          docker buildx imagetools create \
+            --tag "$SIDECAR_IMAGE:${{ steps.version.outputs.version }}" \
+            "${refs[@]}"
+
+      - name: Inspect
+        run: docker buildx imagetools inspect "$SIDECAR_IMAGE:${{ steps.version.outputs.version }}"
+
   # ── GitHub Release ────────────────────────────────────────────────────────
+  #
+  # Gated on the sidecar publish as well as the binaries. A release whose
+  # sidecar image is missing still *works* — `sidecar_image.rs` falls back to
+  # compiling it locally — but it silently hands every new user the slow first
+  # run this job exists to remove, which is worse than not cutting the
+  # release. Re-run the workflow once the push succeeds.
   create-release:
     name: Create Release
-    needs: [build]
+    needs: [build, sidecar-merge]
     runs-on: ubuntu-latest
     permissions:
       contents: write

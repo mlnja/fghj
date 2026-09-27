@@ -135,6 +135,22 @@ pub struct ContainerDesired {
     /// `RunRegistry::config_drift` to detect drift; never used to decide
     /// anything on its own.
     pub config_hash: String,
+    /// Whether this container's desired terminal state is "exited 0" rather
+    /// than "running" — true for exactly the nodes resolved with
+    /// `kind: "task"` (see `resolver::visit_dependency::visit_task_dependency`).
+    ///
+    /// The one bit of the node's *kind* that has to travel into runtime
+    /// state, because `observed.status == "exited"` means opposite things
+    /// for the two: drift for a service, success for a task. Nothing
+    /// downstream of the reducer — the drift reconciler, the UI's status
+    /// badge, `ensure_running`'s "is it still alive" check — holds the
+    /// resolved graph, so without this they would all have to guess.
+    ///
+    /// Note `running` stays `false` for a task even while its container is
+    /// alive: `running` records what fghj wants to be true *at rest*, and
+    /// what fghj wants for a task at rest is for it to be finished.
+    #[serde(default)]
+    pub terminating: bool,
 }
 
 /// Everything about a container Docker itself last reported — the
@@ -158,6 +174,16 @@ pub struct ContainerObserved {
     /// (container not running, or no live binding yet).
     pub ports: BTreeMap<String, Option<u16>>,
     pub sync: SyncStatus,
+    /// The exit code Docker reports for a container that has finished —
+    /// `None` while it is still running, and `None` for a container fghj
+    /// has not re-inspected since it exited. Only meaningful alongside
+    /// `ContainerDesired::terminating`: for a service an exit code is just
+    /// one more detail of a crash, but for a task it *is* the outcome, and
+    /// `Some(0)` versus `Some(n)` is the whole difference between a
+    /// migration that ran and one that has to block everything downstream
+    /// of it.
+    #[serde(default)]
+    pub exit_code: Option<i64>,
 }
 
 /// One container's full state: what fghj wants (`desired`), what Docker
@@ -166,13 +192,126 @@ pub struct ContainerObserved {
 /// `RunRegistry` that drives Docker, SQLite, and the `/runs` JSON the UI
 /// reads all use this one type, so there is nothing to translate between
 /// and nothing that can be lost in translation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerInfo {
     pub node_id: String,
     pub desired: ContainerDesired,
     pub observed: ContainerObserved,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_action: Option<PendingAction>,
+}
+
+/// What a container's `desired`/`observed` pair *means*, in one word.
+///
+/// Derived, never stored — see `ContainerInfo::condition`. The pair itself is
+/// the state; this is the reading of it, kept in one place so the UI, the CLI
+/// and anything added later cannot each invent their own slightly different
+/// version of the rule.
+///
+/// The variant that justifies the enum is `Crashed`. `desired.running == true`
+/// alongside an `exited` (or `dead`, or `removed`) observation is reachable —
+/// the process crashed, or someone ran `docker rm` — and **nothing in fghj
+/// converges it**. `DockerConvergeEffect::extract` reads only `pending_action`
+/// and `pending_create`, never `observed`; the reconciler is read-only by
+/// design ([[run-lifecycle-and-registry]] argues that at length). Only an
+/// explicit Start clears it.
+///
+/// That design is right, but it only works if the user is *told*, and for a
+/// long time this pair rendered identically to a container the user had
+/// deliberately stopped — the same missing-vocabulary problem
+/// `SyncStatus::Orphaned` was added to fix (`concepts/AUDIT.md` B5, B6).
+///
+/// `Restarting` and `Paused` are here for a smaller version of the same
+/// thing: both are real Docker states, both mean the container is not
+/// serving — every route lookup filters on `status == "running"`
+/// (`state::query`, `effects::hosts`) — and before this both read simply as
+/// "stopped", which is not what is happening in either case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeCondition {
+    /// Docker reports it up.
+    Running,
+    /// Docker reports it down, and fghj was not asked for it to be up. The
+    /// expected, uninteresting state after a Stop.
+    Stopped,
+    /// fghj was asked for this to be up and Docker says it is not. Nothing
+    /// will fix this on its own.
+    Crashed,
+    /// Docker is bouncing it under the `restart` policy the config asked
+    /// for. Not serving, but not stuck either — worth waiting out.
+    Restarting,
+    /// `docker pause`, from outside fghj. Not serving; a plain Start will
+    /// not help, since the container is not stopped.
+    Paused,
+    /// A terminating node that exited zero — for a task this is success, not
+    /// drift. See `ContainerDesired::terminating`.
+    Completed,
+    /// A terminating node that exited non-zero. Everything downstream of it
+    /// was not started.
+    Failed,
+    /// A terminating node that has exited, but which fghj has not
+    /// re-inspected since, so there is no exit code to read yet. Says "no
+    /// verdict", not "success".
+    Finishing,
+}
+
+impl ContainerInfo {
+    /// The one reading of the `desired`/`observed` pair — see
+    /// [`NodeCondition`].
+    ///
+    /// Deliberately says nothing about `pending_action`. That is the
+    /// *transient* half of a node's lifecycle and every consumer already
+    /// layers it on top ("stopping…" wins over whatever the settled pair
+    /// says); folding it in here would make one field answer two different
+    /// questions and lose the settled reading while an action is in flight.
+    pub fn condition(&self) -> NodeCondition {
+        let status = self.observed.status.as_str();
+        // A task is read on a different scale: `exited` is failure for a
+        // service and the *goal* for a task, and the exit code is the only
+        // thing that separates the two ends of that scale.
+        if self.desired.terminating {
+            return match (status, self.observed.exit_code) {
+                ("running", _) => NodeCondition::Running,
+                (_, Some(0)) => NodeCondition::Completed,
+                (_, Some(_)) => NodeCondition::Failed,
+                (_, None) => NodeCondition::Finishing,
+            };
+        }
+        match status {
+            "running" => NodeCondition::Running,
+            "restarting" => NodeCondition::Restarting,
+            "paused" => NodeCondition::Paused,
+            // Every remaining Docker status (`exited`, `dead`, `created`,
+            // fghj's own `removed`) means "not up". Whether that is fine or
+            // broken is not a fact about Docker's word at all — it is
+            // whether fghj was asked for this container to be up.
+            _ if self.desired.running => NodeCondition::Crashed,
+            _ => NodeCondition::Stopped,
+        }
+    }
+}
+
+/// Hand-written rather than derived for one reason: `condition` is a derived
+/// field. It has to reach the UI (it is the whole point of
+/// [`NodeCondition`]), and it must not become a *stored* field that a reducer
+/// arm could forget to update — a cached reading of two fields right next to
+/// it is a bug waiting for the one code path that sets `status` without it.
+///
+/// Everything else is exactly what `#[derive(Serialize)]` produced, including
+/// `pending_action` being omitted when `None`.
+impl Serialize for ContainerInfo {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let fields = 4 + usize::from(self.pending_action.is_some());
+        let mut s = serializer.serialize_struct("ContainerInfo", fields)?;
+        s.serialize_field("node_id", &self.node_id)?;
+        s.serialize_field("desired", &self.desired)?;
+        s.serialize_field("observed", &self.observed)?;
+        s.serialize_field("condition", &self.condition())?;
+        if let Some(pending) = &self.pending_action {
+            s.serialize_field("pending_action", pending)?;
+        }
+        s.end()
+    }
 }
 
 #[cfg(test)]
@@ -189,7 +328,105 @@ mod tests {
             additional_hosts: vec![],
             status_port: Some("80".into()),
             config_hash: "abc123".into(),
+            terminating: false,
         }
+    }
+
+    fn info(status: &str, running: bool) -> ContainerInfo {
+        ContainerInfo {
+            node_id: "web".into(),
+            desired: ContainerDesired {
+                running,
+                ..desired()
+            },
+            observed: ContainerObserved {
+                status: status.into(),
+                ..Default::default()
+            },
+            pending_action: None,
+        }
+    }
+
+    fn task(status: &str, exit_code: Option<i64>) -> ContainerInfo {
+        ContainerInfo {
+            node_id: "migrate".into(),
+            desired: ContainerDesired {
+                running: false,
+                terminating: true,
+                ..desired()
+            },
+            observed: ContainerObserved {
+                status: status.into(),
+                exit_code,
+                ..Default::default()
+            },
+            pending_action: None,
+        }
+    }
+
+    /// The pair [B6](AUDIT) is about: asked to be up, observed down, and
+    /// nothing in fghj will act on it. It must not read the same as a
+    /// container the user deliberately stopped.
+    #[test]
+    fn asked_to_be_up_and_observed_down_is_crashed_not_stopped() {
+        assert_eq!(info("exited", true).condition(), NodeCondition::Crashed);
+        assert_eq!(info("exited", false).condition(), NodeCondition::Stopped);
+    }
+
+    /// Whether "not up" is fine or broken is not a fact about Docker's word
+    /// for it — every one of these means the same thing once you know
+    /// whether fghj asked for the container to be up.
+    #[test]
+    fn every_not_up_status_reads_the_same_way() {
+        for status in ["exited", "dead", "removed", "created"] {
+            assert_eq!(
+                info(status, true).condition(),
+                NodeCondition::Crashed,
+                "{status} while desired-running"
+            );
+            assert_eq!(
+                info(status, false).condition(),
+                NodeCondition::Stopped,
+                "{status} while not desired-running"
+            );
+        }
+    }
+
+    /// Both are "not serving" — every route lookup filters on `running` —
+    /// but neither is stuck, and a Start would not help a paused container.
+    #[test]
+    fn restarting_and_paused_are_neither_running_nor_stopped() {
+        assert_eq!(
+            info("restarting", true).condition(),
+            NodeCondition::Restarting
+        );
+        assert_eq!(info("paused", true).condition(), NodeCondition::Paused);
+    }
+
+    #[test]
+    fn a_task_is_read_on_its_exit_code_not_on_being_down() {
+        assert_eq!(
+            task("exited", Some(0)).condition(),
+            NodeCondition::Completed
+        );
+        assert_eq!(task("exited", Some(1)).condition(), NodeCondition::Failed);
+        // Exited, but not re-inspected since — "no verdict yet", which is
+        // emphatically not the same as success.
+        assert_eq!(task("exited", None).condition(), NodeCondition::Finishing);
+        assert_eq!(task("running", None).condition(), NodeCondition::Running);
+    }
+
+    /// The reason `condition` is derived rather than stored: it must reach
+    /// the UI, and a cached reading of two adjacent fields is a bug waiting
+    /// for the one code path that updates `status` without it.
+    #[test]
+    fn condition_is_serialized_alongside_the_pair_it_reads() {
+        let json = serde_json::to_value(info("exited", true)).unwrap();
+        assert_eq!(json["condition"], "crashed");
+        assert_eq!(json["observed"]["status"], "exited");
+        assert_eq!(json["desired"]["running"], true);
+        // Unchanged from the derived impl: omitted when there is none.
+        assert!(json.get("pending_action").is_none());
     }
 
     #[test]

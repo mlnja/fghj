@@ -28,6 +28,14 @@ pub struct ComponentConfig {
     pub(crate) flows: BTreeMap<String, FlowConfig>,
 }
 
+/// One `--mount=type=secret` source — see `#BuildSecret` in
+/// `schema/component.cue`, including why there is no `env` variant.
+#[derive(Debug, Deserialize, Clone)]
+pub struct BuildSecret {
+    pub(crate) id: String,
+    pub(crate) file: String,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Build {
     #[serde(default = "default_context")]
@@ -36,6 +44,15 @@ pub struct Build {
     pub(crate) dockerfile: String,
     #[serde(default)]
     pub(crate) args: BTreeMap<String, String>,
+    /// `docker build --target` — which stage of a multi-stage Dockerfile to
+    /// build. `None` builds the final stage.
+    #[serde(default)]
+    pub(crate) target: Option<String>,
+    /// Forward the workspace owner's ssh-agent into the build.
+    #[serde(default)]
+    pub(crate) ssh: bool,
+    #[serde(default)]
+    pub(crate) secrets: Vec<BuildSecret>,
 }
 
 pub fn default_context() -> String {
@@ -52,6 +69,21 @@ pub fn default_domain_scope() -> String {
 
 pub fn default_restart() -> String {
     "no".to_string()
+}
+
+/// Mirrors `#RunOptions.stop_grace_period`'s default, which is Docker's own
+/// 10 seconds. Named rather than inlined because both config types need it
+/// as a `serde(default)`, and a stub `Node` (which has no config to read)
+/// has to land on the same number.
+pub fn default_stop_grace_period() -> u64 {
+    10
+}
+
+/// Mirrors `#Task.run`'s default. "on_start" re-runs a task on every start
+/// and top-up; "once" runs it at most once per run. See the schema's own
+/// doc comment for why the idempotent one is the default.
+pub fn default_run_policy() -> String {
+    "on_start".to_string()
 }
 
 /// Mirrors `#Healthcheck` in `schema/dependency.cue`. `interval`/`timeout`/

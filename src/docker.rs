@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use anyhow::{Context, Result, bail};
@@ -11,9 +11,9 @@ use bollard::models::{
     NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum, VolumeCreateRequest,
 };
 use bollard::query_parameters::{
-    BuildImageOptionsBuilder, CreateContainerOptionsBuilder, InspectContainerOptionsBuilder,
-    ListVolumesOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-    RemoveVolumeOptionsBuilder,
+    BuildImageOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
+    InspectContainerOptionsBuilder, ListVolumesOptionsBuilder, LogsOptionsBuilder,
+    RemoveContainerOptionsBuilder, RemoveVolumeOptionsBuilder,
 };
 use futures_util::StreamExt;
 use futures_util::stream::Stream;
@@ -175,15 +175,122 @@ pub async fn list_run_volumes(docker: &Docker, run_id: &str) -> Result<Vec<Strin
         .collect())
 }
 
-pub async fn build_image(
-    docker: &Docker,
-    context_dir: &Path,
-    dockerfile: &str,
-    tag: &str,
-    platform: Option<&str>,
-) -> Result<()> {
+/// Everything one `docker build` needs that isn't the tar stream itself.
+///
+/// Grouped into a struct rather than passed positionally because the list is
+/// open-ended: `#Build` is the one part of the language that mirrors a whole
+/// foreign CLI, and every field added here has to reach the daemon or it is
+/// silently ignored — which is exactly what happened to `args` before
+/// `concepts/build-inputs.md` was written.
+pub struct BuildOpts<'a> {
+    pub context_dir: &'a Path,
+    pub dockerfile: &'a str,
+    pub tag: &'a str,
+    pub platform: Option<&'a str>,
+    /// `#Build.args` — `docker build --build-arg`. Only the `ARG`s a
+    /// Dockerfile actually declares have any effect; Docker ignores the rest.
+    pub args: &'a BTreeMap<String, String>,
+    /// `#Build.target` — which stage of a multi-stage Dockerfile to stop at.
+    pub target: Option<&'a str>,
+    /// `#Build.secrets`, already resolved to absolute host paths — each entry
+    /// is the `id` a `RUN --mount=type=secret,id=…` names and the file whose
+    /// bytes BuildKit should serve for it. Non-empty forces the BuildKit
+    /// path; see `build_image`.
+    pub secrets: &'a [(String, PathBuf)],
+    /// The ssh-agent socket to forward as BuildKit's `default` ssh socket,
+    /// for a Dockerfile doing `RUN --mount=type=ssh`. This is a resolved,
+    /// *live* path (`WorkspaceOwner`'s, via `live_ssh_auth_sock`) rather than
+    /// the `#Build.ssh` boolean, because `fghjd` runs as root and has no
+    /// agent of its own to forward — the whole point is to lend it the
+    /// workspace owner's. `None` forwards nothing.
+    pub ssh_auth_sock: Option<&'a str>,
+}
+
+impl BuildOpts<'_> {
+    /// Whether this build needs BuildKit rather than the classic builder.
+    ///
+    /// `args`, `target` and `platform` all work on both, so a repo that
+    /// declares none of `secrets`/`ssh` keeps building exactly the way it did
+    /// before these existed. That matters more than uniformity: the classic
+    /// path streams `error_detail.message` straight out of the daemon, while
+    /// bollard's BuildKit driver collapses a whole build into one
+    /// `Result<(), GrpcError>` with no progress and a much blunter error.
+    /// Paying that cost only when a feature actually demands it is the trade
+    /// `concepts/build-inputs.md` records.
+    fn needs_buildkit(&self) -> bool {
+        !self.secrets.is_empty() || self.ssh_auth_sock.is_some()
+    }
+}
+
+/// Serializes the process-global `SSH_AUTH_SOCK` mutation that BuildKit ssh
+/// forwarding requires.
+///
+/// bollard's `SshProvider` reads the agent socket from *this process's*
+/// environment (`bollard::grpc::mod.rs`, `check_agent`) with no way to pass
+/// one in. `fghjd` is a root daemon with no agent of its own, so the only way
+/// to lend it the workspace owner's is to set the variable around the build
+/// — which is global to the process, hence the lock. Held across the whole
+/// build, so two ssh-forwarding builds never overlap; builds that don't
+/// forward ssh never touch it and stay fully concurrent.
+static SSH_AUTH_SOCK_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Pulls `repository:tag` from whatever registry `repository` names, leaving
+/// it in the local image store under that same reference.
+///
+/// The only caller today is `sidecar_image::ensure_built` — fghj does not pull
+/// the images its *nodes* declare (see `RunOpts.platform`'s note), because a
+/// node's image may be private and the credential story for that is the
+/// workspace owner's docker config, not fghjd's. The sidecar is different: it
+/// is fghj's own image, published publicly, so an anonymous pull is always
+/// enough and no `DockerCredentials` are passed.
+///
+/// A pull that the daemon reports as failed mid-stream (unknown manifest, no
+/// network, registry 5xx) arrives as a stream item that bollard has already
+/// turned into an `Err` from `error_detail` — so draining the stream and
+/// propagating the first error is the whole implementation. Progress lines are
+/// deliberately discarded: the one caller is a startup step whose slowness is
+/// already explained by `bootstrap.rs`, and nothing in the UI polls it.
+/// A `Docker` handle for tests that never actually talk to Docker — the ones
+/// about bookkeeping that happens to live behind a type owning a client.
+///
+/// `connect_with_local_defaults` cannot serve this purpose: bollard resolves
+/// the unix socket at *construction* and returns `SocketNotFoundError` when it
+/// isn't there, so a test that sends no request still fails on any machine
+/// without Docker — which is every CI runner this project can use, for the
+/// reasons `concepts/release-and-delivery.md` sets out. The http transport
+/// does no such check. Port 1 is deliberate: nothing listens there, so a
+/// request that shouldn't happen fails loudly instead of quietly reaching a
+/// real daemon.
+#[cfg(test)]
+pub(crate) fn undialled_client() -> Docker {
+    Docker::connect_with_http("http://127.0.0.1:1", 1, bollard::API_DEFAULT_VERSION)
+        .expect("constructing an http transport cannot fail")
+}
+
+pub async fn pull_image(docker: &Docker, repository: &str, tag: &str) -> Result<()> {
+    let options = CreateImageOptionsBuilder::default()
+        .from_image(repository)
+        .tag(tag)
+        .build();
+    let mut stream = docker.create_image(Some(options), None, None);
+    while let Some(item) = stream.next().await {
+        item.with_context(|| format!("failed to pull {repository}:{tag}"))?;
+    }
+    Ok(())
+}
+
+pub async fn build_image(docker: &Docker, opts: &BuildOpts<'_>) -> Result<()> {
+    let tar_bytes = tar_build_context(opts.context_dir).await?;
+    if opts.needs_buildkit() {
+        build_image_buildkit(docker, opts, tar_bytes).await
+    } else {
+        build_image_classic(docker, opts, tar_bytes).await
+    }
+}
+
+async fn tar_build_context(context_dir: &Path) -> Result<Vec<u8>> {
     let context_dir = context_dir.to_path_buf();
-    let tar_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
         let mut builder = tar::Builder::new(Vec::new());
         builder
             .append_dir_all("", &context_dir)
@@ -193,14 +300,36 @@ pub async fn build_image(
             .context("failed to finalize build context tar")
     })
     .await
-    .context("tar task panicked")??;
+    .context("tar task panicked")?
+}
 
+async fn build_image_classic(
+    docker: &Docker,
+    opts: &BuildOpts<'_>,
+    tar_bytes: Vec<u8>,
+) -> Result<()> {
+    let BuildOpts {
+        dockerfile,
+        tag,
+        platform,
+        args,
+        target,
+        ..
+    } = *opts;
     let mut options_builder = BuildImageOptionsBuilder::default()
         .dockerfile(dockerfile)
         .t(tag)
         .rm(true);
     if let Some(platform) = platform {
         options_builder = options_builder.platform(platform);
+    }
+    if let Some(target) = target {
+        options_builder = options_builder.target(target);
+    }
+    if !args.is_empty() {
+        let args: HashMap<&str, &str> =
+            args.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        options_builder = options_builder.buildargs(&args);
     }
     let options = options_builder.build();
 
@@ -215,6 +344,133 @@ pub async fn build_image(
         }
     }
     Ok(())
+}
+
+/// The BuildKit path, taken only when `#Build` declares `secrets` or `ssh`.
+///
+/// Unlike `build_image_classic` this is a single round trip with no progress
+/// stream — bollard's `Build::docker_build` runs the whole solve and returns
+/// `Result<(), GrpcError>`. The image still lands in the daemon's local image
+/// store under `tag`, because the `Moby` driver asks for the `docker`
+/// exporter, so everything downstream (`create_container`, `spec_hash`'s
+/// image tag) is unchanged.
+async fn build_image_buildkit(
+    docker: &Docker,
+    opts: &BuildOpts<'_>,
+    tar_bytes: Vec<u8>,
+) -> Result<()> {
+    use bollard::grpc::build::{ImageBuildFrontendOptions, ImageBuildLoadInput, SecretSource};
+    let mut frontend = ImageBuildFrontendOptions::builder().dockerfile(Path::new(opts.dockerfile));
+    if let Some(target) = opts.target {
+        frontend = frontend.target(target);
+    }
+    for (key, value) in opts.args {
+        frontend = frontend.buildarg(key, value);
+    }
+    if let Some(platform) = opts.platform
+        && let Some(platform) = parse_platform(platform)
+    {
+        frontend = frontend.platforms(&platform);
+    }
+    for (id, path) in opts.secrets {
+        // `SecretSource::Env` exists too, and is deliberately unreachable:
+        // there is no host environment to read one from until
+        // `concepts/AUDIT.md` E2 closes. See `#BuildSecret`.
+        frontend = frontend.set_secret(id, &SecretSource::File(PathBuf::from(path)));
+    }
+    frontend = frontend.enable_ssh(opts.ssh_auth_sock.is_some());
+    let frontend = frontend.build();
+
+    let load = ImageBuildLoadInput::Upload(bytes::Bytes::from(tar_bytes));
+    let tag = opts.tag;
+
+    let result = match opts.ssh_auth_sock {
+        // The guard is scoped to the match arm so the process-global variable
+        // is restored — and the lock released — the moment this one build
+        // finishes, not at the end of the function.
+        Some(sock) => {
+            let _guard = SSH_AUTH_SOCK_ENV.lock().await;
+            let previous = std::env::var_os("SSH_AUTH_SOCK");
+            set_ssh_auth_sock(Some(sock));
+            let result = solve_on_dedicated_thread(docker, tag, frontend, load).await;
+            set_ssh_auth_sock(previous.as_ref().and_then(|v| v.to_str()));
+            result
+        }
+        None => solve_on_dedicated_thread(docker, tag, frontend, load).await,
+    };
+    result.with_context(|| format!("buildkit build of {tag} failed"))
+}
+
+/// Runs one BuildKit solve on a thread of its own.
+///
+/// bollard's `Build::docker_build` future is `!Send` — its driver tear-down
+/// handler is a bare `Box<dyn Future>` — so awaiting it inline would make
+/// every caller up to and including `tokio::spawn` in `daemon::reconcile`
+/// `!Send` too. Rather than restructure the daemon around one dependency's
+/// boxed future, the solve gets a current-thread runtime and a `LocalSet` on
+/// a dedicated thread, and only its result crosses back.
+async fn solve_on_dedicated_thread(
+    docker: &Docker,
+    tag: &str,
+    frontend: bollard::grpc::build::ImageBuildFrontendOptions,
+    load: bollard::grpc::build::ImageBuildLoadInput,
+) -> Result<()> {
+    use bollard::grpc::driver::Build;
+    use bollard::grpc::driver::moby::Moby;
+
+    let docker = docker.clone();
+    let tag = tag.to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let outcome = (|| -> Result<()> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("failed to build a runtime for the buildkit solve")?;
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&runtime, async move {
+                Moby::new(&docker)
+                    .docker_build(&tag, frontend, load, None, None)
+                    .await
+                    .map_err(anyhow::Error::from)
+            })
+        })();
+        let _ = tx.send(outcome);
+    });
+    rx.await.context("buildkit solve thread panicked")?
+}
+
+/// Sets or clears the process-global `SSH_AUTH_SOCK`. Only ever called with
+/// `SSH_AUTH_SOCK_ENV` held — see that lock's doc for why this has to be
+/// process-global at all. `set_var` is `unsafe` in edition 2024 because it
+/// races with any *other* thread reading the environment; the lock makes
+/// fghjd's own accesses exclusive, and the read that matters (bollard's
+/// `check_agent`) happens inside the build this brackets.
+fn set_ssh_auth_sock(value: Option<&str>) {
+    unsafe {
+        match value {
+            Some(value) => std::env::set_var("SSH_AUTH_SOCK", value),
+            None => std::env::remove_var("SSH_AUTH_SOCK"),
+        }
+    }
+}
+
+/// Splits an OCI platform string (`linux/arm64`, `linux/arm/v7`) into
+/// BuildKit's structured form. Returns `None` for anything that isn't at
+/// least `os/arch`, which then simply builds for the daemon's own platform —
+/// the same thing that happened before `#Build` could carry secrets at all.
+fn parse_platform(platform: &str) -> Option<bollard::grpc::build::ImageBuildPlatform> {
+    let mut parts = platform.split('/');
+    let os = parts.next()?;
+    let architecture = parts.next()?;
+    if os.is_empty() || architecture.is_empty() {
+        return None;
+    }
+    Some(bollard::grpc::build::ImageBuildPlatform {
+        architecture: architecture.to_string(),
+        os: os.to_string(),
+        variant: parts.next().map(str::to_string),
+    })
 }
 
 pub struct RunOpts<'a> {
@@ -244,6 +500,16 @@ pub struct RunOpts<'a> {
     pub binds: &'a [String],
     /// `#RunOptions.restart` — see `docker::restart_policy_name`.
     pub restart_policy: &'a str,
+    /// `#RunOptions.stop_signal` — `ContainerCreateBody.StopSignal`. `None`
+    /// leaves the image's own `STOPSIGNAL` alone.
+    pub stop_signal: Option<&'a str>,
+    /// `#RunOptions.stop_grace_period` — `ContainerCreateBody.StopTimeout`,
+    /// in seconds. Recorded on the container rather than passed to each
+    /// `stop_container` call so that every path that ever stops this
+    /// container honours it, including ones that no longer have a `Node` to
+    /// read: an orphan whose node was deleted, a container that outlived the
+    /// daemon, a `docker stop` typed by hand.
+    pub stop_grace_period: u64,
     pub user: Option<&'a str>,
     pub working_dir: Option<&'a str>,
     /// User-declared labels — merged under fghj's own `com.docker.compose.*`
@@ -322,6 +588,8 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
         exposed_ports: Some(exposed_ports),
         user: opts.user.map(|s| s.to_string()),
         working_dir: opts.working_dir.map(|s| s.to_string()),
+        stop_signal: opts.stop_signal.map(|s| s.to_string()),
+        stop_timeout: Some(opts.stop_grace_period as i64),
         healthcheck: opts.healthcheck.map(|hc| HealthConfig {
             test: Some(hc.test.clone()),
             interval: hc.interval.map(|s| (s * 1_000_000_000) as i64),
@@ -405,7 +673,24 @@ pub async fn stop_container(docker: &Docker, name: &str) {
     let _ = docker.stop_container(name, None).await;
 }
 
+/// Stops a container and then removes it — two calls, deliberately, not one
+/// `remove_container(force: true)`.
+///
+/// `force` is SIGKILL with no grace period at all, and this function is on
+/// ordinary paths: stopping a whole run, restarting a single node,
+/// reconciling a container whose config changed. A dev database with an
+/// hour of seeded state in a `scope: stable` volume would be killed
+/// mid-write by a routine action — the opposite of what a stable volume
+/// promises. So stop first and let the container's own `StopSignal` /
+/// `StopTimeout` (stamped on at create time by `run_container`) run their
+/// course; Docker escalates to SIGKILL itself once the grace period expires,
+/// so this cannot hang indefinitely.
+///
+/// The remove still passes `force`, for the case the stop could not finish:
+/// a container that is somehow still running must not survive a teardown and
+/// hold its name, network or volumes hostage from the next start.
 pub async fn stop_and_remove(docker: &Docker, name: &str) {
+    let _ = docker.stop_container(name, None).await;
     let _ = docker
         .remove_container(
             name,
@@ -417,6 +702,14 @@ pub async fn stop_and_remove(docker: &Docker, name: &str) {
 pub struct ContainerStatus {
     pub status: String,
     pub published_port: Option<u16>,
+    /// The process's exit code, once Docker has one to report — `None`
+    /// while the container is still running (and for a container that never
+    /// ran). The reading a terminating node (`Node.kind == "task"`, see
+    /// `runs::health::wait_for_exit`) is actually waiting on: for a
+    /// long-running service `status` alone answers every question, but for a
+    /// container whose entire purpose is to finish, "exited" is only half
+    /// the answer.
+    pub exit_code: Option<i64>,
 }
 
 /// Inspects a container, returning its status and the host port bound to
@@ -442,11 +735,17 @@ pub async fn inspect_status(
         Err(e) => return Err(e).context("docker inspect_container failed"),
     };
 
-    let status = inspected
-        .state
-        .and_then(|s| s.status)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    let (status, exit_code) = match &inspected.state {
+        Some(state) => (
+            state
+                .status
+                .as_ref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            state.exit_code,
+        ),
+        None => ("unknown".to_string(), None),
+    };
 
     let port_key = if container_port.contains('/') {
         container_port.to_string()
@@ -464,6 +763,7 @@ pub async fn inspect_status(
     Ok(Some(ContainerStatus {
         status,
         published_port,
+        exit_code,
     }))
 }
 
@@ -709,7 +1009,7 @@ mod tests {
     /// Cheap, dependency-free uniqueness for the container name — tests in
     /// this module never run concurrently with each other in practice, but a
     /// stale container from a previous crashed run shouldn't collide either.
-    fn rand_suffix() -> u32 {
+    pub(super) fn rand_suffix() -> u32 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
@@ -717,6 +1017,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
     async fn exec_start_streams_output_and_reports_exit_code() {
         let docker = crate::daemon::connect_docker().expect("docker client");
         let container = TestContainer::start();
@@ -749,6 +1050,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
     async fn exec_start_reports_nonzero_exit_code_and_accepts_stdin() {
         let docker = crate::daemon::connect_docker().expect("docker client");
         let container = TestContainer::start();
@@ -802,5 +1104,246 @@ mod tests {
         .expect("exec_start failed");
         while (failing.output.next().await).is_some() {}
         assert_eq!(exec_exit_code(&docker, &failing.id).await.unwrap(), 7);
+    }
+}
+
+#[cfg(test)]
+mod build_tests {
+    use super::*;
+    use std::process::Command;
+
+    /// A throwaway build context plus the image tag it produces, both cleaned
+    /// up on drop. `docker rmi` rather than leaving images behind matters
+    /// here: every test in this module builds a *different* image under a
+    /// unique tag, so without it a test run leaks one dangling image apiece.
+    struct BuildFixture {
+        dir: tempfile::TempDir,
+        tag: String,
+    }
+
+    impl BuildFixture {
+        fn new(label: &str, dockerfile: &str) -> Self {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(dir.path().join("Dockerfile"), dockerfile).expect("write Dockerfile");
+            let tag = format!("fghj-build-test/{label}:{}", super::tests::rand_suffix());
+            Self { dir, tag }
+        }
+
+        fn write(&self, name: &str, contents: &str) -> std::path::PathBuf {
+            let path = self.dir.path().join(name);
+            std::fs::write(&path, contents).expect("write fixture file");
+            path
+        }
+
+        /// Runs the built image and returns its combined output, which is how
+        /// every test here checks what actually landed *inside* the image —
+        /// the only evidence that a build input reached the daemon rather
+        /// than being accepted and dropped.
+        fn run(&self, cmd: &[&str]) -> String {
+            let mut args = vec!["run", "--rm", &self.tag];
+            args.extend_from_slice(cmd);
+            let out = Command::new("docker")
+                .args(&args)
+                .output()
+                .expect("docker run of the built image");
+            assert!(
+                out.status.success(),
+                "docker run failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+    }
+
+    impl Drop for BuildFixture {
+        fn drop(&mut self) {
+            let _ = Command::new("docker")
+                .args(["rmi", "-f", &self.tag])
+                .status();
+        }
+    }
+
+    fn docker() -> Docker {
+        Docker::connect_with_local_defaults().expect("connect to docker")
+    }
+
+    #[test]
+    fn a_build_with_neither_secrets_nor_ssh_stays_on_the_classic_builder() {
+        let args = BTreeMap::new();
+        let opts = BuildOpts {
+            context_dir: Path::new("."),
+            dockerfile: "Dockerfile",
+            tag: "t",
+            platform: None,
+            args: &args,
+            target: Some("builder"),
+            secrets: &[],
+            ssh_auth_sock: None,
+        };
+        assert!(!opts.needs_buildkit());
+    }
+
+    #[test]
+    fn a_secret_or_an_agent_forces_the_buildkit_path() {
+        let args = BTreeMap::new();
+        let secrets = vec![(String::from("npmrc"), PathBuf::from("/tmp/npmrc"))];
+        let base = BuildOpts {
+            context_dir: Path::new("."),
+            dockerfile: "Dockerfile",
+            tag: "t",
+            platform: None,
+            args: &args,
+            target: None,
+            secrets: &[],
+            ssh_auth_sock: None,
+        };
+        assert!(
+            BuildOpts {
+                secrets: &secrets,
+                ..base
+            }
+            .needs_buildkit()
+        );
+        assert!(
+            BuildOpts {
+                ssh_auth_sock: Some("/tmp/agent.sock"),
+                ..base
+            }
+            .needs_buildkit()
+        );
+    }
+
+    #[test]
+    fn a_platform_string_splits_into_buildkits_structured_form() {
+        let two = parse_platform("linux/arm64").expect("os/arch parses");
+        assert_eq!(two.os, "linux");
+        assert_eq!(two.architecture, "arm64");
+        assert_eq!(two.variant, None);
+
+        let three = parse_platform("linux/arm/v7").expect("os/arch/variant parses");
+        assert_eq!(three.variant.as_deref(), Some("v7"));
+
+        // Anything the daemon couldn't have meant falls back to its own
+        // platform rather than erroring the build.
+        assert!(parse_platform("linux").is_none());
+        assert!(parse_platform("linux/").is_none());
+        assert!(parse_platform("").is_none());
+    }
+
+    /// The regression test for the bug E3 turned up: `build.args` was parsed,
+    /// carried into the graph, and then silently dropped on the way to the
+    /// daemon. `target` was never plumbed at all. Both are checked at once
+    /// because a build that honours `target` but not `args` and one that
+    /// honours neither produce *different* wrong answers here.
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
+    async fn build_args_and_target_both_reach_the_daemon() {
+        let fixture = BuildFixture::new(
+            "args-target",
+            "FROM busybox AS wanted\n\
+             ARG GREETING=unset\n\
+             RUN echo \"$GREETING\" > /greeting\n\
+             FROM busybox AS unwanted\n\
+             RUN echo wrong-stage > /greeting\n",
+        );
+        let mut args = BTreeMap::new();
+        args.insert(String::from("GREETING"), String::from("hello-from-args"));
+
+        build_image(
+            &docker(),
+            &BuildOpts {
+                context_dir: fixture.dir.path(),
+                dockerfile: "Dockerfile",
+                tag: &fixture.tag,
+                platform: None,
+                args: &args,
+                target: Some("wanted"),
+                secrets: &[],
+                ssh_auth_sock: None,
+            },
+        )
+        .await
+        .expect("classic build with args and target");
+
+        assert_eq!(fixture.run(&["cat", "/greeting"]), "hello-from-args");
+    }
+
+    /// A build secret is mounted for the length of one `RUN` and must not be
+    /// in the finished image — so this asserts both halves: the bytes are
+    /// readable during the build, and nothing survives into the image. The
+    /// mount point is gone entirely afterwards, not merely emptied.
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
+    async fn a_file_secret_is_readable_during_the_build_and_absent_after_it() {
+        let fixture = BuildFixture::new(
+            "secret",
+            "FROM busybox\n\
+             RUN --mount=type=secret,id=token cp /run/secrets/token /copied-during-build\n",
+        );
+        let secret_path = fixture.write("token.txt", "s3cr3t-value");
+
+        build_image(
+            &docker(),
+            &BuildOpts {
+                context_dir: fixture.dir.path(),
+                dockerfile: "Dockerfile",
+                tag: &fixture.tag,
+                platform: None,
+                args: &BTreeMap::new(),
+                target: None,
+                secrets: &[(String::from("token"), secret_path)],
+                ssh_auth_sock: None,
+            },
+        )
+        .await
+        .expect("buildkit build with a file secret");
+
+        assert_eq!(
+            fixture.run(&["cat", "/copied-during-build"]),
+            "s3cr3t-value"
+        );
+        assert_eq!(
+            fixture.run(&[
+                "sh",
+                "-c",
+                "test -e /run/secrets && echo leaked || echo clean"
+            ]),
+            "clean"
+        );
+    }
+
+    /// The BuildKit path has to surface a failing `RUN` as an error, not
+    /// swallow it — `Build::docker_build` collapses a whole solve into one
+    /// `Result`, so this is the only thing standing between a broken
+    /// Dockerfile and a "successful" build of a nonexistent image.
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
+    async fn a_failing_run_under_buildkit_is_reported_as_an_error() {
+        let fixture = BuildFixture::new(
+            "failing",
+            "FROM busybox\n\
+             RUN --mount=type=secret,id=token exit 7\n",
+        );
+        let secret_path = fixture.write("token.txt", "unused");
+
+        let err = build_image(
+            &docker(),
+            &BuildOpts {
+                context_dir: fixture.dir.path(),
+                dockerfile: "Dockerfile",
+                tag: &fixture.tag,
+                platform: None,
+                args: &BTreeMap::new(),
+                target: None,
+                secrets: &[(String::from("token"), secret_path)],
+                ssh_auth_sock: None,
+            },
+        )
+        .await
+        .expect_err("a RUN that exits 7 must fail the build");
+        assert!(
+            format!("{err:#}").contains("buildkit build"),
+            "error should name the build it came from, got: {err:#}"
+        );
     }
 }

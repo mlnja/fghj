@@ -61,6 +61,21 @@
   //   stopped   -> Start or Delete
   //   running   -> Stop, Delete, or Reset (force a fresh container)
   //   starting/stopping/removing -> nothing; show the in-flight action instead
+  // `state::NodeCondition`, snake_case. The ones that mean "this will not
+  // fix itself" get the same loud pill as drifted config, because they call
+  // for the same thing: the user has to do something.
+  const STUCK_CONDITIONS = new Set(['crashed', 'failed', 'paused']);
+  const CONDITION_TITLE = {
+    running: 'up, and reachable at the domains above',
+    stopped: 'down, and fghj was not asked to keep it up — expected after a Stop',
+    crashed: 'fghj was asked to keep this up and Docker says it is down. Nothing reconciles this on its own: press Start',
+    restarting: "Docker is bouncing it under this node's restart policy — not reachable while it does",
+    paused: 'paused from outside fghj (docker pause). Start will not help — docker unpause will',
+    completed: 'this node is a task: it ran and exited 0, which is success, not drift',
+    failed: 'this task exited non-zero; everything downstream of it was not started',
+    finishing: 'exited, but not re-inspected since — no exit code read yet, so no verdict',
+  };
+
   function nodeLifecycle(info) {
     if (!info) return 'absent';
     if (info.pending_action) return info.pending_action;
@@ -393,7 +408,19 @@
         {/each}
         <div class="row"><span class="k">flows</span><span class="v">{node.flows?.join(', ') || '—'}</span></div>
         {#if liveInfo && node.downloaded !== false}
+          <!-- Docker's own word, plus fghj's reading of it. The two are
+               separate rows on purpose: `observed.status` is the raw fact
+               (and the thing to quote in a bug report), while `condition`
+               says what that fact *means* given what fghj was asked for —
+               "exited" alone cannot distinguish a container the user stopped
+               from one that died and which nothing will restart. -->
           <div class="row"><span class="k">container status</span><span class="v">{liveInfo.observed.status}{liveInfo.pending_action ? ` (${liveInfo.pending_action}…)` : ''}</span></div>
+          <div class="row">
+            <span class="k">condition</span>
+            <span class="v">
+              <span class="pill" class:unsynced={STUCK_CONDITIONS.has(liveInfo.condition)} class:synced={liveInfo.condition === 'running' || liveInfo.condition === 'completed'} title={CONDITION_TITLE[liveInfo.condition] ?? ''}>{liveInfo.condition}</span>
+            </span>
+          </div>
           <div class="row"><span class="k">container name</span><span class="v">{liveInfo.desired.container_name}</span></div>
           <div class="row">
             <span class="k">config sync</span>

@@ -28,6 +28,7 @@ pub(super) fn reduce(
             published_port,
             ip,
             ports,
+            exit_code,
         } => {
             let mut next = state.clone();
             if let Some(container) = next
@@ -39,6 +40,7 @@ pub(super) fn reduce(
                 container.observed.published_port = published_port;
                 container.observed.ip = ip;
                 container.observed.ports = ports;
+                container.observed.exit_code = exit_code;
             }
             Ok(next)
         }
@@ -104,7 +106,7 @@ pub(super) fn reduce(
                 }) => {
                     if present {
                         run.pending_create = None;
-                        next.runs.insert(run_id, run);
+                        next.runs.insert(run_id, *run);
                     }
                 }
                 Err(_) => {
@@ -225,6 +227,7 @@ mod tests {
                 additional_hosts: vec![],
                 status_port: None,
                 config_hash: "hash".into(),
+                terminating: false,
             },
             observed: ContainerObserved::default(),
             pending_action: None,
@@ -264,6 +267,7 @@ mod tests {
                 published_port: Some(54321),
                 ip: Some("172.20.0.5".into()),
                 ports: BTreeMap::from([("http".into(), Some(54321)), ("db".into(), None)]),
+                exit_code: None,
             },
         )
         .unwrap();
@@ -287,6 +291,7 @@ mod tests {
                 published_port: None,
                 ip: None,
                 ports: BTreeMap::new(),
+                exit_code: None,
             },
         )
         .unwrap();
@@ -305,6 +310,7 @@ mod tests {
                 published_port: None,
                 ip: None,
                 ports: BTreeMap::new(),
+                exit_code: None,
             },
         )
         .unwrap();
@@ -477,7 +483,7 @@ mod tests {
                 run_id: "default".into(),
                 result: Err(RunCreateError {
                     message: "worker: image pull failed".into(),
-                    partial: Some(partial),
+                    partial: Some(Box::new(partial)),
                 }),
             },
         )
@@ -667,10 +673,10 @@ mod tests {
                 run_id: "default".into(),
                 result: Err(RunCreateError {
                     message: "node 2 of 3 failed".into(),
-                    partial: Some(RunState {
+                    partial: Some(Box::new(RunState {
                         run_id: "default".into(),
                         ..Default::default()
-                    }),
+                    })),
                 }),
             },
         )

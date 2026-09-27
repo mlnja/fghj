@@ -12,7 +12,7 @@ export default defineConfig({
       title: 'fghj',
       description: 'Local development orchestration for multi-repo user flows',
       favicon: '/favicon.svg',
-      social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/virviil/fghj' }],
+      social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/mlnja/fghj' }],
       customCss: ['./src/styles/custom.css'],
       expressiveCode: { themes: ['github-light', 'github-dark'] },
 
@@ -26,6 +26,19 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Tutorial',
+          items: [
+            { label: 'Start here', slug: 'tutorial' },
+            { label: '1. One service', slug: 'tutorial/01-one-service' },
+            { label: '2. A database', slug: 'tutorial/02-a-database' },
+            { label: '3. A migration', slug: 'tutorial/03-a-migration' },
+            { label: '4. A second repo', slug: 'tutorial/04-a-second-repo' },
+            { label: '5. Flows', slug: 'tutorial/05-flows' },
+            { label: '6. Two runs at once', slug: 'tutorial/06-two-runs' },
+            { label: '7. When it goes wrong', slug: 'tutorial/07-when-it-goes-wrong' },
+          ],
+        },
+        {
           label: 'Concepts',
           items: [
             { label: 'Architecture', slug: 'concepts/architecture' },
@@ -33,10 +46,12 @@ export default defineConfig({
             { label: 'Branch ownership model', slug: 'concepts/branch-ownership-model' },
             { label: 'Fog-of-war visibility', slug: 'concepts/fog-of-war-visibility' },
             { label: 'Node identity & domains', slug: 'concepts/node-identity-and-domains' },
+            { label: 'Terminating nodes', slug: 'concepts/terminating-nodes' },
             { label: 'Local CA & TLS proxy', slug: 'concepts/local-ca-and-tls-proxy' },
             { label: 'In-network TLS proxy sidecar', slug: 'concepts/sidecar' },
             { label: 'Split DNS', slug: 'concepts/split-dns' },
             { label: 'Run lifecycle & registry', slug: 'concepts/run-lifecycle-and-registry' },
+            { label: 'Concurrency model', slug: 'concepts/concurrency-model' },
             { label: 'Persistence & workspace store', slug: 'concepts/persistence-and-workspace-store' },
             { label: 'Docker & downloads', slug: 'concepts/docker-and-downloads' },
             { label: 'Control API', slug: 'concepts/control-api' },

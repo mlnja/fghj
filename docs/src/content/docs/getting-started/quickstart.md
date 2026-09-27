@@ -9,6 +9,13 @@ and that the repo you're pointing at has an `.fghj.yaml` — see
 [.fghj.yaml](/reference/fghj-yaml/) if you're setting one up for the first
 time.
 
+:::tip[New to fghj?]
+Read [the tutorial](/tutorial/) instead. It builds a two-repo workspace from
+an empty directory, so you end up understanding *why* each piece is there
+rather than which button to click. This page is the short version for when you
+already do.
+:::
+
 ## 1. Validate a config
 
 Before wiring anything in, you can check a service's `.fghj.yaml` against
@@ -70,8 +77,10 @@ whatever's newly reachable, and never restarts what's already up. See
 ## 6. Open a service over HTTPS
 
 Once a service's container is running, click its node for its resolved
-domain — something like `checkout-service.acme-checkout.fghj.internal` —
-and open it directly. The certificate is issued on the fly by fghj's local
+domain and open it directly. For a service named `checkout` in a repo checked
+out as `checkout-service`, inside a workspace directory called `acme`, that's
+`checkout.checkout-service.acme.fghj.internal` — the service name, the repo
+folder, then the workspace. The certificate is issued on the fly by fghj's local
 CA and is already trusted, because `fghjd` installed that CA into your
 system trust store on first start. No `-k`, no self-signed warning. See
 [Local CA & TLS proxy](/concepts/local-ca-and-tls-proxy/) for how that

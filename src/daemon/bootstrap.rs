@@ -122,17 +122,19 @@ pub async fn run_control_api() -> Result<()> {
     ca::refresh_trust_files(&ca_dir(), &ca).context("failed to refresh CA trust files")?;
 
     // Best-effort and non-blocking: not every workspace ends up starting a
-    // run before `fghjd` itself might need to restart, so a slow/failed
-    // build here (first build compiles the whole crate, and needs crates.io
-    // reachable) shouldn't hold up `fghjd` starting or fail it outright — a
+    // run before `fghjd` itself might need to restart, so a slow or failed
+    // fetch here shouldn't hold up `fghjd` starting or fail it outright — a
     // run that actually needs its sidecar will surface a real error from
-    // `RunRegistry::ensure_sidecar`'s own call to this same function.
+    // `RunRegistry::ensure_sidecar`'s own call to this same function. Doing it
+    // here at all is what usually keeps the cost off the first run: a pull is
+    // fast but not instant, and the fallback path compiles the whole crate
+    // inside a container.
     {
         let docker = docker.clone();
         tokio::spawn(async move {
             if let Err(e) = crate::sidecar_image::ensure_built(&docker).await {
                 daemon_log::warn(format!(
-                    "fghjd: failed to pre-build the sidecar proxy image: {e:#}"
+                    "fghjd: failed to pre-fetch the sidecar proxy image: {e:#}"
                 ));
             }
         });

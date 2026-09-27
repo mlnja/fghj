@@ -55,6 +55,8 @@ fn run_options_round_trip_into_graph_node_for_service_and_backing() {
          \x20 privileged: true\n\
          \x20 extra_hosts:\n\
          \x20   - \"metadata:169.254.169.254\"\n\
+         \x20 stop_signal: SIGQUIT\n\
+         \x20 stop_grace_period: 30\n\
          \x20 dependencies:\n\
          \x20   - kind: backing\n\
          \x20     name: postgres\n\
@@ -64,6 +66,7 @@ fn run_options_round_trip_into_graph_node_for_service_and_backing() {
          \x20     env_file:\n\
          \x20       - .env.postgres\n\
          \x20     restart: unless-stopped\n\
+         \x20     stop_grace_period: 120\n\
          \x20     healthcheck:\n\
          \x20       test: [\"CMD\", \"pg_isready\"]\n\
          \x20       interval: 5\n\
@@ -90,6 +93,8 @@ fn run_options_round_trip_into_graph_node_for_service_and_backing() {
     assert!(service.privileged);
     assert_eq!(service.extra_hosts, vec!["metadata:169.254.169.254"]);
     assert_eq!(service.platform.as_deref(), Some("linux/arm64"));
+    assert_eq!(service.stop_signal.as_deref(), Some("SIGQUIT"));
+    assert_eq!(service.stop_grace_period, 30);
 
     let backing = graph
         .nodes
@@ -99,6 +104,10 @@ fn run_options_round_trip_into_graph_node_for_service_and_backing() {
     assert_eq!(backing.platform.as_deref(), Some("linux/amd64"));
     assert_eq!(backing.env_file, vec![".env.postgres"]);
     assert_eq!(backing.restart, "unless-stopped");
+    // The case this knob exists for: a database that needs longer than
+    // Docker's 10s to flush before it is killed.
+    assert!(backing.stop_signal.is_none());
+    assert_eq!(backing.stop_grace_period, 120);
     let hc = backing.healthcheck.as_ref().unwrap();
     assert_eq!(hc.test, vec!["CMD", "pg_isready"]);
     assert_eq!(hc.interval, Some(5));
@@ -121,4 +130,71 @@ fn run_options_default_to_compose_equivalent_no_ops() {
     assert!(service.labels.is_empty());
     assert!(!service.privileged);
     assert!(service.healthcheck.is_none());
+    // Docker's own default grace period, and no signal override — so a
+    // config that says nothing about stopping behaves exactly as it did
+    // before these fields existed.
+    assert!(service.stop_signal.is_none());
+    assert_eq!(service.stop_grace_period, 10);
+}
+
+/// A task has no `restart` and no `healthcheck`, but it does get the stop
+/// knobs — a migration caught mid-run by a teardown is precisely the thing
+/// that should not be SIGKILLed.
+#[test]
+fn a_task_carries_the_stop_knobs_even_though_it_has_no_restart_policy() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_component(
+        tmp.path(),
+        "myservice",
+        "  build:\n\
+         \x20   context: .\n\
+         \x20 dependencies:\n\
+         \x20   - kind: task\n\
+         \x20     name: migrate\n\
+         \x20     command: [\"rake\", \"db:migrate\"]\n\
+         \x20     stop_signal: SIGINT\n\
+         \x20     stop_grace_period: 300\n",
+    );
+
+    let graph = resolve_universe(tmp.path()).unwrap();
+    let task = graph
+        .nodes
+        .iter()
+        .find(|n| n.id == "migrate.myservice.myservice")
+        .unwrap();
+    assert_eq!(task.stop_signal.as_deref(), Some("SIGINT"));
+    assert_eq!(task.stop_grace_period, 300);
+    assert_eq!(task.restart, "no");
+}
+
+/// CUE's `stop_signal` pattern and the Rust check must agree, so an author
+/// who writes the unprefixed name Docker itself would have taken gets one
+/// clear answer rather than two different ones.
+#[test]
+fn an_unprefixed_stop_signal_is_a_blocking_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_component(tmp.path(), "myservice", "  stop_signal: TERM\n");
+
+    let graph = resolve_universe(tmp.path()).unwrap();
+    let warning = graph
+        .warnings
+        .iter()
+        .find(|w| w.message.contains("stop_signal"))
+        .expect("an unprefixed signal name earns a warning");
+    assert_eq!(warning.severity, Severity::Blocking);
+    assert!(warning.message.contains("SIGTERM"));
+}
+
+#[test]
+fn a_well_formed_stop_signal_earns_no_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_component(tmp.path(), "myservice", "  stop_signal: SIGQUIT\n");
+
+    let graph = resolve_universe(tmp.path()).unwrap();
+    assert!(
+        !graph
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("stop_signal"))
+    );
 }
