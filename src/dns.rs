@@ -18,7 +18,7 @@ const ZONE_SUFFIX: &str = ".fghj.internal";
 
 /// The raw/direct zone: reachable in-network via Docker's own embedded DNS
 /// already (a node's `raw_domain` is a real Docker network alias — see
-/// `runs.rs`), and — once a `raw_net` virtual IP is answered for it here —
+/// `runs/`), and — once a `raw_net` virtual IP is answered for it here —
 /// reachable from the host too, NAT'd straight to the container's real
 /// published port. Never TLS-terminated, never certified (`cert_eligible`
 /// only matches `ZONE`), and never answered with the shared `ANSWER`
@@ -60,7 +60,7 @@ pub(crate) fn matches_zone(qname: &str, zone: &str) -> bool {
 
 /// Whether a DNS server (`serve`) should claim authority for a query name,
 /// and if so, which IP to answer with — the general "is this mine, and what
-/// do I say" hook. Implemented by `WorkspaceRegistry` in `daemon.rs` (the
+/// do I say" hook. Implemented by `WorkspaceRegistry` in `daemon/` (the
 /// host server: `ANSWER` for `in_zone(qname)`/an active `wildcard_hosts`
 /// suffix, a per-node `raw_net::resolve` address under `ZONE_RAW`,
 /// or `None`) and by `FileRoutes` in `fghj-sidecar.rs` (the in-network
@@ -303,16 +303,17 @@ pub async fn serve(socket: UdpSocket, zones: Arc<dyn ZoneSource>, upstream: Opti
     }
 }
 
-/// Routes the OS's resolution of `*.fghj.internal`, plus any currently-active
-/// `wildcard_zones` (a running container's declared `wildcard_hosts`), to
-/// this server, per SPEC.md §5 Subsystem B ("Native OS Integration"). Only
+/// Routes the OS's resolution of both fixed zones (`*.fghj.internal` and
+/// `*.fghj.raw.internal`), plus any currently-active `wildcard_zones` (a
+/// running container's declared `wildcard_hosts`), to this server, per
+/// SPEC.md §5 Subsystem B ("Native OS Integration"). Only
 /// macOS is wired up today (`/etc/resolver`, the mechanism macOS's system
 /// resolver reads); Linux (`systemd-resolved`) and Windows (NRPT) are called
 /// out in SPEC.md but not implemented, so lookups there need a manual
 /// `/etc/hosts`-style workaround until someone picks that up. Called both at
-/// `activate` time and on every reconcile tick (see `daemon.rs`), since
-/// unlike the one fixed `ZONE`, wildcard zones come and go with whichever
-/// containers are currently running.
+/// `activate` time and on every reconcile tick (see `daemon::reconcile`),
+/// since unlike the two fixed zones, wildcard zones come and go with
+/// whichever containers are currently running.
 pub fn install_os_resolver_config(port: u16, wildcard_zones: &[String]) -> Result<()> {
     if cfg!(target_os = "macos") {
         let mut zones: Vec<&str> = vec![ZONE, ZONE_RAW];
@@ -363,7 +364,7 @@ fn is_fghjd_resolver_content(content: &str) -> bool {
 /// (`parse_fghjd_resolver_port`) — the on-disk state `sync_macos_resolver`
 /// last wrote is the source of truth, so this re-parses it rather than
 /// tracking a separate list. Backs the telemetry drawer's network-status tab
-/// (`daemon.rs`'s `/daemon/net-status`).
+/// (`daemon/`'s `/daemon/net-status`).
 pub fn managed_resolver_zones(resolver_dir: &Path) -> Vec<(String, u16)> {
     let Ok(entries) = fs::read_dir(resolver_dir) else {
         return Vec::new();

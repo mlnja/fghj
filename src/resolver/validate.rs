@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use super::config::Healthcheck;
 use super::port::PortConfig;
 use super::service::ServiceConfig;
 
@@ -72,9 +73,32 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
+    /// Warns (blockingly) when a `healthcheck` block is present but its
+    /// `test` list is empty. Docker reads an empty `Test` as "inherit
+    /// whatever the image declares", so writing `test: []` silently gets a
+    /// node *no* healthcheck of its own — and since a healthcheck is what
+    /// the run-wide health budget waits on, "silently no healthcheck" is the
+    /// opposite of what someone typing a healthcheck block wants.
+    ///
+    /// `#Healthcheck.test` in CUE already says `[_, ...]` (non-empty), and
+    /// the two have to agree: the Rust types are the enforcing boundary, so
+    /// without this check the schema would reject a file the daemon happily
+    /// accepted. See `resolver::name`'s module doc on that split.
+    pub(crate) fn check_healthcheck(&mut self, id: &str, healthcheck: Option<&Healthcheck>) {
+        let Some(hc) = healthcheck else { return };
+        if hc.test.is_empty() {
+            self.warnings.push(Warning::blocking(format!(
+                "'{id}' declares a healthcheck with an empty `test` — Docker reads that \
+                 as \"inherit the image's own healthcheck\", so this node would get none of \
+                 its own; write the command, e.g. test: [\"CMD\", \"pg_isready\"]"
+            )));
+        }
+    }
+
     pub(crate) fn check_ports(&mut self, service_id: &str, service: &ServiceConfig) {
         self.check_port_config(service_id, &service.ports);
         self.check_stop_signal(service_id, service.stop_signal.as_deref());
+        self.check_healthcheck(service_id, service.healthcheck.as_ref());
         let has_primary = service.ports.values().any(|cfg| cfg.primary);
         if !service.additional_hosts.is_empty() && !has_primary {
             self.warnings.push(Warning::advisory(format!(

@@ -1,7 +1,7 @@
 //! In-process ring buffer of `fghjd`'s own operational log lines.
 //!
 //! `fghjd` has no logging crate dependency and no persistent log file — its
-//! `println!`/`eprintln!` call sites (`daemon.rs`, `dns.rs`, `raw_net`) are
+//! `println!`/`eprintln!` call sites (`daemon/`, `dns.rs`, `raw_net`) are
 //! its entire log output today, visible only to whatever's supervising the
 //! process (a terminal, launchd/systemd's own log capture). Routing those
 //! same call sites through [`info`]/[`warn`] additionally records them here,

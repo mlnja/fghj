@@ -27,7 +27,7 @@ should always be visible regardless of whether a flow happens to reach it.
 
 ## Status
 
-Implemented in `src/resolver.rs::resolve_universe` — after walking every
+Implemented in `src/resolver/universe.rs::resolve_universe` — after walking every
 declared flow, a second pass calls `visit_local_service` for every repo
 `scan_workspace` found on disk, unconditionally. Nodes visited only this way
 get `flows: []` and render dimmed in `GraphView.svelte` (which already only

@@ -33,7 +33,7 @@
 //!
 //! For the same reason, `rehydrate::rehydrate` is *not* independently wired
 //! into the new actor system's seeding path — `RunRegistry::new` is its
-//! sole caller. The new-system actor (`daemon.rs`'s `wire_actor`) seeds
+//! sole caller. The new-system actor (`daemon/`'s `wire_actor`) seeds
 //! itself by re-keying `RunRegistry`'s own already-reconciled `.list()`
 //! (see `daemon::WorkspaceRegistry::wire_actor`), not by reading SQLite a
 //! second time — `rehydrate` doesn't just read rows, it also reconciles

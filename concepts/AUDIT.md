@@ -108,6 +108,7 @@ the language — added in [§6](#6-delivery)).
 | [D2](#d2) | D | Five subsystems in code with no concept doc (see §4.2) | **closed** |
 | [D3](#d3) | D | Five concepts that never existed (failure semantics, identity algebra, …) | **closed** |
 | [D4](#d4) | D | No documentation for anyone who isn't reading `src/` or `concepts/` | **closed** |
+| [D5](#d5) | D | Docs, tutorial and UI overtaken by the code: dead module paths, a raw zone documented as host-unreachable, per-run rehydration, two stale UI strings, `SPEC.md`'s CLI chapter | **closed** |
 | [R1](#r1) | R | `ui/dist` is compile-required and gitignored; no CI job built it, so no workflow could compile the crate at all | **closed** |
 | [R2](#r2) | R | CI's own gates (`clippy -D warnings`, `cargo test`) could not pass on the runner CI uses | **closed** |
 | [R3](#r3) | R | The sidecar image was compiled from scratch on every user's machine on first need | **closed** |
@@ -1223,15 +1224,16 @@ corrected landing page, and two more concept guides ported to the site
 link to them.
 
 Writing it functioned as a fifth audit pass, which is the part worth recording
-here: prose has to name things, and naming them found three defects that
+here: prose has to name things, and naming them found four defects that
 reading the code had not.
 
 - `#Service.dependencies` had no CUE default while the Rust side has
   `#[serde(default)]`, so `cue vet -c` rejected a leaf service with no
   dependencies that the daemon accepts happily — a direct violation of
   [[config-language]]'s one obligation (CUE must never reject what the daemon
-  takes). Fixed by `| *[]`, with a comment saying why `#Flow.dependencies`
-  is deliberately the other way round.
+  takes). Fixed by `| *[]`. (The comment added alongside it claimed
+  `#Flow.dependencies` was "deliberately the other way round" — that turned
+  out to be the same bug one field over, see [D5](#d5).)
 - The ambiguous-service warning told the author to disambiguate with
   `service:` in both places it fires, but that field only exists on a flow —
   a `kind: service` dependency spells it `services:`. Found by trying to write
@@ -1245,7 +1247,7 @@ reading the code had not.
   `node.branch`, which for any node that can actually be built is the *live*
   git branch (falling back to `"local"`, not to the declared value), and the
   declared value only ever appears as the `branch` of a **stub** node — which
-  is exactly the node `downloads::clone_stub_node` consumes and nothing else
+  is exactly the node `downloads::clone_stub_logged` consumes and nothing else
   does. The claim survived because "it's only ever a default, never a pin" is
   the true and interesting half, and the sentence it was attached to was
   never wrong enough to trip over. Naming the field's *one* job — a freshly
@@ -1258,6 +1260,118 @@ reading the code had not.
 The fix for the second one is the pattern worth keeping: the temptation was to
 document the field the warning named. Documentation that agrees with a wrong
 error message is worse than none, because it makes the error look intentional.
+
+<a id="d5"></a>
+
+### 4.5 D5 · A second sweep of docs, tutorial and code against each other
+
+**Severity: D. Status: closed.**
+
+[D4](#44-d4--documentation-for-someone-who-is-not-reading-the-source) wrote the
+user-facing documentation. This pass re-read all of it against `src/`,
+`ui/src/` and `schema/` looking only for disagreements, and it is recorded
+separately because what it found was a different *class* of problem: not
+missing prose, but prose that had been correct when written and was quietly
+overtaken by the code. Nothing here was an error of authorship; every item is
+drift.
+
+Two mechanical checks did most of the work, and both are worth re-running
+after any refactor that moves a module:
+
+- Extract every `` `src/…` `` / `` `ui/src/…` `` path mentioned anywhere in
+  `docs/`, `concepts/`, `README.md` and `SPEC.md`, and check it exists. Four
+  had died in the module-splitting refactor (`src/resolver.rs`, `src/runs.rs`,
+  `src/daemon.rs`, `src/store.rs` → `resolver/`, `runs/`, `daemon/`,
+  `persistence/`), in seven documents plus **24 places in `src/`'s own doc
+  comments** — the comments that [[README]] promises are the durable "why".
+- Extract every `` `module::symbol` `` and check the symbol still exists.
+  That caught `resolve_route` having moved from a `WorkspaceRegistry` method
+  to `state::query`, and `daemon::write_port`/`read_port` and
+  `/var/run/fghjd.port` in [[local-ca-and-tls-proxy]] — a whole section
+  describing a port-discovery file that no longer exists, since the control
+  API is reached over a fixed-path Unix socket and needs no discovery at all.
+
+Findings that were not path-level:
+
+- **The raw zone's reachability.** Three documents still said
+  `*.fghj.raw.internal` was resolvable "only from inside the run's own docker
+  network" and "never reachable from the host". The virtual-IP + `pf` NAT work
+  ([[two-zones-and-raw-ports]]) made that false, and one of the three used it
+  as the *entire argument* for why a presigned URL must use the http zone.
+  The real argument is that the raw zone has no proxy in front of it, so
+  nothing terminates TLS and no certificate is ever issued for one of its
+  names — a stronger reason that survives the change.
+- **Rehydration granularity.** Both copies of
+  [[run-lifecycle-and-registry]] said a run "missing even one container is
+  dropped outright". `persistence::rehydrate` had been changed to prune
+  per-container precisely because dropping the whole run on a single miss
+  orphaned every *other* still-running container from the route table — and
+  the code comment explaining that was sitting directly above the loop the
+  docs contradicted.
+- **Two stale strings in the shipped UI.** The Actual tab told the user
+  "domain-based access from the browser still requires the future fghj
+  daemon — for now, open a running service via its published localhost port",
+  and the Config tab said the superdaemon subsystems it would surface were
+  "not implemented. None of that exists yet." Both were true once. This is
+  the worst place for drift to sit, since it is read by someone who has no
+  other source, and it makes a working feature look unbuilt.
+- **`SPEC.md`'s CLI chapter** lists `fghj setup`/`init`/`up`/`branch`, none
+  of which were ever built under those names. Left verbatim — it is the
+  original vision document and worth keeping as one — but given a status
+  banner at the top and a note in §6 saying where each command's intent
+  actually landed (`up` in the web UI, `setup` folded into first-run, `branch`
+  dropped with the per-run branch pin).
+- **The telemetry drawer** existed in `ui/src/lib/TelemetryDrawer.svelte`,
+  with the only view of `/etc/resolver`, the `/etc/hosts` block and live NAT
+  routes, and was in neither copy of [[ui-architecture]] — which still said
+  "the three drawers".
+- **`fghj daemon stop`** tears down raw-net NAT and loopback aliases, and
+  removes a resolver entry per zone plus one per active `wildcard_hosts`
+  suffix. The CLI page listed one resolver file and no NAT.
+- **Volume sharing, on the site copy only.** [[docker-and-downloads]]'s site
+  counterpart still described the pre-[B3](#b3) derivation — that two nodes
+  declaring the same volume `name` and `scope` "transparently share one Docker
+  volume" — which is now exactly the accident B3 closed by qualifying the key
+  with the declaring node's id. The same sentence had already been corrected in
+  the reference page earlier in this sweep, which is the useful signal: a
+  correction applied to one of a derived pair is not applied to the pair.
+- **The raw zone on the site's [[split-dns]] and [[in-network-sidecar]]
+  counterparts** said `fghj.raw.internal` is "never answered by `fghjd` at
+  all". `fghjd` serves both fixed zones and writes an `/etc/resolver` file for
+  each; only the *in-network* path is Docker's own resolver. Same root change
+  as the reachability finding above, reached from a different page.
+- **Two module references that the path check structurally could not see**,
+  because they were written as a bare `` `runs.rs` `` with no `src/` prefix.
+  One of them also mis-attributed per-container rehydration to
+  `RunRegistry::new()`, which no longer reloads anything — that moved to
+  `persistence::rehydrate`. A prefix-anchored path check is blind to this;
+  matching a bare `` `word.rs` `` too is a one-line widening and worth it.
+
+And one more instance of the [[config-language]] mismatch class, which is the
+finding with the longest tail:
+
+- `#Flow.dependencies` was `[...#Dependency] & [_, ...]`, rejecting
+  `dependencies: []` — which the daemon accepts silently. Worse, the
+  reference page had written the phantom constraint down as a language rule
+  ("a flow's `dependencies` list must be non-empty"), so the schema had
+  successfully invented a rule. Relaxed, and the docs now say what actually
+  happens.
+- `#Healthcheck.test` was `[_, ...]`, non-empty, with nothing on the Rust
+  side enforcing it — the opposite direction of the same field. Here the
+  schema was right and the daemon was wrong: Docker reads an empty `Test` as
+  "inherit the image's own healthcheck", so `test: []` silently yields *no*
+  healthcheck, and the health budget then waits on nothing. Fixed on the
+  daemon side with a blocking warning (`check_healthcheck`, called from both
+  the service and backing paths) and two tests, rather than by relaxing CUE.
+
+Three instances of this mismatch class is a pattern, so the root cause is now
+written down in [[config-language]] rather than re-derived a fourth time:
+`fghj validate` runs `cue vet` **without `-c`**, so a plain `field: T` is
+enforced as *present* only when `T` isn't already concrete — which is why
+`version: string` is effectively required but `services: [Name=…]: #Service`
+was effectively optional. Plain `field: T` must never be read as "required";
+say `field!:` when serde requires it and `field: T | *default` when serde
+defaults it.
 
 ---
 
@@ -1284,6 +1398,7 @@ Cheap-and-high-value first; design work last.
 | ~~14~~ | ~~`ensure_running` reconciles configuration; a new commit drifts a built node; name the stuck pair~~ — **done**, see [[run-lifecycle-and-registry]] | [B14](#b14) [B13](#b13) [B6](#b6) |
 | ~~15~~ | ~~Make the release buildable, gate it on a prebuilt sidecar~~ — **done**, see [[release-and-delivery]] | [R1](#r1) [R2](#r2) [R3](#r3) |
 | ~~16~~ | ~~Write documentation for users, not just for maintainers: a seven-chapter tutorial, a `README`, a truthful install page~~ — **done**, see [§4.4](#d4) | [D4](#d4) |
+| ~~17~~ | ~~Re-read every doc against the code and fix the drift~~ — **done**, see [§4.5](#d5); two mechanical checks (every `src/…` path mentioned anywhere must exist; every `module::symbol` must resolve) are the reusable part | [D5](#d5) |
 
 Remaining structural items ([E2](#e2), [E4](#e4), [E5](#e5), [E7](#e7)) and the
 knob list ([K1](#k1)) are scope decisions rather than defects — each wants an
@@ -1292,6 +1407,13 @@ explicit accept-or-close call recorded in a concept file, not necessarily code.
 [B16](#b16), which is now written down in two places a user will meet but still
 has no mechanism behind it — it wants one of its three candidate answers
 chosen, not more prose.
+
+The one thing [§4.5](#d5) leaves behind is a habit rather than an item: the
+two path/symbol checks it used are cheap enough to be a CI job, and would have
+caught the largest finding in it (four dead module paths in 31 places,
+including 24 in `src/`'s own doc comments) the day the refactor landed. Not
+filed as a finding, because nothing is currently wrong — but the next
+module split will reintroduce all of it, and nothing stops that today.
 
 ---
 

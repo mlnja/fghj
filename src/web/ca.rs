@@ -104,7 +104,7 @@ pub fn ca_cert_path(dir: &Path) -> PathBuf {
 
 /// Path to the CA private key PEM `ensure_ca` persists under `dir` —
 /// exposed so callers (e.g. the sidecar container's bind-mount setup in
-/// `runs.rs`) can name the key file without reaching into `ca.rs` internals.
+/// `runs/`) can name the key file without reaching into `ca.rs` internals.
 pub fn ca_key_path(dir: &Path) -> PathBuf {
     dir.join(CA_KEY_FILE)
 }

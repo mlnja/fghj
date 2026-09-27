@@ -15,8 +15,8 @@ easy to accidentally conflate them:
    two CUE authors who never talk to each other could hand-pick the same one.
 
 `.fghj.yaml` only ever declares the label (`#Service.name`, `#BackingDependency.name`).
-Everything else — id and domain — is derived by fghj itself, in `src/resolver.rs`
-and `src/runs.rs`.
+Everything else — id and domain — is derived by fghj itself, in `src/resolver/`
+and `src/runs/`.
 
 ## Why the id can't just be the label
 

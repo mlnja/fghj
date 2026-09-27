@@ -134,7 +134,7 @@ actually opens the file for sharing runs as the real macOS user and enforces
 its own permission check *before* the request ever reaches the container's
 UID namespace — verified directly: even outside any container, `cat` on
 that file failed the same way as the logged-in user. Fixed by
-`refresh_sidecar_ca_copy()` in `runs.rs`, which keeps a separate `0644`
+`refresh_sidecar_ca_copy()` in `src/runs/route_table.rs`, which keeps a separate `0644`
 world-readable copy of the CA cert+key at `/var/lib/fghjd/sidecar-ca/`,
 refreshed on every sidecar (re)creation, and mounts *that* into the
 sidecar instead of the real CA directory. The real, `0600` CA key is never
@@ -153,9 +153,9 @@ Fixed by using sibling paths instead of nesting one under the other:
 ## A bookkeeping bug this surfaced (not sidecar-specific)
 
 Live-testing this feature against a real multi-container workspace exposed
-a pre-existing bug in `RunRegistry::new()` (`runs.rs`), which reloads
-persisted run state from the database on every `fghjd` startup and checks
-each tracked container is still alive in Docker. The reconciliation was
+a pre-existing bug in the startup path (today `persistence::rehydrate`)
+that reloads persisted run state from the database on every `fghjd` startup
+and checks each tracked container is still alive in Docker. The reconciliation was
 all-or-nothing: if even *one* container in a run failed its liveness check,
 the code discarded the tracking for the *entire* run, not just that one
 container — silently orphaning every other still-running container from
@@ -188,9 +188,10 @@ traffic across backends that happen to share a port number. Only HTTP(S)
 traffic, where SNI/Host is readable before routing, can ever be served off
 one shared IP. The actual fix was splitting the zone in two —
 `fghj.internal` (HTTP(S)-canonical, proxied, safe to share one IP) and
-`fghj.raw.internal` (raw/direct, resolved straight to the real container
-IP via Docker's native per-network DNS, exactly like a hostname isn't
-shared today) — rather than trying to patch the sentinel further. Docker
+`fghj.raw.internal` (raw/direct, one address per node and never shared — the
+real container IP via Docker's native per-network DNS from inside the run,
+and a per-node virtual IP NAT'd to the container's published port from the
+host) — rather than trying to patch the sentinel further. Docker
 network aliases alone couldn't implement the http side of the split
 (they're exact-match only, and can't express `wildcard_hosts` or be added
 to an already-connected container), which is what pushed the sidecar into also

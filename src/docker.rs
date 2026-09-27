@@ -23,7 +23,7 @@ use crate::resolver::Healthcheck;
 
 /// Maps `#RunOptions.restart`'s CUE-side spelling to bollard's enum — an
 /// unrecognized value (shouldn't happen once `fghj validate` has run, but
-/// `resolver.rs` parses YAML independently of CUE, see its module doc) falls
+/// `resolver/` parses YAML independently of CUE, see its module doc) falls
 /// back to `"no"` rather than erroring, matching the CUE default.
 fn restart_policy_name(restart: &str) -> RestartPolicyNameEnum {
     match restart {
@@ -770,7 +770,7 @@ pub async fn inspect_status(
 /// A container's own IP address on one specific docker network — nothing
 /// today exposes this; `RunOpts.aliases`/Docker's embedded per-network DNS
 /// covers every existing need to *reach* a container by name, but the
-/// sidecar-proxy `extra_hosts` sentinel (see `runs.rs`'s
+/// sidecar-proxy `extra_hosts` sentinel (see `runs/`'s
 /// `rewrite_extra_hosts_sentinel`) needs the sidecar's raw IP to hand to
 /// *other* containers via `HostConfig.extra_hosts`, which takes literal IPs,
 /// not names. Returns `Ok(None)` if the container doesn't exist or isn't

@@ -94,7 +94,7 @@ impl RunRegistry {
     /// The read-only Docker-volume counterpart to `refresh` — lists what
     /// `docker::list_run_volumes` actually finds for `run_id` right now.
     /// Keeps `self.docker` private to this module (nothing outside
-    /// `runs.rs` touches the Docker client directly) while still letting
+    /// `runs/` touches the Docker client directly) while still letting
     /// `effects::docker::observe` discover volume identity without its own
     /// independent Docker-polling loop. Empty (rather than an error) if the
     /// Docker call itself fails — same "purely observational, never worth

@@ -18,10 +18,17 @@ without touching resolution for anything else on the machine.
 Every node gets two derived domains (see [Node identity &
 domains](/concepts/node-identity-and-domains/) for `derive_domain`'s
 formula): `*.fghj.internal` — HTTP(S)-canonical, always answered with
-`127.0.0.1` — and `*.fghj.raw.internal` — raw/direct, resolved via Docker's
-own native per-network DNS straight to the real container's IP, never
-answered by `fghjd` at all. This page covers the `fghj.internal` server
-described below, which is what the host's OS resolver is wired into.
+`127.0.0.1`, because a single reverse proxy on that address dispatches by
+name — and `*.fghj.raw.internal` — raw/direct, one address *per node*. Both
+are served by the same `fghjd` DNS server and both are wired into the host's
+OS resolver, but they answer differently: an in-zone `fghj.internal` name
+gets the one shared `127.0.0.1`, while a `fghj.raw.internal` name gets that
+node's own virtual IP out of `10.222.0.0/16`, NAT'd through to the
+container's published port (see [Networking: HTTP vs
+raw](/guides/networking-http-vs-raw/)). Inside a run's network the raw name
+needs no help from `fghjd` at all — it's a real Docker network alias, so
+Docker's own embedded resolver already points a sibling container straight at
+the real container IP.
 
 Inside a run's own docker network, a second instance of the same DNS wire
 implementation runs in that run's sidecar container
@@ -69,7 +76,8 @@ whoever configures the OS resolver to point at it.
 ## Wiring into the OS resolver
 
 On macOS, `fghjd` writes one `/etc/resolver/<zone>` file per active
-zone — `fghj.internal` plus one per currently-claimed wildcarded
+zone — the two fixed ones, `fghj.internal` and `fghj.raw.internal`, plus one
+per currently-claimed wildcarded
 suffix — a config file the system's resolver subsystem reads to route any
 query under that specific domain to a given nameserver/port, with no
 changes needed to `/etc/hosts` or the system-wide DNS configuration.

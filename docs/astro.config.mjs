@@ -7,14 +7,64 @@ export default defineConfig({
     mermaid({
       theme: 'neutral',
       autoTheme: true,
+      // Colours stay with the auto-selected light/dark theme (one set of
+      // `themeVariables` cannot serve both), but the typeface can follow the
+      // rest of the site — see `src/styles/fghj-tokens.css`.
+      mermaidConfig: {
+        fontFamily: "'Space Grotesk', 'Helvetica Neue', Arial, sans-serif",
+      },
     }),
     starlight({
       title: 'fghj',
       description: 'Local development orchestration for multi-repo user flows',
       favicon: '/favicon.svg',
+      logo: { src: './src/assets/fghj-mark.svg', alt: '' },
       social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/mlnja/fghj' }],
-      customCss: ['./src/styles/custom.css'],
-      expressiveCode: { themes: ['github-light', 'github-dark'] },
+
+      // The three faces of the fghj design system, from the same Google Fonts
+      // request `ui/src/app.css` makes — so the docs and the web UI render in
+      // literally the same type.
+      head: [
+        {
+          tag: 'link',
+          attrs: { rel: 'preconnect', href: 'https://fonts.googleapis.com' },
+        },
+        {
+          tag: 'link',
+          attrs: { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: true },
+        },
+        {
+          tag: 'link',
+          attrs: {
+            rel: 'stylesheet',
+            href: 'https://fonts.googleapis.com/css2?family=Podkova:wght@400..800&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap',
+          },
+        },
+      ],
+
+      customCss: ['./src/styles/fghj-tokens.css', './src/styles/fghj-theme.css'],
+
+      expressiveCode: {
+        themes: ['github-light', 'github-dark'],
+        // Frames borrow the site's own hairline/panel tokens so a code block
+        // reads as one of the UI's panels rather than a foreign widget.
+        styleOverrides: {
+          borderColor: 'var(--sl-color-hairline)',
+          borderRadius: 'var(--fghj-radius-md)',
+          codeBackground: 'var(--fghj-code-bg)',
+          codeFontFamily: 'var(--sl-font-mono)',
+          codeFontSize: '0.8125rem',
+          uiFontFamily: 'var(--sl-font-mono)',
+          frames: {
+            editorTabBarBackground: 'var(--sl-color-bg-nav)',
+            editorActiveTabBackground: 'var(--fghj-code-bg)',
+            editorActiveTabIndicatorTopColor: 'var(--sl-color-accent)',
+            terminalBackground: 'var(--fghj-code-bg)',
+            terminalTitlebarBackground: 'var(--sl-color-bg-nav)',
+            frameBoxShadowCssValue: 'none',
+          },
+        },
+      },
 
       sidebar: [
         {

@@ -92,7 +92,7 @@ owner, as a second line of defense.
 
 ## Status
 
-Implemented: `src/store.rs` (`WorkspaceDb` with migrations, the workspace
+Implemented: `src/persistence/` (`WorkspaceDb` in `persistence/sqlite/` with migrations, the workspace
 index, `WorkspaceOwner` capture/apply, `live_ssh_auth_sock` recovery,
 `harden_git_ssh`). The owner-capture/privilege-drop path is macOS-aware
 (the launchd socket recovery); Linux/Windows would need different

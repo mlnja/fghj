@@ -14,7 +14,7 @@ meant to be supervised by `systemd` or a `launchd` `LaunchDaemon`, which
 already handle backgrounding, restart-on-crash, and log capture.
 
 `fghj` is the unprivileged CLI you actually run day to day (`validate`,
-`graph`, `wire`, `daemon start`/`stop`/`restart`/`status`). It never
+`graph`, `wire`, `exec`, `daemon start`/`stop`/`restart`/`status`). It never
 touches Docker, ports 80/443, or the CA directly — everything that needs
 root goes through `fghjd`'s HTTP control API instead. This split is also
 why `fghj wire` is the place that captures your SSH identity for the
@@ -94,8 +94,8 @@ already has port 80/443" is reported as a hard startup error instead of
 ## Active vs. idle
 
 Everything activation does (DNS, 80/443, `/etc/hosts`) can be torn down
-and rebuilt independently of the process itself — `DaemonControl` in
-`daemon.rs` owns that toggle. `fghjd` starts active by default and stays
+and rebuilt independently of the process itself — `DaemonControl` (in
+`src/daemon/control.rs`) owns that toggle. `fghjd` starts active by default and stays
 that way until `fghj daemon stop` deactivates it or a termination signal
 (SIGTERM/SIGINT) shuts the whole process down after deactivating first.
 Docker containers are untouched by either transition — see
@@ -107,13 +107,13 @@ Active/idle is in-memory state (`DaemonControl.active`), so it wouldn't
 survive `fghjd` restarting on its own — a crash or a reboot would
 otherwise silently reactivate a daemon the operator had explicitly told
 to stay idle. `is_idle_requested`/`set_idle_requested` close that gap
-against `store::DaemonState`, a small durable JSON file
+against `persistence::DaemonState`, a small durable JSON file
 (`/var/lib/fghjd/daemon-state.json`, alongside the CA and the workspace index
 rather than under `/var/run` so it survives a reboot too): `post_daemon_stop`
 sets its `idle_requested` field, `post_daemon_start` clears it, and startup
 checks it before deciding whether to activate at all. `DaemonState` follows
 the same plain-JSON, `#[serde(default)]`-fields pattern as the workspace
-index (`store::load_index`/`save_index`) rather than SQLite — there's only
+index (`persistence::index`'s `load_index`/`save_index`) rather than SQLite — there's only
 one writer and no relational structure, so it's expected to simply grow more
 fields over time as `fghjd` accumulates other state worth surviving a
 restart. The termination-signal path deliberately does *not* touch

@@ -24,9 +24,15 @@ Tells `fghjd` to go idle:
 
 1. Stops and drops the DNS server and the HTTP/HTTPS reverse proxy,
    freeing ports 80/443 and the DNS socket.
-2. Removes the (on macOS) `/etc/resolver/fghj.internal` resolver config.
+2. Removes the (on macOS) `/etc/resolver` entries it authored — one per
+   zone (`fghj.internal`, `fghj.raw.internal`) plus one for every
+   currently-active [`wildcard_hosts`](/reference/fghj-yaml/#additional-hosts)
+   suffix.
 3. Clears fghj's managed block from `/etc/hosts`, dropping every
    [additional host](/reference/fghj-yaml/#additional-hosts) alias.
+4. Tears down the raw zone's host-side plumbing — the NAT rules and
+   loopback aliases that make a `*.fghj.raw.internal` address reachable
+   from the host (see [Networking: HTTP vs. raw](/guides/networking-http-vs-raw/)).
 
 `fghjd` keeps running and keeps serving its control API the whole time —
 this is why no `sudo` is needed for it, unlike the old kill-based version
@@ -34,7 +40,10 @@ of this command.
 
 Docker containers `fghjd` was fronting are **not** stopped — they keep
 running under Docker's own supervision and are simply unreachable via
-`*.fghj.internal` or any additional host until the next `start`.
+`*.fghj.internal`, `*.fghj.raw.internal`, or any additional host until the
+next `start`. Container-to-container traffic is unaffected either way —
+that goes through Docker's own per-network DNS, which `fghjd` isn't in the
+path of.
 
 If `fghjd` isn't running at all, this just prints `fghjd is not running`
 and exits cleanly.

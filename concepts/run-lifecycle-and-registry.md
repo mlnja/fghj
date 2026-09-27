@@ -233,13 +233,24 @@ constructed nowhere. The gap was never the policy, it was the vocabulary.
 
 `persistence::rehydrate` runs the same kind of check once, when a workspace
 is constructed, against whatever runs were persisted from a previous
-`fghjd` lifetime: a run
-whose containers are *all* still alive is restored with freshly-inspected
-statuses; a run missing even one container (removed out-of-band, or lost
-across a reboot with no restart policy configured) is dropped outright
-rather than being presented to the UI as a run that's only partially there.
-The result is parked on `server::WorkspaceState::rehydrated` and read
-exactly once, to seed the actor.
+`fghjd` lifetime. The granularity is **per container, not per run**: each
+persisted container is inspected, the ones Docker still knows about are
+kept with a freshly-read `observed.status`, the ones it doesn't are
+dropped, and only a run left with *nothing* alive is deleted from the db.
+
+That distinction was a real bug, not a style preference. Dropping the whole
+run's tracked list on a single miss — one container stopped, renamed, or
+caught mid-recreate at exactly the moment `fghjd` restarted — silently
+orphaned every *other* still-running container from `fghjd`'s bookkeeping,
+including from the sidecar route table, which is built from exactly this
+list. The containers kept running; fghj just stopped knowing about them.
+
+Only `observed` moves during rehydration. What the persisted row said fghj
+*wants* the container to be doing survives untouched, which is what lets a
+container that died while `fghjd` was down come back reading as drifted
+rather than as freshly correct. The result is parked on
+`server::WorkspaceState::rehydrated` and read exactly once, to seed the
+actor.
 
 ## `ContainerInfo.routes`: how the proxy finds a container
 
@@ -247,8 +258,9 @@ Each `ContainerInfo` a run tracks carries a `routes: Vec<PortRoute>` —
 `{domain, host_port}` pairs built by `start_node` from every port that's
 either `primary` or `name`d (see [[node-identity-and-domains]] for how the
 domain itself is derived). This is what
-`daemon::WorkspaceRegistry::resolve_route`
-(→ [[local-ca-and-tls-proxy]]'s `RouteResolver`) actually scans to turn an
+`state::query::resolve_route` — reached through `daemon::routing`'s
+`RouteResolver` impl for `WorkspaceRegistry` (→ [[local-ca-and-tls-proxy]])
+— actually scans to turn an
 incoming HTTPS SNI into a `127.0.0.1:<port>` to relay to — `fghjd` runs on
 the host, outside the Docker network, so it can't rely on Docker's own
 embedded per-network DNS the way sibling containers can; `routes` is the

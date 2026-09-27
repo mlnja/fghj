@@ -1,5 +1,13 @@
 # Technical Specification: fghj (MVP)
 
+> **Status: original vision document, written before implementation.** It is
+> kept verbatim as the record of what fghj set out to be, and it is still the
+> best single statement of the *product* idea. It is **not** a description of
+> the shipped surface: §6's commands and §7's "Go or Rust" choice were both
+> settled differently. For what exists today read `concepts/` (start at
+> `concepts/README.md`), `PROGRESS.md` for the build state, and `docs/` for
+> the user-facing documentation. Where this file and those disagree, they win.
+
 ## 1. Overview & Vision
 **fghj** is a hyper-focused Local Development Orchestration and Workspace Management tool designed to eliminate the microservices testing crisis. Instead of forcing developers to manage massive, static Docker Compose files or spin up resource-heavy local Kubernetes clusters (`Kind`/`Minikube`), `fghj` shifts the paradigm from **infrastructure-centric** to **product-centric** orchestration. 
 
@@ -115,6 +123,15 @@ service:
 ## 6. CLI Command Architecture & User Experience (UX)
 
 The interactive terminal workflows are built for speed and minimal keypresses.
+
+> **None of the commands below were built under these names.** The shipped CLI
+> is `fghj validate`, `fghj graph`, `fghj wire`, `fghj daemon
+> {start,stop,restart,status}` and `fghj exec` — see
+> `concepts/control-api-and-cli.md`. The divergence is deliberate rather than
+> unfinished: the work this section imagined happening in an interactive
+> terminal picker (`up`) happens in the web UI instead, `setup` folded into the
+> daemon starting itself on first run, and `branch` was dropped along with the
+> per-run branch pin (see `concepts/branch-ownership-model.md`).
 
 *   `fghj setup`: Installs the root background daemon, generates local CA certificates, and injects platform split-DNS configuration hooks. (Requires `sudo` elevation once).
 *   `fghj init <repo_url>`: Fetches the root layout configuration file, bootstraps workspace maps, and scans user flow options.

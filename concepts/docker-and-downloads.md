@@ -262,6 +262,6 @@ resolver used to have a second privilege-dropped clone path,
 Implemented: `src/docker.rs` (build/run/inspect/logs/`stop_and_remove` over
 `bollard`),
 `src/downloads.rs` (`DownloadRegistry`, single-node/pull-all/pull-flow
-jobs, log streaming). `daemon.rs` exposes all of it over HTTP (see
+jobs, log streaming). `daemon/` exposes all of it over HTTP (see
 [[control-api-and-cli]]); `OperationsDrawer.svelte` and `Drawer.svelte` are
 the two UI surfaces that poll it (see [[ui-architecture]]).

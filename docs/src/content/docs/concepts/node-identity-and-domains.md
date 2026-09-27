@@ -185,9 +185,11 @@ Every node actually gets *two* domains out of this, one per `zone`, always
 differing only in suffix: `cart.myworkspace.fghj.internal` (HTTP(S),
 proxied, same address in or out of the run's docker network — see [Split
 DNS](/concepts/split-dns/)) and `cart.myworkspace.fghj.raw.internal` (raw,
-in-network only, resolved straight to the container's own IP via Docker's
-native per-network DNS — never TLS-terminated, never reachable from the
-host). Only the raw domain is ever a real Docker network alias on the
+never TLS-terminated: from inside the network it resolves straight to the
+container's own IP via Docker's native per-network DNS, and from the host
+`fghjd` answers with a per-node virtual IP out of a `/16` it owns, NAT'd to
+the port Docker published — so the name works from the host too, on the
+port the author declared, for declared ports only). Only the raw domain is ever a real Docker network alias on the
 node's own container; the http one is answered by the run's sidecar
 instead, which is what makes it resolvable identically from inside and
 outside the network with no per-consumer setup. In `.fghj.yaml`, the macro

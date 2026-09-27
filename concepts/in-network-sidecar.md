@@ -163,7 +163,7 @@ This matters because a pulled image lands in the local store under the
 reference it was pulled by. If the daemon asked Docker for a bare name, step 1
 would keep missing after a successful step 2, and every daemon start would
 re-pull. One string for a sidecar image, everywhere, is what keeps the
-"already present?" check from disagreeing with what `runs.rs` starts.
+"already present?" check from disagreeing with what `runs/` starts.
 
 The registry is a constant rather than a setting on purpose. This is not a
 user-chosen image: its source is in this crate and its version must match the

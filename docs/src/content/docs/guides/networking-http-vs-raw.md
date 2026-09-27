@@ -16,10 +16,16 @@ wiring up a real multi-repo workspace.
 
 Every node gets **two** domains, always differing only in suffix:
 
-- **`{node}.{workspace}.fghj.raw.internal`** — raw/direct. Resolves via
-  Docker's own per-network DNS straight to the real container's IP.
-  Reachable **only from inside the run's own docker network**. Any port,
-  no TLS, no certificate, fastest path, no CA trust needed.
+- **`{node}.{workspace}.fghj.raw.internal`** — raw/direct. From inside the
+  run's own docker network it resolves straight to the real container IP,
+  on any port the container listens on. From the **host** the same name
+  also works: fghjd hands out a per-node virtual IP and NATs it to the
+  port Docker published, so `db.myworkspace.fghj.raw.internal:5432` is the
+  port the author declared, not the one Docker picked (see
+  [Node identity & domains](/concepts/node-identity-and-domains/#domain-derivation-one-formula-no-exceptions-two-zones)).
+  The host side reaches only **declared** ports, and is a macOS `pf`
+  mechanism today. Either way: no TLS, no certificate, fastest path, no CA
+  trust needed.
 - **`{node}.{workspace}.fghj.internal`** — HTTP(S)-canonical, proxied.
   Resolves to the run's sidecar from inside the network, and to the host
   proxy from the host/a browser outside it — **the same hostname either
@@ -148,10 +154,14 @@ environment:
 
 Why not raw, and why not plain http, here specifically:
 
-- **Raw would break for the external caller.** `fghj.raw.internal` is only
-  resolvable from inside the run's own docker network — a presigned URL
-  built against it would be unreachable for a real `pip install` running
-  on your host.
+- **Raw can't be `https://` at all.** The raw zone goes straight to the
+  container — there is no proxy in front of it, so nothing terminates TLS
+  and no certificate is ever issued for a `fghj.raw.internal` name. An S3
+  client, a browser, or anything else that expects a `https://` endpoint
+  has no raw option. (Plain `http://` against the raw zone *would* reach a
+  host-side caller on macOS, via the virtual-IP NAT above — it just can't
+  be the TLS endpoint this case needs, and it leans on host plumbing the
+  http zone doesn't need.)
 - **Plain `http://` on the http zone always redirects to `https://`.**
   Port 80 in-zone is a deliberate redirect-only listener for every
   `fghj.internal` name (see [Local CA & TLS

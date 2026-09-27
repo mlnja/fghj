@@ -52,7 +52,7 @@ currently no supported way to build one dependency from a different branch
 for a single experiment without checking it out live — see the removal note
 above.)
 
-`resolver.rs` used to track a `path_branches: HashMap<repo, HashSet<branch>>`
+`resolver/` used to track a `path_branches: HashMap<repo, HashSet<branch>>`
 and flag a `"diamond conflict"` warning (plus a `conflict` field on `Node`/
 `Edge`) whenever two dependency edges declared different `default_branch`
 values for the same repo. That detector has been **deleted entirely**, not
@@ -98,7 +98,7 @@ recolors it.
 ## Status
 
 Implemented: `resolver::git_status_dirty` and `Node.dirty`
-(`src/resolver.rs`, set in `visit_local_service` for every real on-disk
+(`src/resolver/visit.rs`, set in `visit_local_service` for every real on-disk
 checkout; always `false` for stub/infra nodes, which have no checkout) —
 surfaced in `GraphView.svelte`'s node cards and `Drawer.svelte`'s detail
 rows, with `App.svelte` polling `/universe.json` every 3s while the

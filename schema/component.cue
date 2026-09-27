@@ -172,7 +172,13 @@ package fghj
 	// when it declares more than one, since there's no other way to tell
 	// which service's dependencies the flow is actually describing.
 	service?: string & =~"^[a-z0-9][a-z0-9-]*$"
-	dependencies: [...#Dependency] & [_, ...]
+	// Required (the Rust `FlowConfig` has no `#[serde(default)]` on it), but
+	// deliberately *not* constrained non-empty: `flows: {smoke: {description:
+	// "...", dependencies: []}}` is a legal, meaningful flow — "this journey
+	// is just the root service" — and the daemon accepts it without comment.
+	// A `& [_, ...]` here used to reject exactly that file, which is the one
+	// thing this schema must never do (see `#ComponentConfig.services`).
+	dependencies: [...#Dependency]
 }
 
 #ComponentConfig: {
@@ -191,6 +197,16 @@ package fghj
 	// Dockerfile), each with its own dependencies. See #SharedBackingDependency
 	// for how two services in the same repo (or different repos) can share
 	// one `kind: backing` instance instead of each provisioning their own.
-	services: [Name=string & =~"^[a-z0-9][a-z0-9-]*$"]: #Service
-	flows: [string]: #Flow
+	//
+	// Required (`!`), not merely constrained: the Rust side has no
+	// `#[serde(default)]` on this field, so a file omitting it entirely is
+	// refused by the daemon with `missing field \`services\``. Leaving it
+	// optional here would let `cue vet` bless a file the daemon then
+	// rejects, which is the one thing this schema must never do — see
+	// `concepts/config-language.md`. An *empty* map is a different case and
+	// stays legal, because serde accepts that too.
+	services!: [Name=string & =~"^[a-z0-9][a-z0-9-]*$"]: #Service
+	// Optional, matching `#[serde(default)]` on the Rust side: a repo that
+	// declares services but no flow is the common case.
+	flows?: [string]: #Flow
 }

@@ -1,0 +1,345 @@
+/*
+ * The fghj look, applied to Starlight's chrome.
+ *
+ * `fghj-tokens.css` handles colour and type; this file handles the handful of
+ * *shapes* that make the web UI recognisable and reproduces them here:
+ *
+ *   - `.eyebrow`  — tiny uppercase mono label with an accent dot, sitting
+ *                   above a heading (UI: every drawer header)
+ *   - `.stencil`  — Podkova 800 uppercase (UI: the logo and drawer titles)
+ *   - mono labels — every piece of chrome text in the UI is JetBrains Mono,
+ *                   uppercase and letterspaced when it is a control
+ *   - hairline panels on the canvas, 4-6px radii, one soft shadow
+ *   - corner brackets on a card (UI: `.corner-brackets`)
+ *
+ * Starlight's own rules live in `@layer starlight.*`; this file is unlayered,
+ * so it wins without needing specificity games.
+ */
+
+/* ── Site chrome ─────────────────────────────────────────────────────── */
+
+.site-title {
+	font-family: var(--fghj-font-display);
+	font-weight: 800;
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+	font-size: var(--sl-text-lg);
+	color: var(--sl-color-white);
+}
+.site-title img {
+	border-radius: 2px;
+}
+
+header.header {
+	border-bottom: 1px solid var(--sl-color-hairline);
+	box-shadow: var(--sl-shadow-sm);
+}
+
+/* The UI's controls: mono, uppercase, letterspaced, hairline border. */
+site-search button[data-open-modal],
+starlight-theme-select select,
+starlight-lang-select select {
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-2xs);
+	border-radius: var(--fghj-radius-sm);
+}
+
+/* ── Left sidebar ────────────────────────────────────────────────────── */
+
+.sidebar-pane {
+	border-inline-end: 1px solid var(--sl-color-hairline);
+}
+
+/* Group labels become the UI's eyebrow. */
+.sidebar-content .large {
+	font-family: var(--sl-font-mono);
+	font-size: 0.625rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--sl-color-gray-3);
+}
+.sidebar-content .large::before {
+	content: '';
+	display: inline-block;
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	background: var(--sl-color-accent);
+	margin-inline-end: 7px;
+	vertical-align: middle;
+}
+
+.sidebar-content a {
+	font-family: var(--sl-font-mono);
+	font-size: 0.78rem;
+	font-weight: 500;
+	border-radius: var(--fghj-radius-sm);
+}
+.sidebar-content a[aria-current='page'] {
+	font-weight: 700;
+}
+
+/* ── Right sidebar (table of contents) ───────────────────────────────── */
+
+#starlight__on-this-page {
+	font-family: var(--sl-font-mono);
+	font-size: 0.625rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--sl-color-gray-3);
+}
+starlight-toc nav a {
+	font-family: var(--sl-font-mono);
+	font-size: 0.72rem;
+	border-radius: var(--fghj-radius-sm);
+}
+mobile-starlight-toc nav summary {
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-2xs);
+}
+
+/* ── Headings ────────────────────────────────────────────────────────── */
+
+/* Podkova 800, the UI's `.stencil` face — but *not* uppercased, unlike the
+   logo and the drawer titles it comes from. Half the page titles here are
+   literal strings (`.fghj.yaml`, `fghj validate`); upper-casing them would
+   print a filename and a command that don't exist. The splash hero, whose
+   title is the brand itself, keeps the uppercase further down. */
+.content-panel h1,
+h1[data-page-title] {
+	font-family: var(--fghj-font-display);
+	font-weight: 800;
+	letter-spacing: -0.005em;
+}
+
+.sl-markdown-content :is(h2, h3, h4, h5, h6) {
+	font-family: var(--fghj-font-display);
+	font-weight: 700;
+	letter-spacing: -0.003em;
+	color: var(--sl-color-white);
+}
+
+/* The section rhythm of the UI's drawers: a hairline, then the next block.
+   Starlight wraps every heading in `.sl-heading-wrapper` for its anchor link
+   and moves the spacing up to the wrapper, so the rule goes there too. */
+.sl-markdown-content > .sl-heading-wrapper.level-h2 {
+	margin-top: 3rem;
+	padding-top: 1.35rem;
+	border-top: 1px solid var(--sl-color-hairline);
+}
+
+/* ── Body copy, links, code ──────────────────────────────────────────── */
+
+.sl-markdown-content {
+	color: var(--sl-color-gray-2);
+}
+.sl-markdown-content a:not(:where(.not-content *)) {
+	text-underline-offset: 0.2em;
+	text-decoration-thickness: 1px;
+}
+
+/* Inline code is the UI's `.crate-tag`. */
+.sl-markdown-content code:not(:where(.not-content *)) {
+	font-size: 0.85em;
+	border: 1px solid var(--sl-color-hairline);
+	border-radius: 3px;
+	padding: 0.1em 0.35em;
+}
+.sl-markdown-content :is(h1, h2, h3, h4, h5, h6) code {
+	font-size: 0.9em;
+	border: 0;
+	background: none;
+	padding: 0;
+}
+.sl-markdown-content pre code {
+	border: 0;
+	padding: 0;
+}
+
+.sl-markdown-content blockquote:not(:where(.not-content *)) {
+	border-inline-start: 2px solid var(--sl-color-accent);
+	color: var(--sl-color-gray-3);
+}
+
+/* ── Tables ──────────────────────────────────────────────────────────── */
+
+.sl-markdown-content table:not(:where(.not-content *)) {
+	border: 1px solid var(--sl-color-hairline);
+	border-radius: var(--fghj-radius-md);
+	border-collapse: separate;
+	border-spacing: 0;
+	overflow: hidden;
+	font-size: var(--sl-text-sm);
+}
+.sl-markdown-content :is(th, td):not(:where(.not-content *)) {
+	border: 0;
+	border-bottom: 1px solid var(--sl-color-hairline);
+	padding: 0.6rem 0.8rem;
+	vertical-align: top;
+}
+.sl-markdown-content th:not(:where(.not-content *)) {
+	font-family: var(--sl-font-mono);
+	font-size: 0.625rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--sl-color-gray-3);
+	background: var(--sl-color-bg-nav);
+	white-space: nowrap;
+}
+.sl-markdown-content tr:last-child :is(th, td):not(:where(.not-content *)) {
+	border-bottom: 0;
+}
+
+/* ── Asides ──────────────────────────────────────────────────────────── */
+
+.starlight-aside {
+	border-inline-start-width: 2px;
+	border-radius: 0 var(--fghj-radius-md) var(--fghj-radius-md) 0;
+}
+.starlight-aside__title {
+	font-family: var(--sl-font-mono);
+	font-size: 0.625rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+}
+
+/* ── Pagination & footer ─────────────────────────────────────────────── */
+
+.pagination-links a {
+	background: var(--sl-color-bg-nav);
+	border: 1px solid var(--sl-color-hairline);
+	border-radius: var(--fghj-radius-md);
+	box-shadow: none;
+}
+.pagination-links a:hover {
+	border-color: var(--sl-color-accent);
+}
+/* "Previous"/"Next" is a bare text node in the outer span, so the eyebrow
+   goes on the span and the title resets out of it. */
+.pagination-links a > span {
+	font-family: var(--sl-font-mono);
+	font-size: 0.625rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--sl-color-gray-3);
+}
+.pagination-links .link-title {
+	font-family: var(--fghj-font-display);
+	font-size: var(--sl-text-xl);
+	font-weight: 700;
+	text-transform: none;
+	letter-spacing: 0;
+}
+
+footer .meta {
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-2xs);
+}
+
+/* ── Splash page ─────────────────────────────────────────────────────── */
+
+/* The UI's `.grid-bg` canvas, faded out at the edges. */
+.hero {
+	position: relative;
+	isolation: isolate;
+}
+.hero::before {
+	content: '';
+	position: absolute;
+	z-index: -1;
+	inset: -2.5rem -1rem;
+	background-image:
+		linear-gradient(var(--sl-color-hairline) 1px, transparent 1px),
+		linear-gradient(90deg, var(--sl-color-hairline) 1px, transparent 1px);
+	background-size: 28px 28px;
+	-webkit-mask-image: radial-gradient(ellipse 65% 75% at 50% 45%, #000 10%, transparent 78%);
+	mask-image: radial-gradient(ellipse 65% 75% at 50% 45%, #000 10%, transparent 78%);
+	pointer-events: none;
+}
+
+.hero h1 {
+	font-family: var(--fghj-font-display);
+	font-weight: 800;
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+}
+.hero .tagline {
+	color: var(--sl-color-gray-2);
+}
+
+/* Hero actions are the UI's `.pull-btn` / active view tab. */
+.sl-link-button {
+	font-family: var(--sl-font-mono);
+	font-size: 0.72rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	border-radius: var(--fghj-radius-sm);
+}
+.sl-link-button.primary {
+	border: 1px solid var(--sl-color-accent);
+}
+.sl-link-button.minimal {
+	border: 1px solid var(--sl-color-gray-5);
+	padding-inline: 1.1rem;
+	color: var(--sl-color-white);
+}
+.sl-link-button.minimal:hover {
+	border-color: var(--sl-color-accent);
+}
+
+/* One accent, not a rainbow — and the UI's corner brackets. */
+.card {
+	--sl-card-border: var(--sl-color-accent);
+	--sl-card-bg: var(--sl-color-accent-low);
+	position: relative;
+	background: var(--sl-color-bg-nav);
+	border-color: var(--sl-color-hairline);
+	border-radius: var(--fghj-radius-lg);
+}
+.card::before,
+.card::after {
+	content: '';
+	position: absolute;
+	width: 9px;
+	height: 9px;
+	border: 1.5px solid var(--sl-color-accent);
+	opacity: 0.45;
+	pointer-events: none;
+}
+.card::before {
+	top: -1px;
+	left: -1px;
+	border-inline-end: 0;
+	border-bottom: 0;
+}
+.card::after {
+	bottom: -1px;
+	right: -1px;
+	border-inline-start: 0;
+	border-top: 0;
+}
+.card .title {
+	font-family: var(--fghj-font-display);
+	font-weight: 700;
+	font-size: var(--sl-text-xl);
+}
+
+/* ── Scrollbar, to match the UI's ────────────────────────────────────── */
+
+::-webkit-scrollbar {
+	width: 8px;
+	height: 8px;
+}
+::-webkit-scrollbar-thumb {
+	background: var(--sl-color-gray-5);
+	border-radius: 8px;
+}
+
+/* The logo mark and the wordmark are one lockup, as in the UI topbar. */
+.site-title { gap: 0.5rem; }

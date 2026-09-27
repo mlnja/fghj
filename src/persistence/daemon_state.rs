@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// A small, single-writer bag of daemon-level settings that need to survive
 /// `fghjd` restarting on its own (crash, reboot) — today just whether the
 /// operator last asked for `daemon stop`, but expected to grow more fields
-/// over time (see `DaemonControl` in `daemon.rs`). Plain JSON with
+/// over time (see `DaemonControl` in `daemon/`). Plain JSON with
 /// `#[serde(default)]` fields, same as `load_index`/`save_index`: there's
 /// only ever one writer and no relational structure here, so a new field is
 /// just a new struct field, no migration machinery needed.

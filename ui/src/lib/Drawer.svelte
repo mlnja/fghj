@@ -426,7 +426,7 @@
             <span class="k">config sync</span>
             <span class="v">
               {#if liveInfo.observed.sync === 'drifted'}
-                <span class="pill unsynced" title="the running container's config no longer matches .fghj.yaml — restart this node to pick up the change">desired ≠ actual</span>
+                <span class="pill unsynced" title="the running container's config no longer matches .fghj.yaml — Reset this node to pick up the change">desired ≠ actual</span>
               {:else if liveInfo.observed.sync === 'synced'}
                 <span class="pill synced">up to date</span>
               {:else if liveInfo.observed.sync === 'orphaned'}

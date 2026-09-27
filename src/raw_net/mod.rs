@@ -93,7 +93,7 @@ pub struct RawEndpoint {
 
 /// One desired NAT rule: traffic to `virtual_ip:container_port` should reach
 /// `127.0.0.1:host_port`. `Serialize`d as-is for the telemetry drawer's
-/// network-status tab (`daemon.rs`'s `/daemon/net-status`).
+/// network-status tab (`daemon/`'s `/daemon/net-status`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct RouteSpec {
     pub virtual_ip: Ipv4Addr,
@@ -300,7 +300,7 @@ pub fn resolve(name: &str) -> Ipv4Addr {
 
 /// Recomputes the sticky assignment table and the desired NAT route set from
 /// `endpoints`, then hands the routes to the platform backend. Called once
-/// per `spawn_reconciler` tick in `daemon.rs`, mirroring `hosts_file::sync`'s
+/// per `spawn_reconciler` tick in `daemon/`, mirroring `hosts_file::sync`'s
 /// "recompute the whole desired state from scratch every tick" approach —
 /// except for the assignment table itself, which is intentionally sticky
 /// (see `assign`).
@@ -322,7 +322,7 @@ pub fn clear() -> Result<()> {
 }
 
 /// The route set currently installed — backs the telemetry drawer's
-/// network-status tab (`daemon.rs`'s `/daemon/net-status`).
+/// network-status tab (`daemon/`'s `/daemon/net-status`).
 pub fn current_routes() -> Vec<RouteSpec> {
     backend().status()
 }

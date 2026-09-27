@@ -51,10 +51,18 @@ that honestly on the next tick rather than `fghj` silently bringing it
 back — you decide whether to restart it.
 
 The same kind of check runs once at daemon startup, against whatever runs
-were persisted from a previous `fghjd` lifetime: a run whose containers
-are all still alive is restored with freshly inspected statuses; a run
-missing even one container is dropped outright rather than being
-presented as a run that's only partially there.
+were persisted from a previous `fghjd` lifetime — one container at a time,
+not one run at a time. Containers Docker still knows about are restored
+with a freshly inspected status; containers that have vanished are dropped
+from the run; and only a run with nothing left alive is forgotten
+entirely. Doing it per-run instead would mean one missing container
+silently orphaned every other container in that run from `fghjd`'s
+bookkeeping — they'd keep running, but nothing would route to them.
+
+Only the *observed* half is refreshed. What fghj recorded that it wanted
+the container to be doing survives the restart untouched, which is what
+lets a container that died while `fghjd` was down come back reading as
+drifted rather than as freshly correct.
 
 ## How the proxy finds a container
 

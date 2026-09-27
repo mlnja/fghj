@@ -45,7 +45,7 @@ notices, says so, and waits for you:
 | Verdict | Means |
 |---|---|
 | **synced** | The running container matches what `.fghj.yaml` would produce right now. |
-| **drifted** | It doesn't. Shown as a `desired ≠ actual` pill: *the running container's config no longer matches .fghj.yaml — restart this node to pick up the change.* |
+| **drifted** | It doesn't. Shown as a `desired ≠ actual` pill: *the running container's config no longer matches .fghj.yaml — Reset this node to pick up the change.* |
 | **orphaned** | The container is running but its node is **no longer in the graph at all** — shown as `no longer declared`. |
 | **unknown** | No drift check has run yet, or the last re-resolve failed. Nothing conclusive to say. |
 

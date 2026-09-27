@@ -39,15 +39,15 @@ useful for piping input into a command or scripting a one-off command
 without a pseudo-terminal's line-editing getting in the way:
 
 ```bash
-echo "select 1;" | fghj exec -T postgres -- psql -U postgres
+echo "select 1;" | fghj exec -T db.web.storefront -- psql -U shop shop
 ```
 
 ## Examples
 
 ```bash
 # a real interactive shell
-fghj exec postgres -- bash
+fghj exec web.storefront -- bash
 
 # a one-off command, output streamed back, exit code propagated
-fghj exec postgres -- pg_isready
+fghj exec db.web.storefront -- pg_isready
 ```

@@ -1,0 +1,132 @@
+/*
+ * fghj design tokens for the docs site.
+ *
+ * The source of truth for this palette is `ui/src/app.css` — the same tokens
+ * the fghj web UI paints itself with. This file's only job is to project them
+ * onto the `--sl-*` variables Starlight already consumes, so the docs and the
+ * app look like one product without either side reimplementing the other.
+ *
+ * Keep the hex values in sync with `ui/src/app.css` when that file changes;
+ * the `--fghj-*` names below are the ones lifted from it verbatim.
+ *
+ * Starlight's ramp is inverted between themes: `--sl-color-white` always means
+ * "maximum-contrast text" and `--sl-color-black` always means "page
+ * background". `:root` carries the dark theme, `:root[data-theme='light']`
+ * the light one — the reverse of how the UI is written, which is light-only.
+ */
+
+/* ── Typography (the UI's three faces, loaded from the same Google Fonts
+      request `ui/src/app.css` makes) ───────────────────────────────────── */
+:root {
+	--fghj-font-display: 'Podkova', 'Iowan Old Style', Georgia, serif;
+	--sl-font: 'Space Grotesk', 'Helvetica Neue', Arial, sans-serif;
+	--sl-font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+	/* The UI's 4px spacing scale, for the few places this stylesheet needs it. */
+	--fghj-radius-sm: 4px;
+	--fghj-radius-md: 6px;
+	--fghj-radius-lg: 10px;
+
+	--sl-line-height: 1.7;
+}
+
+/* ── Dark theme ──────────────────────────────────────────────────────────
+   The UI has no dark mode, so this is derived rather than copied: the same
+   ink hue (`#131b2e`) taken to the background end of the ramp, with the
+   accent lifted until it carries text contrast against it. */
+:root,
+::backdrop {
+	--sl-color-white: #f4f6ff;
+	--sl-color-gray-1: #e3e8f2;
+	--sl-color-gray-2: #c2ccda;
+	--sl-color-gray-3: #93a0b2;
+	--sl-color-gray-4: #647184;
+	--sl-color-gray-5: #3b4557;
+	--sl-color-gray-6: #232c3f;
+	--sl-color-black: #101827;
+
+	--sl-color-accent-low: #06354c;
+	--sl-color-accent: #2aa1d4;
+	--sl-color-accent-high: #9fdcf5;
+
+	--sl-color-bg-nav: #18202f;
+	--sl-color-bg-sidebar: #18202f;
+	--sl-color-bg-inline-code: #232c3f;
+	--sl-color-bg-accent: var(--sl-color-accent-high);
+	/* Code frames: a panel one step off the page ground (see
+	   `expressiveCode.styleOverrides` in `astro.config.mjs`). */
+	--fghj-code-bg: #18202f;
+
+	/* Asides and badges: the UI's success/warning/danger trio, lightened for
+	   a dark ground. `blue` is pulled into the accent family on purpose —
+	   fghj has one accent hue, not two. */
+	--sl-color-green-low: #0d3b22;
+	--sl-color-green: #4ade80;
+	--sl-color-green-high: #a7f3c4;
+	--sl-color-orange-low: #3d2a08;
+	--sl-color-orange: #f0b354;
+	--sl-color-orange-high: #fbdfae;
+	--sl-color-red-low: #4a1614;
+	--sl-color-red: #f08a86;
+	--sl-color-red-high: #fbcfcd;
+	--sl-color-blue-low: #06354c;
+	--sl-color-blue: #2aa1d4;
+	--sl-color-blue-high: #9fdcf5;
+	/* `:::tip` is Starlight's one purple. fghj has no purple, so it borrows
+	   the success green — leaving note/tip/caution/danger as accent, green,
+	   warning, danger: four colours the app already uses. */
+	--sl-color-purple-low: #0d3b22;
+	--sl-color-purple: #4ade80;
+	--sl-color-purple-high: #a7f3c4;
+
+	--sl-color-backdrop-overlay: rgba(16, 24, 39, 0.72);
+}
+
+/* ── Light theme — the UI's actual palette, verbatim ─────────────────── */
+:root[data-theme='light'],
+[data-theme='light'] ::backdrop {
+	--sl-color-white: #131b2e; /* --ink */
+	--sl-color-gray-1: #1d2639;
+	--sl-color-gray-2: #3e4850; /* --ink-dim */
+	--sl-color-gray-3: #6e7881; /* --ink-faint */
+	--sl-color-gray-4: #98a2ad;
+	--sl-color-gray-5: #bec8d2; /* --line-strong */
+	--sl-color-gray-6: #e2e8f0; /* --line */
+	--sl-color-gray-7: #f2f3ff; /* --panel-2 */
+	--sl-color-black: #faf8ff; /* --bg, the UI's canvas */
+
+	--sl-color-accent-low: #c9e6ff; /* --accent-bg */
+	--sl-color-accent: #006591; /* --accent */
+	--sl-color-accent-high: #00405e;
+
+	/* The chrome is the white floating panel the UI's topbar and drawers are,
+	   sitting on the tinted canvas the content area keeps. */
+	--sl-color-bg-nav: #ffffff; /* --panel */
+	--sl-color-bg-sidebar: #ffffff;
+	--sl-color-bg-inline-code: #f2f3ff;
+	--sl-color-bg-accent: var(--sl-color-accent);
+	--fghj-code-bg: #ffffff;
+
+	--sl-color-green-low: #dcfce7; /* --success-bg */
+	--sl-color-green: #16a34a; /* --success */
+	--sl-color-green-high: #15803d;
+	--sl-color-orange-low: #fdead0; /* --warning-bg */
+	--sl-color-orange: #d98324;
+	--sl-color-orange-high: #8a5100; /* --warning */
+	--sl-color-red-low: #fde2e1; /* --danger-bg */
+	--sl-color-red: #ba1a1a; /* --danger */
+	--sl-color-red-high: #8c1414;
+	--sl-color-blue-low: #c9e6ff;
+	--sl-color-blue: #006591;
+	--sl-color-blue-high: #00405e;
+	--sl-color-purple-low: #dcfce7;
+	--sl-color-purple: #16a34a;
+	--sl-color-purple-high: #15803d;
+
+	--sl-color-backdrop-overlay: rgba(19, 27, 46, 0.55);
+
+	/* The UI's one shadow, used wherever a panel floats. */
+	--sl-shadow-sm: 0 1px 2px rgba(19, 27, 46, 0.06);
+	--sl-shadow-md: 0 8px 20px -10px rgba(19, 27, 46, 0.14);
+	--sl-shadow-lg: 0 12px 32px -12px rgba(19, 27, 46, 0.18);
+}

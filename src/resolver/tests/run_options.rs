@@ -198,3 +198,58 @@ fn a_well_formed_stop_signal_earns_no_warning() {
             .any(|w| w.message.contains("stop_signal"))
     );
 }
+
+/// `#Healthcheck.test` is `[_, ...]` in CUE — non-empty. The Rust side is the
+/// enforcing boundary, so if it silently accepted `test: []` the schema would
+/// be rejecting a file the daemon runs, which is the one asymmetry the two are
+/// not allowed to have. Blocking, because the failure mode is silent: Docker
+/// reads an empty `Test` as "inherit the image's healthcheck", so the node
+/// ends up with no healthcheck at all — and the run-wide health budget then
+/// waits on nothing.
+#[test]
+fn warns_when_a_healthcheck_declares_an_empty_test() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_component(
+        tmp.path(),
+        "myservice",
+        "  healthcheck:\n\
+         \x20   test: []\n",
+    );
+
+    let graph = resolve_universe(tmp.path()).unwrap();
+
+    let w = graph
+        .warnings
+        .iter()
+        .find(|w| w.message.contains("empty `test`"))
+        .expect("an empty healthcheck test must be reported");
+    assert!(matches!(w.severity, Severity::Blocking));
+    assert!(w.message.contains("myservice.myservice"));
+}
+
+/// The same check applies to a backing dependency's healthcheck, which is the
+/// far more common place to write one (a `pg_isready` on a database) — and a
+/// separate call site, so a separate test.
+#[test]
+fn warns_when_a_backing_healthcheck_declares_an_empty_test() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_component(
+        tmp.path(),
+        "myservice",
+        "  dependencies:\n\
+         \x20   - kind: backing\n\
+         \x20     name: db\n\
+         \x20     image: postgres:16\n\
+         \x20     healthcheck:\n\
+         \x20       test: []\n",
+    );
+
+    let graph = resolve_universe(tmp.path()).unwrap();
+
+    assert!(
+        graph
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("empty `test`") && w.message.contains("db.myservice"))
+    );
+}

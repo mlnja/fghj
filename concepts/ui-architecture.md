@@ -91,7 +91,7 @@ fresh from `graph.nodes`/`graph.edges` on every render (`$derived`):
    graph from visibly jittering on every poll for reasons unrelated to any
    real change.
 
-## The three drawers
+## The four drawers
 
 - **`Drawer`** (node detail): general info + logs, opened by clicking any
   node. Shows the node's default-run domain and (when live) its container
@@ -102,10 +102,53 @@ fresh from `graph.nodes`/`graph.edges` on every render (`$derived`):
   ever started this daemon lifetime (`DownloadRegistry::list`, most-recent
   first) with its live log — the one place to see a `pull-all` or
   individual clone's raw git output.
+- **`TelemetryDrawer`** (the "⚡" header button): the daemon's own view of
+  itself, not any workspace's — two tabs, `Logs` (the `daemon_log` ring
+  buffer) and `DNS / DNAT`, the latter listing the managed `/etc/hosts`
+  block, the `/etc/resolver` zones with the ephemeral port each points at,
+  and the live `pf` NAT routes backing the raw zone. This is the answer to
+  "is the plumbing actually up" without reading `fghjd`'s stdout — see
+  [[split-dns]], [[host-aliases]], [[two-zones-and-raw-ports]].
 - **`SideDrawer`**: not a feature on its own — a shared shell (fixed-width
-  panel sliding in from the right, click-outside-to-close) both of the
+  panel sliding in from the right, click-outside-to-close) all three of the
   above render their actual content into via Svelte's `{@render children()}`
   snippet mechanism.
+
+## The design system, and the docs site that borrows it
+
+`ui/src/app.css` is the whole design system: one palette (`--bg`, `--panel`,
+`--ink*`, one `--accent`, and a success/warning/danger trio), three faces
+(Podkova for display, Space Grotesk for body, JetBrains Mono for every piece
+of chrome text), a 4px spacing scale and three radii. Every component style in
+`ui/src/**` is written against those variables and never against a literal
+colour, which is what lets the whole app be re-skinned from one file.
+
+The documentation site is painted from the same system. `docs/` is Astro
+Starlight, which has its own `--sl-*` variable vocabulary, so the two are
+joined by a projection rather than by sharing a file:
+`docs/src/styles/fghj-tokens.css` restates the palette and maps it onto the
+`--sl-*` names, and `docs/src/styles/fghj-theme.css` rebuilds the handful of
+*shapes* that make the app recognisable — the eyebrow (tiny uppercase mono
+label with an accent dot) over a Podkova heading, mono chrome text, hairline
+panels on the canvas, and the corner brackets from `.corner-brackets`.
+
+Two things are worth knowing before changing either side:
+
+- **The hex values are duplicated, deliberately.** The docs build is a
+  separate npm project with no import path into `ui/`, and a shared file
+  would have to be generated into both. The cost is that a palette change
+  has to be made twice; `fghj-tokens.css` says so at the top and names
+  `ui/src/app.css` as the source of truth.
+- **The docs have a dark theme and the app does not.** Starlight ships a
+  theme toggle, so the dark half of `fghj-tokens.css` is *derived* — the same
+  ink hue taken to the background end of the ramp, with the accent lifted
+  until it carries text contrast. It is not a claim about what a dark fghj UI
+  would look like. Three places where the projection is not one-to-one, all
+  recorded in the files themselves: the app's `.stencil` is uppercase and the
+  docs' page titles are not (half of them are literal strings like
+  `.fghj.yaml`, which upper-casing would falsify), Starlight's `:::tip`
+  purple is remapped onto the success green because fghj has no purple, and
+  Starlight's per-card accent rotation is pinned to the one accent.
 
 ## Status
 

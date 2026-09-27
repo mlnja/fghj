@@ -510,7 +510,7 @@
       {:else if activeTab === 'containers'}
         <Placeholder
           eyebrow="Actual — live container state"
-          text="Start the default environment to build and run every service/infra as real Docker containers on an isolated workspace network, or start a second, named review run alongside the rest running normally. Domain-based access from the browser still requires the future fghj daemon — for now, open a running service via its published localhost port below."
+          text="Start the default environment to build and run every service/infra as real Docker containers on an isolated workspace network, or start a second, named review run alongside it. Each node gets a trusted HTTPS domain under *.fghj.internal, served by the daemon's proxy, plus a per-node address under *.fghj.raw.internal for anything that isn't HTTP — click a node to see and open both."
         >
           <RunControls
             {runs}
@@ -523,7 +523,7 @@
       {:else}
         <Placeholder
           eyebrow="Config — secrets, split-DNS, root CA"
-          text="Not available yet. This view will surface per-service env vars, the split-DNS table, and issued local TLS certs — once the superdaemon subsystems from the spec are implemented. None of that exists yet, so there is nothing real to show here."
+          text="Not available yet. The subsystems behind it are running — split DNS, the local root CA, the TLS proxy — but this view doesn't surface them yet. Until it does, the ⚡ telemetry drawer in the header shows live DNS and DNAT status."
         />
       {/if}
     {/if}

@@ -35,7 +35,7 @@ pub fn socket_path() -> PathBuf {
 
 /// Durable storage for the local CA — must survive a reboot, or every
 /// `fghjd` restart would need the user to re-approve a brand new CA in
-/// Keychain Access. `pub(crate)` so `runs.rs` can bind-mount it (read-only)
+/// Keychain Access. `pub(crate)` so `runs/` can bind-mount it (read-only)
 /// into a run's sidecar proxy container.
 pub(crate) fn ca_dir() -> PathBuf {
     persistence::fghjd_root().join("ca")

@@ -51,14 +51,29 @@ a sibling repo's checkout directly, the same way Docker Compose would.
 A named volume's real Docker name is *derived*, never the literal string
 you write — the same principle as a node's `*.fghj.internal` domain (see
 [Node identity & domains](/concepts/node-identity-and-domains/)). It's
-built from the volume's own `name`, folding in the run id unless `scope`
-is `"stable"`. Because the derivation is keyed by that author-chosen
-`name` rather than by any node id, two unrelated nodes — two services, or
-a service and a backing dependency — that declare the same `name` and
-`scope` land on the same derived value and transparently share one Docker
-volume. This is also why a `kind: shared-backing` reference automatically
-gets the backing dependency's persisted data for free: there's only ever
-one container that owns it, no matter how many services reference it.
+built from the volume's own `name`, **qualified by the id of the node that
+declared it**, and folding in the run id unless `scope` is `"stable"`.
+
+The node-id qualification is the part worth understanding, because it used
+to be absent. Keying only on the author-chosen `name` meant two unrelated
+repos that both happened to call a volume `data` silently landed on one
+Docker volume — two Postgres containers on one data directory, with no
+error anywhere, because Docker will happily mount the same volume twice.
+The qualification makes accidental sharing impossible; deliberate sharing
+is then spelled out with `shared: true` on **both** declarations, which
+drops the qualification so the label alone decides identity. Reach for it
+rarely: the usual reason to want it — several services behind one database
+— is already `kind: shared-backing`, which gives you one *node*, and
+therefore one container and one volume, with no name coincidence carrying
+any weight.
+
+One hazard the qualification doesn't close: `scope: "stable"` means one
+volume across every run *including two runs that are up at the same time*,
+so a default run's database and a review run's database can still end up on
+one data directory. It's documented where an author meets it — the
+[volume table](/reference/fghj-yaml/#setting-a-named-volume) and
+[tutorial chapter 6](/tutorial/06-two-runs/) — and not enforced anywhere
+yet.
 
 Volumes are never deleted by `fghj` — stopping a run tears down its
 containers and network only, which is what lets a volume survive a
@@ -112,6 +127,6 @@ rather than as root, using the identity-borrowing mechanism described in
 [Persistence & workspace store](/concepts/persistence-and-workspace-store/),
 as defense in depth against a clone subprocess hanging on an unanswerable
 interactive prompt. (The now-removed branch-override build path — see
-[Run lifecycle & registry](/concepts/run-lifecycle-and-registry/)) — used
+[Run lifecycle & registry](/concepts/run-lifecycle-and-registry/) — used
 to share this same privilege drop for its own mirror clone; that code no
 longer exists.)

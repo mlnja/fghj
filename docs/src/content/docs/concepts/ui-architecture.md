@@ -98,3 +98,10 @@ the current node/edge set on every render:
 - **Operations** — lists every download job started this daemon lifetime,
   most-recent-first, with its live log — the one place to see a "pull
   all" or an individual clone's raw Git output.
+- **Telemetry** (the "⚡" button in the header) — the daemon's view of
+  itself rather than of any one workspace: its recent log lines, and a
+  live listing of the managed `/etc/hosts` entries, the `/etc/resolver`
+  zones with the port each points at, and the NAT routes backing the raw
+  zone. It's how you check the plumbing is up without reading `fghjd`'s
+  output — see [Split DNS](/concepts/split-dns/) and
+  [Networking: HTTP vs. raw](/guides/networking-http-vs-raw/).

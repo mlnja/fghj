@@ -2,7 +2,7 @@
 //! aliases into `hosts_file::sync` — the architecture plan's
 //! (rosy-soaring-teapot.md) "dns + hosts_file effects" migration step,
 //! following the same `FannedInEffect` idiom `effects::raw_net::RawNetEffect`
-//! already established for the raw-net slice. `daemon.rs`'s
+//! already established for the raw-net slice. `daemon/`'s
 //! `spawn_reconciler` must never also call `hosts_file::sync` directly once
 //! this effect is spawned — two writers of the same managed `/etc/hosts`
 //! block would just race each other to reach the same end state.

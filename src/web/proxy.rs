@@ -37,7 +37,8 @@ pub struct Backend {
 
 /// Resolves an in-zone hostname that isn't the zone apex to the backend it
 /// should be proxied to, if any. Kept as a trait (implemented by
-/// `daemon::WorkspaceRegistry::resolve_route` in production) rather than a
+/// `daemon::routing`'s impl for `WorkspaceRegistry`, over
+/// `state::query::resolve_route`, in production) rather than a
 /// concrete dependency so this module doesn't need to know anything about
 /// workspaces, runs, or Docker — and so tests can exercise dispatch with a
 /// plain in-memory map instead of real containers.

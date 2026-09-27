@@ -25,14 +25,53 @@ that is the only place the bytes are actually checked.
 
 ## The obligation that runs the other way
 
-Given that split, the CUE has exactly one hard obligation: **it must never
-accept something the daemon would reject.**
+Given that split, the CUE has one hard obligation: **it must never accept
+something the daemon would reject**, and — established later, the hard way —
+**it must never reject something the daemon accepts** either.
 
-That direction is the dangerous one. CUE being stricter than Rust is
-harmless — the author gets a preview of a constraint that would have been
-fine. CUE being *looser* means `fghj validate` says "ok" and the daemon then
-refuses the file, which is the worst possible outcome for a validation tool:
-it teaches people not to trust it.
+The first direction is the dangerous one: `fghj validate` says "ok" and the
+daemon then refuses the file, which is the worst possible outcome for a
+validation tool. It teaches people not to trust it.
+
+The second direction was originally written off here as harmless ("the
+author gets a preview of a constraint that would have been fine"). It
+isn't. `#Flow.dependencies` carried `& [_, ...]` — non-empty — while the
+Rust `FlowConfig` accepted `dependencies: []` without comment. So a legal,
+working flow failed `fghj validate`, and because the schema was treated as
+the spec, the reference documentation then went and wrote the phantom rule
+down as fact ("a flow's `dependencies` list must be non-empty"). A schema
+that is too strict doesn't stay a small annoyance; it invents language
+rules, and the docs launder them into real ones. Same lesson as
+[[AUDIT]] §4.4: fix the boundary, not the prose that agrees with it.
+
+### Why this class of bug recurs: CUE presence is not what it looks like
+
+Three mismatches of exactly this kind have been found (`#Service.dependencies`
+missing its `| *[]`, `#ComponentConfig.services` not being `!`,
+`#Flow.dependencies` being non-empty), which is enough to be a pattern
+rather than three accidents. The pattern comes from a mechanical detail that
+is easy to read past: **`fghj validate` runs `cue vet` without `-c`, so a
+plain `field: T` is only enforced as *present* when `T` is not already
+concrete.**
+
+Concretely:
+
+- `version: string & =~"…"` — a missing `version` leaves a non-concrete
+  string, so `vet` errors. Effectively required. Matches serde.
+- `services: [Name=…]: #Service` — a missing `services` leaves an empty
+  struct, which *is* concrete, so `vet` passes. Effectively optional —
+  while serde required it. That was the bug; `services!:` fixes it, because
+  `!` is enforced regardless of concreteness.
+- `dependencies: [...#Dependency]` — a missing list is non-concrete, so
+  required; but `& [_, ...]` additionally rejects the empty list, which
+  serde allows.
+
+So the reliable rule when adding a field: decide what serde does first, then
+spell it in CUE as `field!:` (serde requires it), `field?:` (serde has
+`Option` with no `#[serde(default)]`… which still defaults to `None`, so
+prefer `?` only for genuinely optional), or `field: T | *default` (serde has
+`#[serde(default)]`). Never rely on a plain `field: T` to mean "required" —
+it only does so by accident of the type.
 
 `resolver::name`'s `rust_and_cue_agree_on_what_a_name_is` enforces the
 obligation mechanically. It reads `schema/*.cue`, pulls out every `=~"…"`

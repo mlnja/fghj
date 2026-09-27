@@ -55,8 +55,9 @@ refuse until it is fixed.
 
 ## Status
 
-Implemented in `fghj` (see `src/resolver.rs`: `scan_workspace`,
-`resolve_universe`, `pull_all`; `Node.downloaded`). Plan history:
+Implemented in `fghj` (see `src/resolver/`: `workspace_scan::scan_workspace`,
+`universe::resolve_universe`; `src/downloads.rs`: `start_pull_all`;
+`Node.downloaded`). Plan history:
 `/Users/virviil/.claude/plans/fluffy-cooking-ripple.md`.
 
 This file is a running index — drop other "fancy shit" design ideas here as

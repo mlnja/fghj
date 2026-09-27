@@ -120,20 +120,32 @@ Where those routes actually come from is `runs::start_node` — see
 [[run-lifecycle-and-registry]] for when `start_node` runs and how
 `ContainerInfo.routes` gets persisted so routing survives a `fghjd` restart.
 
-## Ephemeral-port + `/var/run` discovery, shared with DNS and the control API
+## Nothing here needs to be discovered
 
-The CA/proxy subsystem doesn't publish a discoverable port itself (443 is
-fixed and well-known), but it's built and wired up alongside two other
-pieces that do — the DNS server (`dns::bind` picks an OS-assigned port,
-`dns::install_os_resolver_config` writes it into `/etc/resolver/fghj.internal`)
-and the control API (binds an OS-assigned port, published at
-`/var/run/fghjd.port` via `daemon::write_port`/`read_port`, mirroring the
-existing `/var/run/fghjd.pid` convention). All three follow the same shape:
-bind whatever the OS hands out, persist where to find it under `/var/run`
-(ephemeral, tied to this `fghjd` lifetime — unlike the CA's durable
-`/var/lib/fghjd/ca`), and have the unprivileged `fghj` CLI or the OS
-resolver discover it from there instead of hardcoding a fixed port that
-might already be taken by something else on a real dev machine.
+Three listeners come up together, and it's worth being precise about which
+of them anyone has to *find*:
+
+- **The proxy** (this subsystem) binds 80 and 443. Fixed, well-known, and
+  the entire point — a browser has to be able to guess it.
+- **The DNS server** binds an OS-assigned port (`dns::bind`), because
+  nothing but the OS resolver ever dials it and the resolver is told where
+  to look: `dns::install_os_resolver_config` writes the port it actually
+  got into `/etc/resolver/fghj.internal`. This is the one case that really
+  is "bind whatever the OS hands out, then publish it."
+- **The control API** binds an OS-assigned TCP loopback port *and* a Unix
+  socket at the fixed path `/var/run/fghjd.sock` (`daemon::socket_path`).
+  The ephemeral TCP port is never published anywhere and never dialed by
+  the CLI — only the in-process proxy relays to it, and it already holds
+  the address it bound. The CLI uses the socket, whose path is a constant,
+  so there is no discovery step at all: "can I connect to that path" is
+  also the CLI's whole definition of "is `fghjd` up". See
+  [[control-api-and-cli]].
+
+What all three do share is the `/var/run` vs. `/var/lib/fghjd` split:
+anything tied to *this* `fghjd` lifetime (the socket, the resolver config)
+lives under `/var/run` and is expected to vanish on reboot, while anything
+that must outlive a restart (the CA, the workspace index, the
+active/idle flag) lives under `/var/lib/fghjd`.
 
 ## Status
 

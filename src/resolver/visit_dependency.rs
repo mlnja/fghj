@@ -205,6 +205,7 @@ impl<'a> ResolveCtx<'a> {
                 let ports = ports.into_map();
                 self.check_port_config(&backing_id, &ports);
                 self.check_stop_signal(&backing_id, stop_signal.as_deref());
+                self.check_healthcheck(&backing_id, healthcheck.as_ref());
                 // A backing dependency has no checkout of its own — it's
                 // declared inline in the owning service's `.fghj.yaml` — but
                 // it still belongs to that service's repo/branch, and its

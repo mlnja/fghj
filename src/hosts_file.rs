@@ -69,7 +69,7 @@ pub fn sync(path: &Path, hosts: &[String]) -> Result<()> {
 /// on-disk file is the source of truth here — this re-parses it rather than
 /// tracking a separate list — so it reflects what's actually installed, not
 /// merely what was last computed as desired. Backs the telemetry drawer's
-/// network-status tab (`daemon.rs`'s `/daemon/net-status`).
+/// network-status tab (`daemon/`'s `/daemon/net-status`).
 pub fn managed_hosts(path: &Path) -> Vec<String> {
     let existing = fs::read_to_string(path).unwrap_or_default();
     let mut in_block = false;

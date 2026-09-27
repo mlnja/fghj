@@ -203,7 +203,7 @@ pub async fn run_fanned_in_effect<E: FannedInEffect>(
     }
 }
 
-/// Every daemon-wide fanned-in effect currently migrated off `daemon.rs`'s
+/// Every daemon-wide fanned-in effect currently migrated off `daemon/`'s
 /// old `spawn_reconciler` — see `spawn_all`. Bundled into one struct (rather
 /// than three loose `JoinHandle`s in `daemon::ActiveResources`) so
 /// `abort_all` can guarantee all three ever stop together, the same
