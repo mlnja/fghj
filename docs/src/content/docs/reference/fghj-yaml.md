@@ -438,7 +438,7 @@ path segment).
 |---|---|
 | `repo` | Git URL — `git@…`, `https://…`, or `ssh://…`. |
 | `services` | Which of the target repo's `services` this depends on — a list, so depending on several from the same repo is still one block (`repo`/`default_branch` stated once), not one block per service. Omit when that repo declares exactly one service (used automatically); required when it declares more than one. Each name gets its own `depends-on` edge; a name that doesn't exist there is a warning, not a hard `fghj validate` failure. |
-| `default_branch` | The branch cloned by default. This is only ever a *default* — never a live pin; see [Branch ownership model](/concepts/branch-ownership-model/). |
+| `default_branch` | The branch fghj clones this repo at the first time it fetches it — `git clone --branch <it> --single-branch`, defaulting to `main`. Its purpose is that a dependency you've never had on this machine arrives *ready to run*: you're declaring the edge, so you're the one who knows which branch of that repo works against yours. Read once, at clone time. Re-pulling a checkout that already exists only verifies its `origin` and never moves it off the branch you're on, so this is a starting point and never a live pin — see [Branch ownership model](/concepts/branch-ownership-model/). |
 
 ### `kind: backing`
 

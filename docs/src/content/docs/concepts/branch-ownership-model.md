@@ -10,9 +10,15 @@ distinct owners:
    This is repo-owned, versioned config: whichever repo's `.fghj.yaml`
    declares the flow owns its `dependencies` list (see
    [Flat workspace model](/concepts/flat-workspace-model/)). A
-   dependency's `default_branch` lives here too, but it's only ever a
-   *default* — the initial clone target, and the fallback build tag. It's
-   never a live pin.
+   dependency's `default_branch` lives here too, and it has exactly one job:
+   it's the branch the initial clone lands on (`git clone --branch <it>
+   --single-branch`, defaulting to `main`), so a repo you've never had on
+   this machine arrives *ready to run*. The author of the edge is the one who
+   knows which branch of their dependency works against them, so that's where
+   it's declared. It's read once, at clone time, and never again — re-pulling
+   an existing checkout only verifies its `origin` and leaves the branch
+   alone, and a built image is tagged from the *live* branch, not this one.
+   It's a starting point, never a pin.
 2. **Live branch/dirty state** — *which branch a repo is on right now*.
    This is owned by the workspace checkout: one real Git working tree per
    repo, shared by every flow that happens to reference it. There's no

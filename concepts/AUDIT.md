@@ -1239,6 +1239,21 @@ reading the code had not.
   the caller's own field name in, with a test asserting the two call sites
   produce the two different strings.
 - [B16](#b16) above.
+- [[branch-ownership-model]] described `default_branch` as "the initial
+  `pull_all` clone target, **and the fallback label for a run's build tag**".
+  The second half was never true: `runs::node_spec` tags images from
+  `node.branch`, which for any node that can actually be built is the *live*
+  git branch (falling back to `"local"`, not to the declared value), and the
+  declared value only ever appears as the `branch` of a **stub** node — which
+  is exactly the node `downloads::clone_stub_node` consumes and nothing else
+  does. The claim survived because "it's only ever a default, never a pin" is
+  the true and interesting half, and the sentence it was attached to was
+  never wrong enough to trip over. Naming the field's *one* job — a freshly
+  cloned dependency should arrive ready to run, and the author declaring the
+  edge is the one who knows which branch does that — is what made the extra
+  clause visibly unsupported. Corrected in the concept, its site counterpart,
+  the reference table, and `schema/dependency.cue`, which had no comment on
+  the field at all.
 
 The fix for the second one is the pattern worth keeping: the temptation was to
 document the field the warning named. Documentation that agrees with a wrong

@@ -18,12 +18,52 @@ In `storefront/.fghj.yaml`, add a third entry to `web`'s `dependencies:`:
         repo: https://github.com/you/catalog.git
 ```
 
-That's the whole declaration. No service name, no port, no path — and note
-what's *absent*: no branch. Branch is not a property of a dependency edge in
-fghj, deliberately. Two repos could otherwise demand different branches of
-the same third repo, and there is only one checkout of it on disk. Branch
-identity belongs to the workspace checkout, not to the edge pointing at it.
-See [Branch ownership model](/concepts/branch-ownership-model/).
+That's the whole declaration. No service name, no port, no path.
+
+There is one more field you could add, and it's worth knowing what it's for:
+
+```yaml
+      - kind: service
+        repo: https://github.com/you/catalog.git
+        default_branch: main
+```
+
+`default_branch` answers exactly one question: **when fghj clones this repo for
+the first time, which branch should it land on so the thing is ready to run?**
+You're the one declaring the dependency, so you're the one who knows — maybe
+`catalog`'s default branch is `master`, or maybe `main` is a release branch and
+the branch that actually works against your service is `develop`. Say so here
+and a teammate who pulls your graph gets a working checkout without having to
+be told. Omitted, it clones `main`.
+
+It's used in one place, once: the clone.
+
+```
+git clone --branch main --single-branch https://github.com/you/catalog.git
+```
+
+That's the whole extent of it. Note `--single-branch` — only that branch is
+fetched, so it's a genuine "get me a runnable checkout" instruction and not a
+full mirror. After that, `default_branch` is never consulted again:
+
+- A **stub** node (declared, not on disk) reports the declared value as its
+  `branch`, because that's the branch it *would* be cloned at. That's the node
+  the cloner reads.
+- A **real** node (on disk) reports whatever `git` says it's on right now.
+  fghj reads your working tree; it doesn't hold the declared value against it.
+- **Pulling a repo that's already checked out never changes its branch.** fghj
+  verifies the `origin` matches and otherwise leaves your tree alone — it will
+  not move you off a branch you're working on.
+
+Which is why two edges can disagree about it harmlessly. One repo declaring
+`default_branch: main` for `catalog` and another declaring
+`default_branch: develop` is not a conflict, because there's exactly **one
+checkout per repo, workspace-wide** — whichever edge gets there first clones
+it, and from then on the only thing that decides the branch is you, in that
+directory. If an edge could *pin* a branch rather than seed one, two of them
+could pin different ones and there'd be no correct answer. That failure mode
+isn't resolved here; it's unrepresentable. See
+[Branch ownership model](/concepts/branch-ownership-model/).
 
 Resolve, *before* creating anything:
 

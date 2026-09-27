@@ -8,9 +8,19 @@ distinct owners:
 1. **Flow membership** — *which repos* are in scope for a user journey. This
    is repo-owned, versioned config: whichever repo's `.fghj.yaml` declares the
    flow owns its `dependencies` list, per [[flat-workspace-model]]. A
-   dependency's `default_branch` lives here too, but it is only ever a
-   *default* — the initial `pull_all` clone target, and the fallback label
-   for a run's build tag. It is never a live pin.
+   dependency's `default_branch` lives here too, and it has exactly one job:
+   it is the branch `pull_all` clones at (`git clone --branch <it>
+   --single-branch`, defaulting to `main`), so that a repo the declaring
+   author has never seen on this machine arrives *ready to run* — the author
+   of the edge is the one who knows which branch of their dependency works
+   against them. It is read once, at clone time, and never again. It is not a
+   pin: `downloads::ensure_checkout_is` only verifies `origin` on a checkout
+   that already exists, so re-pulling never moves a live tree off its branch.
+   Nor does it reach a build tag — `runs::node_spec` tags images
+   `fghj/{id}:{sanitize_label(node.branch)}` from the *live* branch (falling
+   back to `"local"`), and a node with no checkout can't be built at all, so
+   the declared value is only ever the `branch` of a **stub** node, which is
+   precisely the node the cloner consumes.
 2. **Live branch/dirty state** — *which branch a repo is on right now*. This
    is owned by the **workspace checkout**: one real git working tree per
    repo, shared by every flow that happens to reference it. There is no

@@ -20,7 +20,19 @@ package fghj
 	kind: "service"
 	// Omit for the same-repo form (nothing to clone, no branch to pick);
 	// required for the cross-repo form.
-	repo?:           string & =~"^(git@|https://|ssh://)"
+	repo?: string & =~"^(git@|https://|ssh://)"
+	// The branch fghj clones this repo at the first time it fetches it
+	// (`git clone --branch <it> --single-branch`); `main` when omitted. Its
+	// job is that a dependency nobody on this machine has seen yet arrives
+	// *ready to run*: the author declaring the edge is the one who knows
+	// which branch of that repo works against theirs, so that's where it's
+	// said. Read once, at clone time, and never again — re-pulling an
+	// existing checkout only verifies its `origin` and never moves a live
+	// working tree off the branch someone is on. So two edges naming
+	// different branches for one repo is not a conflict: there is one
+	// checkout per repo workspace-wide, and after the clone the only thing
+	// deciding its branch is the developer standing in it. See
+	// `concepts/branch-ownership-model.md`.
 	default_branch?: string
 	// Which of the target repo's #ComponentConfig.services this depends on —
 	// one entry per service wanted, so depending on several services from the

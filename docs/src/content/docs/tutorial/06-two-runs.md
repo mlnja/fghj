@@ -63,12 +63,25 @@ run to test a branch and the sequence is: switch the branch in the
 workspace, then start the run.
 
 Which means two runs cannot be on two different branches of the same repo at
-the same time. That's not an oversight — branch identity lives on the one
-shared checkout, precisely so that two repos depending on a third can never
-demand two branches of it at once. The conflict isn't resolved, it's made
-unrepresentable, and the cost is real: a genuine need for two branches
-side-by-side has to be serialised in wall-clock time. See
-[Branch ownership model](/concepts/branch-ownership-model/).
+the same time. That's the same one-checkout rule from
+[chapter 4](/tutorial/04-a-second-repo/#declare-the-dependency-before-the-repo-exists),
+seen from the other side: branch identity lives on the one shared checkout
+precisely so that two repos depending on a third can never demand two branches
+of it at once. The conflict isn't resolved, it's made unrepresentable, and the
+cost is real — a genuine need for two branches side-by-side has to be
+serialised in wall-clock time.
+
+**A per-run branch pin used to exist and was deliberately removed**, so it's
+worth knowing you're not missing a flag. A run could once override which branch
+a specific node built from, using a throwaway mirror clone kept separate from
+the live checkout. Two things killed it: the mirror clone's permission model
+was never sound under a privilege-dropping `fghjd` (the directory it clones
+into is created root-owned before the owner is known), and there was no
+designed answer for an override branch whose own `.fghj.yaml` describes a
+*different graph* — a branch that renames a service or drops a flow leaves the
+run's node set disagreeing with the workspace's. See
+[Branch ownership model](/concepts/branch-ownership-model/) and
+[Run lifecycle & registry](/concepts/run-lifecycle-and-registry/#branch-overrides-removed).
 
 ## Reaching into a specific run
 
