@@ -26,6 +26,7 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use fghj::dns;
+use fghj::supervisor;
 use fghj::web::{ca, proxy};
 use serde::Deserialize;
 use tokio::net::{TcpListener, UdpSocket};
@@ -78,23 +79,27 @@ impl FileRoutes {
             own_ip,
             routes: Mutex::new(Self::load()),
         });
-        let watched = this.clone();
-        tokio::spawn(async move {
-            let mut last_mtime: Option<SystemTime> = std::fs::metadata(ROUTES_PATH)
+        supervisor::supervise_forever("routes file watcher", Self::poll_routes(this.clone()));
+        this
+    }
+
+    /// A named `async fn` rather than an inline block so its return type is
+    /// `()`: the `loop` never breaks, and a bare async block would then have
+    /// type `!`, which satisfies no `supervisor::Outcome` impl.
+    async fn poll_routes(watched: Arc<Self>) {
+        let mut last_mtime: Option<SystemTime> = std::fs::metadata(ROUTES_PATH)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        loop {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            let mtime = std::fs::metadata(ROUTES_PATH)
                 .ok()
                 .and_then(|m| m.modified().ok());
-            loop {
-                tokio::time::sleep(POLL_INTERVAL).await;
-                let mtime = std::fs::metadata(ROUTES_PATH)
-                    .ok()
-                    .and_then(|m| m.modified().ok());
-                if mtime != last_mtime {
-                    last_mtime = mtime;
-                    *watched.routes.lock().unwrap() = Self::load();
-                }
+            if mtime != last_mtime {
+                last_mtime = mtime;
+                *watched.routes.lock().unwrap() = Self::load();
             }
-        });
-        this
+        }
     }
 }
 

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::daemon::control::DaemonControl;
 use crate::util::time::now_ms;
-use crate::{effects, resolver};
+use crate::{effects, resolver, supervisor};
 
 /// How often the background reconciler re-inspects live containers. Kept in
 /// step with the frontend's `/runs` poll interval (see `App.svelte`) so the
@@ -44,26 +44,31 @@ pub(crate) const SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(15);
 /// documented in `raw_net::macos`'s module doc — that's why none of that
 /// sync happens here any more.
 pub(crate) fn spawn_reconciler(daemon: Arc<DaemonControl>) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
-        loop {
-            interval.tick().await;
-            for (id, _) in daemon.registry.list() {
-                if let Some(state) = daemon.registry.get(&id) {
-                    // Re-inspects every recorded container and reports what
-                    // Docker actually says into the actor — see
-                    // `effects::docker::observe`'s module doc for why this
-                    // is the loop's only Docker read.
-                    if let Some(handle) = daemon.registry.actors().get(&id) {
-                        effects::docker::observe::report(&state.runs, &handle.actor).await;
-                    }
+    supervisor::supervise_forever("docker reconciler", reconcile_loop(daemon));
+}
+
+/// Split out of `spawn_reconciler` so the body has a declared `()` return
+/// type: the `loop` below never breaks, so as a bare async block it
+/// would have type `!` and satisfy no `supervisor::Outcome` impl.
+async fn reconcile_loop(daemon: Arc<DaemonControl>) {
+    let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
+    loop {
+        interval.tick().await;
+        for (id, _) in daemon.registry.list() {
+            if let Some(state) = daemon.registry.get(&id) {
+                // Re-inspects every recorded container and reports what
+                // Docker actually says into the actor — see
+                // `effects::docker::observe`'s module doc for why this
+                // is the loop's only Docker read.
+                if let Some(handle) = daemon.registry.actors().get(&id) {
+                    effects::docker::observe::report(&state.runs, &handle.actor).await;
                 }
             }
-            if daemon.is_active() {
-                *daemon.last_reconcile_ms.lock().unwrap() = Some(now_ms());
-            }
         }
-    });
+        if daemon.is_active() {
+            *daemon.last_reconcile_ms.lock().unwrap() = Some(now_ms());
+        }
+    }
 }
 
 /// The config-drift counterpart to `spawn_reconciler`: on its own, much
@@ -77,27 +82,30 @@ pub(crate) fn spawn_reconciler(daemon: Arc<DaemonControl>) {
 /// skip it the way `spawn_reconciler` skips its `/etc/hosts`/`/etc/resolver`
 /// sync.
 pub(crate) fn spawn_sync_reconciler(daemon: Arc<DaemonControl>) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(SYNC_RECONCILE_INTERVAL);
-        loop {
-            interval.tick().await;
-            for (id, path) in daemon.registry.list() {
-                let Some(state) = daemon.registry.get(&id) else {
-                    continue;
-                };
-                let graph =
-                    match tokio::task::spawn_blocking(move || resolver::resolve_universe(&path))
-                        .await
-                    {
-                        Ok(Ok(graph)) => graph,
-                        _ => continue,
-                    };
-                let Some(handle) = daemon.registry.actors().get(&id) else {
-                    continue;
-                };
-                effects::docker::observe::report_config_drift(&state.runs, &handle.actor, &graph)
-                    .await;
-            }
+    supervisor::supervise_forever("config-sync reconciler", sync_reconcile_loop(daemon));
+}
+
+/// Split out of `spawn_sync_reconciler` so the body has a declared `()` return
+/// type: the `loop` below never breaks, so as a bare async block it
+/// would have type `!` and satisfy no `supervisor::Outcome` impl.
+async fn sync_reconcile_loop(daemon: Arc<DaemonControl>) {
+    let mut interval = tokio::time::interval(SYNC_RECONCILE_INTERVAL);
+    loop {
+        interval.tick().await;
+        for (id, path) in daemon.registry.list() {
+            let Some(state) = daemon.registry.get(&id) else {
+                continue;
+            };
+            let graph = match tokio::task::spawn_blocking(move || resolver::resolve_universe(&path))
+                .await
+            {
+                Ok(Ok(graph)) => graph,
+                _ => continue,
+            };
+            let Some(handle) = daemon.registry.actors().get(&id) else {
+                continue;
+            };
+            effects::docker::observe::report_config_drift(&state.runs, &handle.actor, &graph).await;
         }
-    });
+    }
 }

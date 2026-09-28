@@ -31,3 +31,42 @@ bytes = "1.12.1"
 
 [dev-dependencies]
 x509-parser = { version = "0.18.1", features = ["verify"] }
+
+# Tuned for speed, not size: fghjd is a long-lived daemon whose binary is
+# downloaded once and then runs for weeks, so size is the cheap axis.
+# opt-level = "z" would take it from 12.4 MB to 6.8 MB, and is deliberately
+# not used — it shrinks LLVM's inlining threshold and disables loop
+# vectorisation across rustls' record layer and tokio/hyper's buffer
+# handling. Fat LTO over all 254 crates plus a single codegen unit is the
+# opposite trade: a bigger compile (~2 min, release only) in exchange for
+# cross-crate inlining.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+incremental = false
+
+# Debug info is dead weight in a shipped artifact — it costs size and does
+# nothing for speed. CI strips as well; this makes a local `cargo build
+# --release` produce the same bytes.
+debug = false
+strip = "symbols"
+
+# NOT panic = "abort", even though it would save ~2.3 MB and elide the
+# landing pads. fghjd is one process supervising every workspace at once,
+# and unwinding is what keeps one workspace's panic from taking down DNS,
+# 80/443 and every other workspace with it. `supervisor::supervise` needs
+# per-task panic reporting to work at all; see src/supervisor.rs.
+panic = "unwind"
+
+# target/debug reached 36 GB: 200k stale .o files, because macOS defaults
+# to split-debuginfo = "unpacked" and Cargo never garbage-collects old
+# artifacts. Dependencies are ~253 of the 254 crates and are not where
+# anyone sets a breakpoint, so they emit no debuginfo; this crate keeps
+# full debuginfo. "packed" folds what remains into .dSYM bundles instead
+# of a sea of loose object files.
+[profile.dev]
+split-debuginfo = "packed"
+
+[profile.dev.package."*"]
+debug = false

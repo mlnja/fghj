@@ -25,8 +25,13 @@ release:
 
     echo "Released v$next"
 
-# Update the Homebrew tap formula with real SHAs for the given release.
-# Run this after GitHub Actions has finished publishing the release.
+# Manual fallback for updating the Homebrew tap formula.
+#
+# The release workflow's `tap` job already does this automatically on every
+# tagged release — reach for this only to fix a formula without cutting a
+# release, or if that job failed. Both drive the same `# darwin-<arch>`
+# marker comments in the formula, so they can't disagree.
+#
 # Usage: just update-tap [version]   (defaults to current Cargo.toml version)
 update-tap version="":
     #!/usr/bin/env bash
@@ -54,8 +59,15 @@ update-tap version="":
             "$FORMULA" > "$TMPDIR/formula.tmp" && mv "$TMPDIR/formula.tmp" "$FORMULA"
     done
 
-    sed -i.bak "s/version \"[^\"]*\"/version \"$VERSION\"/" "$FORMULA"
+    sed -i.bak "s/^  version \"[^\"]*\"/  version \"$VERSION\"/" "$FORMULA"
     rm "$FORMULA.bak"
+
+    # A formula still holding placeholder zeros would install nothing and
+    # fail only at `brew install` time, on someone else's machine.
+    if grep -q '"0\{64\}"' "$FORMULA"; then
+        echo "error: formula still contains placeholder checksums" >&2
+        exit 1
+    fi
 
     cd ../homebrew-tap
     git add Formula/fghj.rb

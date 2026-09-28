@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use super::logs::capture_container_logs;
 use crate::persistence::WorkspaceDb;
+use crate::supervisor;
 
 /// The Docker-facing half of run management: it owns the clients and
 /// handles needed to *do* things (create a container, wait on a
@@ -49,7 +50,7 @@ pub struct RunRegistry {
     /// `spawn_log_capture`. Keyed so that starting a node again aborts its
     /// previous capture task before replacing it, guaranteeing at most one
     /// task (and one open generation) writing for a given node at a time.
-    pub(super) log_captures: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    pub(super) log_captures: Mutex<HashMap<String, tokio::task::AbortHandle>>,
 }
 
 impl RunRegistry {
@@ -81,13 +82,16 @@ impl RunRegistry {
     /// explicitly avoids ever leaving two tasks writing under the same key.
     pub(super) fn spawn_log_capture(&self, run_id: &str, node_id: &str, container_name: &str) {
         let key = format!("{run_id}:{node_id}");
-        let handle = tokio::spawn(capture_container_logs(
-            self.db.clone(),
-            self.docker.clone(),
-            run_id.to_string(),
-            node_id.to_string(),
-            container_name.to_string(),
-        ));
+        let handle = supervisor::supervise(
+            format!("log capture[{key}]"),
+            capture_container_logs(
+                self.db.clone(),
+                self.docker.clone(),
+                run_id.to_string(),
+                node_id.to_string(),
+                container_name.to_string(),
+            ),
+        );
         if let Some(old) = self.log_captures.lock().unwrap().insert(key, handle) {
             old.abort();
         }

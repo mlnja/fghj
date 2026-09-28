@@ -22,6 +22,7 @@ pub mod runs;
 pub mod server;
 pub mod sidecar_image;
 pub mod state;
+pub mod supervisor;
 pub mod util;
 pub mod web;
 

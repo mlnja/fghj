@@ -234,3 +234,82 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Homebrew tap ──────────────────────────────────────────────────────────
+  #
+  # Rewrites Formula/fghj.rb in mlnja/homebrew-tap with this release's version
+  # and checksums, so `brew install mlnja/tap/fghj` serves the new build
+  # without a manual step. The `just update-tap` recipe does the same thing by
+  # hand and stays as the escape hatch for fixing a formula without cutting a
+  # release; both drive the same `# darwin-<arch>` marker comments in the
+  # formula, so they can't disagree about where a checksum goes.
+  #
+  # Needs HOMEBREW_TAP_TOKEN: a fine-grained PAT with Contents:write on
+  # mlnja/homebrew-tap. The default GITHUB_TOKEN is scoped to this repo only
+  # and cannot push to the tap.
+  #
+  # Gated on create-release so the formula never points at URLs that 404:
+  # the release assets must exist before anything tells Homebrew to fetch
+  # them.
+  tap:
+    name: Update Homebrew tap
+    needs: [create-release]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read crate version
+        id: version
+        run: |
+          version=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Check out the tap
+        uses: actions/checkout@v4
+        with:
+          repository: mlnja/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Rewrite the formula
+        run: |
+          set -euo pipefail
+          formula=tap/Formula/fghj.rb
+          version="${{ steps.version.outputs.version }}"
+
+          sed -i "s/^  version \"[^\"]*\"/  version \"$version\"/" "$formula"
+
+          for platform in darwin-arm64 darwin-amd64; do
+            sha=$(cut -d' ' -f1 < "$(find artifacts -name "fghj-$platform.tar.gz.sha256" | head -1)")
+            echo "  $platform  $sha"
+            awk -v sha="$sha" -v marker="# $platform" \
+              '$0 ~ marker { sub(/"[0-9a-f]+"/, "\"" sha "\"") } { print }' \
+              "$formula" > "$formula.tmp" && mv "$formula.tmp" "$formula"
+          done
+
+          # A formula still holding placeholder zeros would install nothing
+          # and fail only at `brew install` time, on a user's machine.
+          if grep -q '"0\{64\}"' "$formula"; then
+            echo "::error::formula still contains placeholder checksums"
+            exit 1
+          fi
+          git -C tap diff -- Formula/fghj.rb
+
+      - name: Commit and push
+        working-directory: tap
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- Formula/fghj.rb; then
+            echo "formula already up to date, nothing to push"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/fghj.rb
+          git commit -m "fghj ${{ steps.version.outputs.version }}"
+          git push

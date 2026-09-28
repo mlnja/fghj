@@ -8,15 +8,15 @@ use anyhow::{Context, Result};
 
 use crate::daemon::registry::WorkspaceRegistry;
 use crate::web::{ca, proxy};
-use crate::{daemon_log, dns, effects, hosts_file, persistence, raw_net};
+use crate::{daemon_log, dns, effects, hosts_file, persistence, raw_net, supervisor};
 
 /// The pieces of `fghjd` that only exist while it's in the "active" state:
 /// the DNS server, and the HTTP/HTTPS reverse proxy occupying 80/443.
 /// Dropping (aborting) these tasks frees the ports/socket they held.
 pub(crate) struct ActiveResources {
-    dns_task: tokio::task::JoinHandle<()>,
-    http_task: tokio::task::JoinHandle<()>,
-    https_task: tokio::task::JoinHandle<()>,
+    dns_task: tokio::task::AbortHandle,
+    http_task: tokio::task::AbortHandle,
+    https_task: tokio::task::AbortHandle,
     /// Drives `effects::raw_net::RawNetEffect`, `effects::dns::DnsEffect`,
     /// and `effects::hosts::HostsEffect` for as long as `fghjd` is active —
     /// the sole remaining callers of `raw_net::reconcile`,
@@ -101,21 +101,27 @@ impl DaemonControl {
             .local_addr()
             .context("DNS socket has no local address")?
             .port();
-        let dns_task = tokio::spawn(dns::serve(dns_socket, self.registry.clone(), None));
+        let dns_task = supervisor::supervise_forever(
+            "dns server",
+            dns::serve(dns_socket, self.registry.clone(), None),
+        );
 
         let http_listener = proxy::bind_http().await?;
         let https_listener = proxy::bind_https().await?;
-        let http_task = tokio::spawn(proxy::serve_http_redirect(
-            http_listener,
-            self.registry.clone(),
-        ));
-        let https_task = tokio::spawn(proxy::serve_https(
-            https_listener,
-            self.cert_resolver.clone(),
-            self.control_port,
-            self.provider.clone(),
-            self.registry.clone(),
-        ));
+        let http_task = supervisor::supervise_forever(
+            "http redirect listener (:80)",
+            proxy::serve_http_redirect(http_listener, self.registry.clone()),
+        );
+        let https_task = supervisor::supervise_forever(
+            "https proxy listener (:443)",
+            proxy::serve_https(
+                https_listener,
+                self.cert_resolver.clone(),
+                self.control_port,
+                self.provider.clone(),
+                self.registry.clone(),
+            ),
+        );
 
         let effect_tasks = effects::spawn_all(dns_port, self.registry.actors().subscribe());
 

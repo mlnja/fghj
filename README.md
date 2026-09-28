@@ -8,8 +8,9 @@ outward from whichever repos you're actually working on, and brings up just
 that subgraph — with real `*.fghj.internal` HTTPS domains, locally trusted
 certificates, and no `docker-compose.yml` to hand-maintain.
 
-> **Status: pre-release.** macOS only, no tagged release yet. Build from
-> source (below). The config language is settled enough to write against;
+> **Status: pre-release.** macOS only, no tagged release yet — so the
+> Homebrew formula is published but its URLs 404 until the first tag. Build
+> from source (below). The config language is settled enough to write against;
 > the `version: "1.0"` field in `.fghj.yaml` is the compatibility hook.
 
 ## The one idea
@@ -49,9 +50,22 @@ why the same config works unchanged in a second, isolated run.
 
 ## Install
 
-No release is tagged yet, so build from source. You need Rust (stable),
-Node 22+, Docker, and macOS. `cue` is optional — only `fghj validate`
-needs it.
+Once a release is tagged, via Homebrew:
+
+```bash
+brew install mlnja/tap/fghj
+sudo brew services start fghj
+```
+
+The `sudo` is real: `fghjd` binds 80/443, installs a root CA into your system
+trust store, and edits `/etc/resolver` and `/etc/hosts`, so Homebrew installs
+it as a root LaunchDaemon — the same shape as `dnsmasq` or `nginx`. (No
+formula auto-starts a service; `brew install postgresql` doesn't either.)
+Everything after that is automatic on first start.
+
+**No release is tagged yet**, so until then, build from source. You need Rust
+(stable), Node 22+, Docker, and macOS. `cue` is optional — only
+`fghj validate` needs it.
 
 ```bash
 git clone https://github.com/mlnja/fghj.git
@@ -72,7 +86,7 @@ sudo fghjd            # foreground; supervise with a launchd LaunchDaemon for re
 fghj daemon status    # -> "fghjd is running and active"
 ```
 
-Full details, including the (not-yet-working) Homebrew path:
+Full details, including uninstall cleanup:
 [`docs/.../installation.md`](docs/src/content/docs/getting-started/installation.md).
 
 ## Use it

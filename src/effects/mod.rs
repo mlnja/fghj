@@ -14,6 +14,7 @@ use tokio::sync::watch;
 
 use crate::registry::WorkspaceHandle;
 use crate::state::WorkspaceState;
+use crate::supervisor;
 
 pub mod dns;
 pub mod docker;
@@ -145,7 +146,7 @@ pub async fn run_fanned_in_effect<E: FannedInEffect>(
     name: &str,
 ) {
     let changed = Arc::new(tokio::sync::Notify::new());
-    let mut forwarders: BTreeMap<String, tokio::task::JoinHandle<()>> = BTreeMap::new();
+    let mut forwarders: BTreeMap<String, tokio::task::AbortHandle> = BTreeMap::new();
     let mut last: Option<E::Snapshot> = None;
 
     loop {
@@ -168,7 +169,7 @@ pub async fn run_fanned_in_effect<E: FannedInEffect>(
             forwarders.entry(id.clone()).or_insert_with(|| {
                 let mut rx = handle.actor.subscribe();
                 let changed = changed.clone();
-                tokio::spawn(async move {
+                supervisor::supervise("actor change forwarder", async move {
                     while rx.changed().await.is_ok() {
                         changed.notify_one();
                     }
@@ -210,9 +211,9 @@ pub async fn run_fanned_in_effect<E: FannedInEffect>(
 /// atomically-together shutdown `DaemonControl::deactivate` already relied
 /// on for the single `raw_net_task` before this phase.
 pub struct EffectTasks {
-    raw_net: tokio::task::JoinHandle<()>,
-    dns: tokio::task::JoinHandle<()>,
-    hosts: tokio::task::JoinHandle<()>,
+    raw_net: tokio::task::AbortHandle,
+    dns: tokio::task::AbortHandle,
+    hosts: tokio::task::AbortHandle,
 }
 
 impl EffectTasks {
@@ -234,21 +235,22 @@ pub fn spawn_all(
     registry_rx: watch::Receiver<Arc<BTreeMap<String, WorkspaceHandle>>>,
 ) -> EffectTasks {
     EffectTasks {
-        raw_net: tokio::spawn(run_fanned_in_effect(
-            raw_net::RawNetEffect,
-            registry_rx.clone(),
-            "raw_net",
-        )),
-        dns: tokio::spawn(run_fanned_in_effect(
-            dns::DnsEffect { port: dns_port },
-            registry_rx.clone(),
-            "dns",
-        )),
-        hosts: tokio::spawn(run_fanned_in_effect(
-            hosts::HostsEffect,
-            registry_rx,
-            "hosts",
-        )),
+        raw_net: supervisor::supervise_forever(
+            "raw_net effect",
+            run_fanned_in_effect(raw_net::RawNetEffect, registry_rx.clone(), "raw_net"),
+        ),
+        dns: supervisor::supervise_forever(
+            "dns effect",
+            run_fanned_in_effect(
+                dns::DnsEffect { port: dns_port },
+                registry_rx.clone(),
+                "dns",
+            ),
+        ),
+        hosts: supervisor::supervise_forever(
+            "hosts effect",
+            run_fanned_in_effect(hosts::HostsEffect, registry_rx, "hosts"),
+        ),
     }
 }
 

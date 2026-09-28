@@ -23,6 +23,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 
 use crate::dns;
+use crate::supervisor;
 use crate::web::ca;
 
 /// Where a resolved hostname should actually be relayed to. Usually
@@ -114,7 +115,7 @@ pub async fn serve_http_redirect(listener: TcpListener, routes: Arc<dyn RouteRes
             }
         };
         let routes = routes.clone();
-        tokio::spawn(async move {
+        supervisor::supervise("http connection", async move {
             if let Err(e) = handle_http_connection(stream, routes).await {
                 eprintln!("fghjd: HTTP handler error: {e}");
             }
@@ -240,7 +241,7 @@ pub async fn serve_https(
         };
         let acceptor = acceptor.clone();
         let routes = routes.clone();
-        tokio::spawn(async move {
+        supervisor::supervise("https connection", async move {
             match acceptor.accept(stream).await {
                 Ok(tls_stream) => handle_https_connection(tls_stream, control_port, routes).await,
                 // Expected and frequent for out-of-zone SNI, which

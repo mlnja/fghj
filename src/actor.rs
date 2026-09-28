@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::action::{Action, ActionRejected};
 use crate::reducer::reduce;
 use crate::state::WorkspaceState;
+use crate::supervisor;
 
 type Reply = oneshot::Sender<Result<(), ActionRejected>>;
 
@@ -74,7 +75,7 @@ pub fn spawn(initial: WorkspaceState) -> ActorHandle {
     let (action_tx, mut action_rx) = mpsc::unbounded_channel::<(Action, Reply)>();
     let (state_tx, state_rx) = watch::channel(Arc::new(initial));
 
-    tokio::spawn(async move {
+    supervisor::supervise("workspace actor", async move {
         while let Some((action, reply)) = action_rx.recv().await {
             let current = state_tx.borrow().clone();
             let outcome = match reduce(&current, action) {

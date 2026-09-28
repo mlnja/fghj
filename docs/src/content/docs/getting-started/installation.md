@@ -28,20 +28,52 @@ shims.
 
 ## Homebrew
 
-There is a tap, `mlops-ninja/homebrew-tap`:
-
 ```bash
-brew install mlops-ninja/tap/fghj
+brew install mlnja/tap/fghj
+sudo brew services start fghj
 ```
 
-:::caution[Not usable yet]
-The formula points at release tarballs — and no release has been tagged yet,
+Two commands, and the second one needs `sudo`. That is not an oversight:
+`brew install` runs unprivileged and Homebrew never starts a service at
+install time (`brew install postgresql` doesn't start Postgres either), and
+`fghjd` is declared with `require_root true` because it binds 80/443,
+installs a root CA, and edits `/etc/resolver` and `/etc/hosts`. Homebrew
+therefore installs it as a *LaunchDaemon* under `/Library/LaunchDaemons`
+rather than a per-user LaunchAgent, and refuses to start it unprivileged.
+This is the same shape as `dnsmasq` or `nginx` on macOS.
+
+Everything else is automatic. On its first start `fghjd` generates the local
+root CA, installs it into the System keychain, writes
+`/etc/resolver/fghj.internal`, and takes ports 80/443 — see
+[Start the daemon](#start-the-daemon) below. Then:
+
+```bash
+fghj daemon status      # -> fghjd is running and active
+```
+
+:::caution[Needs a tagged release]
+The formula points at release tarballs, and no release has been tagged yet,
 so the download URLs 404 and the checksums in the formula are still
 placeholders. Until the first `v0.1.0` release is published, **build from
-source** as below. The formula is in the repo's sibling tap so that the
-release pipeline has somewhere to publish to, not because the path works
-today.
+source** as below. Once a tag is pushed, the release workflow's `tap` job
+rewrites the formula with real checksums automatically.
 :::
+
+### Uninstalling
+
+```bash
+sudo brew services stop fghj      # unwinds /etc/resolver and /etc/hosts
+brew uninstall fghj
+```
+
+Two things `brew uninstall` cannot remove, because it runs unprivileged —
+the root CA in your System keychain, and `fghjd`'s durable state:
+
+```bash
+sudo security delete-certificate -c "fghj local CA" \
+  /Library/Keychains/System.keychain
+sudo rm -rf /var/lib/fghjd
+```
 
 ## Build from source
 

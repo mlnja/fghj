@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::daemon::workspace_id::workspace_id;
 use crate::server::WorkspaceState;
-use crate::{actor, daemon_log, effects, persistence, registry, state};
+use crate::{actor, daemon_log, effects, persistence, registry, state, supervisor};
 
 /// The segment a workspace at `path` contributes to every domain its nodes
 /// derive — `resolve_universe` takes the canonical path's `file_name` as the
@@ -48,7 +48,7 @@ pub struct WorkspaceRegistry {
     /// the only thing that ever mutates a workspace's real containers now
     /// that `effects::bridge` (a purely-mirroring, never-mutating stand-in)
     /// is gone. Torn down in `stop`.
-    docker_converge_tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    docker_converge_tasks: Mutex<HashMap<String, tokio::task::AbortHandle>>,
 }
 
 impl WorkspaceRegistry {
@@ -120,26 +120,35 @@ impl WorkspaceRegistry {
             ..Default::default()
         };
         let handle = actor::spawn(seed);
-        let docker_converge_task = tokio::spawn(effects::run_effect(
-            effects::docker::DockerConvergeEffect::new(old.clone(), handle.clone()),
-            handle.subscribe(),
-            "docker_converge",
-        ));
+        let docker_converge_task = supervisor::supervise(
+            format!("docker_converge[{id}]"),
+            effects::run_effect(
+                effects::docker::DockerConvergeEffect::new(old.clone(), handle.clone()),
+                handle.subscribe(),
+                "docker_converge",
+            ),
+        );
         // Persistence and the sidecar route table are both pure functions
         // of published state, so they are derived here rather than written
         // by hand at the end of every lifecycle call in `runs/`. See
         // `effects::persist` and `effects::routes` for why that move fixes
         // a real class of stale write, not just tidiness.
-        tokio::spawn(effects::run_async_effect(
-            effects::persist::PersistEffect::new(old.db.clone()),
-            handle.subscribe(),
-            "persist",
-        ));
-        tokio::spawn(effects::run_effect(
-            effects::routes::RouteTableEffect::new(),
-            handle.subscribe(),
-            "route_table",
-        ));
+        supervisor::supervise(
+            format!("persist[{id}]"),
+            effects::run_async_effect(
+                effects::persist::PersistEffect::new(old.db.clone()),
+                handle.subscribe(),
+                "persist",
+            ),
+        );
+        supervisor::supervise(
+            format!("route_table[{id}]"),
+            effects::run_effect(
+                effects::routes::RouteTableEffect::new(),
+                handle.subscribe(),
+                "route_table",
+            ),
+        );
         self.actors
             .insert(id.to_string(), registry::WorkspaceHandle { actor: handle });
         self.docker_converge_tasks

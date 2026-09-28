@@ -12,7 +12,7 @@ use crate::daemon::registry::WorkspaceRegistry;
 use crate::daemon::{ca_dir, socket_path};
 use crate::web::api::build_router;
 use crate::web::ca;
-use crate::{daemon_log, dns, persistence};
+use crate::{daemon_log, dns, persistence, supervisor};
 
 /// Connects to the Docker Engine API, preferring the plain `DOCKER_HOST`/
 /// default-socket convention bollard understands natively, but falling back
@@ -131,7 +131,7 @@ pub async fn run_control_api() -> Result<()> {
     // inside a container.
     {
         let docker = docker.clone();
-        tokio::spawn(async move {
+        supervisor::supervise("sidecar image prefetch", async move {
             if let Err(e) = crate::sidecar_image::ensure_built(&docker).await {
                 daemon_log::warn(format!(
                     "fghjd: failed to pre-fetch the sidecar proxy image: {e:#}"
@@ -200,7 +200,7 @@ pub async fn run_control_api() -> Result<()> {
     // TCP one is only ever dialed internally by the HTTPS proxy's apex-name
     // relay (see above) — `Router` is cheap to clone (an `Arc` internally).
     let cli_app = app.clone();
-    tokio::spawn(async move {
+    supervisor::supervise_forever("control socket server", async move {
         if let Err(e) = axum::serve(cli_listener, cli_app).await {
             daemon_log::warn(format!("fghjd: control socket server error: {e}"));
         }

@@ -50,6 +50,7 @@ use crate::server;
 use crate::state::{
     ContainerInfo, PendingAction, RunCreateError, RunSpec, RunState, WorkspaceState,
 };
+use crate::supervisor;
 
 /// One container currently mid-start/stop/delete, as seen by this effect's
 /// `extract` — a plain projection of `ContainerInfo::pending_action`,
@@ -310,7 +311,7 @@ impl Drop for SettleGuard {
                     .to_string(),
             )
         });
-        tokio::spawn(async move {
+        supervisor::supervise("container action settled dispatch", async move {
             let _ = actor
                 .dispatch(Action::ContainerActionSettled {
                     run_id,
@@ -345,7 +346,7 @@ impl Drop for CreateSettleGuard {
                 "run creation task ended without reporting a result (likely a panic or cancellation)",
             ))
         });
-        tokio::spawn(async move {
+        supervisor::supervise("run create settled dispatch", async move {
             let _ = actor
                 .dispatch(Action::RunCreateSettled {
                     run_id,
@@ -379,7 +380,7 @@ impl Drop for TeardownSettleGuard {
                     .to_string(),
             )
         });
-        tokio::spawn(async move {
+        supervisor::supervise("run teardown settled dispatch", async move {
             let _ = actor
                 .dispatch(Action::RunTeardownSettled {
                     run_id,
@@ -440,7 +441,7 @@ impl DockerConvergeEffect {
         // Taken at spawn time rather than read back out of `RunRegistry`,
         // which no longer keeps one.
         let run = self.actor.current().runs.get(&entry.run_id).cloned();
-        tokio::spawn(async move {
+        supervisor::supervise("container action", async move {
             let result = match run {
                 Some(run) => perform(&old, &entry, &run)
                     .await
@@ -461,7 +462,7 @@ impl DockerConvergeEffect {
         let run_id = entry.run_id.clone();
         let actor = self.actor.clone();
         let prior = self.actor.current().runs.get(&entry.run_id).cloned();
-        tokio::spawn(async move {
+        supervisor::supervise("run create", async move {
             // Per-node progress is translated into actions here rather than
             // in `runs/`, which deliberately knows nothing about actors.
             // The draining task ends when `perform_create` drops its sender.
@@ -486,7 +487,9 @@ impl DockerConvergeEffect {
             // lands — otherwise a late progress report could arrive *after*
             // `RunCreateSettled` and re-add a container the settle dropped.
             drop(tx);
-            let _ = drain.await;
+            if let Err(e) = drain.await {
+                daemon_log::warn(format!("run-create progress drain task failed: {e}"));
+            }
             // The HTTP caller already had its `200` long before this ran, so
             // without a log line here a failed create leaves no trace outside
             // the per-node events table — including the case where part of a
@@ -518,7 +521,7 @@ impl DockerConvergeEffect {
             guard.settle(Ok(()));
             return;
         };
-        tokio::spawn(async move {
+        supervisor::supervise("run stop", async move {
             let result = old
                 .runs
                 .stop(&run_id, &state)
