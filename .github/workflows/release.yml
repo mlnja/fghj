@@ -217,8 +217,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Only the two macOS binary artifacts. Without a pattern this
+      # downloads everything the run produced, which also means the
+      # `.dockerbuild` build records `docker/build-push-action` uploads and
+      # the `sidecar-digest-*` scratch files — none of which this job reads,
+      # and any one of which can fail the whole release on a flaky blob
+      # fetch. That is exactly how v0.1.1 failed.
       - uses: actions/download-artifact@v4
         with:
+          pattern: fghj-darwin-*
           path: artifacts
 
       - name: Collect release assets

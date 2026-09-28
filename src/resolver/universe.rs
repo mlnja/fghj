@@ -219,7 +219,7 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     }
 
     let mut edges = ctx.edges;
-    for (edge, flows) in edges.iter_mut().zip(edge_flows.into_iter()) {
+    for (edge, flows) in edges.iter_mut().zip(edge_flows) {
         let mut fl: Vec<String> = flows.into_iter().collect();
         fl.sort();
         edge.flows = fl;

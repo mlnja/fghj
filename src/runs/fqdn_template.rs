@@ -42,10 +42,7 @@ pub(crate) fn expand_service_fqdn_templates(
     const TOKEN_RAW: &str = "${FGHJ_SERVICE_FQDN";
     let mut out = String::with_capacity(value.len());
     let mut rest = value;
-    loop {
-        let Some(start) = rest.find(TOKEN_RAW) else {
-            break;
-        };
+    while let Some(start) = rest.find(TOKEN_RAW) {
         let (token_len, zone, own_domain) = if rest[start..].starts_with(TOKEN_HTTP) {
             (TOKEN_HTTP.len(), DomainZone::Http, own_http_domain)
         } else {
