@@ -165,3 +165,7 @@ Before changing behaviour, check `concepts/` for a file that already explains
 why the current behaviour is what it is — and when you settle something new,
 fold the decision into the relevant concept file rather than leaving it only
 in a commit message.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
