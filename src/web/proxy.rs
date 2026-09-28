@@ -1,6 +1,6 @@
 //! The TLS reverse proxy on ports 80/443 (SPEC.md Subsystem C).
 //!
-//! Every `*.fghj.internal` name resolves to `127.0.0.1` (see `dns`), so this
+//! Every `*.fghj.internal` name resolves to [`PROXY_IP`] (see `dns`), so this
 //! is what actually decides *which* container a request reaches: it reads
 //! the TLS SNI, asks a [`RouteResolver`] for a [`Backend`], and relays bytes
 //! to it. Port 80 exists only to redirect to 443.
@@ -12,6 +12,7 @@
 //! [`Backend`] carrying a full host rather than just a port.
 
 use std::io;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -53,19 +54,41 @@ pub trait RouteResolver: Send + Sync {
 pub const HTTP_PORT: u16 = 80;
 pub const HTTPS_PORT: u16 = 443;
 
-/// Bound to `127.0.0.1` only, matching every other `fghjd` listener — DNS
-/// only ever answers `*.fghj.internal` with `127.0.0.1`, so there's no
-/// reason to expose this proxy to the network.
+/// The address the proxy binds, and the address the host's DNS server hands
+/// out for every `ZONE` name (`dns::ANSWER` is this constant).
+///
+/// Deliberately **not** `127.0.0.1`. Binding the machine's usual loopback
+/// address at :80/:443 would mean a developer already running something
+/// there — `docker run -p 80:80`, a local nginx — either couldn't start
+/// fghjd or, worse, would find their own `curl http://127.0.0.1/` answered
+/// by fghjd instead of by their container. Taking a dedicated alias leaves
+/// `127.0.0.1:80`, `127.0.0.1:443` and `0.0.0.0:80` completely free, so
+/// installing fghj can't disturb a setup that was working.
+///
+/// Inside `127.0.0.0/8` rather than the `10.222.0.0/16` raw-zone pool
+/// because RFC 1122 forbids a loopback-destined datagram from ever reaching
+/// the wire — no LAN, VPN or corporate network can collide with it. `10/8`
+/// is ordinary RFC 1918 space that sites really do carve up, so a virtual IP
+/// there can shadow a real host the developer needs. (`127.0.0.11` for
+/// Docker's embedded DNS and `127.0.0.53` for systemd-resolved are the same
+/// trick.) Requires an `ifconfig lo0 alias` on macOS, which only assigns
+/// `127.0.0.1` itself — see `raw_net::add_loopback_alias`, called from
+/// `DaemonControl::activate`.
+pub const PROXY_IP: Ipv4Addr = Ipv4Addr::new(127, 222, 0, 1);
+
+/// Fails if `PROXY_IP` isn't aliased onto `lo0` yet — `activate` does that
+/// first, so the error below points at a genuinely occupied port rather
+/// than a missing alias.
 pub async fn bind_http() -> Result<TcpListener> {
-    TcpListener::bind(("127.0.0.1", HTTP_PORT))
+    TcpListener::bind((PROXY_IP, HTTP_PORT))
         .await
-        .with_context(|| format!("failed to bind fghj's HTTP listener on port {HTTP_PORT} — is something else already using it?"))
+        .with_context(|| format!("failed to bind fghj's HTTP listener on {PROXY_IP}:{HTTP_PORT} — is something else already using it?"))
 }
 
 pub async fn bind_https() -> Result<TcpListener> {
-    TcpListener::bind(("127.0.0.1", HTTPS_PORT))
+    TcpListener::bind((PROXY_IP, HTTPS_PORT))
         .await
-        .with_context(|| format!("failed to bind fghj's HTTPS listener on port {HTTPS_PORT} — is something else already using it?"))
+        .with_context(|| format!("failed to bind fghj's HTTPS listener on {PROXY_IP}:{HTTPS_PORT} — is something else already using it?"))
 }
 
 /// Longest request line / header line this server will read before giving

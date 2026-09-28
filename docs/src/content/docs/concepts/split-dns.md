@@ -6,7 +6,7 @@ description: A minimal, hand-rolled authoritative DNS server for *.fghj.internal
 ## The problem
 
 For `https://cart.myworkspace.fghj.internal` to work in a browser,
-something has to answer that DNS query with `127.0.0.1` — your normal
+something has to answer that DNS query with a local address — your normal
 resolver has never heard of `fghj.internal` and would just return
 NXDOMAIN. `fghj` needs its own authoritative answer for that zone, plus
 any wildcarded suffix a running service has claimed (see
@@ -18,11 +18,11 @@ without touching resolution for anything else on the machine.
 Every node gets two derived domains (see [Node identity &
 domains](/concepts/node-identity-and-domains/) for `derive_domain`'s
 formula): `*.fghj.internal` — HTTP(S)-canonical, always answered with
-`127.0.0.1`, because a single reverse proxy on that address dispatches by
+`127.222.0.1`, because a single reverse proxy on that address dispatches by
 name — and `*.fghj.raw.internal` — raw/direct, one address *per node*. Both
 are served by the same `fghjd` DNS server and both are wired into the host's
 OS resolver, but they answer differently: an in-zone `fghj.internal` name
-gets the one shared `127.0.0.1`, while a `fghj.raw.internal` name gets that
+gets the one shared `127.222.0.1`, while a `fghj.raw.internal` name gets that
 node's own virtual IP out of `10.222.0.0/16`, NAT'd through to the
 container's published port (see [Networking: HTTP vs
 raw](/guides/networking-http-vs-raw/)). Inside a run's network the raw name
@@ -35,12 +35,28 @@ implementation runs in that run's sidecar container
 (see [In-network TLS proxy sidecar](/concepts/sidecar/)) — same
 `parse_query`/`build_response` code, different answer and different
 "is this mine?" rule: it answers `*.fghj.internal` (and any active alias)
-with its own container IP instead of `127.0.0.1`, and forwards anything
+with its own container IP instead of `127.222.0.1`, and forwards anything
 else — including every `*.fghj.raw.internal` query — verbatim to Docker's
 embedded resolver at `127.0.0.11:53`. Every node in the run points its
 `--dns` at the sidecar first, so this is fully automatic: no
 `/etc/resolver` file, no OS integration, just an ordinary container DNS
 setting.
+
+### Why `127.222.0.1` and not `127.0.0.1`
+
+The proxy binds a loopback address `fghjd` aliases for itself
+(`ifconfig lo0 alias`) rather than the machine's usual `127.0.0.1`. That
+leaves `127.0.0.1:80`, `127.0.0.1:443` and `0.0.0.0:80` entirely free, so
+installing fghj can't collide with a local nginx or a `docker run -p 80:80`
+that was already working — and a `curl http://127.0.0.1/` still reaches
+whatever the developer expects, not fghj.
+
+It sits inside `127.0.0.0/8` rather than the `10.222.0.0/16` raw pool
+because RFC 1122 forbids a loopback-destined packet from ever reaching the
+wire: no LAN, VPN or corporate network can collide with it. `10/8` is
+ordinary private space that real sites do use, so an address there can
+shadow a host the developer actually needs. Docker's embedded resolver
+(`127.0.0.11`) and systemd-resolved (`127.0.0.53`) use the same trick.
 
 ## A hand-rolled server, on purpose
 
@@ -51,7 +67,7 @@ wildcarded `additional_hosts` suffix (or wildcarded default domain)
 currently claimed by a running container, re-checked on every query so a
 zone starts or stops answering within one query of its owning container
 starting or stopping. The answer is always
-the same (`127.0.0.1`, with a short 5-second TTL so a container restart's
+the same (`127.222.0.1`, with a short 5-second TTL so a container restart's
 new route is picked up quickly instead of being cached stale on the
 client), and every in-zone query gets that answer while everything
 out-of-zone gets NXDOMAIN. The "is this name ours?" check is exposed as a

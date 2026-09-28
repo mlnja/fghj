@@ -157,7 +157,7 @@ something else on the network (or nothing at all) — delegating a whole
 suffix like `.local` to `fghjd`'s DNS would hijack every other lookup
 under it, including mDNS device discovery. Instead, `fghjd` manages a
 marked block inside `/etc/hosts`, pinning only the exact hostnames
-currently declared by a running node to `127.0.0.1` — every other name
+currently declared by a running node to `127.222.0.1` — every other name
 under the same suffix is left alone. That block is kept in sync as
 containers start and stop, and cleared entirely whenever `fghjd` goes
 idle — via `fghj daemon stop` or the process shutting down outright.
@@ -197,7 +197,7 @@ how a route's domain itself is derived is covered in
 
 ## Reaching the proxy from inside a run's own network
 
-The host-side proxy above is bound to `127.0.0.1`, reachable from the host
+The host-side proxy above is bound to `127.222.0.1`, reachable from the host
 but not from inside a run's own docker network. A service can need the
 *same* HTTPS hostname to work both for its own internal calls and for the
 URLs it hands out to external consumers (a presigned S3 URL is the

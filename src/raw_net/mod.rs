@@ -321,6 +321,39 @@ pub fn clear() -> Result<()> {
     backend().clear()
 }
 
+/// Aliases `ip` onto the loopback interface, so a socket can bind it.
+///
+/// Distinct from everything else in this module: `ip` here is *not* a
+/// raw-zone virtual IP and has no `RouteSpec` behind it. It exists for
+/// `web::proxy::PROXY_IP`, the single address the HTTP/HTTPS proxy binds,
+/// which is why `DaemonControl::activate` calls this directly rather than
+/// going through `reconcile`. Keeping it outside `POOL_BASE/16` is what
+/// stops `MacosPfBackend`'s alias pruning — which deletes any pool address
+/// with no live route — from tearing the proxy's own address out from
+/// under it on the next tick.
+///
+/// A no-op off macOS: every other platform this could run on already
+/// routes the whole of `127.0.0.0/8` to loopback, so there is nothing to
+/// alias. macOS only pre-assigns `127.0.0.1` itself, hence the `ifconfig`.
+pub fn add_loopback_alias(ip: Ipv4Addr) -> Result<()> {
+    if cfg!(target_os = "macos") {
+        macos::add_lo0_alias(ip)
+    } else {
+        Ok(())
+    }
+}
+
+/// Reverses [`add_loopback_alias`]. Safe to call for an address that was
+/// never aliased — `ifconfig -alias` on an unknown address is already the
+/// state we want, so the error is swallowed rather than reported.
+pub fn remove_loopback_alias(ip: Ipv4Addr) -> Result<()> {
+    if cfg!(target_os = "macos") {
+        macos::remove_lo0_alias(ip).or(Ok(()))
+    } else {
+        Ok(())
+    }
+}
+
 /// The route set currently installed — backs the telemetry drawer's
 /// network-status tab (`daemon/`'s `/daemon/net-status`).
 pub fn current_routes() -> Vec<RouteSpec> {

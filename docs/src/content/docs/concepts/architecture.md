@@ -29,7 +29,8 @@ description: How fghj's pieces — the CLI, the superdaemon, the resolver, the p
 - **`fghjd`** is the root-owned superdaemon — one instance per machine,
   modeled on `dockerd`. It owns everything that needs a privileged port or
   system trust changes: the DNS server for `*.fghj.internal`, the
-  TLS-terminating reverse proxy on 80/443, the local certificate authority,
+  TLS-terminating reverse proxy on 80/443 (bound to its own `127.222.0.1`
+  loopback alias), the local certificate authority,
   and Docker access. See [Local CA & TLS proxy](/concepts/local-ca-and-tls-proxy/),
   [Split DNS](/concepts/split-dns/), and [Docker & downloads](/concepts/docker-and-downloads/).
 - **`fghj`** is the CLI a developer runs directly — `validate`, `graph`,

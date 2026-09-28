@@ -33,7 +33,13 @@ pub(crate) const ZONE_RAW: &str = "fghj.raw.internal";
 /// this for `ZONE`; the in-network sidecar (`fghj-sidecar.rs`) answers with
 /// its own discovered IP instead; a `ZONE_RAW` name gets its own distinct
 /// virtual IP instead of this constant at all — see `ZoneSource::answer_for`.
-pub const ANSWER: Ipv4Addr = Ipv4Addr::LOCALHOST;
+///
+/// This is the proxy's own dedicated loopback alias, not `127.0.0.1` — see
+/// [`crate::web::proxy::PROXY_IP`] for why. Only ever handed to clients on
+/// *this* host: `/etc/resolver/fghj.internal` points macOS's resolver at
+/// this server, and containers use the sidecar's resolver instead, so the
+/// address never has to be meaningful anywhere but here.
+pub const ANSWER: Ipv4Addr = crate::web::proxy::PROXY_IP;
 
 /// Short TTL: this is a dev-loop tool, not a public zone, so answers should
 /// never be cached long enough to survive a `fghjd` restart onto a different

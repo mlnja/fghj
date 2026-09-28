@@ -106,6 +106,19 @@ impl DaemonControl {
             dns::serve(dns_socket, self.registry.clone(), None),
         );
 
+        // Must precede the binds: on macOS only `127.0.0.1` is assigned to
+        // `lo0` out of the box, so binding `PROXY_IP` fails with
+        // `EADDRNOTAVAIL` until the alias exists. Deliberately *not* part of
+        // `raw_net::reconcile`'s route-driven alias set — `PROXY_IP` has no
+        // `RouteSpec`, and has to exist for as long as the daemon is active
+        // even with no workspace wired at all.
+        raw_net::add_loopback_alias(proxy::PROXY_IP).with_context(|| {
+            format!(
+                "failed to alias {} onto lo0 — fghjd needs it to bind its proxy",
+                proxy::PROXY_IP
+            )
+        })?;
+
         let http_listener = proxy::bind_http().await?;
         let https_listener = proxy::bind_https().await?;
         let http_task = supervisor::supervise_forever(
@@ -163,6 +176,15 @@ impl DaemonControl {
         if let Err(e) = raw_net::clear() {
             daemon_log::warn(format!(
                 "fghjd: failed to clear raw-net routes on deactivate: {e}"
+            ));
+        }
+        // Hands the address back, so an idle fghjd leaves no trace on `lo0`.
+        // `raw_net::clear` above won't do it: `PROXY_IP` sits outside the
+        // raw-zone pool precisely so that pruning can't touch it.
+        if let Err(e) = raw_net::remove_loopback_alias(proxy::PROXY_IP) {
+            daemon_log::warn(format!(
+                "fghjd: failed to remove the {} lo0 alias on deactivate: {e}",
+                proxy::PROXY_IP
             ));
         }
     }

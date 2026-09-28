@@ -96,7 +96,7 @@
             <div class="empty">no managed entries</div>
           {:else}
             {#each netStatus.hosts as h}
-              <div class="row"><span class="k">{h}</span><span class="v">127.0.0.1</span></div>
+              <div class="row"><span class="k">{h}</span><span class="v">{netStatus.proxy_ip ?? '127.0.0.1'}</span></div>
             {/each}
           {/if}
         </div>

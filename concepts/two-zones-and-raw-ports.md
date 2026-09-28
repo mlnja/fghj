@@ -31,7 +31,7 @@ it can be reached:
 | certificates | eligible | never (`cert_eligible` matches `ZONE` only) |
 | port | 443 (or 80) | the node's own declared port |
 | in-network | answered by the run's sidecar | answered by Docker's embedded DNS |
-| from the host | always `127.0.0.1` | a `raw_net` virtual IP, NAT'd |
+| from the host | always `127.222.0.1` | a `raw_net` virtual IP, NAT'd |
 
 The two are disjoint despite looking nested: `fghj.raw.internal` does not end
 with `.fghj.internal`, so `dns::in_zone` cannot accidentally claim a raw name.
@@ -83,7 +83,7 @@ even though the actual address differs.
 That gives four answer paths, two per zone:
 
 - **host → `fghj.internal`** — `daemon::routing`'s `ZoneSource` answers
-  `dns::ANSWER` (`127.0.0.1`), always, for any in-zone name. The host proxy
+  `dns::ANSWER` (`127.222.0.1`), always, for any in-zone name. The host proxy
   dispatches by SNI.
 - **host → `fghj.raw.internal`** — answered with `raw_net::resolve(qname)`, a
   per-name virtual IP. See below.

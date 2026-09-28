@@ -239,11 +239,11 @@ fn disable_pf() -> Result<()> {
     run(Command::new("pfctl").arg("-d"))
 }
 
-fn add_lo0_alias(ip: Ipv4Addr) -> Result<()> {
+pub(super) fn add_lo0_alias(ip: Ipv4Addr) -> Result<()> {
     run(Command::new("ifconfig").args(["lo0", "alias", &ip.to_string(), "up"]))
 }
 
-fn remove_lo0_alias(ip: Ipv4Addr) -> Result<()> {
+pub(super) fn remove_lo0_alias(ip: Ipv4Addr) -> Result<()> {
     run(Command::new("ifconfig").args(["lo0", "-alias", &ip.to_string()]))
 }
 

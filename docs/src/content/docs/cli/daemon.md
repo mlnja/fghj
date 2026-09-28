@@ -15,7 +15,7 @@ boot and restarted on crash by whatever supervises it (`systemd`, a
 `launchd` `LaunchDaemon`, or just a terminal you leave open during local
 dev). None of these subcommands stop or start that process. Instead they
 talk to its always-on control API to toggle whether it's *active*
-(occupying ports 80/443, answering `*.fghj.internal` DNS, and maintaining
+(serving ports 80/443 on its loopback alias, answering `*.fghj.internal` DNS, and maintaining
 `/etc/hosts`) or *idle* (staying up and reachable, but out of the way).
 
 ## `fghj daemon stop`
@@ -23,7 +23,7 @@ talk to its always-on control API to toggle whether it's *active*
 Tells `fghjd` to go idle:
 
 1. Stops and drops the DNS server and the HTTP/HTTPS reverse proxy,
-   freeing ports 80/443 and the DNS socket.
+   freeing ports 80/443, its loopback alias, and the DNS socket.
 2. Removes the (on macOS) `/etc/resolver` entries it authored — one per
    zone (`fghj.internal`, `fghj.raw.internal`) plus one for every
    currently-active [`wildcard_hosts`](/reference/fghj-yaml/#additional-hosts)
@@ -56,7 +56,7 @@ back. Only an explicit `fghj daemon start` clears that flag.
 
 ## `fghj daemon start`
 
-Reverses `stop`: rebinds DNS and the 80/443 proxy, reinstalls the OS
+Reverses `stop`: re-adds the loopback alias, rebinds DNS and the 80/443 proxy, reinstalls the OS
 resolver config, and resyncs `/etc/hosts` from whatever's currently
 running. Safe to call when already active — it's a no-op in that case.
 

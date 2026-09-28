@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::web::proxy::PROXY_IP;
+
 /// Marks the block `sync` owns inside `/etc/hosts` — everything else in the
 /// file (the user's own entries, macOS's default `127.0.0.1 localhost` line,
 /// etc.) is left exactly as found. Exported so `main.rs`'s `daemon_stop`
@@ -17,7 +19,7 @@ pub fn hosts_path() -> PathBuf {
 }
 
 /// Rewrites the managed block inside `path` to contain exactly one
-/// `127.0.0.1 <host>` line per entry in `hosts` — every other line in the
+/// `<PROXY_IP> <host>` line per entry in `hosts` — every other line in the
 /// file, including anything outside the markers, is preserved untouched.
 /// Called with the full set of `additional_hosts` declared by every
 /// currently-*running* container across every wired workspace (see
@@ -51,7 +53,11 @@ pub fn sync(path: &Path, hosts: &[String]) -> Result<()> {
         out.push_str(BEGIN_MARKER);
         out.push('\n');
         for host in hosts {
-            out.push_str("127.0.0.1 ");
+            // These names are served by the same proxy as `*.fghj.internal`,
+            // so they have to point at the same address it binds — see
+            // `web::proxy::PROXY_IP` for why that isn't `127.0.0.1`.
+            out.push_str(&PROXY_IP.to_string());
+            out.push(' ');
             out.push_str(host);
             out.push('\n');
         }
@@ -79,7 +85,13 @@ pub fn managed_hosts(path: &Path) -> Vec<String> {
             _ if line.trim() == BEGIN_MARKER => in_block = true,
             _ if line.trim() == END_MARKER => in_block = false,
             trimmed if in_block => {
-                if let Some(host) = trimmed.strip_prefix("127.0.0.1 ") {
+                // `127.0.0.1 ` is accepted as well as the current address so
+                // that upgrading from a version that wrote loopback doesn't
+                // under-report the block until the next `sync` rewrites it.
+                if let Some(host) = trimmed
+                    .strip_prefix(&format!("{PROXY_IP} "))
+                    .or_else(|| trimmed.strip_prefix("127.0.0.1 "))
+                {
                     hosts.push(host.to_string());
                 }
             }
@@ -107,7 +119,7 @@ mod tests {
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.starts_with("127.0.0.1 localhost\n::1 localhost\n"));
         assert!(contents.contains(&format!(
-            "{BEGIN_MARKER}\n127.0.0.1 aikido.local\n127.0.0.1 demo.example.com\n{END_MARKER}\n"
+            "{BEGIN_MARKER}\n{PROXY_IP} aikido.local\n{PROXY_IP} demo.example.com\n{END_MARKER}\n"
         )));
 
         // Removing every host must drop the block entirely, leaving the
@@ -137,7 +149,7 @@ mod tests {
         let first = fs::read_to_string(&path).unwrap();
         assert_eq!(
             first,
-            format!("{BEGIN_MARKER}\n127.0.0.1 a.local\n127.0.0.1 b.local\n{END_MARKER}\n")
+            format!("{BEGIN_MARKER}\n{PROXY_IP} a.local\n{PROXY_IP} b.local\n{END_MARKER}\n")
         );
 
         // Re-syncing with the same logical set (different input order) must
@@ -159,8 +171,46 @@ mod tests {
         sync(&path, &["fresh.local".to_string()]).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
-            format!("before\nafter\n{BEGIN_MARKER}\n127.0.0.1 fresh.local\n{END_MARKER}\n")
+            format!("before\nafter\n{BEGIN_MARKER}\n{PROXY_IP} fresh.local\n{END_MARKER}\n")
         );
+    }
+
+    /// The whole point of the address change: an entry fghj claims must not
+    /// be pinned to `127.0.0.1`, or it would shadow whatever the developer
+    /// is already running there.
+    #[test]
+    fn managed_entries_point_at_the_proxy_address_not_plain_loopback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hosts");
+        fs::write(&path, "").unwrap();
+
+        sync(&path, &["shop.local".to_string()]).unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(
+            contents.contains(&format!("{PROXY_IP} shop.local")),
+            "{contents}"
+        );
+        assert!(
+            !contents.contains("127.0.0.1 shop.local"),
+            "managed entries must not claim plain loopback: {contents}"
+        );
+    }
+
+    /// Upgrading from a build that wrote `127.0.0.1` must not make the
+    /// existing block invisible to the telemetry drawer in the window before
+    /// the next `sync` rewrites it.
+    #[test]
+    fn managed_hosts_still_reads_a_block_written_by_an_older_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hosts");
+        fs::write(
+            &path,
+            format!("{BEGIN_MARKER}\n127.0.0.1 legacy.local\n{END_MARKER}\n"),
+        )
+        .unwrap();
+
+        assert_eq!(managed_hosts(&path), vec!["legacy.local".to_string()]);
     }
 
     #[test]

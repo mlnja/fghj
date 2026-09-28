@@ -74,10 +74,10 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum DaemonAction {
-    /// Reconcile fghjd back into the active state (occupy 80/443 and DNS,
+    /// Reconcile fghjd back into the active state (serve 80/443 and DNS,
     /// resync /etc/hosts)
     Start,
-    /// Release 80/443, DNS, and /etc/hosts without stopping fghjd itself
+    /// Release 80/443, the loopback alias, DNS, and /etc/hosts without stopping fghjd itself
     Stop,
     /// Equivalent to `stop` followed by `start`
     Restart,
@@ -212,7 +212,8 @@ fn wire(entry: String, workspace: Option<PathBuf>) -> Result<()> {
 /// `fghjd` itself is meant to run for the life of the machine, supervised by
 /// launchd/systemd — these commands never touch that process's lifecycle.
 /// They talk to its always-on control API to toggle whether it's actively
-/// occupying 80/443, `*.fghj.internal` DNS, and `/etc/hosts`, or sitting
+/// serving 80/443 on its own loopback alias, `*.fghj.internal` DNS, and
+/// `/etc/hosts`, or sitting
 /// idle out of the way (see `fghj::daemon::DaemonControl`).
 fn daemon_start() -> Result<()> {
     if !probe_daemon() {
@@ -225,7 +226,10 @@ fn daemon_start() -> Result<()> {
     if let Some(err) = resp.get("error") {
         bail!("fghjd failed to activate: {err}");
     }
-    println!("fghjd is active — occupying 80/443 and *.fghj.internal DNS");
+    println!(
+        "fghjd is active — serving 80/443 on {} and answering *.fghj.internal DNS",
+        fghj::web::proxy::PROXY_IP
+    );
     Ok(())
 }
 
@@ -236,7 +240,7 @@ fn daemon_stop() -> Result<()> {
     }
     http_post_json("/daemon/stop", &serde_json::json!({}))?;
     println!(
-        "fghjd is now idle — 80/443, DNS, and /etc/hosts released (fghjd itself is still running; \
+        "fghjd is now idle — 80/443, the loopback alias, DNS, and /etc/hosts released (fghjd itself is still running; \
          `fghj daemon start` to reconcile again)"
     );
     Ok(())

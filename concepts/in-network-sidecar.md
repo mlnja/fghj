@@ -10,7 +10,7 @@
 
 [[local-ca-and-tls-proxy]] gets a *browser* to
 `https://cart.myworkspace.fghj.internal`: the OS resolver is pointed at fghj's
-DNS, which answers `127.0.0.1`, where a TLS proxy terminates with a
+DNS, which answers `127.222.0.1`, where a TLS proxy terminates with a
 locally-trusted cert and dispatches by SNI.
 
 None of that exists inside a Docker network. A container asking for the same

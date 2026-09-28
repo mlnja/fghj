@@ -57,11 +57,16 @@ brew install mlnja/tap/fghj
 sudo brew services start fghj
 ```
 
-The `sudo` is real: `fghjd` binds 80/443, installs a root CA into your system
-trust store, and edits `/etc/resolver` and `/etc/hosts`, so Homebrew installs
-it as a root LaunchDaemon — the same shape as `dnsmasq` or `nginx`. (No
-formula auto-starts a service; `brew install postgresql` doesn't either.)
+The `sudo` is real: `fghjd` binds ports 80/443, installs a root CA into your
+system trust store, and edits `/etc/resolver` and `/etc/hosts`, so Homebrew
+installs it as a root LaunchDaemon — the same shape as `dnsmasq` or `nginx`.
+(No formula auto-starts a service; `brew install postgresql` doesn't either.)
 Everything after that is automatic on first start.
+
+It binds those ports on `127.222.0.1`, a loopback address it aliases for
+itself — **not** on `127.0.0.1` or `0.0.0.0`. If you already run something on
+port 80, a local nginx or a `docker run -p 80:80`, it keeps working and
+`curl http://127.0.0.1/` still reaches it rather than fghj.
 
 **No release is tagged yet**, so until then, build from source. You need Rust
 (stable), Node 22+, Docker, and macOS. `cue` is optional — only
@@ -78,8 +83,9 @@ cargo build --release
 sudo cp target/release/fghj target/release/fghjd /usr/local/bin/
 ```
 
-Then start the daemon. It needs root to bind 80/443, answer DNS, install its
-root CA into the system trust store, and edit `/etc/hosts`:
+Then start the daemon. It needs root to bind ports 80/443 (privileged on
+macOS whatever address they're on), alias its loopback address, answer DNS,
+install its root CA into the system trust store, and edit `/etc/hosts`:
 
 ```bash
 sudo fghjd            # foreground; supervise with a launchd LaunchDaemon for real use

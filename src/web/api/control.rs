@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use crate::daemon::control::DaemonControl;
 use crate::state::query;
+use crate::web::proxy;
 use crate::{daemon_log, dns, hosts_file, raw_net};
 
 /// `fghj daemon start` — reconciles `fghjd` back into the active state
@@ -115,6 +116,10 @@ pub(crate) async fn get_daemon_net_status(State(daemon): State<Arc<DaemonControl
         "hosts": hosts,
         "resolver_zones": resolver_zones,
         "raw_routes": raw_routes,
+        // Reported rather than assumed by the UI: the managed `/etc/hosts`
+        // entries point here, and this is not `127.0.0.1` — see
+        // `web::proxy::PROXY_IP`.
+        "proxy_ip": proxy::PROXY_IP,
         "last_reconcile_ms": daemon.last_reconcile_ms(),
     }))
     .into_response()

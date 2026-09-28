@@ -15,7 +15,8 @@ DNS](/concepts/split-dns/).
 
 ## The problem
 
-`fghjd`'s reverse proxy binds to `127.0.0.1` on the host. That's fine for a
+`fghjd`'s reverse proxy binds a loopback address on the host
+(`127.222.0.1` — see [Split DNS](/concepts/split-dns/)). That's fine for a
 browser or a host process, but breaks a real workflow: a service that hands
 out URLs pointing at a sibling container (a presigned S3 URL against a
 `minio` backing dependency is the motivating case) needs the *same*

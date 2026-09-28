@@ -132,7 +132,7 @@ fghj daemon status
 ## The specific things that go wrong
 
 **A domain doesn't resolve at all.** Check `fghj daemon status` first. If
-`fghjd` is running but idle it has released ports 80/443 and DNS;
+`fghjd` is running but idle it has released ports 80/443, its loopback alias and DNS;
 `fghj daemon start` reconciles it back to active. On macOS the split-DNS hook
 is `/etc/resolver/fghj.internal` — if that file is gone, `fghj daemon
 restart` rewrites it.
@@ -147,7 +147,7 @@ there's no route registered for that name — so the node isn't running, or
 isn't the one you think. Check the node's status, and check whether you're
 using a run-scoped name for a node in a different run.
 
-**`fghjd` won't start.** It needs root (ports 80/443, DNS, the trust store,
+**`fghjd` won't start.** It needs root (ports 80/443, the loopback alias, DNS, the trust store,
 `/etc/hosts`) and it needs to reach Docker. It refuses to start rather than
 half-work if Docker isn't there.
 

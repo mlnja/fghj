@@ -273,8 +273,9 @@ had to agree for that to happen:
 
 1. **DNS.** `fghjd` runs an authoritative DNS server for
    `*.fghj.internal` and wrote `/etc/resolver/fghj.internal` so macOS sends
-   those lookups to it. It answers with `127.0.0.1`. See
-   [Split DNS](/concepts/split-dns/).
+   those lookups to it. It answers with `127.222.0.1` — a loopback address
+   `fghjd` aliases for itself, so your own `127.0.0.1:80` and `:443` stay
+   free for whatever else you run. See [Split DNS](/concepts/split-dns/).
 2. **TLS.** The connection lands on `fghjd`'s proxy on port 443, which mints
    a leaf certificate for that exact name on the fly, signed by a local CA
    it installed into your system trust store on first start. See

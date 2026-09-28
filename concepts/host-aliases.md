@@ -67,7 +67,7 @@ declared up front.
 That distinction forces two different delivery mechanisms, because
 `/etc/hosts` has no wildcard syntax.
 
-- **Exact aliases** go into `/etc/hosts`, as one `127.0.0.1 <host>` line each,
+- **Exact aliases** go into `/etc/hosts`, as one `127.222.0.1 <host>` line each,
   inside a marked block (`# fghj-managed-begin` / `-end`). Everything outside
   the markers — the user's own entries, macOS's default `localhost` line — is
   preserved byte for byte. The rewrite is a full-block replacement, sorted
