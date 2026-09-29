@@ -210,6 +210,33 @@ fn current_pool_aliases() -> Vec<Ipv4Addr> {
     parse_pool_aliases(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// Must lead every non-empty ruleset below. Without it, a `rdr ... ->
+/// 127.0.0.1 port <host_port>` rule makes that host port unreachable over
+/// plain loopback: a direct `127.0.0.1:<host_port>` connection hangs in
+/// `SYN_RCVD` because pf treats the reply — which *is* sourced from the
+/// redirect target — as a packet needing reverse translation, and rewrites
+/// it to come from the virtual IP instead. The client never dialled that
+/// address, so it drops the SYN-ACK and the handshake never finishes.
+///
+/// That is not a corner case: `web::proxy` dials exactly those published
+/// `127.0.0.1:<host_port>` backends, so any container with *both* a raw
+/// port and an HTTP domain would serve fine on `*.fghj.raw.internal` and
+/// fail with an empty reply on `*.fghj.internal` — the two zones breaking
+/// each other for the same container.
+///
+/// Excluding loopback-to-loopback traffic from translation entirely fixes
+/// it, and can never shadow a real rule: every `rdr` below matches a
+/// `POOL_BASE/16` destination, which is not in `127.0.0.0/8`. Written as
+/// the whole `/8` rather than bare `127.0.0.1` so it also covers
+/// `web::proxy::PROXY_IP`.
+///
+/// Verified against live pf, not reasoned about: with this line both a
+/// direct `127.0.0.1:<host_port>` connection and the redirected virtual-IP
+/// path answer; without it only the latter does. Dropping `pass` from the
+/// `rdr` rules does *not* help, so this is the translation rule itself
+/// matching, not state it created.
+const LOOPBACK_EXEMPTION: &str = "no rdr on lo0 inet proto tcp from 127.0.0.0/8 to 127.0.0.0/8\n";
+
 /// Renders our anchor's full content from scratch — a declarative
 /// full-rewrite of *just our own anchor*, same as `hosts_file::sync`'s "own
 /// the whole managed block" approach, rather than incremental per-rule
@@ -217,7 +244,10 @@ fn current_pool_aliases() -> Vec<Ipv4Addr> {
 /// anchor's sole owner by construction (nothing else loads into an anchor
 /// named `fghjd`).
 fn render_ruleset(routes: &[RouteSpec]) -> String {
-    let mut out = String::new();
+    if routes.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(LOOPBACK_EXEMPTION);
     for route in routes {
         out.push_str(&format!(
             "rdr pass on lo0 inet proto tcp from any to {} port {} -> 127.0.0.1 port {}\n",
@@ -429,7 +459,38 @@ mod tests {
         }];
         assert_eq!(
             render_ruleset(&routes),
-            "rdr pass on lo0 inet proto tcp from any to 10.222.1.1 port 9000 -> 127.0.0.1 port 54321\n"
+            "no rdr on lo0 inet proto tcp from 127.0.0.0/8 to 127.0.0.0/8\n\
+             rdr pass on lo0 inet proto tcp from any to 10.222.1.1 port 9000 -> 127.0.0.1 port 54321\n"
+        );
+    }
+
+    /// The regression this guards is not "a line is missing" but "the HTTP
+    /// zone breaks whenever the raw zone is in use": without the exemption
+    /// first, pf reverse-translates replies out of the redirect target, and
+    /// `web::proxy`'s `127.0.0.1:<host_port>` backend dial hangs. Order
+    /// matters — pf takes the first matching translation rule — so this
+    /// asserts position, not just presence.
+    #[test]
+    fn every_ruleset_exempts_loopback_to_loopback_before_any_redirect() {
+        let routes = vec![
+            RouteSpec {
+                virtual_ip: Ipv4Addr::new(10, 222, 1, 1),
+                container_port: 9000,
+                host_port: 54321,
+            },
+            RouteSpec {
+                virtual_ip: Ipv4Addr::new(10, 222, 1, 2),
+                container_port: 5432,
+                host_port: 54322,
+            },
+        ];
+        let rendered = render_ruleset(&routes);
+        let first = rendered.lines().next().expect("ruleset must not be empty");
+        assert_eq!(first, LOOPBACK_EXEMPTION.trim_end());
+        assert_eq!(
+            rendered.lines().filter(|l| l.starts_with("no rdr")).count(),
+            1,
+            "one exemption for the whole anchor, not one per route"
         );
     }
 
