@@ -52,6 +52,19 @@ enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Remove everything fghj installed on this machine: the trusted root
+    /// CA, /var/lib/fghjd, and all system configuration. Needs root
+    Uninstall {
+        /// Skip the confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Leave the root CA trusted in the System keychain
+        #[arg(long)]
+        keep_ca: bool,
+        /// Leave /var/lib/fghjd (wired workspaces, CA key, run state) in place
+        #[arg(long)]
+        keep_state: bool,
+    },
     /// Run a command inside a running node's container — like `docker
     /// compose exec`, full duplex (a real interactive shell works)
     Exec {
@@ -243,6 +256,113 @@ fn daemon_stop() -> Result<()> {
         "fghjd is now idle — 80/443, the loopback alias, DNS, and /etc/hosts released (fghjd itself is still running; \
          `fghj daemon start` to reconcile again)"
     );
+    Ok(())
+}
+
+/// Reads a yes/no answer from stdin. Requires a full `y`/`yes` — anything
+/// else, including a bare Enter or a closed stdin (piped, CI), is "no".
+/// Defaulting an irreversible delete to "no" is the only safe direction.
+fn confirmed(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// `fghj uninstall` — the counterpart to the Homebrew caveats that used to
+/// just *print* these steps and leave them to the user.
+///
+/// Needs root for all three of its jobs (the System keychain, `/etc/*`, and
+/// `/var/lib/fghjd`), and deliberately does not re-exec itself under `sudo`:
+/// a command that silently escalates to delete a trusted root certificate is
+/// the wrong shape. It refuses and tells the user what to run instead.
+fn uninstall(yes: bool, keep_ca: bool, keep_state: bool) -> Result<()> {
+    if unsafe { libc::geteuid() } != 0 {
+        bail!(
+            "fghj uninstall needs root — it removes a certificate from the System keychain, \
+             {}, and fghjd's system configuration.\n\nRun: sudo fghj uninstall",
+            fghj::persistence::fghjd_root().display()
+        );
+    }
+
+    if !yes {
+        println!("This will remove:");
+        println!("  - the fghjd-managed block in /etc/hosts, /etc/resolver/fghj*, the lo0");
+        println!("    aliases and the pf anchor (stopping fghjd if it is running)");
+        if !keep_ca {
+            println!(
+                "  - the \"{}\" root certificate from {}",
+                fghj::web::ca::COMMON_NAME,
+                fghj::web::ca::SYSTEM_KEYCHAIN
+            );
+        }
+        if !keep_state {
+            println!(
+                "  - {} — the CA private key, every wired workspace, and all run state",
+                fghj::persistence::fghjd_root().display()
+            );
+        }
+        println!();
+        println!("Docker containers, networks and volumes are NOT removed (a `scope: stable`");
+        println!("volume may hold data you still want). Neither are the binaries — use");
+        println!("`brew uninstall fghj` for those.");
+        print!("\nContinue? [y/N] ");
+        std::io::stdout().flush().ok();
+
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).ok();
+        if !confirmed(&answer) {
+            println!("Aborted; nothing was removed.");
+            return Ok(());
+        }
+    }
+
+    let outcome = fghj::uninstall::purge(
+        fghj::uninstall::Options {
+            keep_ca,
+            keep_state,
+        },
+        || {
+            if !probe_daemon() {
+                return Ok(false);
+            }
+            http_post_json("/daemon/stop", &serde_json::json!({}))?;
+            Ok(true)
+        },
+    );
+
+    if outcome.daemon_was_running {
+        println!("stopped fghjd and unwound its system configuration");
+    } else {
+        println!("fghjd was not running; cleared any system configuration it left behind");
+    }
+    match outcome.certificates_removed {
+        0 if keep_ca => println!("kept the root CA trusted (--keep-ca)"),
+        0 => println!(
+            "no \"{}\" certificate was trusted",
+            fghj::web::ca::COMMON_NAME
+        ),
+        n => println!(
+            "removed {n} \"{}\" certificate(s) from the System keychain",
+            fghj::web::ca::COMMON_NAME
+        ),
+    }
+    match &outcome.state_dir_removed {
+        Some(path) => println!("removed {}", path.display()),
+        None if keep_state => println!(
+            "kept {} (--keep-state)",
+            fghj::persistence::fghjd_root().display()
+        ),
+        None => println!(
+            "{} did not exist",
+            fghj::persistence::fghjd_root().display()
+        ),
+    }
+
+    for warning in &outcome.warnings {
+        eprintln!("warning: {warning}");
+    }
+
+    println!();
+    println!("Remaining: the binaries (`brew uninstall fghj`) and any fghj- Docker");
+    println!("resources (`docker ps -a --filter name=^fghj-`).");
     Ok(())
 }
 
@@ -513,6 +633,11 @@ async fn main() -> Result<()> {
             DaemonAction::Restart => daemon_restart(),
             DaemonAction::Status => daemon_status(),
         },
+        Commands::Uninstall {
+            yes,
+            keep_ca,
+            keep_state,
+        } => uninstall(yes, keep_ca, keep_state),
         Commands::Exec {
             node,
             workspace,
@@ -520,5 +645,25 @@ async fn main() -> Result<()> {
             no_tty,
             cmd,
         } => exec_cmd(node, workspace, run, no_tty, cmd).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Guards the direction of the default on `fghj uninstall`'s prompt.
+    /// The action it gates — deleting a trusted root CA and its private
+    /// key — cannot be undone, so every answer that isn't an explicit yes
+    /// has to read as no, including the empty string a bare Enter or a
+    /// closed stdin produces.
+    #[test]
+    fn only_an_explicit_yes_confirms_an_irreversible_uninstall() {
+        for yes in ["y", "Y", "yes", "YES", " yes \n", "Yes\n"] {
+            assert!(confirmed(yes), "{yes:?} should confirm");
+        }
+        for no in ["", "\n", "n", "no", "ye", "yep", "sure", "q", "-y"] {
+            assert!(!confirmed(no), "{no:?} must not confirm");
+        }
     }
 }

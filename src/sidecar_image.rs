@@ -148,18 +148,86 @@ fn materialize(scratch: &Path) -> Result<()> {
     std::fs::create_dir_all(scratch.join("sidecar"))
         .with_context(|| format!("failed to create {:?}", scratch.join("sidecar")))?;
     std::fs::write(scratch.join("sidecar").join("Dockerfile"), DOCKERFILE)?;
-    SRC_DIR
-        .extract(scratch.join("src"))
-        .context("failed to extract embedded src/ into sidecar build context")?;
-    web::ui::UI_DIST
-        .extract(scratch.join("ui/dist"))
-        .context("failed to extract embedded ui/dist into sidecar build context")?;
+    // `include_dir`'s `extract` creates the *sub*directories it walks into,
+    // but never its own `base_path` — a top-level file is written with a
+    // bare `fs::write`, which fails with `ENOENT` if the destination
+    // directory isn't already there. Both of these roots hold files
+    // directly (`src/lib.rs`, `ui/dist/index.html`), so both must be
+    // created first. `ui/dist` needs `create_dir_all` for the intermediate
+    // `ui/` component too.
+    extract_into(&SRC_DIR, &scratch.join("src"), "src/")?;
+    extract_into(
+        &web::ui::UI_DIST,
+        &scratch.join("ui").join("dist"),
+        "ui/dist",
+    )?;
     Ok(())
+}
+
+/// Creates `dest` and unpacks `dir` into it. `label` names the embedded tree
+/// in the error, since a bare `ENOENT` from `extract` says nothing about
+/// which of the two failed.
+fn extract_into(dir: &include_dir::Dir<'_>, dest: &Path, label: &str) -> Result<()> {
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("failed to create {dest:?} for embedded {label}"))?;
+    dir.extract(dest)
+        .with_context(|| format!("failed to extract embedded {label} into {dest:?}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The regression: `include_dir::Dir::extract` does not create its own
+    /// `base_path`, so extracting a tree whose root holds files directly
+    /// failed with a bare `ENOENT` — and since the pull from
+    /// [`SIDECAR_REPOSITORY`] is only *best effort*, the build fallback
+    /// failing meant no sidecar image at all, and no run could start.
+    ///
+    /// Asserts the files the Dockerfile actually `COPY`s, not merely that
+    /// `materialize` returned `Ok`: the bug was specifically about
+    /// top-level files inside each extracted root.
+    #[test]
+    fn materialize_writes_a_build_context_the_dockerfile_can_consume() {
+        let dir = tempfile::tempdir().unwrap();
+        let scratch = dir.path().join("sidecar-build");
+
+        materialize(&scratch).expect("materialize must succeed");
+
+        for expected in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "Dockerfile",
+            "sidecar/Dockerfile",
+            // Top-level files in each extracted root — the exact case that
+            // used to fail.
+            "src/lib.rs",
+            "src/sidecar_image.rs",
+            // ...and a nested one, to show the walk still recurses.
+            "src/raw_net/macos.rs",
+        ] {
+            assert!(
+                scratch.join(expected).is_file(),
+                "{expected} missing from the build context"
+            );
+        }
+        assert!(scratch.join("ui/dist").is_dir(), "ui/dist missing");
+    }
+
+    /// `materialize` clears the scratch directory first, so a build context
+    /// left by an older `fghjd` can't leak stale sources into a new image.
+    #[test]
+    fn materialize_replaces_a_stale_build_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let scratch = dir.path().join("sidecar-build");
+        std::fs::create_dir_all(scratch.join("src")).unwrap();
+        std::fs::write(scratch.join("src").join("ghost.rs"), "stale").unwrap();
+
+        materialize(&scratch).expect("materialize must succeed");
+
+        assert!(!scratch.join("src").join("ghost.rs").exists());
+        assert!(scratch.join("src/lib.rs").is_file());
+    }
 
     /// Guards the "one string for a sidecar image" invariant. If this ever
     /// went back to a bare `fghj-sidecar:x.y.z`, `ensure_built`'s pull target

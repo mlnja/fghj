@@ -23,6 +23,7 @@ pub mod server;
 pub mod sidecar_image;
 pub mod state;
 pub mod supervisor;
+pub mod uninstall;
 pub mod util;
 pub mod web;
 

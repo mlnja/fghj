@@ -73,18 +73,17 @@ against anything else holding port 80 on the machine.
 ### Uninstalling
 
 ```bash
-sudo brew services stop fghj      # unwinds /etc/resolver and /etc/hosts
+sudo fghj uninstall
 brew uninstall fghj
 ```
 
-Two things `brew uninstall` cannot remove, because it runs unprivileged —
-the root CA in your System keychain, and `fghjd`'s durable state:
-
-```bash
-sudo security delete-certificate -c "fghj local CA" \
-  /Library/Keychains/System.keychain
-sudo rm -rf /var/lib/fghjd
-```
+`brew uninstall` runs unprivileged, so it cannot touch the two artifacts
+that outlive it: the root CA trusted in your System keychain, and `fghjd`'s
+durable state under `/var/lib/fghjd` — which holds that CA's private key.
+`sudo fghj uninstall` removes both, along with every system change the
+daemon made. It lists what it will delete and asks first; `-y` skips the
+prompt, and `--keep-ca` / `--keep-state` leave either behind if you are
+reinstalling rather than leaving.
 
 Docker containers, networks and volumes are *not* removed by either command,
 and neither are repositories fghj cloned into your workspace. For the

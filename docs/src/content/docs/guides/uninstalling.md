@@ -10,17 +10,32 @@ This page is the complete list.
 The short version, if you just want it gone:
 
 ```bash
-sudo brew services stop fghj      # unwinds /etc/hosts, /etc/resolver, pf, aliases
+sudo fghj uninstall
 brew uninstall fghj
-
-# The two things an unprivileged `brew uninstall` cannot remove:
-sudo security delete-certificate -c "fghj local CA" \
-  /Library/Keychains/System.keychain
-sudo rm -rf /var/lib/fghjd
 ```
 
-That leaves Docker resources behind. See
+`fghj uninstall` does everything `brew uninstall` can't: it stops the
+daemon, unwinds its system configuration, deletes the root CA from your
+System keychain, and removes `/var/lib/fghjd`. It prints what it is about
+to remove and asks before doing any of it (`-y` skips the prompt).
+
+It needs root, and it will not silently re-run itself under `sudo` — a
+command that escalates on its own to delete a trusted root certificate is
+the wrong shape, so it refuses and tells you what to run.
+
+Two flags exist for the reinstalling-in-place case, where a full purge is
+more than you want:
+
+| Flag | Keeps |
+|---|---|
+| `--keep-ca` | The root CA trusted, so a reinstall doesn't re-prompt for keychain authorization |
+| `--keep-state` | `/var/lib/fghjd` — every wired workspace and the CA private key |
+
+Docker resources are left alone either way. See
 [Docker resources](#docker-resources) below.
+
+If you'd rather do it by hand, or `fghj` is already gone from your PATH,
+every step is spelled out in the sections that follow.
 
 ## What is removed automatically
 

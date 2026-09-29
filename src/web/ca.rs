@@ -174,13 +174,60 @@ fn load_ca(cert_path: &Path, key_path: &Path) -> Result<LoadedCa> {
     })
 }
 
+/// The CA certificate's Common Name. Also the handle `uninstall` hands to
+/// `security delete-certificate`, which matches on exactly this string —
+/// so the generator and the remover cannot drift into naming different
+/// certificates.
+pub const COMMON_NAME: &str = "fghj local CA";
+
+/// Machine-wide, not per-user: the CA has to be trusted for every browser
+/// and every user on the box, and `fghjd` already runs as root.
+pub const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
+
+/// The inverse of [`install_macos_trust`] — deletes every System-keychain
+/// certificate named [`COMMON_NAME`], returning how many it removed.
+///
+/// Loops rather than deleting once because `security delete-certificate`
+/// removes a single match per invocation, and a machine that has run
+/// several `fghjd` installs can hold several: deleting
+/// `/var/lib/fghjd/ca/` makes the next start mint a *new* CA and trust it
+/// too, leaving the old one behind. Uninstalling has to clear all of them
+/// or it leaves trusted roots whose private keys the user thinks they
+/// deleted.
+///
+/// A non-zero exit means "no certificate by that name", which is the
+/// success condition here, not an error — so the loop ends on the first
+/// failure and reports the count rather than propagating it.
+pub fn remove_macos_trust() -> usize {
+    if !cfg!(target_os = "macos") {
+        return 0;
+    }
+    let mut removed = 0;
+    // Bounded so a `security` that somehow always succeeds can't spin
+    // forever; far above any plausible number of stale fghj CAs.
+    while removed < 32 {
+        let ok = Command::new("security")
+            .args(["delete-certificate", "-c", COMMON_NAME, SYSTEM_KEYCHAIN])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            break;
+        }
+        removed += 1;
+    }
+    removed
+}
+
 fn generate_ca() -> Result<LoadedCa> {
     let key_pair = KeyPair::generate().context("failed to generate CA key pair")?;
     let mut params =
         CertificateParams::new(Vec::new()).context("failed to construct CA cert params")?;
     params
         .distinguished_name
-        .push(DnType::CommonName, "fghj local CA");
+        .push(DnType::CommonName, COMMON_NAME);
     params
         .distinguished_name
         .push(DnType::OrganizationName, "fghj");
@@ -218,7 +265,7 @@ fn is_trusted_on_macos(ca_cert_path: &Path) -> bool {
     Command::new("security")
         .args(["verify-cert", "-c"])
         .arg(ca_cert_path)
-        .args(["-k", "/Library/Keychains/System.keychain"])
+        .args(["-k", SYSTEM_KEYCHAIN])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -256,7 +303,7 @@ pub fn install_macos_trust(ca_cert_path: &Path) -> Result<()> {
             "-r",
             "trustRoot",
             "-k",
-            "/Library/Keychains/System.keychain",
+            SYSTEM_KEYCHAIN,
         ])
         .arg(ca_cert_path)
         .status()
