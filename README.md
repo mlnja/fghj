@@ -8,10 +8,10 @@ outward from whichever repos you're actually working on, and brings up just
 that subgraph — with real `*.fghj.internal` HTTPS domains, locally trusted
 certificates, and no `docker-compose.yml` to hand-maintain.
 
-> **Status: pre-release.** macOS only, no tagged release yet — so the
-> Homebrew formula is published but its URLs 404 until the first tag. Build
-> from source (below). The config language is settled enough to write against;
-> the `version: "1.0"` field in `.fghj.yaml` is the compatibility hook.
+> **Status: early.** macOS only. Released and installable from the Homebrew
+> tap; building from source (below) also works. The config language is
+> settled enough to write against; the `version: "1.0"` field in
+> `.fghj.yaml` is the compatibility hook.
 
 ## The one idea
 
@@ -68,9 +68,10 @@ itself — **not** on `127.0.0.1` or `0.0.0.0`. If you already run something on
 port 80, a local nginx or a `docker run -p 80:80`, it keeps working and
 `curl http://127.0.0.1/` still reaches it rather than fghj.
 
-**No release is tagged yet**, so until then, build from source. You need Rust
-(stable), Node 22+, Docker, and macOS. `cue` is optional — only
-`fghj validate` needs it.
+### Building from source
+
+If you'd rather not use the tap, you need Rust (stable), Node 22+, Docker,
+and macOS. `cue` is optional — only `fghj validate` needs it.
 
 ```bash
 git clone https://github.com/mlnja/fghj.git

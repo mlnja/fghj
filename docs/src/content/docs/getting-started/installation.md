@@ -52,14 +52,6 @@ alias — see [Start the daemon](#start-the-daemon) below. Then:
 fghj daemon status      # -> fghjd is running and active
 ```
 
-:::caution[Needs a tagged release]
-The formula points at release tarballs, and no release has been tagged yet,
-so the download URLs 404 and the checksums in the formula are still
-placeholders. Until the first `v0.1.0` release is published, **build from
-source** as below. Once a tag is pushed, the release workflow's `tap` job
-rewrites the formula with real checksums automatically.
-:::
-
 ### If you already use ports 80 or 443
 
 You can still install and run fghj. `fghjd` binds 80/443 on `127.222.0.1`,
