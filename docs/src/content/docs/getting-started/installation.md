@@ -94,6 +94,12 @@ sudo security delete-certificate -c "fghj local CA" \
 sudo rm -rf /var/lib/fghjd
 ```
 
+Docker containers, networks and volumes are *not* removed by either command,
+and neither are repositories fghj cloned into your workspace. For the
+complete inventory of every file, system setting and Docker resource fghj
+creates — and how to verify nothing is left — see [What fghj touches, and
+how to remove it](/guides/uninstalling/).
+
 ## Build from source
 
 You need **Rust** (stable — install via [rustup](https://rustup.rs)) and
