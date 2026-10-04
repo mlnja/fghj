@@ -1,8 +1,13 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import mermaid from 'astro-mermaid';
+import remarkGfm from 'remark-gfm';
 
 export default defineConfig({
+  // Astro 6's MDX pipeline doesn't apply GFM the way the plain-Markdown one
+  // does, so a table in `index.mdx` renders as literal pipes. Declaring the
+  // plugin here covers both.
+  markdown: { remarkPlugins: [remarkGfm] },
   integrations: [
     mermaid({
       theme: 'neutral',
