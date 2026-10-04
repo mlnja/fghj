@@ -197,6 +197,7 @@ mod tests {
             healthcheck: None,
             platform: None,
             run_policy: None,
+            debug: None,
         }
     }
 

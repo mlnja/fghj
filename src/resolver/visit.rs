@@ -139,6 +139,7 @@ impl<'a> ResolveCtx<'a> {
                     healthcheck: service.healthcheck.clone(),
                     platform: service.platform.clone(),
                     run_policy: None,
+                    debug: service.debug,
                 }
             });
         }

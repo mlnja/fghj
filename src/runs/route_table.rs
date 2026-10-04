@@ -139,6 +139,7 @@ mod tests {
                 status_port: Some("8080".to_string()),
                 config_hash: String::new(),
                 terminating: false,
+                debug_wait: false,
             },
             observed: ContainerObserved::default(),
             pending_action: None,

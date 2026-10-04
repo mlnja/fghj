@@ -151,6 +151,32 @@ pub struct ContainerDesired {
     /// what fghj wants for a task at rest is for it to be finished.
     #[serde(default)]
     pub terminating: bool,
+    /// Whether this container was started with `FGHJ_DEBUG_WAIT=1` — the
+    /// per-container switch that asks the image to halt at startup until a
+    /// debugger attaches.
+    ///
+    /// The only environment variable fghj sets for debugging at all —
+    /// `#RunOptions.debug` itself injects nothing, since an image already
+    /// knows which port it listens on. This is the one fact it cannot know:
+    /// whether a human has asked *this* container to wait. See
+    /// `guides/debugging.md` for what an image does with it.
+    ///
+    /// Runtime state, not config: it is flipped from the UI per container,
+    /// never declared in `.fghj.yaml`, because that file is committed and
+    /// shared — pinning it there would halt every teammate's start of this
+    /// node indefinitely.
+    ///
+    /// Deliberately **not** part of `runs::spec::spec_hash`. The hash is a
+    /// statement about the node's resolved *config*, and this isn't one; if
+    /// it were included, `ensure_running`'s drift check would read a halted
+    /// container as drifted and recreate it, killing the debug session the
+    /// switch had just established. The cost of that choice is that a
+    /// recreate for genuine config drift silently drops the flag — which is
+    /// why this is recorded here, on the container, rather than held
+    /// separately: the switch shown in the UI is then always what the
+    /// running container actually has.
+    #[serde(default)]
+    pub debug_wait: bool,
 }
 
 /// Everything about a container Docker itself last reported — the
@@ -329,6 +355,7 @@ mod tests {
             status_port: Some("80".into()),
             config_hash: "abc123".into(),
             terminating: false,
+            debug_wait: false,
         }
     }
 

@@ -9,6 +9,7 @@ use super::naming::{DEFAULT_RUN_ID, resolve_run_id};
 use super::order::topological_start_order;
 use super::progress::{ProgressSink, RunProgress, report};
 use super::spec::spec_hash;
+use super::start_node::StartContext;
 use crate::docker;
 use crate::resolver::{Graph, Node};
 use crate::state::{ContainerInfo, RunCreateError, RunSpec, RunState};
@@ -147,7 +148,20 @@ impl RunRegistry {
         for node_id in &ordered_ids {
             let node = node_map[node_id.as_str()];
             match self
-                .start_node(graph, node, &run_id, &network, Some(&sidecar_ip), &budget)
+                // A fresh run start never halts for a debugger: the
+                // switch is per container and this container does not
+                // exist yet.
+                .start_node(
+                    graph,
+                    node,
+                    StartContext {
+                        run_id: &run_id,
+                        network: &network,
+                        sidecar_ip: Some(&sidecar_ip),
+                        budget: &budget,
+                        debug_wait: false,
+                    },
+                )
                 .await
             {
                 Ok(info) => {
@@ -313,10 +327,17 @@ impl RunRegistry {
                 .start_node(
                     graph,
                     node,
-                    &run_id,
-                    &network,
-                    state.sidecar_ip.as_deref(),
-                    &budget,
+                    StartContext {
+                        run_id: &run_id,
+                        network: &network,
+                        sidecar_ip: state.sidecar_ip.as_deref(),
+                        budget: &budget,
+                        // Preserved across a drift recreate, so a top-up
+                        // that rebuilds this node for a genuine
+                        // `.fghj.yaml` change doesn't silently drop a debug
+                        // switch someone has on.
+                        debug_wait: existing.is_some_and(|c| c.desired.debug_wait),
+                    },
                 )
                 .await
             {

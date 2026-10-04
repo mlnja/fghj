@@ -13,6 +13,26 @@ use crate::state::{ContainerDesired, ContainerInfo, ContainerObserved, PortRoute
 
 use super::registry::RunRegistry;
 
+/// Everything about *this* start that isn't the node's own declared config:
+/// which run and network the container joins, where the run's sidecar is,
+/// how much time the start may spend waiting, and whether the per-container
+/// debug switch is on.
+///
+/// A struct rather than five more positional parameters because `run_id` and
+/// `network` are both `&str` and adjacent — a caller that swapped them would
+/// compile and then produce a container on the wrong network under the right
+/// name.
+#[derive(Clone, Copy)]
+pub(super) struct StartContext<'a> {
+    pub(super) run_id: &'a str,
+    pub(super) network: &'a str,
+    pub(super) sidecar_ip: Option<&'a str>,
+    pub(super) budget: &'a RunBudget,
+    /// See [`debug_wait_overrides`] for what this changes and why it is
+    /// passed in here rather than read off the node.
+    pub(super) debug_wait: bool,
+}
+
 impl RunRegistry {
     /// Actually starts a node's container: resolves its full spec via
     /// `resolve_node_spec` (`side_effects: true`, so the image gets built
@@ -27,11 +47,15 @@ impl RunRegistry {
         &self,
         graph: &Graph,
         node: &Node,
-        run_id: &str,
-        network: &str,
-        sidecar_ip: Option<&str>,
-        budget: &RunBudget,
+        start: StartContext<'_>,
     ) -> Result<ContainerInfo> {
+        let StartContext {
+            run_id,
+            network,
+            sidecar_ip,
+            budget,
+            debug_wait,
+        } = start;
         self.begin_event_cycle(run_id, &node.id, "start").await;
         self.record_event(
             run_id,
@@ -79,6 +103,11 @@ impl RunRegistry {
         let mut labels = node.labels.clone();
         labels.insert("fghj.config_hash".to_string(), config_hash.clone());
 
+        // Deliberately *after* `spec_hash` above, and that ordering is the
+        // whole reason this isn't folded into `resolve_node_spec` — see
+        // `debug_wait_overrides`.
+        let (env, healthcheck) = debug_wait_overrides(&spec, node, debug_wait);
+
         // Every node asks this run's sidecar for DNS first — it's the
         // authority for the `fghj.internal` zone (and any active
         // `additional_hosts`/`wildcard_hosts` alias) inside this network,
@@ -106,7 +135,7 @@ impl RunRegistry {
                 name: &spec.container_name,
                 network,
                 aliases: &spec.aliases,
-                env: &spec.env,
+                env: &env,
                 dns: &dns,
                 ports: &spec.port_list,
                 image: &spec.image,
@@ -124,7 +153,7 @@ impl RunRegistry {
                 cap_drop: &node.cap_drop,
                 privileged: node.privileged,
                 extra_hosts: &node.extra_hosts,
-                healthcheck: node.healthcheck.as_ref(),
+                healthcheck,
                 platform: node.platform.as_deref(),
             },
         )
@@ -176,8 +205,15 @@ impl RunRegistry {
         // inspect already done above for `status_port`'s own binding rather
         // than re-querying it; one more inspect per remaining port (there's
         // rarely more than one or two per node).
+        //
+        // Keyed off `spec.port_list` rather than `node.ports`, because that
+        // is the set actually published — it also carries the `debug` port,
+        // and `raw_net::reconcile` NATs a node's raw domain only to the
+        // ports it finds *here* (via `state::query::raw_endpoints`). Reading
+        // `node.ports` instead left the debugger published by Docker but
+        // unreachable at `{raw_domain}:{debug}`.
         let mut port_host_ports: BTreeMap<String, Option<u16>> = BTreeMap::new();
-        for port in node.ports.keys() {
+        for (port, _) in &spec.port_list {
             let host_port = if status_port.as_deref() == Some(port.as_str()) {
                 published_port
             } else {
@@ -428,6 +464,7 @@ impl RunRegistry {
                 status_port,
                 config_hash,
                 terminating: node.kind == "task",
+                debug_wait,
             },
             observed: ContainerObserved {
                 status,
@@ -446,6 +483,45 @@ impl RunRegistry {
     }
 }
 
+/// The two things `FGHJ_DEBUG_WAIT` changes about a container, derived from
+/// an already-hashed `spec` rather than written into it.
+///
+/// That ordering is the point. `debug_wait` is an operator action on one
+/// container — "halt this one at startup until I attach" — not a statement
+/// about the node's config, and it is flipped per container from the UI
+/// rather than declared in `.fghj.yaml` (which is committed and shared:
+/// pinning it there would block *every* teammate's start of this node
+/// forever). Folding it into `spec_hash` would therefore mean
+/// `ensure_running`'s drift check (see `orchestrate`'s `top_up_may_skip`)
+/// saw a halted container as drifted and recreated it — destroying the debug
+/// session the switch just set up — and `config_drift` would report a node
+/// as out of sync with a `.fghj.yaml` that never mentioned this.
+///
+/// Keeping it out of the hash gives the opposite, and correct, behaviour: a
+/// top-up leaves a halted container alone, and a recreate for *genuine*
+/// config drift drops the flag — which the UI then honestly reports as the
+/// switch going off, since the new container really doesn't have it.
+///
+/// The healthcheck is dropped because a process halted before line 0 can
+/// never report Docker-healthy, so leaving it in place would make
+/// `wait_for_healthy` burn this node's whole `PER_NODE_LIMIT` and stall
+/// every dependent behind a container that is waiting for a human. It is
+/// also the honest reading: a halted process genuinely has nothing to say
+/// about its own health, so fghj stops asking rather than recording a
+/// failure.
+fn debug_wait_overrides<'a>(
+    spec: &super::spec::NodeSpec,
+    node: &'a Node,
+    debug_wait: bool,
+) -> (Vec<String>, Option<&'a crate::resolver::Healthcheck>) {
+    if !debug_wait {
+        return (spec.env.clone(), node.healthcheck.as_ref());
+    }
+    let mut env = spec.env.clone();
+    env.push("FGHJ_DEBUG_WAIT=1".to_string());
+    (env, None)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -453,6 +529,75 @@ mod tests {
     use super::*;
     use crate::persistence::WorkspaceDb;
     use crate::runs::testing::{test_graph, test_node};
+
+    fn debug_spec(env: Vec<String>) -> super::super::spec::NodeSpec {
+        super::super::spec::NodeSpec {
+            container_name: "c".to_string(),
+            domain: "d".to_string(),
+            raw_domain: "d".to_string(),
+            aliases: Vec::new(),
+            image: "busybox".to_string(),
+            port_list: vec![("9229".to_string(), None)],
+            binds: Vec::new(),
+            env,
+        }
+    }
+
+    fn healthcheck() -> crate::resolver::Healthcheck {
+        crate::resolver::Healthcheck {
+            test: vec!["CMD".to_string(), "true".to_string()],
+            interval: None,
+            timeout: None,
+            retries: None,
+            start_period: None,
+        }
+    }
+
+    #[test]
+    fn the_switch_off_changes_nothing_about_the_container() {
+        let mut node = test_node("api", "api", "service");
+        node.healthcheck = Some(healthcheck());
+        let spec = debug_spec(vec!["PORT=3000".to_string()]);
+
+        let (env, hc) = debug_wait_overrides(&spec, &node, false);
+
+        assert_eq!(env, spec.env);
+        assert!(hc.is_some());
+    }
+
+    #[test]
+    fn the_switch_on_adds_the_wait_variable_and_drops_the_healthcheck() {
+        let mut node = test_node("api", "api", "service");
+        node.healthcheck = Some(healthcheck());
+        let spec = debug_spec(vec!["PORT=3000".to_string()]);
+
+        let (env, hc) = debug_wait_overrides(&spec, &node, true);
+
+        assert_eq!(env.last().map(String::as_str), Some("FGHJ_DEBUG_WAIT=1"));
+        // A container halted before line 0 can never report healthy, so
+        // asking would burn the node's whole health budget.
+        assert!(
+            hc.is_none(),
+            "a halted container must not be health-checked"
+        );
+    }
+
+    /// The invariant the whole design rests on: turning the switch on must
+    /// not move the node's `config_hash`, or `ensure_running`'s drift check
+    /// would recreate the very container the switch just halted.
+    #[test]
+    fn the_switch_does_not_move_the_config_hash() {
+        let node = test_node("api", "api", "service");
+        let spec = debug_spec(vec!["PORT=3000".to_string()]);
+
+        let before = spec_hash(&node, &spec);
+        let (env, _) = debug_wait_overrides(&spec, &node, true);
+
+        assert_eq!(before, spec_hash(&node, &spec));
+        // ...which only holds because the variable lands in a *new* env, not
+        // in the spec that was hashed.
+        assert!(env.len() > spec.env.len());
+    }
 
     /// A `RunRegistry` over a throwaway workspace/db plus a real, uniquely
     /// named Docker network, torn down on drop along with every container
@@ -505,10 +650,13 @@ mod tests {
                 .start_node(
                     &graph,
                     node,
-                    &self.run_id,
-                    &self.network,
-                    None,
-                    &super::RunBudget::default(),
+                    StartContext {
+                        run_id: &self.run_id,
+                        network: &self.network,
+                        sidecar_ip: None,
+                        budget: &super::RunBudget::default(),
+                        debug_wait: false,
+                    },
                 )
                 .await
         }
@@ -592,10 +740,13 @@ mod tests {
             .start_node(
                 &graph,
                 &node,
-                &fixture.run_id,
-                &fixture.network,
-                None,
-                &budget,
+                StartContext {
+                    run_id: &fixture.run_id,
+                    network: &fixture.network,
+                    sidecar_ip: None,
+                    budget: &budget,
+                    debug_wait: false,
+                },
             )
             .await
             .expect_err("a task that never exits must fail its node");

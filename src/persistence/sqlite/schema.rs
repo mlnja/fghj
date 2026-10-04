@@ -72,6 +72,10 @@ pub const ADD_COLUMN_MIGRATIONS: &[&str] = &[
     // were the same column (`status`), so a restored container's desired
     // state had to be guessed from its last observed one.
     "ALTER TABLE containers ADD COLUMN desired_running INTEGER",
+    // The per-container debug switch (`FGHJ_DEBUG_WAIT`). Persisted so a
+    // `fghjd` restart doesn't silently drop someone out of a halted debug
+    // session; absent in an older row means off, which is the default.
+    "ALTER TABLE containers ADD COLUMN debug_wait INTEGER",
     // Whether this container's desired terminal state is "exited 0" rather
     // than "running", and the code it exited with. Without them a restored
     // task would read back as a service that had crashed — see

@@ -142,6 +142,20 @@ pub struct Node {
     /// re-run policy because it has nothing to re-run.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub run_policy: Option<String>,
+    /// `#RunOptions.debug` — the in-container port this node's debugger
+    /// listens on, or `None` for a node that declares none.
+    ///
+    /// Carries into the run layer in exactly one place: `runs::node_spec`
+    /// publishes it alongside the node's declared `ports`, so it answers at
+    /// `{raw_domain}:{debug}` on the declared number, host and in-network
+    /// alike. Nothing is injected into the container's environment, for the
+    /// same reason nothing is injected for `ports`. fghj
+    /// never learns which debugger it is — see
+    /// `concepts/debugging-in-containers.md` for why that stays the image's
+    /// business, and `state::ContainerDesired::debug_wait` for the one piece
+    /// of debug behaviour that is *not* declared here.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub debug: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Clone)]

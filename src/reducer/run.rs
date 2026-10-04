@@ -80,6 +80,11 @@ pub(super) fn reduce(
         }
 
         Action::RunNodeStartRequested { run_id, node_id } => start_node(state, &run_id, &node_id),
+        Action::RunNodeDebugWaitRequested {
+            run_id,
+            node_id,
+            wait,
+        } => set_debug_wait(state, &run_id, &node_id, wait),
         Action::RunNodeStopRequested { run_id, node_id } => {
             set_pending(state, &run_id, &node_id, PendingAction::Stopping, false)
         }
@@ -114,6 +119,43 @@ fn lookup_mut<'a>(
         .containers
         .get_mut(node_id)
         .ok_or(ActionRejected::NodeNotFound)
+}
+
+/// Flips the per-container debug switch (`FGHJ_DEBUG_WAIT`) and queues the
+/// recreate that applies it.
+///
+/// There is deliberately no dedicated `PendingAction` for this: the switch
+/// is a value in `desired`, and `PendingAction::Starting` is already the
+/// convergence that makes a container match its desired state. So this
+/// records the new desire and reuses that path — `converge::perform` reads
+/// `desired.debug_wait` back out when it calls `restart_container`.
+///
+/// Unlike `start_node`, this requires the container to already exist. A node
+/// with no container has nothing to halt, and inserting a placeholder would
+/// mean "start this node, and also halt it before line 0" — two intents for
+/// one switch. Start the node first.
+fn set_debug_wait(
+    state: &WorkspaceState,
+    run_id: &str,
+    node_id: &str,
+    wait: bool,
+) -> Result<WorkspaceState, ActionRejected> {
+    let mut next = state.clone();
+    let run = next
+        .runs
+        .get_mut(run_id)
+        .ok_or(ActionRejected::RunNotFound)?;
+    let container = run
+        .containers
+        .get_mut(node_id)
+        .ok_or(ActionRejected::NodeNotFound)?;
+    if container.pending_action.is_some() {
+        return Err(ActionRejected::AlreadyInFlight);
+    }
+    container.desired.debug_wait = wait;
+    container.desired.running = true;
+    container.pending_action = Some(PendingAction::Starting);
+    Ok(next)
 }
 
 /// `RunNodeStartRequested` is the one per-node action that must succeed even
@@ -166,6 +208,7 @@ fn start_node(
                         // the real graph when it reports back, and that is
                         // the only place `terminating` is ever decided.
                         terminating: false,
+                        debug_wait: false,
                     },
                     observed: ContainerObserved::default(),
                     pending_action: Some(PendingAction::Starting),
@@ -211,6 +254,7 @@ mod tests {
                 status_port: None,
                 config_hash: "hash".into(),
                 terminating: false,
+                debug_wait: false,
             },
             observed: ContainerObserved::default(),
             pending_action: None,
@@ -236,6 +280,106 @@ mod tests {
             },
         );
         state
+    }
+
+    /// The switch is a value in `desired`, applied by the ordinary
+    /// `Starting` convergence — so flipping it on must leave exactly that
+    /// behind for `converge::perform` to read back out.
+    #[test]
+    fn debug_wait_requested_sets_the_desire_and_queues_the_recreate() {
+        let state = state_with_run("default", vec![container("api")]);
+
+        let next = reduce(
+            &state,
+            Action::RunNodeDebugWaitRequested {
+                run_id: "default".into(),
+                node_id: "api".into(),
+                wait: true,
+            },
+        )
+        .unwrap();
+
+        let c = next.runs["default"].containers["api"].clone();
+        assert!(c.desired.debug_wait);
+        // The container has to come back up for the flag to mean anything:
+        // a halted-at-startup container is still a *running* container.
+        assert!(c.desired.running);
+        assert_eq!(c.pending_action, Some(PendingAction::Starting));
+    }
+
+    #[test]
+    fn debug_wait_can_be_turned_back_off() {
+        let mut state = state_with_run("default", vec![container("api")]);
+        state
+            .runs
+            .get_mut("default")
+            .unwrap()
+            .containers
+            .get_mut("api")
+            .unwrap()
+            .desired
+            .debug_wait = true;
+
+        let next = reduce(
+            &state,
+            Action::RunNodeDebugWaitRequested {
+                run_id: "default".into(),
+                node_id: "api".into(),
+                wait: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!next.runs["default"].containers["api"].desired.debug_wait);
+        assert_eq!(
+            next.runs["default"].containers["api"].pending_action,
+            Some(PendingAction::Starting)
+        );
+    }
+
+    /// Unlike `start_node`, this does *not* insert a placeholder: a node with
+    /// no container has nothing to halt, and conjuring one would fold two
+    /// intents ("start this" and "halt it before line 0") into one switch.
+    #[test]
+    fn debug_wait_is_rejected_for_a_node_with_no_container() {
+        let state = state_with_run("default", vec![container("api")]);
+
+        let err = reduce(
+            &state,
+            Action::RunNodeDebugWaitRequested {
+                run_id: "default".into(),
+                node_id: "worker".into(),
+                wait: true,
+            },
+        )
+        .expect_err("no container means nothing to halt");
+
+        assert_eq!(err, ActionRejected::NodeNotFound);
+    }
+
+    #[test]
+    fn debug_wait_is_rejected_while_another_action_is_in_flight() {
+        let mut state = state_with_run("default", vec![container("api")]);
+        state
+            .runs
+            .get_mut("default")
+            .unwrap()
+            .containers
+            .get_mut("api")
+            .unwrap()
+            .pending_action = Some(PendingAction::Stopping);
+
+        let err = reduce(
+            &state,
+            Action::RunNodeDebugWaitRequested {
+                run_id: "default".into(),
+                node_id: "api".into(),
+                wait: true,
+            },
+        )
+        .expect_err("the switch must not race a stop");
+
+        assert_eq!(err, ActionRejected::AlreadyInFlight);
     }
 
     #[test]

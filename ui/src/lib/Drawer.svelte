@@ -23,6 +23,7 @@
     onStopNode,
     onDeleteNode,
     onResetNode,
+    onSetDebugWait,
   } = $props();
   let activeTab = $state('general');
 
@@ -48,6 +49,17 @@
   // which "Start" is hidden for. Container-only: never touches volumes.
   function resetNode() {
     onResetNode?.(node.id);
+  }
+
+  // Whether this container currently has `FGHJ_DEBUG_WAIT=1`. Read off
+  // `desired`, not off a local flag: the backend records it on the container
+  // itself, so after a recreate for genuine config drift drops the flag the
+  // switch here honestly goes back to off instead of claiming a session that
+  // no longer exists. See `concepts/debugging-in-containers.md`.
+  let debugWait = $derived(liveInfo?.desired.debug_wait === true);
+
+  function toggleDebugWait() {
+    onSetDebugWait?.(node.id, !debugWait);
   }
 
   // Single source of truth for "what can this node's controls do right
@@ -388,6 +400,44 @@
             </span>
           </div>
         {/each}
+        <!-- `#RunOptions.debug`. Rendered only when the node declares it,
+             because without it there is no address to show and nothing to
+             toggle. fghj only publishes the port — whether anything is
+             actually listening on it is the image's business, which is why
+             this says "declared" rather than claiming a debugger is
+             there. -->
+        {#if node.debug}
+          <div class="port-row">
+            <span class="port-chip">{node.debug}</span>
+            <span class="port-badge role-debug">debug</span>
+            <span class="port-target">
+              {#if liveInfo?.observed.ports?.[node.debug] && liveInfo?.desired.raw_domain}
+                <button class="copy-btn" onclick={() => copyText(`${liveInfo.desired.raw_domain}:${node.debug}`, 'debug')}>
+                  {liveInfo.desired.raw_domain}:{node.debug} {copiedKey === 'debug' ? '· copied' : '⧉'}
+                </button>
+              {:else}
+                <span class="muted">not running</span>
+              {/if}
+            </span>
+          </div>
+          <div class="row">
+            <span class="k">halt at startup</span>
+            <span class="v">
+              <button
+                class="toggle"
+                class:on={debugWait}
+                onclick={toggleDebugWait}
+                disabled={!runId || busy || !liveInfo}
+                title={liveInfo
+                  ? 'Sets FGHJ_DEBUG_WAIT=1 and recreates this container. Your image decides what that means — typically --inspect-brk, suspend=y, or wait_for_client(). While it is on, fghj stops health-checking this node, since a process stopped before line 0 can never report healthy.'
+                  : 'Start this node first — there is no container to halt yet.'}
+              >
+                <span class="toggle-track"><span class="toggle-knob"></span></span>
+                {debugWait ? 'on' : 'off'}
+              </button>
+            </span>
+          </div>
+        {/if}
         {#each node.additional_hosts ?? [] as host}
           {@const liveRoute = liveInfo?.desired.routes?.find((r) => r.domain === host)}
           <div class="row">
@@ -572,6 +622,28 @@
   .port-badge.role-additional { background: var(--panel-2); color: var(--ink-dim); border: 1px solid var(--line-strong); }
   .port-badge.role-tcp { background: var(--panel-2); color: var(--ink-faint); border: 1px solid var(--line-strong); }
   .port-badge.wildcard { background: var(--warning-bg); color: var(--warning); }
+  .port-badge.role-debug { background: var(--accent-bg); color: var(--accent); border: 1px solid var(--accent); }
+  /* The halt-at-startup switch. A real switch rather than a button because
+     it has a persistent state the backend owns, and that state matters even
+     when you are not touching it — a node left halted is a node nothing
+     downstream of it will start. */
+  .toggle {
+    display: inline-flex; align-items: center; gap: 7px; background: none; border: none;
+    padding: 0; margin: 0; cursor: pointer; font: 700 10px var(--font-mono);
+    text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint);
+  }
+  .toggle-track {
+    width: 26px; height: 14px; border-radius: 999px; background: var(--panel-2);
+    border: 1px solid var(--line-strong); position: relative; transition: background 120ms, border-color 120ms;
+  }
+  .toggle-knob {
+    position: absolute; top: 1px; left: 1px; width: 10px; height: 10px; border-radius: 50%;
+    background: var(--ink-faint); transition: transform 120ms, background 120ms;
+  }
+  .toggle.on { color: var(--accent); }
+  .toggle.on .toggle-track { background: var(--accent-bg); border-color: var(--accent); }
+  .toggle.on .toggle-knob { transform: translateX(12px); background: var(--accent); }
+  .toggle:disabled { cursor: not-allowed; opacity: 0.5; }
   .pill {
     padding: 1px 7px; border-radius: 999px; font: 700 9px var(--font-mono); text-transform: uppercase;
     letter-spacing: 0.04em;

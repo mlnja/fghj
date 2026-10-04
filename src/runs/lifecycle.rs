@@ -11,6 +11,7 @@ use crate::util::label::sanitize_label;
 use super::health::RunBudget;
 use super::registry::RunRegistry;
 use super::route_table::sidecar_routes_dir;
+use super::start_node::StartContext;
 
 impl RunRegistry {
     /// Tears a whole run down: every container, the sidecar, the network,
@@ -67,6 +68,7 @@ impl RunRegistry {
         node_id: &str,
         network: &str,
         sidecar_ip: Option<&str>,
+        debug_wait: bool,
     ) -> Result<ContainerInfo> {
         let lock = self.node_lock(run_id, node_id);
         let _guard = lock.lock().await;
@@ -86,10 +88,13 @@ impl RunRegistry {
         self.start_node(
             graph,
             node,
-            run_id,
-            network,
-            sidecar_ip,
-            &RunBudget::single_node(),
+            StartContext {
+                run_id,
+                network,
+                sidecar_ip,
+                budget: &RunBudget::single_node(),
+                debug_wait,
+            },
         )
         .await
     }

@@ -159,6 +159,45 @@ pub(crate) async fn post_run_node_start(
     dispatch_node_action(&actor, run_id, node_id, action).await
 }
 
+/// The per-container debug switch (`FGHJ_DEBUG_WAIT`) — see
+/// `state::ContainerDesired::debug_wait`. Body is `{"wait": true|false}`.
+///
+/// There is no dedicated pending action: the reducer records the new desire
+/// and queues `PendingAction::Starting`, and the ordinary convergence reads
+/// `desired.debug_wait` back out when it recreates the container. Requires
+/// the container to already exist — a node with nothing running has nothing
+/// to halt.
+pub(crate) async fn post_run_node_debug_wait(
+    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    ActorExtractor(actor): ActorExtractor,
+    body: Bytes,
+) -> Response {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        wait: bool,
+    }
+    // An *empty* body means on, matching the bare-POST convention of
+    // `/start` and `/stop` — the request itself is the intent. A body that
+    // is present but unparseable is a 400 rather than a default, because
+    // "turn it on" is the direction that halts a container and stalls
+    // everything downstream of it; a caller that meant `{"wait": false}`
+    // and typo'd it must not be told the opposite happened.
+    let wait = if body.is_empty() {
+        true
+    } else {
+        match serde_json::from_slice::<Body>(&body) {
+            Ok(b) => b.wait,
+            Err(e) => return bad_request(e),
+        }
+    };
+    let action = action::Action::RunNodeDebugWaitRequested {
+        run_id: run_id.clone(),
+        node_id: node_id.clone(),
+        wait,
+    };
+    dispatch_node_action(&actor, run_id, node_id, action).await
+}
+
 pub(crate) async fn post_run_node_stop(
     AxumPath((run_id, node_id)): AxumPath<(String, String)>,
     ActorExtractor(actor): ActorExtractor,

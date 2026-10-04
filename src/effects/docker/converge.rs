@@ -212,6 +212,13 @@ async fn perform(
                     &entry.node_id,
                     &run.network,
                     run.sidecar_ip.as_deref(),
+                    // The reducer has already written the desired value
+                    // (`RunNodeDebugWaitRequested`), so the ordinary
+                    // `Starting` convergence is what applies a flip of the
+                    // debug switch — there is no separate action for it.
+                    // Absent container: a node being started for the first
+                    // time, which never halts.
+                    container.is_some_and(|c| c.desired.debug_wait),
                 )
                 .await?;
             Ok(Some(info))
@@ -589,6 +596,7 @@ mod tests {
                 status_port: None,
                 config_hash: "hash".into(),
                 terminating: false,
+                debug_wait: false,
             },
             observed: ContainerObserved::default(),
             pending_action: pending,

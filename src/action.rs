@@ -45,6 +45,13 @@ pub enum Action {
         run_id: String,
         node_id: String,
     },
+    /// Flip the per-container debug switch and recreate the container to
+    /// apply it — see `state::ContainerDesired::debug_wait`.
+    RunNodeDebugWaitRequested {
+        run_id: String,
+        node_id: String,
+        wait: bool,
+    },
     RunNodeDeleteRequested {
         run_id: String,
         node_id: String,

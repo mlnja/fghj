@@ -97,6 +97,7 @@ mod tests {
                     status_port: None,
                     config_hash: String::new(),
                     terminating: false,
+                    debug_wait: false,
                 },
                 observed: Default::default(),
                 pending_action: None,

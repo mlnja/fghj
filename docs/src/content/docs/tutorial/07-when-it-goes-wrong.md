@@ -164,7 +164,13 @@ both.
 
 ## Where to go from here
 
-You've used most of the language. What's left is breadth, not new concepts:
+One chapter left, and it's optional: [attaching a
+debugger](/tutorial/08-attaching-a-debugger/) adds a Python service and a Go
+service to the shop, catches a request mid-flight in one and startup code in
+the other, and is the only chapter that touches something you *can't*
+declare in `.fghj.yaml`.
+
+Otherwise, what's left is breadth rather than new concepts:
 
 - [.fghj.yaml reference](/reference/fghj-yaml/) — every field, including the
   ones this tutorial skipped: `env_file`, `additional_hosts`, `extra_hosts`,

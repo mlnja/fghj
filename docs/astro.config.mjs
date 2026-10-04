@@ -91,6 +91,7 @@ export default defineConfig({
             { label: '5. Flows', slug: 'tutorial/05-flows' },
             { label: '6. Two runs at once', slug: 'tutorial/06-two-runs' },
             { label: '7. When it goes wrong', slug: 'tutorial/07-when-it-goes-wrong' },
+            { label: '8. Attaching a debugger', slug: 'tutorial/08-attaching-a-debugger' },
           ],
         },
         {
@@ -118,6 +119,9 @@ export default defineConfig({
           items: [
             { label: 'What fghj fixes', slug: 'guides/what-it-fixes' },
             { label: 'HTTP vs. raw: choosing a zone', slug: 'guides/networking-http-vs-raw' },
+            { label: 'Attaching a debugger', slug: 'guides/debugging' },
+            { label: 'Python services in fghj', slug: 'guides/python' },
+            { label: 'Go services in fghj', slug: 'guides/go' },
             { label: 'What fghj touches, and how to remove it', slug: 'guides/uninstalling' },
           ],
         },

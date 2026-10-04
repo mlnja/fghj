@@ -68,6 +68,7 @@ mod tests {
                 status_port: None,
                 config_hash: "hash".into(),
                 terminating: false,
+                debug_wait: false,
             },
             observed: ContainerObserved {
                 status: status.to_string(),

@@ -50,6 +50,7 @@ pub fn test_node(id: &str, label: &str, kind: &str) -> Node {
         healthcheck: None,
         platform: None,
         run_policy: None,
+        debug: None,
     }
 }
 

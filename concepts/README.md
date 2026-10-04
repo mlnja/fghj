@@ -85,6 +85,7 @@ it in the audit's tracker — the concept files stay the durable record.
 | [[state-and-effects]] | The actor/action/reducer/effects architecture: one store of state, one writer, and why an effect is `extract` + `converge`. |
 | [[concurrency-model]] | What may run at the same time, what may not: per-node locks, merging writes, and the run-wide health budget. |
 | [[config-drift]] | How fghj notices that a running container no longer matches the `.fghj.yaml` underneath it — and why it deliberately does nothing about it. |
+| [[debugging-in-containers]] | `debug: <port>` publishes a port and injects nothing — the whole contract — plus why halting at startup is the one `FGHJ_DEBUG_WAIT` switch, and why it is deliberately absent from `spec_hash`. |
 | [[persistence-and-workspace-store]] | The per-workspace SQLite store, the root-owned workspace index, and the root-runs-as-root/clones-as-you privilege split. |
 | [[docker-and-downloads]] | Image builds, container lifecycle, and the background clone/pull job registry the UI polls. |
 | [[control-api-and-cli]] | The axum control API, the `fghj`/`fghjd` process split, and the CLI's own hand-rolled HTTP client. |
@@ -119,6 +120,7 @@ be compared.
 | `src/persistence/` | [[persistence-and-workspace-store]], [[security-model]] |
 | `src/hosts_file.rs`, `src/effects/hosts.rs` | [[host-aliases]] |
 | `src/runs/spec.rs`, `src/state/sync_status.rs` | [[config-drift]] |
+| `src/runs/node_spec.rs`, `src/runs/start_node.rs` (`debug_wait_overrides`) | [[debugging-in-containers]], [[config-drift]] |
 | `src/docker.rs`, `src/downloads.rs` | [[docker-and-downloads]], [[build-inputs]] |
 | `src/web/api/`, `src/daemon/`, `src/daemon_log.rs`, `src/main.rs`, `src/bin/fghjd.rs` | [[control-api-and-cli]] |
 | `Justfile`, `.github/workflows/`, `sidecar/Dockerfile`, `.dockerignore` | [[release-and-delivery]], [[in-network-sidecar]] |

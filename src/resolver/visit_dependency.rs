@@ -88,6 +88,9 @@ impl<'a> ResolveCtx<'a> {
                 healthcheck: None,
                 platform: None,
                 run_policy: None,
+                // Unknown until the repo is actually pulled and its
+                // `.fghj.yaml` read, same as `healthcheck`/`platform` above.
+                debug: None,
             });
             stub_id
         };
@@ -197,6 +200,7 @@ impl<'a> ResolveCtx<'a> {
                     privileged,
                     extra_hosts,
                     healthcheck,
+                    debug,
                 } = *backing;
                 // Leaf-first, same convention as service ids and named
                 // ports (`{port_name}.{node's domain}`): the specific thing
@@ -256,6 +260,7 @@ impl<'a> ResolveCtx<'a> {
                         healthcheck,
                         platform,
                         run_policy: None,
+                        debug,
                     });
                 self.edges.push(Edge {
                     from: owner_id.to_string(),
@@ -337,6 +342,7 @@ impl<'a> ResolveCtx<'a> {
             extra_hosts,
             stop_signal,
             stop_grace_period,
+            debug,
         } = task;
         let task_id = format!("{name}.{owner_id}");
         self.check_stop_signal(&task_id, stop_signal.as_deref());
@@ -419,6 +425,7 @@ impl<'a> ResolveCtx<'a> {
             healthcheck: None,
             platform,
             run_policy: Some(run),
+            debug,
         });
 
         self.edges.push(Edge {

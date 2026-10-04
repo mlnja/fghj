@@ -54,5 +54,7 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub(crate) platform: Option<String>,
     #[serde(default)]
+    pub(crate) debug: Option<u16>,
+    #[serde(default)]
     pub(crate) dependencies: Vec<Dependency>,
 }

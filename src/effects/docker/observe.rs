@@ -219,6 +219,7 @@ mod tests {
                             status_port: Some("http".into()),
                             config_hash: "hash".into(),
                             terminating: false,
+                            debug_wait: false,
                         },
                         observed: ContainerObserved::default(),
                         pending_action: None,

@@ -22,7 +22,8 @@ pub fn reduce(state: &WorkspaceState, action: Action) -> Result<WorkspaceState, 
         | Action::RunStopRequested { .. }
         | Action::RunNodeStartRequested { .. }
         | Action::RunNodeStopRequested { .. }
-        | Action::RunNodeDeleteRequested { .. } => run::reduce(state, action),
+        | Action::RunNodeDeleteRequested { .. }
+        | Action::RunNodeDebugWaitRequested { .. } => run::reduce(state, action),
 
         Action::ContainerObserved { .. }
         | Action::ContainerActionSettled { .. }

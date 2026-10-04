@@ -108,8 +108,8 @@ impl WorkspaceDb {
             tx.execute("DELETE FROM containers WHERE run_id = ?1", rusqlite::params![state.run_id])?;
             for c in state.containers.values() {
                 tx.execute(
-                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running, terminating, exit_code)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running, terminating, exit_code, debug_wait)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                     rusqlite::params![
                         state.run_id,
                         c.node_id,
@@ -127,6 +127,7 @@ impl WorkspaceDb {
                         c.desired.running,
                         c.desired.terminating,
                         c.observed.exit_code,
+                        c.desired.debug_wait,
                     ],
                 )?;
             }
@@ -185,7 +186,7 @@ impl WorkspaceDb {
             drop(stmt);
 
             let mut stmt = conn.prepare(
-                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running, terminating, exit_code FROM containers",
+                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running, terminating, exit_code, debug_wait FROM containers",
             )?;
             let rows = stmt.query_map([], |row| {
                 let status: String = row.get(3)?;
@@ -215,6 +216,12 @@ impl WorkspaceDb {
                             // nothing to guess: it can only have been a
                             // service.
                             terminating: row.get::<_, Option<i64>>(14)?.is_some_and(|v| v != 0),
+                            // Absent in a row written before the column
+                            // existed, which means off — the default, and
+                            // the only safe guess: inferring "halt at
+                            // startup" would block the node on a human who
+                            // isn't there.
+                            debug_wait: row.get::<_, Option<i64>>(16)?.is_some_and(|v| v != 0),
                         },
                         observed: ContainerObserved {
                             status,
@@ -271,6 +278,7 @@ mod tests {
                 status_port: Some("8080".to_string()),
                 config_hash: "deadbeef".to_string(),
                 terminating: false,
+                debug_wait: false,
             },
             observed: ContainerObserved {
                 status: "running".to_string(),
@@ -321,6 +329,29 @@ mod tests {
 
         db.clone().delete_run("default".to_string()).await.unwrap();
         assert!(db.load_runs().await.unwrap().is_empty());
+    }
+
+    /// Persisted so an `fghjd` restart doesn't silently drop someone out of
+    /// a halted debug session — the container is still sitting there waiting
+    /// for an attach, so the switch the UI shows has to survive too.
+    #[tokio::test]
+    async fn the_debug_wait_switch_survives_a_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
+
+        let mut c = container();
+        c.desired.debug_wait = true;
+        let state = RunState {
+            run_id: "default".to_string(),
+            network: "fghj-demo-default".to_string(),
+            containers: BTreeMap::from([("svc-a".to_string(), c)]),
+            sidecar_container_name: "fghj-demo-default-sidecar".to_string(),
+            ..Default::default()
+        };
+        db.clone().save_run(state).await.unwrap();
+
+        let loaded = db.load_runs().await.unwrap();
+        assert!(loaded["default"].containers["svc-a"].desired.debug_wait);
     }
 
     /// The whole reason `desired` and `observed` are stored in separate

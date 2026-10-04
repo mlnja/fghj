@@ -131,6 +131,35 @@ package fghj
 	// top, so an explicit `environment` entry always wins over one loaded
 	// from a file.
 	env_file: [...string] | *[]
+	// The port this node's debugger listens on inside the container, e.g.
+	// 9229 for Node's inspector, 5678 for debugpy, 2345 for Delve.
+	//
+	// Declaring it does one thing: the port is published like any other
+	// declared port, so it answers at `{node's raw domain}:{this port}`
+	// from the host *and* from inside the run's network, on the declared
+	// number — see `concepts/two-zones-and-raw-ports.md`. That is the
+	// address you point an IDE at.
+	//
+	// Nothing is injected into the container's environment. This is a port
+	// declaration, exactly like `ports`, and behaves like one: your app
+	// already knows which port it listens on, and this tells fghj so it can
+	// publish and address it. Starting the debugger is your image's job —
+	// see `guides/debugging.md` for a recipe per language. An image that
+	// never listens makes declaring `debug` inert, which is a harmless
+	// no-op rather than an error.
+	//
+	// What `debug` buys over just putting the number in `ports` is the
+	// *meaning*: fghj knows which port is the debugger, so the UI can label
+	// the address and offer the halt-at-startup switch for this node.
+	//
+	// Always set, not toggled: a debugger that is merely *listening* costs
+	// essentially nothing and cannot stop anything, because a breakpoint
+	// only exists once an IDE has attached and sent it. Halting at startup
+	// is the one thing that does need a switch, and that's
+	// `FGHJ_DEBUG_WAIT` — runtime state flipped per container from the UI,
+	// never declared here, because it must not be committed for a whole
+	// team (see `concepts/debugging-in-containers.md`).
+	debug?: uint & >0 & <=65535
 }
 
 // A dependency on a backing service (a datastore, broker, etc. — the 12-Factor

@@ -322,11 +322,35 @@ impl RunRegistry {
                 .map(|name| format!("{name}.{raw_domain}")),
         );
 
-        let port_list: Vec<(String, Option<u16>)> = node
+        let mut port_list: Vec<(String, Option<u16>)> = node
             .ports
             .iter()
             .map(|(port, cfg)| (port.clone(), cfg.host_port))
             .collect();
+        // `debug` is published exactly like a declared port, which is the
+        // whole mechanism: `raw_net::reconcile` NATs every *published* port
+        // of a node to `{virtual_ip}:{container_port}` (see
+        // `state::query::raw_endpoints`, which reads the full observed port
+        // map rather than only the routed ones), so the debugger answers at
+        // `{raw_domain}:{debug}` — on the declared number, from the host and
+        // from inside the run's network alike, and without colliding with
+        // the same port on any other node or any parallel run.
+        //
+        // Published unconditionally, even with nothing listening on the
+        // other side: that keeps the address stable and printable before
+        // anyone attaches, and means enabling `FGHJ_DEBUG_WAIT` changes only
+        // the environment, never the port set.
+        //
+        // Skipped when the same number is already in `ports`, where an
+        // explicit `#Port` may carry a `host_port` or a `name` this would
+        // otherwise clobber — Docker would also reject the duplicate
+        // binding.
+        if let Some(debug_port) = node.debug {
+            let key = debug_port.to_string();
+            if !node.ports.contains_key(&key) {
+                port_list.push((key, None));
+            }
+        }
 
         // A named volume's Docker-side existence is otherwise implicit (the
         // daemon auto-creates one, unlabeled, the first time a bind
@@ -418,6 +442,20 @@ impl RunRegistry {
                 expand_service_fqdn_templates(entry, node, &raw_domain, &domain, graph, run_id);
         }
 
+        // Nothing is appended here for `node.debug`, and that absence is
+        // deliberate. `debug` is a port declaration, exactly like `ports`,
+        // and fghj injects nothing into the environment for those either:
+        // the app already knows which port it listens on, and the config
+        // declares it so fghj can publish and address it. A
+        // `FGHJ_DEBUG_PORT` would just be the same number a second time, in
+        // a second place, able to disagree with the first.
+        //
+        // The one thing an image genuinely cannot know on its own is whether
+        // the operator has asked *this container* to halt at startup — that
+        // is `FGHJ_DEBUG_WAIT`, and it is set in `start_node`, after
+        // `spec_hash`, because it is runtime state rather than config. See
+        // `state::ContainerDesired::debug_wait`.
+
         Ok(Some(NodeSpec {
             container_name,
             domain,
@@ -461,8 +499,13 @@ fn resolve_build_secrets(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::persistence::WorkspaceDb;
     use crate::resolver::NodeBuildSecret;
+    use crate::resolver::port::PortConfig;
+    use crate::runs::testing::{test_graph, test_node};
 
     fn secret(id: &str, file: &str) -> NodeBuildSecret {
         NodeBuildSecret {
@@ -508,5 +551,111 @@ mod tests {
         std::fs::create_dir_all(repo.path().join("ci")).unwrap();
 
         assert!(resolve_build_secrets(repo.path(), &[secret("npmrc", "ci")]).is_err());
+    }
+
+    /// A `RunRegistry` whose Docker handle is never dialled — see
+    /// `docker::undialled_client`. Every test below resolves a node that
+    /// declares an `image:` with `side_effects: false`, which is the wholly
+    /// pure path: no build, no `ensure_volume`, no daemon.
+    fn registry() -> (RunRegistry, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
+        let registry = RunRegistry::new(
+            tmp.path().to_path_buf(),
+            db,
+            Arc::new(crate::docker::undialled_client()),
+        );
+        (registry, tmp)
+    }
+
+    /// A backing node, which needs nothing from the workspace on disk.
+    fn debuggable(debug: Option<u16>) -> crate::resolver::Node {
+        let mut node = test_node("api", "api", "backing");
+        node.image = Some("busybox".to_string());
+        node.debug = debug;
+        node
+    }
+
+    async fn spec_for(node: &crate::resolver::Node) -> NodeSpec {
+        let (registry, _tmp) = registry();
+        let graph = test_graph(vec![node.clone()], Vec::new());
+        registry
+            .resolve_node_spec(&graph, node, "default", false)
+            .await
+            .expect("resolving an image-backed node is pure")
+            .expect("side_effects: false still yields a spec")
+    }
+
+    /// The whole of `debug:`, in one assertion: the port joins the published
+    /// set, and nothing is injected into the environment.
+    ///
+    /// `debug` is a port declaration like `ports`, so it behaves like one.
+    /// An earlier draft also set `FGHJ_DEBUG=1` and `FGHJ_DEBUG_PORT`; both
+    /// were dropped because the image already knows which port it listens
+    /// on — the number would just be restated in a second place, free to
+    /// disagree with the first.
+    #[tokio::test]
+    async fn declaring_debug_publishes_the_port_and_injects_no_environment() {
+        let spec = spec_for(&debuggable(Some(9229))).await;
+
+        assert_eq!(spec.port_list, vec![("9229".to_string(), None)]);
+        assert!(spec.env.is_empty(), "got: {:?}", spec.env);
+    }
+
+    /// `FGHJ_DEBUG_WAIT` — the only variable fghj sets at all, and the only
+    /// thing an image genuinely cannot work out for itself — is emphatically
+    /// not in the *spec*: `start_node` appends it after `spec_hash`, so a
+    /// halted container never reads as drifted. See
+    /// `state::ContainerDesired::debug_wait`.
+    #[tokio::test]
+    async fn the_wait_variable_is_never_part_of_the_spec() {
+        let spec = spec_for(&debuggable(Some(5678))).await;
+        assert!(!spec.env.iter().any(|e| e.starts_with("FGHJ_DEBUG")));
+    }
+
+    #[tokio::test]
+    async fn a_node_without_debug_publishes_nothing() {
+        let spec = spec_for(&debuggable(None)).await;
+
+        assert!(spec.port_list.is_empty());
+        assert!(spec.env.is_empty());
+    }
+
+    /// The same number declared both ways must publish once. Docker rejects
+    /// a duplicate binding outright, and the explicit `#Port` is the one
+    /// that carries a pinned `host_port` and a `name`, so it wins.
+    #[tokio::test]
+    async fn a_debug_port_already_declared_in_ports_is_not_published_twice() {
+        let mut node = debuggable(Some(9229));
+        node.ports.insert(
+            "9229".to_string(),
+            PortConfig {
+                host_port: Some(19229),
+                name: Some(crate::resolver::name::Name::parse("inspector").unwrap()),
+                ..Default::default()
+            },
+        );
+
+        let spec = spec_for(&node).await;
+
+        assert_eq!(spec.port_list, vec![("9229".to_string(), Some(19229))]);
+        // ...and the named-port alias the explicit declaration asked for is
+        // still registered, which is what would have been lost.
+        assert!(spec.aliases.iter().any(|a| a.starts_with("inspector.")));
+    }
+
+    /// `debug` has to reach `spec_hash`, and it does so purely through
+    /// `port_list`: adding it to `.fghj.yaml` changes the container's
+    /// published ports, which is genuine drift. This is the assertion that
+    /// keeps that true now that no environment variable carries it.
+    #[tokio::test]
+    async fn adding_debug_to_the_config_reads_as_drift() {
+        let plain = debuggable(None);
+        let debugging = debuggable(Some(9229));
+
+        let before = crate::runs::spec::spec_hash(&plain, &spec_for(&plain).await);
+        let after = crate::runs::spec::spec_hash(&debugging, &spec_for(&debugging).await);
+
+        assert_ne!(before, after);
     }
 }

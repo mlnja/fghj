@@ -56,6 +56,8 @@ pub struct BackingDependencyConfig {
     pub(crate) extra_hosts: Vec<String>,
     #[serde(default)]
     pub(crate) healthcheck: Option<Healthcheck>,
+    #[serde(default)]
+    pub(crate) debug: Option<u16>,
 }
 
 /// The fields of a `Dependency::Task` — `#Task` in
@@ -115,6 +117,8 @@ pub struct TaskConfig {
     pub(crate) stop_signal: Option<String>,
     #[serde(default = "default_stop_grace_period")]
     pub(crate) stop_grace_period: u64,
+    #[serde(default)]
+    pub(crate) debug: Option<u16>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -68,7 +68,10 @@ Routes, grouped by what they front:
   `POST .../nodes/{node_id}/start`|`stop`|`delete` — wrappers over
   `runs::RunRegistry` (see [[run-lifecycle-and-registry]]); `post_runs` is
   the one handler that decides `start` vs. `ensure_running` based on
-  whether the request specified a `run_id`.
+  whether the request specified a `run_id`. `POST .../debug-wait` is the one
+  per-node route with a request body (`{"wait": bool}`); it flips a value in
+  `desired` and reuses the ordinary `Starting` convergence rather than
+  adding an action of its own (see [[debugging-in-containers]]).
 - **Per-node observation**: `GET .../logs` (a snapshot),  `.../logs/stream`
   (SSE, live), `.../logs/generations` and `.../logs/history` (previous
   container incarnations of the same node, which is what makes a crash loop

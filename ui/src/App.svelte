@@ -240,7 +240,15 @@
     let ok = false;
     let message = '';
     try {
-      const res = await fetch(withWs(job.path), { method: 'POST' });
+      const res = await fetch(withWs(job.path), {
+        method: 'POST',
+        // Only the debug-wait toggle sends a body; every other node action
+        // is a bare POST and must stay one (the handlers don't read a body,
+        // and a stray Content-Type would be noise in the access log).
+        ...(job.body
+          ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(job.body) }
+          : {}),
+      });
       let body = null;
       try {
         body = await res.json();
@@ -259,8 +267,8 @@
     processQueue();
   }
 
-  function enqueueNodeAction(nodeId, action, path) {
-    actionQueue = [...actionQueue, { id: `${Date.now()}-${Math.random()}`, nodeId, action, path }];
+  function enqueueNodeAction(nodeId, action, path, body) {
+    actionQueue = [...actionQueue, { id: `${Date.now()}-${Math.random()}`, nodeId, action, path, body }];
     processQueue();
   }
 
@@ -307,6 +315,25 @@
   function resetNode(nodeId) {
     if (!selectedRunId) return;
     enqueueNodeAction(nodeId, 'reset', `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/start`);
+  }
+
+  // The per-container debug switch (`FGHJ_DEBUG_WAIT`). Goes through the
+  // same queue as Start/Stop because it *is* a lifecycle action: the backend
+  // records the new desire and then recreates the container to apply it, so
+  // letting it race a concurrent Stop would be the same mistake.
+  //
+  // Deliberately not declarable in `.fghj.yaml` — that file is committed and
+  // shared, and "halt before line 0 until a human attaches" pinned there
+  // would block every teammate's start of this node. See
+  // `concepts/debugging-in-containers.md`.
+  function setDebugWait(nodeId, wait) {
+    if (!selectedRunId) return;
+    enqueueNodeAction(
+      nodeId,
+      wait ? 'debug-wait on' : 'debug-wait off',
+      `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/debug-wait`,
+      { wait },
+    );
   }
 
   $effect(() => {
@@ -559,6 +586,7 @@
       onStopNode={stopNode}
       onDeleteNode={deleteNode}
       onResetNode={resetNode}
+      onSetDebugWait={setDebugWait}
     />
   {/if}
 
