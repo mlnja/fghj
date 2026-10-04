@@ -25,6 +25,73 @@ fn domain_label(path: &std::path::Path) -> String {
     )
 }
 
+/// Canonicalizes `path` as far as it actually exists, re-appending the
+/// components that don't.
+///
+/// Needed because the nesting check has to run *before*
+/// `resolve_workspace` creates the directory and clones into it — a
+/// rejected wire must not leave a stray clone behind — but a path that
+/// doesn't exist yet cannot be canonicalized at all. Resolving the deepest
+/// existing ancestor is enough: symlinks live in the part that exists, and
+/// the part that doesn't contributes only literal components.
+///
+/// Falls back to `path` unchanged when nothing along it exists, which keeps
+/// this total. The result is only ever fed to a comparison, never used to
+/// open anything.
+fn canonicalize_lossy(path: &std::path::Path) -> PathBuf {
+    for ancestor in path.ancestors() {
+        if let Ok(real) = std::fs::canonicalize(ancestor) {
+            return match path.strip_prefix(ancestor) {
+                Ok(rest) => real.join(rest),
+                Err(_) => real,
+            };
+        }
+    }
+    path.to_path_buf()
+}
+
+/// Rejects a `candidate` workspace that would nest with one already wired,
+/// **in either direction** — whether it sits inside an existing workspace or
+/// contains one.
+///
+/// Nesting has to be prevented rather than merely tolerated because a
+/// workspace is the unit `resolve_universe` scans: every sibling directory
+/// under it is a candidate repo. Two overlapping workspaces therefore claim
+/// the same repos, derive duplicate node ids and domains from them, and run
+/// two independent reconcilers over one set of containers. There is no
+/// sensible resolution after the fact, so the only place to catch it is
+/// here, before the second one exists — the same reasoning as the
+/// `domain_label` collision check below.
+///
+/// Checking only the "inside" direction, as this did originally, leaves the
+/// hole wide open: wire `~/work/shop` first and then `~/work`, and the
+/// descendant test is false, so the nesting gets built bottom-up instead.
+///
+/// `Path::starts_with` is component-wise, so `~/work/shop` does not conflict
+/// with `~/work/shop-legacy` the way a string-prefix test would. `candidate`
+/// and `existing` must both already be canonical; re-wiring the exact same
+/// path is not a conflict (that is the idempotent case `resolve` relies on).
+fn nesting_conflict(candidate: &std::path::Path, existing: &std::path::Path) -> Option<String> {
+    if candidate == existing {
+        return None;
+    }
+    if candidate.starts_with(existing) {
+        return Some(format!(
+            "{} is inside the already-wired workspace {}. Workspaces cannot              nest — wire it separately outside that directory, or stop the              outer workspace first.",
+            candidate.display(),
+            existing.display()
+        ));
+    }
+    if existing.starts_with(candidate) {
+        return Some(format!(
+            "{} contains the already-wired workspace {}. Workspaces cannot              nest — wire a directory that doesn't enclose it, or stop the              inner workspace first.",
+            candidate.display(),
+            existing.display()
+        ));
+    }
+    None
+}
+
 /// In-memory registry of workspaces the daemon knows about, keyed by id.
 /// Holds only data (path + per-workspace registries) — there is no thread or
 /// listener tied to a workspace; all of them are served off the single axum
@@ -79,6 +146,31 @@ impl WorkspaceRegistry {
                 )),
             }
         }
+        // `resolve` makes a nesting pair impossible to create, but an index
+        // written by an older fghjd — whose check only looked in the
+        // "inside" direction — can still hold one. Warned about rather than
+        // dropped: the operator may have live runs in both, and silently
+        // de-wiring a workspace is worse than a loud warning. The CLI's
+        // `enclosing_workspace` resolves the ambiguity deterministically
+        // (innermost wins) until one of them is stopped.
+        let loaded_paths: Vec<(String, PathBuf)> = by_id
+            .iter()
+            .map(|(id, state)| (id.clone(), state.path.clone()))
+            .collect();
+        for (i, (id_a, path_a)) in loaded_paths.iter().enumerate() {
+            for (id_b, path_b) in loaded_paths.iter().skip(i + 1) {
+                if nesting_conflict(path_a, path_b).is_some() {
+                    daemon_log::warn(format!(
+                        "fghjd: wired workspaces {id_a} ({}) and {id_b} ({}) overlap — one \
+                         contains the other. They scan the same repos and will fight over the \
+                         same containers; stop one of them. Newer fghjd refuses to wire this.",
+                        path_a.display(),
+                        path_b.display()
+                    ));
+                }
+            }
+        }
+
         let registry = Self {
             by_id: Mutex::new(by_id),
             index_path,
@@ -166,17 +258,42 @@ impl WorkspaceRegistry {
 
     /// Resolves (cloning `entry` if needed) and registers a workspace,
     /// reusing the existing entry if this path is already known. Errors if
-    /// the path is nested inside an already-wired workspace — a workspace
-    /// root covers its whole subtree, so a second registration underneath it
-    /// would just be an alias for part of the same tree — or if its folder
-    /// name collides with another workspace's in the domain namespace (see
+    /// the path would nest with an already-wired workspace in either
+    /// direction (see [`nesting_conflict`]), or if its folder name collides
+    /// with another workspace's in the domain namespace (see
     /// [`domain_label`]).
+    ///
+    /// The nesting check runs twice, deliberately. The authoritative pass is
+    /// after `resolve_workspace`, which is the only thing that can produce a
+    /// truly canonical path. But `resolve_workspace` also creates the
+    /// directory and `git clone`s `entry` into it, so checking only there
+    /// means a *rejected* wire still litters the filesystem with a clone.
+    /// The first pass catches that for any path the caller actually named,
+    /// existing or not (see [`canonicalize_lossy`]); only a `None`
+    /// workspace, meaning "the daemon's cwd", falls through to the second.
     pub async fn resolve(
         &self,
         entry: Option<String>,
         workspace: Option<PathBuf>,
         owner: Option<persistence::WorkspaceOwner>,
     ) -> Result<(String, PathBuf)> {
+        // Best-effort pre-check, before `resolve_workspace` creates
+        // anything. Only possible when the caller named a path we can
+        // resolve now; `None` (meaning "the daemon's cwd") and a
+        // not-yet-existing directory fall through to the authoritative
+        // check below.
+        if let Some(canonical) = workspace.as_deref().map(canonicalize_lossy) {
+            let conflict = {
+                let by_id = self.by_id.lock().unwrap();
+                by_id
+                    .values()
+                    .find_map(|state| nesting_conflict(&canonical, &state.path))
+            };
+            if let Some(conflict) = conflict {
+                bail!(conflict);
+            }
+        }
+
         let entry_for_meta = entry.clone();
         let owner_for_clone = owner.clone();
         let path = tokio::task::spawn_blocking(move || {
@@ -189,12 +306,8 @@ impl WorkspaceRegistry {
         {
             let by_id = self.by_id.lock().unwrap();
             for state in by_id.values() {
-                if canonical != state.path && canonical.starts_with(&state.path) {
-                    bail!(
-                        "{} is inside the already-wired workspace {}",
-                        canonical.display(),
-                        state.path.display()
-                    );
+                if let Some(conflict) = nesting_conflict(&canonical, &state.path) {
+                    bail!(conflict);
                 }
                 // Workspaces are keyed by *id* here but by *name* in every
                 // derived domain, and `resolve_route` scans all of them. Two
@@ -308,6 +421,8 @@ impl WorkspaceRegistry {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::path::Path;
+
     use super::*;
 
     /// Shared by `daemon::control`'s tests too. Never dialled — these tests
@@ -362,6 +477,87 @@ pub(crate) mod tests {
             .unwrap();
     }
 
+    /// A rejected wire must not have created anything: the nesting check
+    /// runs before `resolve_workspace` would `mkdir` the path and clone into
+    /// it.
+    #[tokio::test]
+    async fn rejecting_a_nested_workspace_does_not_create_its_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry =
+            WorkspaceRegistry::load_from(tmp.path().join("workspaces.json"), test_docker()).await;
+
+        let root = tmp.path().join("root");
+        registry
+            .resolve(None, Some(root.clone()), None)
+            .await
+            .unwrap();
+
+        let nested = root.join("not-yet-there");
+        assert!(
+            registry
+                .resolve(None, Some(nested.clone()), None)
+                .await
+                .is_err()
+        );
+        assert!(
+            !nested.exists(),
+            "{} was created by a wire that was rejected",
+            nested.display()
+        );
+    }
+
+    #[test]
+    fn canonicalize_lossy_resolves_the_existing_part_and_keeps_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(tmp.path()).unwrap();
+        assert_eq!(
+            canonicalize_lossy(&tmp.path().join("a/b/c")),
+            real.join("a/b/c")
+        );
+    }
+
+    #[test]
+    fn nesting_conflict_rejects_a_candidate_inside_an_existing_workspace() {
+        let conflict = nesting_conflict(Path::new("/w/shop/api"), Path::new("/w/shop"));
+        assert!(
+            conflict
+                .as_deref()
+                .is_some_and(|c| c.contains("is inside the already-wired workspace")),
+            "unexpected: {conflict:?}"
+        );
+    }
+
+    /// The direction the original check missed: wire the child first, then
+    /// the parent, and the nesting gets built bottom-up.
+    #[test]
+    fn nesting_conflict_rejects_a_candidate_containing_an_existing_workspace() {
+        let conflict = nesting_conflict(Path::new("/w"), Path::new("/w/shop"));
+        assert!(
+            conflict
+                .as_deref()
+                .is_some_and(|c| c.contains("contains the already-wired workspace")),
+            "unexpected: {conflict:?}"
+        );
+    }
+
+    /// Re-wiring the same path is the idempotent case, not a conflict.
+    #[test]
+    fn nesting_conflict_allows_rewiring_the_identical_path() {
+        assert!(nesting_conflict(Path::new("/w/shop"), Path::new("/w/shop")).is_none());
+    }
+
+    /// Component-wise, not string-prefix: these are siblings.
+    #[test]
+    fn nesting_conflict_allows_a_sibling_sharing_a_name_prefix() {
+        assert!(nesting_conflict(Path::new("/w/shop-legacy"), Path::new("/w/shop")).is_none());
+        assert!(nesting_conflict(Path::new("/w/shop"), Path::new("/w/shop-legacy")).is_none());
+    }
+
+    #[test]
+    fn nesting_conflict_allows_unrelated_trees() {
+        assert!(nesting_conflict(Path::new("/a/shop"), Path::new("/b/shop")).is_none());
+    }
+
     #[tokio::test]
     async fn resolve_is_idempotent_and_rejects_nested_workspaces() {
         let tmp = tempfile::tempdir().unwrap();
@@ -397,6 +593,21 @@ pub(crate) mod tests {
                 .contains("is inside the already-wired workspace"),
             "unexpected error message: {err}"
         );
+
+        // ...and so must registering a path that *contains* one, which the
+        // original one-directional check let through.
+        let err = registry
+            .resolve(None, Some(tmp.path().to_path_buf()), None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("contains the already-wired workspace"),
+            "unexpected error message: {err}"
+        );
+
+        // Neither rejection may have registered anything.
+        assert_eq!(registry.list().len(), 1);
     }
 
     #[tokio::test]

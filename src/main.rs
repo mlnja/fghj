@@ -35,7 +35,8 @@ enum Commands {
     Graph {
         /// Git URL of the entry repo to clone in, if not already in the workspace
         entry: String,
-        /// Workspace root directory holding sibling repo checkouts (default: current directory)
+        /// Workspace root holding sibling repo checkouts (default: the wired
+        /// workspace the current directory is inside, else the current directory)
         #[arg(long)]
         workspace: Option<PathBuf>,
     },
@@ -43,7 +44,8 @@ enum Commands {
     Wire {
         /// Git URL of the entry repo to clone in, if not already in the workspace
         entry: String,
-        /// Workspace root directory holding sibling repo checkouts (default: current directory)
+        /// Workspace root holding sibling repo checkouts (default: the wired
+        /// workspace the current directory is inside, else the current directory)
         #[arg(long)]
         workspace: Option<PathBuf>,
     },
@@ -70,7 +72,8 @@ enum Commands {
     Exec {
         /// Node id to exec into (see `fghj graph` for ids)
         node: String,
-        /// Workspace root directory holding sibling repo checkouts (default: current directory)
+        /// Workspace root holding sibling repo checkouts (default: the wired
+        /// workspace the current directory is inside, else the current directory)
         #[arg(long)]
         workspace: Option<PathBuf>,
         /// Which run to target (default: the shared default environment)
@@ -126,8 +129,79 @@ fn validate(path: &Path) -> Result<()> {
     }
 }
 
+/// Turns the optional `--workspace` flag into an absolute, canonical path.
+///
+/// An explicit flag always wins. When it is absent we ask `fghjd` which
+/// workspaces are wired and take the one the current directory sits inside,
+/// so every workspace-scoped command works from anywhere in a workspace —
+/// including several levels down inside one of its repos — instead of only
+/// from the workspace root itself.
+///
+/// Canonical because that is what makes the comparison in
+/// `enclosing_workspace` meaningful, and because `wire` registers the path
+/// that `exec` later has to match exactly. Resolving both ends the same way
+/// here is what keeps `/var` and `/private/var` from being two different
+/// workspaces.
+///
+/// `canonicalize` failing is not fatal: `graph` is allowed to name a
+/// workspace directory that doesn't exist yet (it creates it), so we fall
+/// back to the merely-absolute path rather than erroring.
+fn workspace_root(flag: Option<PathBuf>) -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    if let Some(flag) = flag {
+        let absolute = if flag.is_absolute() {
+            flag
+        } else {
+            cwd.join(flag)
+        };
+        return Ok(std::fs::canonicalize(&absolute).unwrap_or(absolute));
+    }
+
+    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+    match derive_workspace(&cwd) {
+        // Announced on stderr, not stdout: `fghj graph` pipes JSON to
+        // stdout, and silently operating on a directory the user never
+        // named is exactly the kind of helpfulness that needs to be
+        // visible. Suppressed when it derived the directory you were
+        // already standing in, which tells you nothing.
+        Some(derived) if derived != cwd => {
+            eprintln!(
+                "using workspace {} (derived from the current directory)",
+                derived.display()
+            );
+            Ok(derived)
+        }
+        Some(derived) => Ok(derived),
+        None => Ok(cwd),
+    }
+}
+
+/// The wired workspace containing `cwd`, according to `fghjd`.
+///
+/// Goes through the control API rather than reading `workspaces.json`
+/// directly because that file lives under root-only `/var/lib/fghjd` and
+/// this is the unprivileged CLI.
+///
+/// Every failure is `None`, never an error. The daemon may legitimately be
+/// down — `fghj graph` resolves a workspace without one at all — and an
+/// unreachable daemon should degrade to the old "current directory"
+/// behaviour, not turn a working command into a failing one.
+fn derive_workspace(cwd: &Path) -> Option<PathBuf> {
+    if !probe_daemon() {
+        return None;
+    }
+    let workspaces = http_get_json("/workspaces").ok()?;
+    let candidates: Vec<PathBuf> = workspaces
+        .as_array()?
+        .iter()
+        .filter_map(|w| w["workspace"].as_str())
+        .map(PathBuf::from)
+        .collect();
+    fghj::enclosing_workspace(cwd, &candidates)
+}
+
 fn graph(entry: String, workspace: Option<PathBuf>) -> Result<()> {
-    let workspace = fghj::resolve_workspace(Some(entry), workspace, None)?;
+    let workspace = fghj::resolve_workspace(Some(entry), Some(workspace_root(workspace)?), None)?;
     let g = fghj::resolver::resolve_universe(&workspace)?;
     println!("{}", serde_json::to_string_pretty(&g)?);
     Ok(())
@@ -185,12 +259,7 @@ fn wire(entry: String, workspace: Option<PathBuf>) -> Result<()> {
         );
     }
 
-    let workspace = workspace.unwrap_or_else(|| PathBuf::from("."));
-    let absolute_workspace = if workspace.is_absolute() {
-        workspace
-    } else {
-        std::env::current_dir()?.join(workspace)
-    };
+    let absolute_workspace = workspace_root(workspace)?;
 
     // `fghjd` runs as root and has no credentials of its own for private
     // remotes — captured here (as the real, unprivileged user) so the daemon
@@ -435,13 +504,7 @@ async fn exec_cmd(
         );
     }
 
-    let workspace = workspace.unwrap_or_else(|| PathBuf::from("."));
-    let absolute_workspace = if workspace.is_absolute() {
-        workspace
-    } else {
-        std::env::current_dir()?.join(workspace)
-    };
-    let canonical = std::fs::canonicalize(&absolute_workspace).unwrap_or(absolute_workspace);
+    let canonical = workspace_root(workspace)?;
 
     let workspaces = http_get_json("/workspaces")?;
     let id = workspaces

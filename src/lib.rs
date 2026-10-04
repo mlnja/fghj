@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -69,9 +69,102 @@ pub fn resolve_workspace(
     Ok(workspace)
 }
 
+/// The workspace `cwd` sits inside, chosen from `candidates` (the paths
+/// `GET /workspaces` reports as wired).
+///
+/// Exists so `fghj graph|wire|exec` can be run from anywhere inside a
+/// workspace — including deep inside one of its repos — instead of only from
+/// the workspace root. Without it, an omitted `--workspace` meant literally
+/// `.`, so running `fghj exec` from inside `aikido/aikifactory/internal/`
+/// looked for a workspace *there* and failed, which is not what anyone
+/// means.
+///
+/// **Deepest** match wins, not first. `daemon::registry::nesting_conflict`
+/// refuses to wire overlapping workspaces, so a nested pair should not
+/// arise — but an index written by an older `fghjd` can still contain one,
+/// and `load_from` warns about that rather than silently de-wiring a
+/// workspace the operator may have runs in. For that case the inner
+/// directory is the more specific answer, the same most-specific-match rule
+/// `query::resolve_route` uses for hostnames, and iteration order of
+/// `candidates` must not decide it.
+///
+/// Comparison is `Path::starts_with`, which is component-wise: a workspace
+/// at `/w/app` does not capture a `cwd` of `/w/app-legacy`, the way a naive
+/// string prefix would. Callers are responsible for passing canonical
+/// paths — a symlinked `cwd` and a real `candidate` are different strings
+/// and won't match.
+pub fn enclosing_workspace(cwd: &Path, candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .filter(|candidate| cwd.starts_with(candidate))
+        .max_by_key(|candidate| candidate.components().count())
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enclosing_workspace_matches_the_workspace_root_itself() {
+        let ws = PathBuf::from("/w/aikido");
+        assert_eq!(
+            enclosing_workspace(Path::new("/w/aikido"), std::slice::from_ref(&ws)),
+            Some(ws)
+        );
+    }
+
+    /// The whole point: any depth below the workspace resolves to it.
+    #[test]
+    fn enclosing_workspace_matches_from_deep_inside_a_repo() {
+        let ws = PathBuf::from("/w/aikido");
+        assert_eq!(
+            enclosing_workspace(
+                Path::new("/w/aikido/aikifactory/internal/config"),
+                std::slice::from_ref(&ws)
+            ),
+            Some(ws)
+        );
+    }
+
+    /// Nested workspaces: the inner one is the more specific answer, and
+    /// which one is listed first must not matter.
+    #[test]
+    fn enclosing_workspace_prefers_the_deepest_of_several() {
+        let outer = PathBuf::from("/w");
+        let inner = PathBuf::from("/w/aikido");
+        let cwd = Path::new("/w/aikido/aikifactory");
+
+        assert_eq!(
+            enclosing_workspace(cwd, &[outer.clone(), inner.clone()]),
+            Some(inner.clone())
+        );
+        assert_eq!(
+            enclosing_workspace(cwd, &[inner.clone(), outer]),
+            Some(inner)
+        );
+    }
+
+    /// Component-wise, not string-prefix: `/w/app-legacy` is not inside
+    /// `/w/app`. A `starts_with` on strings would say it is.
+    #[test]
+    fn enclosing_workspace_does_not_match_a_sibling_with_a_shared_prefix() {
+        let ws = PathBuf::from("/w/app");
+        assert_eq!(
+            enclosing_workspace(Path::new("/w/app-legacy/src"), &[ws]),
+            None
+        );
+    }
+
+    #[test]
+    fn enclosing_workspace_is_none_when_outside_every_workspace() {
+        let candidates = vec![PathBuf::from("/w/aikido"), PathBuf::from("/w/other")];
+        assert_eq!(
+            enclosing_workspace(Path::new("/tmp/scratch"), &candidates),
+            None
+        );
+        assert_eq!(enclosing_workspace(Path::new("/tmp/scratch"), &[]), None);
+    }
 
     #[test]
     fn resolve_workspace_creates_dir_without_entry() {
