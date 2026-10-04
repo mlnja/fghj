@@ -28,14 +28,20 @@ hand-maintain.
 
 ## One name, inside and out
 
-| | from your browser, `psql`, `curl` | from a container in the run |
-|---|---|---|
-| `minio.api.shop.fghj.internal` | host proxy, 443, trusted cert | the run's sidecar, 443, same cert |
-| `db.web.shop.fghj.raw.internal` | virtual IP NAT'd to 5432 | the container's own IP, 5432 |
+```bash title="from your laptop"
+psql -h db.web.shop.fghj.raw.internal -p 5432
+curl https://minio.api.shop.fghj.internal/
+```
 
-Same hostname, same port, same scheme. Nothing has to know which side of the
-network boundary it's on — so there's no `API_PUBLIC_URL` twin, and no URL
-getting rewritten on its way to the browser.
+```bash title="from inside any container in the run"
+psql -h db.web.shop.fghj.raw.internal -p 5432
+curl https://minio.api.shop.fghj.internal/
+```
+
+Byte-identical. One pair resolves through the host proxy and a virtual IP,
+the other through the run's sidecar and Docker's own network — and nothing
+on either side has to know which. So there's no `API_PUBLIC_URL` twin, and
+no URL getting rewritten on its way to the browser.
 
 Everything below falls out of that.
 
