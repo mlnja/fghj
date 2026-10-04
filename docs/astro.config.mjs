@@ -111,6 +111,7 @@ export default defineConfig({
         {
           label: 'Guides',
           items: [
+            { label: 'What fghj fixes', slug: 'guides/what-it-fixes' },
             { label: 'HTTP vs. raw: choosing a zone', slug: 'guides/networking-http-vs-raw' },
             { label: 'What fghj touches, and how to remove it', slug: 'guides/uninstalling' },
           ],
