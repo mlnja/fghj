@@ -28,6 +28,8 @@ hand-maintain.
 
 ## One name, inside and out
 
+<CardGrid>
+
 ```bash title="from your laptop"
 psql -h db.web.shop.fghj.raw.internal -p 5432
 curl https://minio.api.shop.fghj.internal/
@@ -37,6 +39,8 @@ curl https://minio.api.shop.fghj.internal/
 psql -h db.web.shop.fghj.raw.internal -p 5432
 curl https://minio.api.shop.fghj.internal/
 ```
+
+</CardGrid>
 
 Byte-identical. One pair resolves through the host proxy and a virtual IP,
 the other through the run's sidecar and Docker's own network — and nothing
