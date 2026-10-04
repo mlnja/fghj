@@ -1,64 +1,206 @@
 ---
 title: fghj
-description: Local development orchestration for multi-repo user flows. Spin up exactly the services a user journey needs, wired together with real HTTPS domains.
+description: Local development orchestration for multi-repo user flows. Every service gets a real hostname and a trusted HTTPS certificate, so presigned URLs open in the browser and every Postgres is on 5432.
 template: splash
 hero:
-  tagline: Local dev environments scoped to a user flow, not your whole microservice fleet.
+  tagline: |
+    Every service gets a real hostname and a real HTTPS certificate.
+    Presigned URLs open in the browser. Every Postgres is on 5432.
   actions:
     - text: Start the tutorial
       link: /tutorial/
       icon: right-arrow
       variant: primary
+    - text: What it fixes
+      link: "#a-presigned-url-you-can-paste-into-a-browser"
+      icon: down-caret
+      variant: minimal
     - text: View on GitHub
       link: https://github.com/mlnja/fghj
       icon: external
       variant: minimal
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-## Why fghj?
+`fghj` reads a small `.fghj.yaml` in each repo, follows the declared
+dependencies outward from whichever repos you actually have checked out, and
+brings up just that subgraph. No mega-repo, no `docker-compose.yml` to
+hand-maintain, no table of published ports to keep in your head.
 
-Testing one user journey shouldn't require booting every microservice you own.
-`fghj` reads a small `fghj.yaml` in each repo, follows declared dependencies
-outward from whichever repos you're actually working on, and brings up just
-that subgraph — with real `*.fghj.internal` HTTPS domains, trusted locally
-signed certs, and no `docker-compose.yml` to hand-maintain.
+Testing one user journey shouldn't require booting every microservice you
+own — but that's not the part that's hard to go back from. This is:
 
-<CardGrid stagger>
-  <Card title="Federated config" icon="puzzle">
-    No mega-repo. Every service declares its own dependencies in its own
-    `fghj.yaml` — peers, not a tree with one root.
+## A presigned URL you can paste into a browser
+
+Your app signs an S3 URL against the endpoint it knows, which inside a
+compose network is `http://minio:9000`. SigV4 covers the `Host` header. So
+the URL you hand to the browser names a host the browser can't resolve — and
+the moment you rewrite it to `localhost:9000`, the signature no longer
+matches what you signed:
+
+```xml
+<Error><Code>SignatureDoesNotMatch</Code></Error>
+```
+
+The usual workaround is two endpoints (`S3_ENDPOINT` and
+`S3_PUBLIC_ENDPOINT`), two clients, and a rewrite somewhere in the middle.
+
+With fghj there is one name, and it works from both sides:
+
+```yaml title=".fghj.yaml"
+environment:
+  S3_ENDPOINT: https://${FGHJ_SERVICE_FQDN_HTTP:minio}
+```
+
+`minio.api.shop.fghj.internal` resolves to the run's sidecar from inside the
+docker network and to the host proxy from your browser — **the same
+hostname, the same port 443, the same trusted certificate** either way. And
+the proxy is a byte relay that never rewrites the `Host` header, so the
+signature your SDK computed is exactly the signature MinIO verifies.
+
+## Every Postgres on 5432. At the same time.
+
+First one is `5432:5432`. The second is `5433:5432`. The third is `55432`
+because Docker picked it. Now your `.env`, your GUI client's saved
+connections and your teammate's notes all disagree, and you keep a mental
+lookup table of which number means which database.
+
+fghj publishes nothing you have to remember. Every raw node gets its own
+virtual IP out of a `/16` the daemon owns, NAT'd to the port the author
+*declared* — so the canonical port is the port, for all of them at once:
+
+```bash
+psql -h db.web.storefront.shop.fghj.raw.internal -p 5432
+psql -h db.api.billing.shop.fghj.raw.internal    -p 5432
+psql -h db.web.storefront.pr-123.shop.fghj.raw.internal -p 5432
+```
+
+Three different databases, three live connections, all on 5432. The third is
+in a review run standing beside the other two. The port went back to being a
+property of the protocol, and the hostname carries the identity.
+
+## Redirect URIs that don't change every restart
+
+A tunnel hands you a new URL on every boot, which you re-paste into the
+provider's console, which breaks it for everyone else testing against it.
+
+fghj's names are derived and stable, served over HTTPS with a certificate
+your system already trusts — so they're valid redirect URIs as they are:
+
+```yaml title=".fghj.yaml"
+environment:
+  OAUTH_REDIRECT_URI: https://${FGHJ_SERVICE_FQDN_HTTP}/auth/callback
+```
+
+And when something already has a hostname on file that you can't change,
+the service can answer on that too:
+
+```yaml title=".fghj.yaml"
+additional_hosts:
+  - app.acme.local
+```
+
+Because `.local` is a reserved, never-real TLD — as are `.test`,
+`.internal` and `.localhost` — that alias gets a certificate too, though
+only while a running container actually claims the route. An alias under a
+*real* public suffix (`app.acme.io`) is still routed, but only ever over
+plain HTTP: fghj will not mint browser-trusted certificates for names that
+exist on the internet.
+
+:::note[Browser redirects, not server-to-server]
+This works because the *browser* performs the OAuth redirect, and your
+browser is on the machine that can resolve these names. A webhook delivered
+from a third party's servers still can't reach a local-only hostname; for
+that you still need a tunnel.
+:::
+
+## Cookies that behave like production
+
+Cookies aren't scoped by port — [RFC 6265 §8.5](https://www.rfc-editor.org/rfc/rfc6265#section-8.5)
+is explicit that they "do not provide isolation by port". So
+`localhost:3000` and `localhost:3001` share one jar, and your storefront's
+session cookie quietly overwrites your admin app's. Meanwhile `Secure`,
+`SameSite=None` and the `__Host-` prefix can't be exercised over plain HTTP
+at all, so the auth flow you tested is not the auth flow you ship.
+
+Under fghj every service has a distinct hostname under its own parent
+domain, over real TLS. Cookie jars separate the way they do in production,
+`__Host-` and `Secure` work, cross-site `SameSite=None` is testable, and
+CORS preflight sees genuinely distinct origins.
+
+## Wildcard subdomains, each with a real certificate
+
+A multi-tenant app that routes on subdomain normally means an `/etc/hosts`
+edit per tenant. A static wildcard cert doesn't rescue you either: X.509
+wildcards match exactly one leftmost label ([RFC 6125](https://www.rfc-editor.org/rfc/rfc6125)),
+so `*.fghj.internal` could never cover a name like
+`acme.app.shop.fghj.internal`.
+
+fghj mints a leaf certificate per hostname, on first sight:
+
+```yaml title=".fghj.yaml"
+ports:
+  "3000":
+    primary: true
+    wildcard: true
+```
+
+```
+https://acme.app.shop.fghj.internal      ✓ trusted
+https://globex.app.shop.fghj.internal    ✓ trusted
+https://whatever-you-type.app.shop.fghj.internal   ✓ trusted
+```
+
+No `/etc/hosts` edit, no certificate to regenerate, no restart.
+
+## It doesn't take port 80
+
+Every other local-proxy setup binds `0.0.0.0:80` and now the project you
+*weren't* working on can't start its own server.
+
+`fghjd` binds 80 and 443 on `127.222.0.1` — a loopback alias it adds for
+itself — and never on `127.0.0.1` or `0.0.0.0`. Your nginx keeps serving and
+`curl http://127.0.0.1/` still reaches it. The address sits inside
+`127.0.0.0/8` deliberately: [RFC 1122](https://www.rfc-editor.org/rfc/rfc1122)
+forbids a loopback-destined packet from ever reaching the wire, so unlike a
+`10.x` alias it cannot collide with your VPN, your LAN, or your office
+network.
+
+## And while you're in there
+
+<CardGrid>
+  <Card title="Migrations as graph nodes" icon="list-format">
+    `kind: task` runs to completion and *gates* the services that need it —
+    ordered against the database it seeds, recorded, re-runnable. Not a
+    command you remember to type after everything boots.
   </Card>
-  <Card title="Real HTTPS, locally" icon="approve-check">
-    A local CA and a TLS-terminating reverse proxy issue trusted certs
-    on the fly for every `*.fghj.internal` domain your services get.
+  <Card title="Two environments side by side" icon="puzzle">
+    A named run gets its own network, containers, sidecar and domains. Review
+    a PR without tearing down what you were already doing.
   </Card>
-  <Card title="Fog-of-war visibility" icon="magnifier">
-    The graph only shows what's actually on disk. Selecting a user flow
-    highlights its slice — it never hides the rest.
+  <Card title="Fog-of-war graph" icon="magnifier">
+    The graph shows what's actually on disk. Selecting a flow highlights its
+    slice and dims the rest — it never hides it, so you can always see what
+    you'd be pulling in next.
   </Card>
-  <Card title="One shared environment" icon="rocket">
-    A default run tops up idempotently as you touch more of the graph,
-    plus disposable named runs that stand up their own isolated copy of it.
+  <Card title="Federated config" icon="document">
+    Every repo declares its own dependencies in its own `.fghj.yaml`. Peers,
+    not a tree with one root, and no central file to merge-conflict over.
+  </Card>
+  <Card title="Byte-transparent proxy" icon="random">
+    WebSockets and SSE pass straight through — after routing on SNI the proxy
+    relays bytes and rewrites no headers.
+  </Card>
+  <Card title="Leaves no trace" icon="close">
+    `sudo fghj uninstall` reverses all of it: the trusted root CA, the
+    resolver file, the loopback aliases, the pf rules, `/var/lib/fghjd`.
   </Card>
 </CardGrid>
 
-## At a glance
+## One file per repo
 
-```bash
-# Validate a repo's .fghj.yaml against the schema
-fghj validate ./.fghj.yaml
-
-# Resolve the full dependency graph from any repo and print it as JSON
-fghj graph git@github.com:acme/checkout-service.git
-
-# Register a workspace with the running daemon, then drive it from the UI
-fghj wire git@github.com:acme/checkout-service.git
-```
-
-```yaml
-# .fghj.yaml
+```yaml title=".fghj.yaml"
 version: "1.0"
 
 services:
@@ -70,6 +212,7 @@ services:
         primary: true
     environment:
       DATABASE_URL: postgres://app:dev@${FGHJ_SERVICE_FQDN:postgres}:5432/app
+      S3_ENDPOINT: https://${FGHJ_SERVICE_FQDN_HTTP:minio}
     dependencies:
       - kind: backing
         name: postgres
@@ -90,9 +233,34 @@ flows:
         repo: git@github.com:acme/payments-service.git
 ```
 
-That repo now answers at `https://checkout.<workspace>.fghj.internal` with a
-certificate your system already trusts, and its Postgres at
-`postgres.checkout.<workspace>.fghj.raw.internal:5432`. Neither address is
-written down anywhere — both are derived.
+```bash
+fghj wire git@github.com:acme/checkout-service.git
+```
 
-[Start the tutorial →](/tutorial/)
+That repo now answers at `https://checkout.shop.fghj.internal` with a
+certificate your system already trusts, and its Postgres at
+`postgres.checkout.shop.fghj.raw.internal:5432`. Neither address is written
+down anywhere — both are derived from the graph.
+
+<CardGrid>
+  <LinkCard
+    title="Start the tutorial"
+    href="/tutorial/"
+    description="Build a two-repo workspace from nothing, one chapter at a time. Start here if you want to understand fghj."
+  />
+  <LinkCard
+    title="Quickstart"
+    href="/getting-started/quickstart/"
+    description="The short version, if you already know what you're doing."
+  />
+  <LinkCard
+    title="HTTP vs. raw: choosing a zone"
+    href="/guides/networking-http-vs-raw/"
+    description="The two DNS zones, which macro to use, and the one pitfall that accounts for most bugs in this area."
+  />
+  <LinkCard
+    title="What fghj touches on your machine"
+    href="/guides/uninstalling/"
+    description="Every file, system setting, Docker resource and loopback alias it creates — and how to remove all of it."
+  />
+</CardGrid>
