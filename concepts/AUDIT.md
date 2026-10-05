@@ -200,10 +200,12 @@ Dockerfile.
 
 > `src/resolver/config.rs:29` · `src/runs/node_spec.rs:146` (`build_image` takes only dir, dockerfile, tag, platform)
 
-**Closed.** `#Build` gained `target`, `ssh` and `secrets` (with `#BuildSecret`),
-and `build_image` dispatches on whether the build actually needs BuildKit —
-classic builder otherwise, so every repo that builds today keeps the classic
-path's much better errors. `ssh: true` forwards the workspace owner's live
+**Closed.** `#Build` gained `target`, `ssh` and `secrets` (with `#BuildSecret`).
+`build_image` originally dispatched on whether the build actually needed
+BuildKit, keeping the classic builder's much better per-step errors for
+everything else; that split was later removed and every build now goes
+through BuildKit, because cache mounts worked only in repos that happened to
+declare a secret. See [[build-inputs]]. `ssh: true` forwards the workspace owner's live
 agent, re-derived per build, which is the mechanism this entry called out as
 ironically absent. Written up in [[build-inputs]].
 

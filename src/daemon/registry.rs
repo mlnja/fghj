@@ -77,14 +77,18 @@ fn nesting_conflict(candidate: &std::path::Path, existing: &std::path::Path) -> 
     }
     if candidate.starts_with(existing) {
         return Some(format!(
-            "{} is inside the already-wired workspace {}. Workspaces cannot              nest — wire it separately outside that directory, or stop the              outer workspace first.",
+            "{} is inside the already-wired workspace {}. Workspaces cannot \
+             nest — wire it separately outside that directory, or stop the \
+             outer workspace first.",
             candidate.display(),
             existing.display()
         ));
     }
     if existing.starts_with(candidate) {
         return Some(format!(
-            "{} contains the already-wired workspace {}. Workspaces cannot              nest — wire a directory that doesn't enclose it, or stop the              inner workspace first.",
+            "{} contains the already-wired workspace {}. Workspaces cannot \
+             nest — wire a directory that doesn't enclose it, or stop the \
+             inner workspace first.",
             candidate.display(),
             existing.display()
         ));
@@ -375,6 +379,15 @@ impl WorkspaceRegistry {
     /// and what `pf`/`/etc/resolver` were configured for can't disagree.
     pub fn states(&self) -> BTreeMap<String, Arc<state::WorkspaceState>> {
         self.actors.states()
+    }
+
+    /// The shared Docker client every workspace in this registry runs
+    /// through. Exposed for `/daemon/doctor`, which has `DaemonControl` but
+    /// no client of its own and must not make a second one: a fresh
+    /// connection would test whatever `connect_docker` resolves *now*, not
+    /// the daemon the running workspaces are actually using.
+    pub(crate) fn docker(&self) -> Arc<bollard::Docker> {
+        Arc::clone(&self.docker)
     }
 
     pub fn list(&self) -> Vec<(String, PathBuf)> {

@@ -4,16 +4,15 @@ use std::pin::Pin;
 
 use anyhow::{Context, Result, bail};
 use bollard::Docker;
-use bollard::body_full;
 use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::models::{
     ContainerCreateBody, EndpointSettings, HealthConfig, HostConfig, NetworkCreateRequest,
     NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum, VolumeCreateRequest,
 };
 use bollard::query_parameters::{
-    BuildImageOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
-    InspectContainerOptionsBuilder, ListVolumesOptionsBuilder, LogsOptionsBuilder,
-    RemoveContainerOptionsBuilder, RemoveVolumeOptionsBuilder,
+    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, InspectContainerOptionsBuilder,
+    ListVolumesOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
+    RemoveVolumeOptionsBuilder,
 };
 use futures_util::StreamExt;
 use futures_util::stream::Stream;
@@ -194,8 +193,7 @@ pub struct BuildOpts<'a> {
     pub target: Option<&'a str>,
     /// `#Build.secrets`, already resolved to absolute host paths — each entry
     /// is the `id` a `RUN --mount=type=secret,id=…` names and the file whose
-    /// bytes BuildKit should serve for it. Non-empty forces the BuildKit
-    /// path; see `build_image`.
+    /// bytes BuildKit should serve for it.
     pub secrets: &'a [(String, PathBuf)],
     /// The ssh-agent socket to forward as BuildKit's `default` ssh socket,
     /// for a Dockerfile doing `RUN --mount=type=ssh`. This is a resolved,
@@ -204,22 +202,6 @@ pub struct BuildOpts<'a> {
     /// agent of its own to forward — the whole point is to lend it the
     /// workspace owner's. `None` forwards nothing.
     pub ssh_auth_sock: Option<&'a str>,
-}
-
-impl BuildOpts<'_> {
-    /// Whether this build needs BuildKit rather than the classic builder.
-    ///
-    /// `args`, `target` and `platform` all work on both, so a repo that
-    /// declares none of `secrets`/`ssh` keeps building exactly the way it did
-    /// before these existed. That matters more than uniformity: the classic
-    /// path streams `error_detail.message` straight out of the daemon, while
-    /// bollard's BuildKit driver collapses a whole build into one
-    /// `Result<(), GrpcError>` with no progress and a much blunter error.
-    /// Paying that cost only when a feature actually demands it is the trade
-    /// `concepts/build-inputs.md` records.
-    fn needs_buildkit(&self) -> bool {
-        !self.secrets.is_empty() || self.ssh_auth_sock.is_some()
-    }
 }
 
 /// Serializes the process-global `SSH_AUTH_SOCK` mutation that BuildKit ssh
@@ -279,13 +261,21 @@ pub async fn pull_image(docker: &Docker, repository: &str, tag: &str) -> Result<
     Ok(())
 }
 
+/// Builds `opts.tag` from `opts.context_dir`, always through BuildKit.
+///
+/// There used to be a second, classic-builder path taken by any build that
+/// declared neither `secrets` nor `ssh`, because bollard's BuildKit driver
+/// gives up the classic path's per-step `error_detail.message` stream. That
+/// split is gone: BuildKit has been Docker's default builder since Engine
+/// 23.0, and keeping two builders meant `RUN --mount=type=cache` — the
+/// single most useful BuildKit feature for a dev loop — worked only in
+/// repos that happened to declare a secret for unrelated reasons. One
+/// builder, and a daemon too old to offer it is a failed build with a clear
+/// message rather than a silently different one. `fghj doctor` checks for it
+/// up front; see `concepts/build-inputs.md`.
 pub async fn build_image(docker: &Docker, opts: &BuildOpts<'_>) -> Result<()> {
     let tar_bytes = tar_build_context(opts.context_dir).await?;
-    if opts.needs_buildkit() {
-        build_image_buildkit(docker, opts, tar_bytes).await
-    } else {
-        build_image_classic(docker, opts, tar_bytes).await
-    }
+    build_image_buildkit(docker, opts, tar_bytes).await
 }
 
 async fn tar_build_context(context_dir: &Path) -> Result<Vec<u8>> {
@@ -303,57 +293,12 @@ async fn tar_build_context(context_dir: &Path) -> Result<Vec<u8>> {
     .context("tar task panicked")?
 }
 
-async fn build_image_classic(
-    docker: &Docker,
-    opts: &BuildOpts<'_>,
-    tar_bytes: Vec<u8>,
-) -> Result<()> {
-    let BuildOpts {
-        dockerfile,
-        tag,
-        platform,
-        args,
-        target,
-        ..
-    } = *opts;
-    let mut options_builder = BuildImageOptionsBuilder::default()
-        .dockerfile(dockerfile)
-        .t(tag)
-        .rm(true);
-    if let Some(platform) = platform {
-        options_builder = options_builder.platform(platform);
-    }
-    if let Some(target) = target {
-        options_builder = options_builder.target(target);
-    }
-    if !args.is_empty() {
-        let args: HashMap<&str, &str> =
-            args.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        options_builder = options_builder.buildargs(&args);
-    }
-    let options = options_builder.build();
-
-    let mut stream = docker.build_image(options, None, Some(body_full(tar_bytes.into())));
-    while let Some(item) = stream.next().await {
-        let info = item.context("docker build_image stream error")?;
-        if let Some(detail) = info.error_detail {
-            bail!(
-                "docker build -t {tag} failed: {}",
-                detail.message.unwrap_or_default()
-            );
-        }
-    }
-    Ok(())
-}
-
-/// The BuildKit path, taken only when `#Build` declares `secrets` or `ssh`.
-///
-/// Unlike `build_image_classic` this is a single round trip with no progress
-/// stream — bollard's `Build::docker_build` runs the whole solve and returns
-/// `Result<(), GrpcError>`. The image still lands in the daemon's local image
-/// store under `tag`, because the `Moby` driver asks for the `docker`
-/// exporter, so everything downstream (`create_container`, `spec_hash`'s
-/// image tag) is unchanged.
+/// One BuildKit solve, with no progress stream: bollard's
+/// `Build::docker_build` runs the whole thing and returns
+/// `Result<(), GrpcError>`. The image lands in the daemon's local image store
+/// under `tag`, because the `Moby` driver asks for the `docker` exporter, so
+/// everything downstream (`create_container`, `spec_hash`'s image tag) is
+/// unchanged.
 async fn build_image_buildkit(
     docker: &Docker,
     opts: &BuildOpts<'_>,
@@ -367,10 +312,8 @@ async fn build_image_buildkit(
     for (key, value) in opts.args {
         frontend = frontend.buildarg(key, value);
     }
-    if let Some(platform) = opts.platform
-        && let Some(platform) = parse_platform(platform)
-    {
-        frontend = frontend.platforms(&platform);
+    if let Some(platform) = opts.platform {
+        frontend = frontend.platforms(&parse_platform(platform)?);
     }
     for (id, path) in opts.secrets {
         // `SecretSource::Env` exists too, and is deliberately unreachable:
@@ -456,17 +399,24 @@ fn set_ssh_auth_sock(value: Option<&str>) {
 }
 
 /// Splits an OCI platform string (`linux/arm64`, `linux/arm/v7`) into
-/// BuildKit's structured form. Returns `None` for anything that isn't at
-/// least `os/arch`, which then simply builds for the daemon's own platform —
-/// the same thing that happened before `#Build` could carry secrets at all.
-fn parse_platform(platform: &str) -> Option<bollard::grpc::build::ImageBuildPlatform> {
+/// BuildKit's structured form.
+///
+/// Anything that isn't at least `os/arch` is an error rather than a silent
+/// fallback to the daemon's own platform. It used to be a fallback, which was
+/// defensible while the classic builder still handled most builds and passed
+/// `#Build.platform` through to Docker to reject itself; now that every build
+/// comes through here, swallowing it would mean `platform: arm64` (a common
+/// mistake — the arch alone, no os) quietly building for the host instead.
+fn parse_platform(platform: &str) -> Result<bollard::grpc::build::ImageBuildPlatform> {
     let mut parts = platform.split('/');
-    let os = parts.next()?;
-    let architecture = parts.next()?;
+    let os = parts.next().unwrap_or_default();
+    let architecture = parts.next().unwrap_or_default();
     if os.is_empty() || architecture.is_empty() {
-        return None;
+        bail!(
+            "`platform: {platform}` is not a valid OCI platform:              it needs at least os/arch, e.g. linux/arm64"
+        );
     }
-    Some(bollard::grpc::build::ImageBuildPlatform {
+    Ok(bollard::grpc::build::ImageBuildPlatform {
         architecture: architecture.to_string(),
         os: os.to_string(),
         variant: parts.next().map(str::to_string),
@@ -1168,52 +1118,6 @@ mod build_tests {
     }
 
     #[test]
-    fn a_build_with_neither_secrets_nor_ssh_stays_on_the_classic_builder() {
-        let args = BTreeMap::new();
-        let opts = BuildOpts {
-            context_dir: Path::new("."),
-            dockerfile: "Dockerfile",
-            tag: "t",
-            platform: None,
-            args: &args,
-            target: Some("builder"),
-            secrets: &[],
-            ssh_auth_sock: None,
-        };
-        assert!(!opts.needs_buildkit());
-    }
-
-    #[test]
-    fn a_secret_or_an_agent_forces_the_buildkit_path() {
-        let args = BTreeMap::new();
-        let secrets = vec![(String::from("npmrc"), PathBuf::from("/tmp/npmrc"))];
-        let base = BuildOpts {
-            context_dir: Path::new("."),
-            dockerfile: "Dockerfile",
-            tag: "t",
-            platform: None,
-            args: &args,
-            target: None,
-            secrets: &[],
-            ssh_auth_sock: None,
-        };
-        assert!(
-            BuildOpts {
-                secrets: &secrets,
-                ..base
-            }
-            .needs_buildkit()
-        );
-        assert!(
-            BuildOpts {
-                ssh_auth_sock: Some("/tmp/agent.sock"),
-                ..base
-            }
-            .needs_buildkit()
-        );
-    }
-
-    #[test]
     fn a_platform_string_splits_into_buildkits_structured_form() {
         let two = parse_platform("linux/arm64").expect("os/arch parses");
         assert_eq!(two.os, "linux");
@@ -1223,11 +1127,13 @@ mod build_tests {
         let three = parse_platform("linux/arm/v7").expect("os/arch/variant parses");
         assert_eq!(three.variant.as_deref(), Some("v7"));
 
-        // Anything the daemon couldn't have meant falls back to its own
-        // platform rather than erroring the build.
-        assert!(parse_platform("linux").is_none());
-        assert!(parse_platform("linux/").is_none());
-        assert!(parse_platform("").is_none());
+        // Anything the daemon couldn't have meant fails the build rather
+        // than quietly building for the host — `platform: arm64`, the arch
+        // with no os, is the mistake this catches.
+        for bad in ["linux", "linux/", "", "arm64"] {
+            let err = parse_platform(bad).expect_err("not a platform");
+            assert!(err.to_string().contains("os/arch"), "got: {err}");
+        }
     }
 
     /// The regression test for the bug E3 turned up: `build.args` was parsed,

@@ -79,10 +79,10 @@ Routes, grouped by what they front:
 - **Exec**: `GET .../nodes/{node_id}/exec/ws`, the one WebSocket route —
   see below.
 - **Daemon control and telemetry**: `POST /daemon/start`|`stop`,
-  `GET /daemon/status`, `GET /daemon/logs`, `GET /daemon/net-status`. These
-  are the only routes with no `?workspace=` — they hang off `DaemonControl`
-  rather than `WorkspaceRegistry`, because they are about the process, not
-  about anything wired into it.
+  `GET /daemon/status`, `GET /daemon/logs`, `GET /daemon/net-status`,
+  `GET /daemon/doctor`. These are the only routes with no `?workspace=` —
+  they hang off `DaemonControl` rather than `WorkspaceRegistry`, because they
+  are about the process, not about anything wired into it.
 - **Everything else**: falls back to `static_handler`, which serves the
   embedded Svelte build (`server::UI_DIST`, baked in at compile time via
   `include_dir!("$CARGO_MANIFEST_DIR/ui/dist")`) with an SPA-style
@@ -155,6 +155,16 @@ endpoints, so `raw_net` doesn't have to carry a domain field through its
 internal state purely for display. See [[two-zones-and-raw-ports]] for what
 those routes are.
 
+`GET /daemon/doctor` extends the same rule from those three integration
+points to the whole host surface fghj depends on, and turns the readings into
+verdicts — see [[preflight-checks]]. It's on the daemon rather than in the
+CLI for a reason the `?workspace=`-less grouping above almost explains on its
+own: the checks need the Docker client the workspaces actually run through,
+the activation state, and root to read the CA under `/var/lib/fghjd`. The CLI
+contributes only the two checks it alone can make (its own socket connects,
+`cue` is on `PATH`) and prints those first, so a broken socket answers the
+question before there's anything to ask.
+
 ## Fail fast, in a specific order
 
 `run_control_api` deliberately orders its startup steps so failures surface
@@ -170,7 +180,7 @@ without any TLS proxy in front of it.
 
 ## Status
 
-Implemented: `src/main.rs` (`validate`/`graph`/`wire`/`exec`/`daemon stop`),
+Implemented: `src/main.rs` (`validate`/`graph`/`wire`/`exec`/`daemon stop`/`doctor`),
 `src/bin/fghjd.rs`, `src/daemon/` (`WorkspaceRegistry`, the full route
 table, `spawn_reconciler`, `connect_docker`'s Docker-context fallback for
 Docker Desktop/OrbStack/colima), `src/web/api/` (the axum router and its

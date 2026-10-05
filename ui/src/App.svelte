@@ -139,6 +139,12 @@
     return await res.json();
   }
 
+  async function fetchDaemonDoctor() {
+    const res = await fetch('/daemon/doctor');
+    if (!res.ok) return null;
+    return await res.json();
+  }
+
   async function downloadNode(nodeId) {
     await fetch(withWs(`/pull/${encodeURIComponent(nodeId)}`), { method: 'POST' });
   }
@@ -599,6 +605,7 @@
       onClose={() => (telemetryOpen = false)}
       onFetchDaemonLogs={fetchDaemonLogs}
       onFetchNetStatus={fetchDaemonNetStatus}
+      onFetchDoctor={fetchDaemonDoctor}
     />
   {/if}
 </div>

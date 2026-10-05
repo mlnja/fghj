@@ -10,8 +10,8 @@ are worth knowing before you write one:
   mistake that makes a published port connect and then hang.
 - **A healthcheck needs a binary, not a shell**, because the images you
   want for Go don't have one.
-- **`RUN --mount=type=cache` won't work** unless the repo also declares
-  `build.secrets` or `build.ssh` — see below.
+- **`RUN --mount=type=cache` is worth using** — fghj builds everything
+  through BuildKit, and a Go rebuild is where that pays off most.
 - **SIGTERM kills a Go process outright** unless you handle it.
 
 ## A service, end to end
@@ -114,25 +114,31 @@ healthcheck:
   test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/health"]
 ```
 
-### Build caching: layers yes, cache mounts no
+### Build caching: layers and cache mounts
 
-fghj builds with Docker's **classic builder** and only switches to BuildKit
-when a repo declares `build.secrets` or `build.ssh` — the classic path
-streams the daemon's own per-step error messages, which is worth more during
-development than uniformity.
-
-So the `COPY go.mod go.sum` / `go mod download` split above is doing real
-work, and this is a build error rather than a speed-up:
+fghj builds every image through **BuildKit**, with no classic-builder
+fallback, so cache mounts are available to you unconditionally. Go gets more
+out of them than most languages, because `go build` keeps a compiled-package
+cache that is otherwise thrown away with the build stage every time:
 
 ```docker
-# Needs BuildKit. Fails on the classic builder with
-# "the --mount option requires BuildKit".
-RUN --mount=type=cache,target=/root/.cache/go-build go build ./...
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 go build -o /out/server ./cmd/server
 ```
 
-If you want cache mounts, the repo has to be on the BuildKit path anyway for
-another reason (a private module, a build secret). Don't declare `build.ssh`
-just to get there.
+That survives across builds, which is the difference between recompiling your
+dependencies on every change and recompiling only what you touched.
+
+Keep the `COPY go.mod go.sum` / `go mod download` split as well. The two
+mechanisms cover different failures: the layer split means an edit to your
+own code doesn't re-download modules at all, while the cache mount means a
+change to `go.mod` — which does invalidate that layer — still doesn't start
+from an empty cache.
+
+If a build fails with `the --mount option requires BuildKit`, your Docker
+daemon is too old (BuildKit needs Engine 18.09+, and has been the default
+since 23.0). `fghj doctor` reports that directly.
 
 ### Private modules
 
@@ -152,9 +158,7 @@ RUN --mount=type=ssh \
 ```
 
 The agent is the workspace owner's, the same one fghj already lends to `git
-clone` — a repo's config can ask for the socket, never for a key. This is
-one of the two things that put the build on BuildKit, so cache mounts work
-here too.
+clone` — a repo's config can ask for the socket, never for a key.
 
 ### Graceful shutdown
 
@@ -232,7 +236,7 @@ CMD ["air"]
         container: /src
 ```
 
-`target` is `docker build --target`, and it works on the classic builder.
+`target` is plain `docker build --target`.
 Mounting your checkout at `/src` is what makes `air` see your edits; because
 the mount shadows everything the stage copied there, keep the module cache
 out of the mounted tree (it's at `/go/pkg/mod`, which is why the `COPY`/`go
@@ -351,7 +355,7 @@ public internet.
 | Symptom | Cause |
 |---|---|
 | Port connects, nothing answers | Listening on `127.0.0.1`. Use `":"+port`. |
-| `the --mount option requires BuildKit` | Cache mount on the classic builder — see above. |
+| `the --mount option requires BuildKit` | Docker daemon too old for BuildKit. Run `fghj doctor`. |
 | Healthcheck always fails | No shell or `curl` in the final image. Use a `-healthcheck` flag or `alpine` + `wget`. |
 | Container dies mid-request on stop | No SIGTERM handler. |
 | `permission denied` on start | `chmod +x docker-entrypoint.sh`. |

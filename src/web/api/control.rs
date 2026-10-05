@@ -1,4 +1,4 @@
-//! The `/daemon/*` endpoints: start, stop, status, logs, net-status.
+//! The `/daemon/*` endpoints: start, stop, status, logs, net-status, doctor.
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -14,7 +14,7 @@ use serde::Deserialize;
 use crate::daemon::control::DaemonControl;
 use crate::state::query;
 use crate::web::proxy;
-use crate::{daemon_log, dns, hosts_file, raw_net};
+use crate::{daemon_log, dns, doctor, hosts_file, raw_net};
 
 /// `fghj daemon start` — reconciles `fghjd` back into the active state
 /// (rebinds DNS/80/443, resyncs `/etc/hosts`). Idempotent: calling it while
@@ -123,4 +123,18 @@ pub(crate) async fn get_daemon_net_status(State(daemon): State<Arc<DaemonControl
         "last_reconcile_ms": daemon.last_reconcile_ms(),
     }))
     .into_response()
+}
+
+/// `fghj doctor` and the telemetry drawer's "Doctor" tab — see
+/// [`crate::doctor`] for what it probes and why each probe reads real host
+/// state instead of the daemon's own idea of it.
+///
+/// Lives on the daemon rather than in the CLI because every interesting
+/// check needs something only this process has: the Docker client the
+/// workspaces actually run through, the activation state, and root (the CA
+/// path under `/var/lib/fghjd` isn't readable by the invoking user). The CLI
+/// adds its own two local checks on top — see `doctor::client_checks`.
+pub(crate) async fn get_daemon_doctor(State(daemon): State<Arc<DaemonControl>>) -> Response {
+    let docker = daemon.registry.docker();
+    Json(doctor::daemon_report(&docker, &daemon).await).into_response()
 }

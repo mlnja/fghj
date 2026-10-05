@@ -260,14 +260,19 @@ fn pem_to_der(pem: &str) -> Result<CertificateDer<'static>> {
 /// *modification* — unlike `add-trusted-cert` it never triggers an
 /// interactive Authorization Services prompt, so this is safe (and cheap) to
 /// call unconditionally, including from a non-macOS caller that will never
-/// invoke it.
-fn is_trusted_on_macos(ca_cert_path: &Path) -> bool {
+/// invoke it. That promptlessness is also why `doctor` can report trust as
+/// a read-only check rather than having to attempt the install to find out.
+pub fn is_trusted_on_macos(ca_cert_path: &Path) -> bool {
     Command::new("security")
         .args(["verify-cert", "-c"])
         .arg(ca_cert_path)
         .args(["-k", SYSTEM_KEYCHAIN])
-        .status()
-        .map(|s| s.success())
+        // `output` rather than `status` purely to capture the subprocess's
+        // own chatter: `verify-cert` prints "certificate verification
+        // successful" on every call, and `doctor` calls this on demand, so
+        // inheriting stdout would scatter that line through `fghjd`'s log.
+        .output()
+        .map(|o| o.status.success())
         .unwrap_or(false)
 }
 

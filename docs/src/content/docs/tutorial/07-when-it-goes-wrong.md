@@ -122,22 +122,35 @@ environment is the only place the expanded templates are visible. A literal
 match any sibling: usually a typo, or a node you didn't actually declare a
 dependency on.
 
-**3. The daemon.** The ⚡ button opens `fghjd`'s own telemetry: its log, plus
-DNS and port-forwarding status. Start from the CLI:
+**3. The daemon.** The ⚡ button opens `fghjd`'s own telemetry: its log, DNS
+and port-forwarding status, and a **Doctor** tab. Start from the CLI:
 
 ```bash
-fghj daemon status
+fghj doctor
 ```
+
+That's the one to reach for when nothing resolves and nothing connects,
+because every host-level failure — idle daemon, missing loopback alias,
+something else holding 443, a stale resolver file, untrusted CA — produces
+the same refused connection in the browser. [`fghj
+doctor`](/cli/doctor/) checks all of them and names the one that's actually
+wrong, with the command to fix it. `fghj daemon status` is the narrower
+question: is the daemon up, and is it active.
 
 ## The specific things that go wrong
 
-**A domain doesn't resolve at all.** Check `fghj daemon status` first. If
-`fghjd` is running but idle it has released ports 80/443, its loopback alias and DNS;
-`fghj daemon start` reconciles it back to active. On macOS the split-DNS hook
-is `/etc/resolver/fghj.internal` — if that file is gone, `fghj daemon
-restart` rewrites it.
+**A domain doesn't resolve at all.** Run `fghj doctor`. If `fghjd` is running
+but idle it has released ports 80/443, its loopback alias and DNS; `fghj
+daemon start` reconciles it back to active. On macOS the split-DNS hook is
+`/etc/resolver/fghj.internal` — if that file is gone, `fghj daemon restart`
+rewrites it. The file being *present* isn't proof it works: the DNS port in
+it is assigned fresh on each `fghjd` start, so one left behind by a previous
+process points at nothing. That's exactly the case doctor's `fghj.internal
+resolves through the OS` check catches, by resolving a name the way your
+browser would instead of reading the file.
 
-**The browser shows a certificate warning.** The local CA isn't trusted.
+**The browser shows a certificate warning.** The local CA isn't trusted —
+doctor's `root CA trusted by the system` check says so directly.
 `fghjd` verifies and re-installs its own CA into the system keychain on every
 start, so a restart usually fixes it. It only ever writes when trust is
 genuinely absent, which is why it can do that check every time.

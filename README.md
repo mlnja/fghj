@@ -91,6 +91,7 @@ install its root CA into the system trust store, and edit `/etc/hosts`:
 ```bash
 sudo fghjd            # foreground; supervise with a launchd LaunchDaemon for real use
 fghj daemon status    # -> "fghjd is running and active"
+fghj doctor           # Docker, BuildKit, ports, DNS, CA — all checked against the machine
 ```
 
 Full details, including uninstall cleanup:
@@ -104,6 +105,7 @@ fghj graph .                        # resolve the whole graph, print JSON
 fghj wire .                         # register the workspace with the daemon
 fghj exec db.web.storefront -- psql -U shop shop
 fghj daemon {start,stop,restart,status}
+fghj doctor                         # is anything fghj needs from this host missing?
 ```
 
 Runs are started from the UI at `https://fghj.internal/`. `fghj wire` prints

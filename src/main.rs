@@ -6,6 +6,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use fghj::doctor::Verdict;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -54,6 +55,11 @@ enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Check that everything fghj needs from this machine is actually
+    /// there: Docker with BuildKit, the proxy's ports and loopback alias,
+    /// OS DNS routing, and the trusted root CA. Exits non-zero if anything
+    /// is broken
+    Doctor,
     /// Remove everything fghj installed on this machine: the trusted root
     /// CA, /var/lib/fghjd, and all system configuration. Needs root
     Uninstall {
@@ -679,6 +685,72 @@ fn daemon_status() -> Result<()> {
     Ok(())
 }
 
+/// Renders one `doctor::Check` as a line, with its hint indented under it.
+/// The mark is a character rather than a color so the output survives a pipe,
+/// a CI log and a pasted bug report intact.
+fn print_check(check: &fghj::doctor::Check) {
+    let mark = match check.verdict {
+        Verdict::Pass => "\u{2713}",
+        Verdict::Warn => "!",
+        Verdict::Fail => "\u{2717}",
+    };
+    println!("{mark} {}: {}", check.title, check.detail);
+    if let Some(hint) = &check.hint {
+        println!("    \u{2192} {hint}");
+    }
+}
+
+/// `fghj doctor` — the two client-side checks, then the daemon's full
+/// report. Deliberately prints the client checks *before* asking the daemon
+/// for anything: when the socket is the thing that's broken, the first line
+/// of output is already the answer, and there's nothing to ask.
+fn doctor() -> Result<()> {
+    let client = fghj::doctor::client_checks();
+    for check in &client {
+        print_check(check);
+    }
+
+    if !probe_daemon() {
+        println!();
+        bail!(
+            "fghjd isn't running, so the rest of the checks (Docker, ports, DNS, CA) \
+             can't run — start it with `sudo fghjd`"
+        );
+    }
+
+    // A `fghjd` that predates this subcommand has no `/daemon/doctor` route,
+    // and the router's fallback serves the embedded UI — so the failure there
+    // is "that isn't JSON", which on its own reads like a daemon bug rather
+    // than a version skew.
+    let resp = http_get_json("/daemon/doctor").context(
+        "could not get a doctor report from fghjd — if the response above is HTML, the \
+         running fghjd is older than this CLI and has no doctor endpoint; restart it on \
+         the current build",
+    )?;
+    let report: fghj::doctor::Report = serde_json::from_value(resp)
+        .context("fghjd returned a doctor report this version of fghj can't read")?;
+    for check in &report.checks {
+        print_check(check);
+    }
+
+    let failures = report
+        .checks
+        .iter()
+        .chain(client.iter())
+        .filter(|c| c.verdict == Verdict::Fail)
+        .count();
+    println!();
+    if failures == 0 {
+        println!("all clear");
+        return Ok(());
+    }
+    // Non-zero exit without an `anyhow` message: the failures were already
+    // printed in place, each next to its own hint, and re-stating them as a
+    // trailing error would just say the same thing twice.
+    println!("{failures} check(s) failed");
+    std::process::exit(1);
+}
+
 // Only `exec` is genuinely async (it needs a live duplex WebSocket) — every
 // other subcommand is plain blocking I/O, called directly from here same as
 // before `main` grew a runtime.
@@ -696,6 +768,7 @@ async fn main() -> Result<()> {
             DaemonAction::Restart => daemon_restart(),
             DaemonAction::Status => daemon_status(),
         },
+        Commands::Doctor => doctor(),
         Commands::Uninstall {
             yes,
             keep_ca,

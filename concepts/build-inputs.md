@@ -3,7 +3,7 @@
 > **Status:** implemented. Language in `schema/component.cue` (`#Build`,
 > `#BuildSecret`) and `src/resolver/` (`config::Build`, `graph::NodeBuild`,
 > `graph::NodeBuildSecret`); transport in `src/docker.rs`
-> (`BuildOpts`, `build_image`, `build_image_classic`, `build_image_buildkit`,
+> (`BuildOpts`, `build_image`, `build_image_buildkit`,
 > `solve_on_dedicated_thread`, `SSH_AUTH_SOCK_ENV`); resolution in
 > `src/runs/node_spec.rs` (`build_node_image`, `resolve_build_secrets`);
 > drift in `src/runs/spec.rs`. Closes [[AUDIT]] E3.
@@ -51,8 +51,8 @@ services:
 Every field is optional and every default is the old behaviour, so a config
 written before these existed resolves to exactly the build it always did.
 
-`target` is the one that needed no new machinery at all — the classic builder
-has always supported it, it simply was not plumbed. `target: dev` against
+`target` is the one that needed no new machinery at all — every builder has
+always supported it, it simply was not plumbed. `target: dev` against
 `target: prod` off one multi-stage Dockerfile is the standard pattern; without
 it a repo needs a second Dockerfile.
 
@@ -84,32 +84,42 @@ If `ssh: true` is set and no live agent can be found, the node fails with a
 message naming `fghj wire`. Building anyway would produce a Dockerfile-level
 failure that looks like a network problem.
 
-## Two builders, chosen per build
+## One builder
 
-`build_image` dispatches on `BuildOpts::needs_buildkit()`:
+`build_image` goes through BuildKit, always. There is no dispatch and no
+second path.
 
-| declares | builder | why |
-|---|---|---|
-| neither `secrets` nor `ssh` | classic | `args`, `target` and `platform` all work there |
-| either one | BuildKit | nothing else can mount a secret or a socket |
+There used to be. `BuildOpts::needs_buildkit()` chose the classic builder
+for any build declaring neither `secrets` nor `ssh`, on the grounds that
+bollard's BuildKit driver collapses an entire solve into one
+`Result<(), GrpcError>` — no progress stream, and a much blunter error than
+the classic path's `error_detail.message`, which comes straight out of the
+daemon and names the failing step. Keeping the better errors for the builds
+that didn't need BuildKit looked like a free win.
 
-Uniformity was the obvious alternative and was rejected. bollard's BuildKit
-driver collapses an entire solve into one `Result<(), GrpcError>` — no
-progress stream, and a much blunter error than the classic path's
-`error_detail.message`, which comes straight out of the daemon and names the
-failing step. Every repo that exists today builds fine on the classic path, so
-they keep its better errors, and only a build that actually demands BuildKit
-pays for it.
+It wasn't free. It meant `RUN --mount=type=cache` — the single most useful
+BuildKit feature for a dev loop, and the thing that turns a Go or Node
+rebuild from a minute into seconds — worked only in repos that happened to
+declare a secret for some unrelated reason. Two builders also means two sets
+of behavior to reason about for every other feature: a build that works today
+can break tomorrow because someone added `ssh: true` and silently moved it to
+the other builder.
 
-The cost of the split is real and worth naming: a Dockerfile using
-`RUN --mount=type=cache` works only if that build *also* declares a secret or
-`ssh`. Nothing forces BuildKit on otherwise. An explicit opt-in knob is the
-obvious follow-up if that bites.
+BuildKit has been the default builder in Docker Engine since 23.0 (February
+2023), so the compatibility argument for keeping the classic path had already
+expired. A daemon too old to offer BuildKit is now a failed build with a
+message saying so, rather than a silently different one — and `fghj doctor`
+([[preflight-checks]]) reports it up front instead of waiting for the first
+build to discover it.
 
-The built image lands in the daemon's local image store under the same tag
-either way — the `Moby` driver asks for the `docker` exporter — so
+The blunter error message is the price, paid uniformly. It's visible in
+`build_image_buildkit`'s own error context rather than hidden behind a
+condition nobody can predict.
+
+The built image lands in the daemon's local image store under the requested
+tag — the `Moby` driver asks for the `docker` exporter — so
 `create_container`, `spec_hash`'s image field and everything else downstream
-are unchanged by which path ran.
+see exactly what they did before.
 
 ## Two things bollard forced
 

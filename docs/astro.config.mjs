@@ -133,6 +133,7 @@ export default defineConfig({
             { label: 'fghj wire', slug: 'cli/wire' },
             { label: 'fghj exec', slug: 'cli/exec' },
             { label: 'fghj daemon', slug: 'cli/daemon' },
+            { label: 'fghj doctor', slug: 'cli/doctor' },
             { label: 'fghj uninstall', slug: 'cli/uninstall' },
             { label: 'fghjd (superdaemon)', slug: 'cli/fghjd' },
           ],

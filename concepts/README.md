@@ -69,7 +69,7 @@ it in the audit's tracker — the concept files stay the durable record.
 | [[fog-of-war-visibility]] | What's on the graph is driven by what's pulled to disk, not by flow membership — flows are a highlight layer, not a visibility filter. |
 | [[terminating-nodes]] | Seeds and migrations are a third node kind that runs to completion, not a service with a clever restart policy — because "exited" means success for one and drift for the other. |
 | [[language-boundaries]] | What `.fghj.yaml` deliberately cannot say — no host-process node kind, no branch on an edge — and how to tell a boundary from a missing knob. |
-| [[build-inputs]] | A build may carry `target`, file secrets and the workspace owner's forwarded ssh-agent — but the credential path comes from `WorkspaceOwner`, never from the repo's own config, and BuildKit is used only when a build actually needs it. |
+| [[build-inputs]] | A build may carry `target`, file secrets and the workspace owner's forwarded ssh-agent — but the credential path comes from `WorkspaceOwner`, never from the repo's own config, and every build goes through BuildKit, with no classic-builder fallback. |
 
 ## Subsystem guides
 
@@ -90,6 +90,7 @@ it in the audit's tracker — the concept files stay the durable record.
 | [[docker-and-downloads]] | Image builds, container lifecycle, and the background clone/pull job registry the UI polls. |
 | [[control-api-and-cli]] | The axum control API, the `fghj`/`fghjd` process split, and the CLI's own hand-rolled HTTP client. |
 | [[ui-architecture]] | The Svelte app's state model, the three tabs (Repos/Actual/Config), the graph layout algorithm, and the polling model that keeps it live. |
+| [[preflight-checks]] | `fghj doctor` and the Doctor tab: six host dependencies that all fail with the same symptom, why every check reads the machine instead of fghjd's intent, and why `Warn` doesn't set the exit code. |
 
 ## Cross-cutting concerns
 
@@ -123,6 +124,7 @@ be compared.
 | `src/runs/node_spec.rs`, `src/runs/start_node.rs` (`debug_wait_overrides`) | [[debugging-in-containers]], [[config-drift]] |
 | `src/docker.rs`, `src/downloads.rs` | [[docker-and-downloads]], [[build-inputs]] |
 | `src/web/api/`, `src/daemon/`, `src/daemon_log.rs`, `src/main.rs`, `src/bin/fghjd.rs` | [[control-api-and-cli]] |
+| `src/doctor.rs` | [[preflight-checks]] |
 | `Justfile`, `.github/workflows/`, `sidecar/Dockerfile`, `.dockerignore` | [[release-and-delivery]], [[in-network-sidecar]] |
 | `src/web/ui.rs`, `ui/src/**` | [[ui-architecture]] |
 | `schema/*.cue` | [[config-language]]; referenced throughout — an authoring aid for `.fghj.yaml` (editors, agents, CI, `fghj validate`), **not** what the daemon trusts. The Rust types that deserialize it are the enforcing boundary; the schema's obligation is only to never accept something the daemon would reject, which `resolver::name`'s drift test checks by reading these files |

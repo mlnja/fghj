@@ -10,6 +10,7 @@ pub mod daemon;
 pub mod daemon_log;
 pub mod dns;
 pub mod docker;
+pub mod doctor;
 pub mod downloads;
 pub mod effects;
 pub mod hosts_file;

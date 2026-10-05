@@ -1,7 +1,7 @@
 <script>
   import SideDrawer from './SideDrawer.svelte';
 
-  let { onClose, onFetchDaemonLogs, onFetchNetStatus } = $props();
+  let { onClose, onFetchDaemonLogs, onFetchNetStatus, onFetchDoctor } = $props();
 
   let activeTab = $state('logs');
 
@@ -35,6 +35,38 @@
     netStatus = await onFetchNetStatus();
   }
 
+  // Doctor tab: fetched once when the tab is opened, and after that only when
+  // asked. Unlike the other two this is deliberately not polled — every check
+  // shells out to the OS (ifconfig, getaddrinfo, `security verify-cert`, TCP
+  // connects) and none of what it measures changes on its own, so a timer
+  // would spend real work re-proving the same thing. A failed check is
+  // something you go fix and then re-run, which is a button.
+  //
+  // Loaded from the tab's own click rather than from the `$effect` below:
+  // `runDoctor` writes the same state it reads to guard itself, and doing
+  // that inside a tracked effect makes the effect re-run on its own writes.
+  // The drawer always opens on `logs`, so a click is the only way in here.
+  let doctorChecks = $state(null);
+  let doctorBusy = $state(false);
+  let doctorAt = $state(null);
+
+  async function runDoctor() {
+    if (!onFetchDoctor || doctorBusy) return;
+    doctorBusy = true;
+    try {
+      const report = await onFetchDoctor();
+      doctorChecks = report?.checks ?? [];
+      doctorAt = Date.now();
+    } finally {
+      doctorBusy = false;
+    }
+  }
+
+  function openDoctor() {
+    activeTab = 'doctor';
+    if (doctorChecks === null) runDoctor();
+  }
+
   $effect(() => {
     if (activeTab === 'logs') {
       pollLogs();
@@ -47,6 +79,8 @@
       return () => clearInterval(timer);
     }
   });
+
+  const MARKS = { pass: '\u2713', warn: '!', fail: '\u2717' };
 
   function formatTime(ms) {
     return new Date(ms).toLocaleTimeString();
@@ -71,6 +105,7 @@
   <div class="tabs">
     <div class="tab" class:active={activeTab === 'logs'} onclick={() => (activeTab = 'logs')}>Logs</div>
     <div class="tab" class:active={activeTab === 'network'} onclick={() => (activeTab = 'network')}>DNS / DNAT</div>
+    <div class="tab" class:active={activeTab === 'doctor'} onclick={openDoctor}>Doctor</div>
   </div>
 
   {#if activeTab === 'logs'}
@@ -83,7 +118,7 @@
             .join('\n')}</pre>
       {/if}
     </div>
-  {:else}
+  {:else if activeTab === 'network'}
     <div class="net">
       {#if !netStatus}
         <div class="empty">loading…</div>
@@ -127,6 +162,38 @@
         </div>
       {/if}
     </div>
+  {:else}
+    <div class="net">
+      <div class="doc-head">
+        <div class="net-meta">
+          read from the machine itself{#if doctorAt}, <b>{formatAge(doctorAt)}</b>{/if}
+        </div>
+        <button class="rerun" onclick={runDoctor} disabled={doctorBusy}>
+          {doctorBusy ? 'checking…' : 're-run'}
+        </button>
+      </div>
+
+      {#if doctorChecks === null}
+        <div class="empty">checking…</div>
+      {:else if !doctorChecks.length}
+        <div class="empty">fghjd returned no checks</div>
+      {:else}
+        <div class="section">
+          {#each doctorChecks as c}
+            <div class="check {c.verdict}">
+              <div class="check-head">
+                <span class="mark">{MARKS[c.verdict] ?? '?'}</span>
+                <span class="check-title">{c.title}</span>
+              </div>
+              <div class="check-detail">{c.detail}</div>
+              {#if c.hint}
+                <div class="check-hint">→ {c.hint}</div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
   {/if}
 </SideDrawer>
 
@@ -157,4 +224,30 @@
   .row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 8px; border-radius: 4px; font: 500 11.5px var(--font-mono); background: var(--panel-2); margin-bottom: 3px; }
   .row .k { color: var(--ink); }
   .row .v { color: var(--ink-dim); word-break: break-all; text-align: right; }
+
+  .doc-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .rerun {
+    border: 1px solid var(--line-strong); background: var(--panel-2); color: var(--ink);
+    border-radius: 4px; padding: 5px 12px; cursor: pointer;
+    font: 700 10px var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .rerun:disabled { color: var(--ink-faint); cursor: default; }
+
+  .check {
+    padding: 8px 10px; border-radius: 4px; background: var(--panel-2); margin-bottom: 4px;
+    border-left: 3px solid var(--line-strong);
+  }
+  /* Verdict carries a shape as well as a color — the mark glyph — so the
+     three states stay distinguishable without relying on hue. */
+  .check.pass { border-left-color: #4ac97e; }
+  .check.warn { border-left-color: #d9a73c; }
+  .check.fail { border-left-color: #e05c5c; }
+  .check-head { display: flex; align-items: baseline; gap: 8px; }
+  .mark { font: 700 12px var(--font-mono); }
+  .check.pass .mark { color: #4ac97e; }
+  .check.warn .mark { color: #d9a73c; }
+  .check.fail .mark { color: #e05c5c; }
+  .check-title { font: 700 11.5px var(--font-mono); color: var(--ink); }
+  .check-detail { font: 500 11.5px var(--font-mono); color: var(--ink-dim); margin: 3px 0 0 20px; word-break: break-word; }
+  .check-hint { font: 500 11.5px var(--font-mono); color: var(--ink); margin: 4px 0 0 20px; word-break: break-word; }
 </style>

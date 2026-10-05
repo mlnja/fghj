@@ -103,12 +103,21 @@ fresh from `graph.nodes`/`graph.edges` on every render (`$derived`):
   first) with its live log — the one place to see a `pull-all` or
   individual clone's raw git output.
 - **`TelemetryDrawer`** (the "⚡" header button): the daemon's own view of
-  itself, not any workspace's — two tabs, `Logs` (the `daemon_log` ring
-  buffer) and `DNS / DNAT`, the latter listing the managed `/etc/hosts`
-  block, the `/etc/resolver` zones with the ephemeral port each points at,
-  and the live `pf` NAT routes backing the raw zone. This is the answer to
-  "is the plumbing actually up" without reading `fghjd`'s stdout — see
-  [[split-dns]], [[host-aliases]], [[two-zones-and-raw-ports]].
+  itself, not any workspace's — three tabs. `Logs` (the `daemon_log` ring
+  buffer); `DNS / DNAT`, listing the managed `/etc/hosts` block, the
+  `/etc/resolver` zones with the ephemeral port each points at, and the live
+  `pf` NAT routes backing the raw zone; and `Doctor`, the same report
+  `fghj doctor` prints. Together these answer "is the plumbing actually up"
+  without reading `fghjd`'s stdout — see [[split-dns]], [[host-aliases]],
+  [[two-zones-and-raw-ports]], [[preflight-checks]].
+
+  The first two poll (1.5s and 2s); `Doctor` deliberately does not. It
+  fetches on tab open and then only from its own re-run button, because every
+  check shells out to the OS (`ifconfig`, `getaddrinfo`,
+  `security verify-cert`, three TCP connects) and nothing it measures changes
+  on its own — a missing loopback alias does not come back by itself. The
+  interaction a doctor wants is read, go fix, re-run, which is a button, not
+  a timer.
 - **`SideDrawer`**: not a feature on its own — a shared shell (fixed-width
   panel sliding in from the right, click-outside-to-close) all three of the
   above render their actual content into via Svelte's `{@render children()}`

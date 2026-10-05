@@ -38,7 +38,7 @@ impl WorkspaceOwner {
     /// `ssh_auth_sock` — see `live_ssh_auth_sock`. Public because BuildKit
     /// ssh forwarding needs the path itself rather than a configured
     /// `Command`: bollard reads it out of `fghjd`'s own environment, so
-    /// `docker::build_image_buildkit` has to set it there directly.
+    /// `docker::build_image` has to set it there directly.
     pub fn live_ssh_auth_sock(&self) -> Option<String> {
         live_ssh_auth_sock(self.uid, self.ssh_auth_sock.as_deref())
     }

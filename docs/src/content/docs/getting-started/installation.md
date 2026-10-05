@@ -167,6 +167,24 @@ they toggle whether the running daemon is occupying the machine. Stopping
 the process itself is your supervisor's job (`sudo brew services stop fghj`,
 or Ctrl-C).
 
+For the full picture — Docker and BuildKit, the loopback alias, both ports,
+OS DNS routing and CA trust, each checked against the machine rather than
+against what `fghjd` thinks it set up — run [`fghj doctor`](/cli/doctor/):
+
+```bash
+$ fghj doctor
+✓ fghjd control socket: connected to /var/run/fghjd.sock
+✓ Docker Engine reachable: server 29.4.0, API 1.54
+✓ BuildKit available: API 1.54 supports the BuildKit session endpoint
+✓ fghjd is active: serving DNS, 80 and 443
+...
+all clear
+```
+
+It's the right first command for any "nothing resolves" or "connection
+refused" problem, since all of those failures look identical from the
+browser.
+
 ## Next
 
 - [The tutorial](/tutorial/) — build a two-repo workspace from nothing, one
