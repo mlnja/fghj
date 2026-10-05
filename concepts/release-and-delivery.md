@@ -87,6 +87,21 @@ sequence is necessarily two-phase: `just release` → GitHub Actions publishes �
 `just update-tap` reads each `.tar.gz.sha256` back off the release and rewrites
 the formula.
 
+That second phase **waits** rather than failing. The gap between the two is
+not small — `create-release` is gated on two full release compiles of the
+crate plus two more inside Docker for the sidecar — so `update-tap` run
+straight after `release` used to 404 on its first `curl`, which reads as a
+broken formula rather than as "not yet". It now polls the `.sha256` assets
+until they appear (`TAP_WAIT_TIMEOUT`, default 2700s; `TAP_WAIT_INTERVAL`,
+default 15s), which makes "release and walk away" the normal path. It polls
+those assets rather than the release object or the workflow run because they
+are the exact bytes the recipe goes on to read, so their presence is the real
+precondition — and checking them needs neither `gh` nor a token.
+
+The order of the two failure modes matters: the missing-tap-checkout check
+runs *before* the poll, so a forgotten `git clone` of the tap fails in a
+second instead of after the full timeout.
+
 The formula installs `fghjd` as a **LaunchDaemon** with `require_root true`,
 not a per-user LaunchAgent: it binds 80/443, installs a system-trusted root CA,
 and edits `/etc/resolver` and `/etc/hosts`. `sudo brew services start fghj` is
