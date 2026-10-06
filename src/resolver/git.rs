@@ -1,24 +1,90 @@
 //! The git facts read off a checkout: its remote, branch, and dirtiness.
 
+use std::ffi::CStr;
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
+
+/// A `git -C <dir>` invocation that runs as the user who **owns** `dir`,
+/// rather than as whoever is asking.
+///
+/// `fghjd` runs as root (it binds 80/443, installs a CA, writes
+/// `/etc/resolver` — see `concepts/preflight-checks.md`), while the checkouts
+/// it reads belong to the developer. Git refuses to operate on a repository
+/// owned by somebody else since 2.35.2 ("detected dubious ownership"), exiting
+/// non-zero, which silently turned every read below into its failure case: no
+/// remote, no branch, no commit, and — because `git_status_dirty` cannot
+/// vouch for a tree it failed to read — *every* node reported permanently
+/// dirty. The daemon and the CLI resolved the same workspace into different
+/// graphs, which is the kind of bug that looks like a UI problem for a while.
+///
+/// Dropping to the owner is the fix rather than `-c safe.directory`: that flag
+/// would leave root running git against a config file an unprivileged user can
+/// write, and git config can name a pager, a hook and a filter to execute. The
+/// repo's owner is the right identity to read the repo with.
+///
+/// No-ops unless we are actually root and the directory belongs to someone
+/// else — `uid()` on a `Command` would otherwise just make the spawn fail.
+fn git_in(dir: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(dir);
+
+    if unsafe { libc::geteuid() } != 0 {
+        return cmd;
+    }
+    let Ok(meta) = std::fs::metadata(dir) else {
+        return cmd;
+    };
+    let (uid, gid) = (meta.uid(), meta.gid());
+    if uid == 0 {
+        return cmd;
+    }
+
+    cmd.uid(uid).gid(gid);
+    // Without this, git inherits root's `HOME` and dies trying to read a
+    // `/var/root/.gitconfig` the dropped uid cannot open — which would
+    // reintroduce the very failure this function exists to remove.
+    match home_dir_of(uid) {
+        Some(home) => {
+            cmd.env("HOME", home);
+        }
+        None => {
+            cmd.env_remove("HOME");
+        }
+    }
+    cmd
+}
+
+/// A uid's home directory, from the passwd database.
+///
+/// `getpwuid` rather than the `HOME` already in the environment: the whole
+/// point is that the environment belongs to root and the uid does not.
+fn home_dir_of(uid: u32) -> Option<String> {
+    // SAFETY: `getpwuid` returns a pointer into a static buffer owned by libc,
+    // which is read (and copied out of) before any other libc call that could
+    // overwrite it. A null return means "no such user", handled below.
+    unsafe {
+        let pw = libc::getpwuid(uid as libc::uid_t);
+        if pw.is_null() || (*pw).pw_dir.is_null() {
+            return None;
+        }
+        CStr::from_ptr((*pw).pw_dir).to_str().ok().map(str::to_owned)
+    }
+}
 
 /// Reads the `origin` remote URL and checked-out branch of a real git working
 /// tree, if any — used so a downloaded node still carries the `repo`/`branch`
 /// info the UI displays per node (see `Node::repo`/`Node::branch`), even
 /// though resolution itself no longer needs it to find the node on disk.
 pub fn git_remote_and_branch(dir: &Path) -> (Option<String>, Option<String>) {
-    let repo = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let repo = git_in(dir)
         .args(["remote", "get-url", "origin"])
         .output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-    let branch = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let branch = git_in(dir)
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()
@@ -41,9 +107,7 @@ pub fn git_remote_and_branch(dir: &Path) -> (Option<String>, Option<String>) {
 /// across calls, so folding it into the hash as `None` is stable, whereas
 /// inventing a value would report drift on every single tick.
 pub fn git_head_sha(dir: &Path) -> Option<String> {
-    Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    git_in(dir)
         .args(["rev-parse", "HEAD"])
         .output()
         .ok()
@@ -55,9 +119,7 @@ pub fn git_head_sha(dir: &Path) -> Option<String> {
 /// Whether a git working tree has uncommitted changes (or its status can't be
 /// read at all — treated as dirty since we can't vouch for it being clean).
 pub fn git_status_dirty(dir: &Path) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    git_in(dir)
         .args(["status", "--porcelain"])
         .output()
         .ok()

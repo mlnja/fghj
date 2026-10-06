@@ -228,8 +228,17 @@
                 <span class="sha" title={n.head}>{sha}</span>
               {/if}
             </div>
+          {:else if n.downloaded === false}
+            <div class="lane-line empty" title="not pulled yet, so there is no checkout to read a branch from">not pulled</div>
           {:else}
-            <div class="lane-line empty" title="no checkout behind this node">&mdash;</div>
+            <!-- A downloaded node always sits in *some* working tree — a
+                 service in its own, a backing dependency or task in its
+                 owner's — so a missing branch here is a failed read, not an
+                 absence. Saying so beats a dash that reads as "nothing to
+                 report": the usual cause is `git` refusing a checkout it
+                 considers foreign-owned, which also forces `dirty` to its
+                 can't-vouch-for-it default of true. -->
+            <div class="lane-line unreadable" title="fghjd could not read git state for this checkout. Its branch, commit and clean/dirty status are all unknown; the DIRTY mark below is a fallback, not a finding.">branch unreadable</div>
           {/if}
         </div>
         {#if showDocker}
@@ -359,6 +368,7 @@
      from "this card is laid out differently" — hence a mark rather than a
      collapsed column. */
   .lane-line.empty { color: var(--line-strong); }
+  .lane-line.unreadable { color: var(--warning); }
   .sha { font: 500 9.5px var(--font-mono); color: var(--ink-faint); opacity: 0.7; }
   /* Accent rather than the old code tag's grey: this one appears on few
      cards and means something when it does, so it should read as a mark
