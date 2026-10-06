@@ -117,6 +117,7 @@ export default defineConfig({
           label: 'Guides',
           items: [
             { label: 'What fghj fixes', slug: 'guides/what-it-fixes' },
+            { label: 'fghj and OrbStack', slug: 'guides/vs-orbstack' },
             { label: 'HTTP vs. raw: choosing a zone', slug: 'guides/networking-http-vs-raw' },
             { label: 'Attaching a debugger', slug: 'guides/debugging' },
             { label: 'Python services in fghj', slug: 'guides/python' },
