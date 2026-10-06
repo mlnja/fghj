@@ -8,7 +8,8 @@ outward from whichever repos you're actually working on, and brings up just
 that subgraph — with real `*.fghj.internal` HTTPS domains, locally trusted
 certificates, and no `docker-compose.yml` to hand-maintain.
 
-> **Status: early.** macOS only. Released and installable from the Homebrew
+> **Status: early.** macOS today, with Linux support in progress. Released
+> and installable from the Homebrew
 > tap; building from source (below) also works. The config language is
 > settled enough to write against; the `version: "1.0"` field in
 > `.fghj.yaml` is the compatibility hook.

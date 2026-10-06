@@ -12,11 +12,14 @@ shims.
 
 ## Prerequisites
 
-- **macOS.** `fghjd`'s split-DNS integration (writing
+- **macOS**, on Apple Silicon or Intel. **Linux support is in progress.**
+  Four pieces of `fghjd` are written against macOS interfaces and each needs a
+  Linux counterpart: its split-DNS integration (writing
   `/etc/resolver/fghj.internal`), its trust-store handling (shelling out to
-  `security`), and its SSH-agent-socket recovery for Git-over-SSH clones are
-  macOS-specific. Linux and Windows would each need equivalent mechanisms
-  added; nothing stubs them out today.
+  `security`), its raw-port NAT (`pf`), and its SSH-agent-socket recovery for
+  Git-over-SSH clones. Until those land there is no Linux build to install —
+  the release publishes `darwin-arm64` and `darwin-amd64` only. Windows would
+  need the same work again and nobody is doing it.
 - **Docker** — Docker Desktop, OrbStack, or Colima. `fghjd` connects to
   whichever Docker context is currently active and refuses to start if it
   can't reach it.

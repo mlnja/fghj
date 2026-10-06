@@ -36,6 +36,14 @@ OrbStack doesn't have to build. fghj is also not a container runtime at all
 — it has nothing to say about VM performance, file-sharing speed or
 Kubernetes, and OrbStack is a reasonable thing to run fghj's containers on.
 
+Today both run on macOS; where they can go differs. OrbStack *is* the VM, so
+on Linux there would be nothing for it to be — Docker runs natively there.
+fghj is macOS-specific only in its mechanisms (`/etc/resolver`, the System
+keychain, `pf`), each of which has a Linux counterpart, and that port is in
+progress. For where it actually stands, read
+[installation](/getting-started/installation/) rather than trusting this
+paragraph.
+
 ## 1. Non-HTTP services, by name, on their real port
 
 OrbStack's domains route HTTP. Connecting to a database by domain —
@@ -151,6 +159,7 @@ can mint.
 | TLD safe from upstream DNS | No, `.local` | Yes, `.internal` |
 | Serve your own TLS behind the name | No | Yes |
 | Container runtime | Yes, that's the product | No |
+| Platform | macOS only | macOS, Linux in progress |
 | Multi-repo dependency graph | No | That's the product |
 | Licensing | Free for personal use, paid for commercial | MIT |
 
