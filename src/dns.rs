@@ -406,8 +406,12 @@ fn sync_macos_resolver(resolver_dir: &Path, port: u16, zones: &[&str]) -> Result
         if fs::read_to_string(&path).ok().as_deref() != Some(desired.as_str()) {
             fs::write(&path, &desired)
                 .with_context(|| format!("failed to write {}", path.display()))?;
+            // The path already ends in the zone, so naming the zone again
+            // spent 60-odd columns restating it — on the one line in this
+            // log that is already the longest, and that repeats on every
+            // reconcile which finds the file changed.
             daemon_log::info(format!(
-                "fghjd: wrote {} — *.{zone} lookups now route to this DNS server",
+                "fghjd: wrote {} — lookups for that zone now route to this DNS server",
                 path.display()
             ));
         }

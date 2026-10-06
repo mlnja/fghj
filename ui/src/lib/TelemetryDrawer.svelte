@@ -10,8 +10,8 @@
   // poll is just as responsive as SSE and much simpler.
   let logLines = $state([]);
   let lastSeq = $state(null);
-  let logsPoll = null;
   let logsPre = $state(null);
+  let logFilter = $state('');
 
   async function pollLogs() {
     if (!onFetchDaemonLogs) return;
@@ -21,8 +21,26 @@
     lastSeq = entries[entries.length - 1].seq;
   }
 
+  // Every message is written `fghjd: ...` at its call site, and that prefix
+  // earns its place on stdout — `daemon_log::info` prints there too, into a
+  // terminal or launchd's capture where fghjd's lines sit among everybody
+  // else's. In here it is on all of them, so it says nothing and costs seven
+  // columns of the width long resolver paths are already fighting for.
+  // Stripped at render rather than at the source, so the stdout copy keeps it.
+  function clean(message) {
+    return message.startsWith('fghjd: ') ? message.slice(7) : message;
+  }
+
+  let visibleLines = $derived.by(() => {
+    const needle = logFilter.trim().toLowerCase();
+    const rows = needle
+      ? logLines.filter((l) => l.message.toLowerCase().includes(needle))
+      : logLines;
+    return rows.map((l) => ({ seq: l.seq, level: l.level, ts_ms: l.ts_ms, text: clean(l.message) }));
+  });
+
   $effect(() => {
-    logLines;
+    visibleLines;
     if (logsPre) logsPre.scrollTop = logsPre.scrollHeight;
   });
 
@@ -82,8 +100,12 @@
 
   const MARKS = { pass: '\u2713', warn: '!', fail: '\u2717' };
 
-  function formatTime(ms) {
-    return new Date(ms).toLocaleTimeString();
+  // 24-hour, so every timestamp is exactly eight characters wide. The
+  // locale default renders `1:34:18 PM` against `11:34:18 AM` — two widths
+  // and a suffix carrying no information in a pane where every line is from
+  // the same hour or two.
+  function formatLogTime(ms) {
+    return new Date(ms).toLocaleTimeString([], { hour12: false });
   }
 
   function formatAge(ms) {
@@ -110,12 +132,40 @@
 
   {#if activeTab === 'logs'}
     <div class="logs">
+      <div class="log-bar">
+        <input
+          class="log-filter"
+          type="text"
+          placeholder="filter lines…"
+          bind:value={logFilter}
+          spellcheck="false"
+        />
+        <span class="log-count">
+          {#if logFilter.trim()}
+            {visibleLines.length} of {logLines.length}
+          {:else}
+            {logLines.length} {logLines.length === 1 ? 'line' : 'lines'}
+          {/if}
+        </span>
+      </div>
       {#if !logLines.length}
         <div class="empty">no log lines yet</div>
+      {:else if !visibleLines.length}
+        <div class="empty">nothing matches “{logFilter.trim()}”</div>
       {:else}
-        <pre bind:this={logsPre}>{logLines
-            .map((l) => `[${formatTime(l.ts_ms)}]${l.level === 'warn' ? ' !' : ''} ${l.message}`)
-            .join('\n')}</pre>
+        <!-- One element per line rather than one `<pre>` of joined text: the
+             timestamp, the level and the message are three different things
+             and none of them could be styled while they were one string. The
+             row is a grid so a wrapped message hangs under the message
+             column instead of running back under the clock. -->
+        <div class="log-pane" bind:this={logsPre}>
+          {#each visibleLines as l (l.seq)}
+            <div class="log-line" class:warn={l.level === 'warn'}>
+              <span class="ts">{formatLogTime(l.ts_ms)}</span>
+              <span class="msg">{l.text}</span>
+            </div>
+          {/each}
+        </div>
       {/if}
     </div>
   {:else if activeTab === 'network'}
@@ -212,10 +262,53 @@
 
   .empty { font: 500 12px var(--font-mono); color: var(--ink-faint); font-style: italic; padding: 10px 0; }
 
-  .logs pre {
-    height: calc(100vh - 220px); margin: 0; background: #000; color: #b8ffb8; padding: 12px; border-radius: 6px;
-    font: 400 11px var(--font-mono); overflow: auto; white-space: pre-wrap; word-break: break-all;
+  .logs { display: flex; flex-direction: column; gap: 8px; }
+
+  .log-bar { display: flex; align-items: center; gap: 10px; }
+  .log-filter {
+    flex: 1; min-width: 0; padding: 5px 9px; border-radius: 5px;
+    border: 1px solid var(--line-strong); background: var(--panel);
+    font: 400 11.5px var(--font-mono); color: var(--ink);
   }
+  .log-filter:focus { outline: none; border-color: var(--accent); }
+  .log-count { font: 500 10.5px var(--font-mono); color: var(--ink-faint); white-space: nowrap; }
+
+  /* Sized to its content up to a cap, rather than a fixed
+     `calc(100vh - 220px)`. Eight lines in a pane locked to the full window
+     height is mostly a black void, which reads as something having gone
+     wrong rather than as a quiet daemon. */
+  .log-pane {
+    min-height: 90px; max-height: calc(100vh - 260px); overflow: auto;
+    background: #0c1116; border: 1px solid #1d262f; border-radius: 6px;
+    padding: 8px 10px;
+  }
+
+  /* `auto 1fr`: the clock column is as wide as a timestamp and no wider,
+     and the message gets everything left over — so a long resolver path
+     wraps within its own column with a hanging indent instead of flowing
+     back underneath the time. */
+  .log-line {
+    display: grid; grid-template-columns: auto 1fr; gap: 0 10px;
+    align-items: baseline; padding: 1.5px 0;
+    font: 400 11px/1.55 var(--font-mono);
+    /* `break-word`, not `break-all`: the old rule chopped words at whatever
+       column ran out, so `/etc/resolver/proxy.package-repository…` split
+       mid-token. This keeps a path intact until it genuinely cannot fit. */
+    overflow-wrap: break-word;
+  }
+  /* Dim, because it is the column you scan past on every line you are not
+     looking for — present for when you need it, never competing with the
+     message for attention the way one uniform green made it. */
+  .log-line .ts { color: #55707f; font-variant-numeric: tabular-nums; }
+  .log-line .msg { color: #c6d6cc; }
+
+  /* A warning used to be a lone `!` glyph inside the same green run of text,
+     which is invisible in a wall of it. Amber plus a rule down the left edge
+     makes it findable without reading. */
+  .log-line.warn { background: #241a07; border-left: 2px solid #c9871f; margin-left: -10px; padding-left: 8px; }
+  .log-line.warn .msg { color: #f0c177; }
+  .log-line.warn .ts { color: #9a7533; }
+
 
   .net { display: flex; flex-direction: column; gap: 20px; overflow-y: auto; height: calc(100vh - 220px); }
   .net-meta { font: 500 11.5px var(--font-mono); color: var(--ink-dim); }
