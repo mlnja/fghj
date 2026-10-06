@@ -70,6 +70,7 @@ it in the audit's tracker — the concept files stay the durable record.
 | [[terminating-nodes]] | Seeds and migrations are a third node kind that runs to completion, not a service with a clever restart policy — because "exited" means success for one and drift for the other. |
 | [[language-boundaries]] | What `.fghj.yaml` deliberately cannot say — no host-process node kind, no branch on an edge — and how to tell a boundary from a missing knob. |
 | [[build-inputs]] | A build may carry `target`, file secrets and the workspace owner's forwarded ssh-agent — but the credential path comes from `WorkspaceOwner`, never from the repo's own config, and every build goes through BuildKit, with no classic-builder fallback. |
+| [[builder-parity]] | fghj builds on the same BuildKit the user's own `docker build` would have reached, because two engines disagreeing about one Dockerfile is a failure nobody can attribute. |
 
 ## Subsystem guides
 
@@ -122,7 +123,7 @@ be compared.
 | `src/hosts_file.rs`, `src/effects/hosts.rs` | [[host-aliases]] |
 | `src/runs/spec.rs`, `src/state/sync_status.rs` | [[config-drift]] |
 | `src/runs/node_spec.rs`, `src/runs/start_node.rs` (`debug_wait_overrides`) | [[debugging-in-containers]], [[config-drift]] |
-| `src/docker.rs`, `src/downloads.rs` | [[docker-and-downloads]], [[build-inputs]] |
+| `src/docker.rs`, `src/downloads.rs` | [[docker-and-downloads]], [[build-inputs]], [[builder-parity]] |
 | `src/web/api/`, `src/daemon/`, `src/daemon_log.rs`, `src/main.rs`, `src/bin/fghjd.rs` | [[control-api-and-cli]] |
 | `src/doctor.rs` | [[preflight-checks]] |
 | `Justfile`, `.github/workflows/`, `sidecar/Dockerfile`, `.dockerignore` | [[release-and-delivery]], [[in-network-sidecar]] |

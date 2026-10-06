@@ -54,8 +54,16 @@ building image   412.0 MiB context in 1m 12s
 ```
 
 The size is the number nothing else would surface. The context is tarred and
-uploaded whole on **every** build, so a `node_modules` or a `.git` that
-belongs in `.dockerignore` shows up here as a cost paid on every start.
+uploaded on **every** build, so anything large that isn't excluded shows up
+here as a cost paid on every start.
+
+`.dockerignore` is honoured, with the same root-anchored patterns the Docker
+CLI uses — a bare `node_modules` excludes the top-level one, and `**/node_modules`
+is how you reach nested copies. If this number looks far bigger than your
+source, something large is reaching the builder that probably shouldn't:
+`.git` is the common culprit, and it does more than cost time — Go stamps VCS
+information into a binary whenever it finds a repository beside the source,
+and `git` inside the builder cannot read it, which fails the build outright.
 
 On failure, the failing step and its exit code, pulled out of BuildKit's
 error:

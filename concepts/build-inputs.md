@@ -157,6 +157,71 @@ and the image appears in the store directly, while a container-backed builder
 ([[builder-parity]]) has no access to that store at all and must export a
 docker-format tarball that fghj streams back through `/images/load`.
 
+## The context is filtered client-side, or not at all
+
+`.dockerignore` is a **client-side** convention. The Docker CLI applies it
+before uploading; the daemon and BuildKit only ever see the tarball they are
+given. fghj tars the context itself — the Engine API has no "build from this
+path" call ([[docker-and-downloads]]) — so not implementing the file means not
+honouring it, silently.
+
+fghj did not honour it, and the symptom was not the obvious one. A Go repo
+whose `.dockerignore` excluded `.git` built on the command line and failed
+under fghj with:
+
+```
+error obtaining VCS status: exit status 128
+	Use -buildvcs=false to disable VCS stamping.
+```
+
+Go stamps VCS information into a binary whenever it finds a repository beside
+the source. `git` inside the builder cannot read a `.git` that arrived through
+a tarball, so it exits 128 and takes the build with it. Nothing about the
+error mentions the context; it names the compile step, so the Dockerfile is
+where anyone looks first. The same repo also shipped 572 MB of `.local` jars —
+including a private key and a production JWT — into image layers on every
+build, and a second repo uploaded 209 MiB where 2 MiB was warranted.
+
+Implemented in `src/dockerignore.rs`, applied by `append_filtered` in
+`src/docker.rs`.
+
+### Why this is hand-rolled
+
+A new matcher is hard to justify when `ignore` exists and has 184M downloads,
+so: **`.dockerignore` is not `.gitignore`.** Its patterns are anchored at the
+context root. A bare `node_modules` excludes the top-level one and leaves
+`pkg/node_modules` alone; gitignore matches a bare name at any depth and would
+exclude both. Verified against a real daemon rather than taken from the docs —
+a build whose `.dockerignore` held only `node_modules` received
+`pkg/node_modules/n.txt` and not `node_modules/r.txt`.
+
+Borrowing gitignore semantics would therefore make fghj filter contexts
+differently from `docker build`, which is precisely the failure
+[[builder-parity]] exists to eliminate: fghj and the CLI disagreeing about one
+repo, with nothing in the repo to explain it. The only published
+`.dockerignore` crate is `use-dockerignore`, at 0.0.1 and 153 downloads.
+`globset` could replace the per-segment matching, at the cost of pulling
+`regex-automata` into a dependency tree deliberately kept lean; the precedence
+and ancestor rules would still have to be written here.
+
+Two rules are worth knowing because getting either wrong breaks a build rather
+than merely over-shipping:
+
+- **The Dockerfile is always sent, even when the file excludes it.** Real
+  `.dockerignore` files do list `Dockerfile`, since `COPY . .` would otherwise
+  bake it into the image. Honouring that literally would leave BuildKit
+  nothing to build. The CLI makes the same exception, for `.dockerignore`
+  itself too.
+- **An excluded directory is not walked** unless some `!` pattern could
+  re-include a file inside it. That fast path is what keeps a 232 MB
+  `node_modules` from costing anything, and `Dockerignore::has_exclusions`
+  exists only to decide it.
+
+A context with no `.dockerignore` keeps `tar`'s own bulk walk, so every
+existing build is byte-for-byte unchanged. An unreadable or empty file
+excludes nothing: a context fghj cannot filter ships too much, which is far
+easier to diagnose than a build that silently lost its sources.
+
 ## Two things bollard forced
 
 Both are worth recording because neither is visible from the call site.

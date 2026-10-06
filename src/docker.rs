@@ -384,7 +384,7 @@ fn split_step_failure(message: &str) -> (Option<&str>, Option<&str>) {
 /// message rather than a silently different one. `fghj doctor` checks for it
 /// up front; see `concepts/build-inputs.md`.
 pub async fn build_image(docker: &Docker, opts: &BuildOpts<'_>) -> Result<BuildReport> {
-    let tar_bytes = tar_build_context(opts.context_dir).await?;
+    let tar_bytes = tar_build_context(opts.context_dir, opts.dockerfile).await?;
     let context_bytes = tar_bytes.len() as u64;
     build_image_buildkit(docker, opts, tar_bytes).await?;
     Ok(BuildReport {
@@ -393,19 +393,98 @@ pub async fn build_image(docker: &Docker, opts: &BuildOpts<'_>) -> Result<BuildR
     })
 }
 
-async fn tar_build_context(context_dir: &Path) -> Result<Vec<u8>> {
+async fn tar_build_context(context_dir: &Path, dockerfile: &str) -> Result<Vec<u8>> {
     let context_dir = context_dir.to_path_buf();
+    let dockerfile = dockerfile.to_string();
     tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        let ignore = crate::dockerignore::Dockerignore::load(&context_dir);
         let mut builder = tar::Builder::new(Vec::new());
-        builder
-            .append_dir_all("", &context_dir)
-            .with_context(|| format!("failed to tar build context {}", context_dir.display()))?;
+        if ignore.is_empty() {
+            builder.append_dir_all("", &context_dir).with_context(|| {
+                format!("failed to tar build context {}", context_dir.display())
+            })?;
+        } else {
+            append_filtered(&mut builder, &context_dir, &ignore, &dockerfile)?;
+        }
         builder
             .into_inner()
             .context("failed to finalize build context tar")
     })
     .await
     .context("tar task panicked")?
+}
+
+/// Walks the context, leaving out what `.dockerignore` excludes.
+///
+/// Separate from the unfiltered path above so a context with no
+/// `.dockerignore` keeps using `tar`'s own bulk walk, which is both faster and
+/// the behaviour every existing build already has.
+///
+/// **The Dockerfile and `.dockerignore` are always sent, even when the file
+/// excludes them.** This is not a nicety: real `.dockerignore` files do list
+/// `Dockerfile` — it has no business inside the image, and `COPY . .` would
+/// otherwise bake it in — and honouring that literally would leave BuildKit
+/// with no Dockerfile to build and turn a context fix into a broken build.
+/// The Docker CLI makes the same exception.
+fn append_filtered(
+    builder: &mut tar::Builder<Vec<u8>>,
+    root: &Path,
+    ignore: &crate::dockerignore::Dockerignore,
+    dockerfile: &str,
+) -> Result<()> {
+    let always = [dockerfile.trim_start_matches("./"), ".dockerignore"];
+    // Depth-first over a stack of directories still to read. A directory's own
+    // header is appended before it is pushed, so a parent always precedes its
+    // children in the archive.
+    let mut stack = vec![String::new()];
+    while let Some(dir) = stack.pop() {
+        let abs_dir = if dir.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(&dir)
+        };
+        let entries = std::fs::read_dir(&abs_dir)
+            .with_context(|| format!("failed to read build context {}", abs_dir.display()))?;
+        for entry in entries {
+            let entry = entry.with_context(|| format!("failed to read {}", abs_dir.display()))?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let rel = if dir.is_empty() {
+                name.to_string()
+            } else {
+                format!("{dir}/{name}")
+            };
+            let abs = entry.path();
+            // `metadata`, not `file_type`: it follows symlinks, which is what
+            // `append_dir_all` does. A broken link is skipped rather than
+            // failing the whole build.
+            let Ok(meta) = std::fs::metadata(&abs) else {
+                continue;
+            };
+            let is_dir = meta.is_dir();
+            if !always.contains(&rel.as_str()) && ignore.excludes(&rel) {
+                // An excluded directory is normally not even opened — that is
+                // what keeps a 232 MB `node_modules` from costing anything. It
+                // has to be walked only when some `!` pattern could re-include
+                // a file inside it, and even then its own entry stays out.
+                if is_dir && ignore.has_exclusions() {
+                    stack.push(rel);
+                }
+                continue;
+            }
+            if is_dir {
+                builder
+                    .append_dir(&rel, &abs)
+                    .with_context(|| format!("failed to tar {}", abs.display()))?;
+                stack.push(rel);
+            } else {
+                builder
+                    .append_path_with_name(&abs, &rel)
+                    .with_context(|| format!("failed to tar {}", abs.display()))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One BuildKit solve, with no progress stream: bollard's
@@ -1272,6 +1351,143 @@ pub async fn exec_exit_code(docker: &Docker, exec_id: &str) -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Builds a context laid out like the repos this was diagnosed on and reads
+    /// the resulting tar back, which is the only way to see what was actually
+    /// uploaded.
+    async fn tar_entries(dir: &Path, dockerfile: &str) -> Vec<String> {
+        let bytes = tar_build_context(dir, dockerfile).await.unwrap();
+        let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
+        archive
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .filter(|p| !p.is_empty() && p != ".")
+            .collect()
+    }
+
+    /// The bug: `.git` reaching the builder makes Go stamp VCS info, `git`
+    /// inside the container exits 128, and the build fails with an error that
+    /// names the compile step and nothing about the context.
+    #[tokio::test]
+    async fn a_dockerignore_keeps_git_and_vendor_trees_out_of_the_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join(".dockerignore"),
+            ".git\nnode_modules\n.env\n*.test\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("Dockerfile"), "FROM scratch\n").unwrap();
+        std::fs::write(root.join("main.go"), "package main\n").unwrap();
+        std::fs::write(root.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::write(root.join("handler.test"), "x").unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::create_dir_all(root.join("node_modules").join("left-pad")).unwrap();
+        std::fs::write(root.join("node_modules").join("left-pad").join("i.js"), "x").unwrap();
+
+        let entries = tar_entries(root, "Dockerfile").await;
+
+        assert!(entries.contains(&String::from("main.go")));
+        for excluded in [".git", ".git/HEAD", "node_modules", ".env", "handler.test"] {
+            assert!(
+                !entries.iter().any(|e| e == excluded),
+                "{excluded} should not have been uploaded, got: {entries:?}"
+            );
+        }
+        assert!(
+            !entries.iter().any(|e| e.starts_with("node_modules")),
+            "nothing under node_modules should be uploaded, got: {entries:?}"
+        );
+    }
+
+    /// Real `.dockerignore` files exclude the Dockerfile, because `COPY . .`
+    /// would otherwise bake it into the image. Honouring that literally would
+    /// leave BuildKit nothing to build — so filtering the context must not
+    /// become a new way to break one.
+    #[tokio::test]
+    async fn the_dockerfile_is_sent_even_when_the_ignore_file_excludes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join(".dockerignore"),
+            "Dockerfile\n.dockerignore\ndocker-compose*.yml\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("Dockerfile"), "FROM scratch\n").unwrap();
+        std::fs::write(root.join("docker-compose.yml"), "services: {}\n").unwrap();
+        std::fs::write(root.join("app.js"), "console.log(1)\n").unwrap();
+
+        let entries = tar_entries(root, "Dockerfile").await;
+
+        assert!(
+            entries.contains(&String::from("Dockerfile")),
+            "got: {entries:?}"
+        );
+        assert!(entries.contains(&String::from("app.js")));
+        assert!(!entries.iter().any(|e| e == "docker-compose.yml"));
+    }
+
+    /// A custom `-f` name has to be the one that survives, not the literal
+    /// string "Dockerfile".
+    #[tokio::test]
+    async fn a_custom_dockerfile_name_is_the_one_that_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".dockerignore"), "*.dockerfile\n").unwrap();
+        std::fs::write(root.join("prod.dockerfile"), "FROM scratch\n").unwrap();
+        std::fs::write(root.join("dev.dockerfile"), "FROM scratch\n").unwrap();
+
+        let entries = tar_entries(root, "prod.dockerfile").await;
+
+        assert!(
+            entries.contains(&String::from("prod.dockerfile")),
+            "got: {entries:?}"
+        );
+        assert!(!entries.iter().any(|e| e == "dev.dockerfile"));
+    }
+
+    /// An exception has to be able to reach inside an excluded directory, which
+    /// is the one case where the directory must still be walked.
+    #[tokio::test]
+    async fn an_exception_reaches_inside_an_excluded_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".dockerignore"), "assets\n!assets/keep.txt\n").unwrap();
+        std::fs::create_dir(root.join("assets")).unwrap();
+        std::fs::write(root.join("assets").join("keep.txt"), "keep").unwrap();
+        std::fs::write(root.join("assets").join("drop.bin"), "drop").unwrap();
+
+        let entries = tar_entries(root, "Dockerfile").await;
+
+        assert!(
+            entries.contains(&String::from("assets/keep.txt")),
+            "got: {entries:?}"
+        );
+        assert!(!entries.iter().any(|e| e == "assets/drop.bin"));
+    }
+
+    /// No `.dockerignore` must behave exactly as before, dotfiles included —
+    /// this path is what every existing build already takes.
+    #[tokio::test]
+    async fn no_dockerignore_uploads_everything_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Dockerfile"), "FROM scratch\n").unwrap();
+        std::fs::write(root.join(".hidden"), "x").unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+
+        let entries = tar_entries(root, "Dockerfile").await;
+
+        for expected in ["Dockerfile", ".hidden", "src/main.rs"] {
+            assert!(
+                entries.iter().any(|e| e == expected),
+                "{expected} should still be uploaded, got: {entries:?}"
+            );
+        }
+    }
 
     /// The exact message BuildKit returned for a failed `go build`, taken
     /// from a real failure — the one that reached the events pane as three
