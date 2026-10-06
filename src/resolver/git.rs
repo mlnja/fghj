@@ -69,7 +69,10 @@ fn home_dir_of(uid: u32) -> Option<String> {
         if pw.is_null() || (*pw).pw_dir.is_null() {
             return None;
         }
-        CStr::from_ptr((*pw).pw_dir).to_str().ok().map(str::to_owned)
+        CStr::from_ptr((*pw).pw_dir)
+            .to_str()
+            .ok()
+            .map(str::to_owned)
     }
 }
 

@@ -9,7 +9,9 @@ use super::spec::spec_hash;
 use crate::dns;
 use crate::docker;
 use crate::resolver::{Graph, Node};
-use crate::state::{ContainerDesired, ContainerInfo, ContainerObserved, PortRoute, SyncStatus};
+use crate::state::{
+    ContainerDesired, ContainerInfo, ContainerObserved, ContainerSource, PortRoute, SyncStatus,
+};
 
 use super::registry::RunRegistry;
 
@@ -102,6 +104,22 @@ impl RunRegistry {
         let config_hash = spec_hash(node, &spec);
         let mut labels = node.labels.clone();
         labels.insert("fghj.config_hash".to_string(), config_hash.clone());
+        // The same two facts as `ContainerDesired::source`, on the container
+        // itself. `config_hash` above is a digest, so `docker inspect` can
+        // show that two containers differ but never what either was built
+        // from; these make "which commit is this thing running" answerable
+        // without fghj, its database, or a resolved graph in hand. Omitted
+        // rather than written empty when git could not be read, so a missing
+        // label means unknown instead of "no branch".
+        if node.build.is_some() {
+            if let Some(branch) = node.branch.as_deref() {
+                labels.insert("fghj.source_branch".to_string(), branch.to_string());
+            }
+            if let Some(head) = node.head.as_deref() {
+                labels.insert("fghj.source_head".to_string(), head.to_string());
+            }
+            labels.insert("fghj.source_dirty".to_string(), node.dirty.to_string());
+        }
 
         // Deliberately *after* `spec_hash` above, and that ordering is the
         // whole reason this isn't folded into `resolve_node_spec` — see
@@ -463,6 +481,14 @@ impl RunRegistry {
                 additional_hosts: additional_hosts_active,
                 status_port,
                 config_hash,
+                // Gated on `node.build` exactly as `spec_hash`'s own
+                // `source` is, so the container records a checkout on
+                // precisely the nodes whose hash can move because of one.
+                source: node.build.as_ref().map(|_| ContainerSource {
+                    branch: node.branch.clone(),
+                    head: node.head.clone(),
+                    dirty: node.dirty,
+                }),
                 terminating: node.kind == "task",
                 debug_wait,
             },

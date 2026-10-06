@@ -85,6 +85,48 @@ impl std::fmt::Display for PendingAction {
     }
 }
 
+/// Which checkout a container was **built from**, recorded at the moment it
+/// was last actually started through fghj.
+///
+/// `ContainerDesired::config_hash` already makes a moved checkout *visible*:
+/// `runs::spec::spec_hash` folds the same `head`/`dirty` pair into the hash,
+/// so a commit, pull or rebase flips the node to `Drifted`. What the hash
+/// cannot do is say what changed, because it is a digest — it compares equal
+/// or unequal and keeps nothing. This keeps the inputs in plain text next to
+/// it, so the answer can be "built from `a3f9c1`, checkout is now `4f4cd9d`"
+/// rather than only "drifted".
+///
+/// Deliberately a snapshot, never refreshed: a field updated to follow the
+/// checkout would always agree with it and could never show drift, which is
+/// the same tautology `ContainerDesired`'s doc comment rules out for
+/// `running`. It changes only when the container is recreated.
+///
+/// `None` on the container for a node fghj does not build, mirroring
+/// `spec_hash`'s own `node.build.as_ref().map(..)` gate — an image pulled by
+/// tag has no checkout the running code could have drifted from, so there is
+/// nothing to report rather than an unknown to display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ContainerSource {
+    /// The branch checked out when this container was built. For display
+    /// only: it is also what the image is tagged with
+    /// (`fghj/{id}:{branch}`), so it is the one field here that a human can
+    /// cross-check against `docker images`.
+    pub branch: Option<String>,
+    /// The commit the build saw, full length as git reported it. `None` when
+    /// git could not be read at all, which is a different statement from
+    /// "no commit" and is why this is not an empty string.
+    pub head: Option<String>,
+    /// Whether the tree had uncommitted changes at build time.
+    ///
+    /// Kept despite being the weaker signal, because dropping it would make
+    /// the clean -> dirty transition invisible: edit a file without
+    /// committing and the container really is serving code that no longer
+    /// exists in the checkout. It is one bit, so it catches that first
+    /// transition and nothing after it — `head` is the field that moves on
+    /// every commit.
+    pub dirty: bool,
+}
+
 /// Everything about a container fghj *wants* to be true — the half of
 /// `ContainerInfo` a reducer ever writes to (aside from `pending_action`),
 /// and the half a convergence effect reads to decide whether/how to act on
@@ -135,6 +177,11 @@ pub struct ContainerDesired {
     /// `RunRegistry::config_drift` to detect drift; never used to decide
     /// anything on its own.
     pub config_hash: String,
+    /// The checkout this container was built from — see [`ContainerSource`].
+    /// `config_hash` above decides *whether* this node drifted; this is what
+    /// lets the answer name a commit instead of only a verdict.
+    #[serde(default)]
+    pub source: Option<ContainerSource>,
     /// Whether this container's desired terminal state is "exited 0" rather
     /// than "running" — true for exactly the nodes resolved with
     /// `kind: "task"` (see `resolver::visit_dependency::visit_task_dependency`).
@@ -354,6 +401,7 @@ mod tests {
             additional_hosts: vec![],
             status_port: Some("80".into()),
             config_hash: "abc123".into(),
+            source: None,
             terminating: false,
             debug_wait: false,
         }

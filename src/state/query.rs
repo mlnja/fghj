@@ -161,6 +161,7 @@ mod tests {
                 additional_hosts: vec![],
                 status_port: None,
                 config_hash: "hash".into(),
+                source: None,
                 terminating: false,
                 debug_wait: false,
             },

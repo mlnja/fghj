@@ -491,6 +491,44 @@
               {/if}
             </span>
           </div>
+          <!-- What the container was built from, as recorded at start time.
+               The row above says *whether* the config drifted; this says what
+               moved, which is the part a digest can't tell you. Always shown
+               once it exists — unlike the card, the drawer is where someone
+               has gone looking, so the agreeing case ("still on it") is worth
+               stating rather than leaving as an absence. -->
+          {#if liveInfo.desired.source}
+            {@const src = liveInfo.desired.source}
+            {@const moved = src.head && node.head && src.head !== node.head}
+            <div class="row">
+              <span class="k">built from</span>
+              <span class="v">
+                {src.branch ?? 'unknown branch'}
+                {#if src.head}
+                  <span class="mono">{src.head.slice(0, 7)}</span>
+                {/if}
+                {#if src.dirty}
+                  <span class="muted">(dirty tree)</span>
+                {/if}
+              </span>
+            </div>
+            {#if moved}
+              <div class="row">
+                <span class="k">checkout now</span>
+                <span class="v">
+                  <span class="mono">{node.head.slice(0, 7)}</span>
+                  <span class="pill unsynced" title="the checkout has moved since this container was built, so it is running code that is no longer what {node.local_path ?? 'the repo'} contains. Reset this node to rebuild it.">behind</span>
+                </span>
+              </div>
+            {:else if src.head && !src.dirty && node.dirty}
+              <div class="row">
+                <span class="k">checkout now</span>
+                <span class="v">
+                  <span class="pill unsynced" title="same commit, but the working tree has uncommitted changes that were not there at build time — the container does not contain them. Reset this node to rebuild it.">edited since build</span>
+                </span>
+              </div>
+            {/if}
+          {/if}
         {/if}
       </div>
     {:else if node.downloaded === false}
@@ -609,6 +647,7 @@
   .row .k { color: var(--ink-faint); text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; }
   .row .v { color: var(--ink); word-break: break-all; }
   .muted { color: var(--ink-faint); font-style: italic; }
+  .mono { font-family: var(--font-mono); font-size: 11px; }
   .port-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font: 500 12px var(--font-mono); }
   .port-chip {
     padding: 1px 6px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--line-strong);

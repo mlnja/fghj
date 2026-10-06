@@ -203,6 +203,12 @@ fn start_node(
                         additional_hosts: Vec::new(),
                         status_port: None,
                         config_hash: String::new(),
+                        // Nothing has been built yet, so there is no
+                        // checkout this container came from — and unlike the
+                        // empty strings above, `None` is the value this
+                        // field would legitimately hold forever for a
+                        // non-built node, so it is not misread as resolved.
+                        source: None,
                         // A placeholder for a node nothing has resolved yet
                         // — `start_node` overwrites the whole `desired` from
                         // the real graph when it reports back, and that is
@@ -253,6 +259,7 @@ mod tests {
                 additional_hosts: vec![],
                 status_port: None,
                 config_hash: "hash".into(),
+                source: None,
                 terminating: false,
                 debug_wait: false,
             },

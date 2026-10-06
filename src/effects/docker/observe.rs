@@ -218,6 +218,7 @@ mod tests {
                             additional_hosts: vec![],
                             status_port: Some("http".into()),
                             config_hash: "hash".into(),
+                            source: None,
                             terminating: false,
                             debug_wait: false,
                         },

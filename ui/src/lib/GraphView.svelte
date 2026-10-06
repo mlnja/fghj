@@ -155,6 +155,20 @@
     {@const showDocker = mode === 'containers' && n.kind !== 'flow'}
     {@const containerState = showDocker ? containerStateOf(live) : null}
     {@const sha = n.head ? n.head.slice(0, 7) : null}
+    <!-- The checkout the running container was *built* from, recorded at
+         start time (`ContainerDesired::source`) and never refreshed. `null`
+         for a node fghj doesn't build, and also for a container started by an
+         fghjd from before the field existed — both render nothing, because
+         neither is a finding. -->
+    {@const built = live?.desired?.source ?? null}
+    {@const builtSha = built?.head ? built.head.slice(0, 7) : null}
+    <!-- Deliberately only shown when it *differs* from the checkout. On a
+         synced node the built commit is the current commit, so printing it
+         would restate the sha in the git lane one column to the left. The
+         interesting case is the asymmetry, which is exactly what the user of
+         this card is scanning for: the code moved and the container didn't. -->
+    {@const movedOff = builtSha && sha && builtSha !== sha}
+    {@const editedSince = !movedOff && built !== null && n.dirty && !built.dirty}
     <!-- `unknown` is the one verdict with nothing to say (no drift check has
          run yet, or the last one failed to re-resolve), so it renders no pill
          at all. `orphaned` does have something to say — the node is gone from
@@ -248,6 +262,19 @@
               <span class="pill" class:drifted={sync === 'drifted'} class:synced={sync === 'synced'} class:orphaned={sync === 'orphaned'} title={SYNC_TITLE[sync]}>
                 {sync.toUpperCase()}
               </span>
+            </div>
+          {/if}
+          <!-- What the container was built from, when that is no longer what
+               the checkout says. `DRIFTED` above is the verdict; this is the
+               evidence for it, and it is the difference between "reset this"
+               and knowing why. -->
+          {#if movedOff}
+            <div class="lane-line built" title="This container was built from {built.head}. The checkout is now on {n.head}, so the running code is behind by at least one commit. Reset the node to rebuild it.">
+              <span class="sha stale">{builtSha}</span>&nbsp;&rarr;&nbsp;<span class="sha">{sha}</span>
+            </div>
+          {:else if editedSince}
+            <div class="lane-line built" title="The checkout was clean when this container was built ({built.head ?? 'commit unknown'}) and has uncommitted changes now, so the container is serving code the working tree no longer contains. Reset the node to rebuild it.">
+              edited since build
             </div>
           {/if}
           <!-- The image, not the published host port. A `5432->54321`
@@ -370,6 +397,18 @@
   .lane-line.empty { color: var(--line-strong); }
   .lane-line.unreadable { color: var(--warning); }
   .sha { font: 500 9.5px var(--font-mono); color: var(--ink-faint); opacity: 0.7; }
+  /* The built-from line. Warning-coloured because it only ever renders when
+     the container is behind the checkout, which is a thing to act on — and
+     full opacity on the arrow so the pair reads as one statement rather than
+     as two faded shas. */
+  .lane-line.built {
+    display: flex; align-items: center; color: var(--warning);
+    font-size: 9.5px; opacity: 1;
+  }
+  /* The commit that is no longer current, struck through: the strike is what
+     makes the pair legible at a glance without reading the arrow. */
+  .lane-line.built .sha { color: var(--warning); opacity: 1; }
+  .lane-line.built .sha.stale { text-decoration: line-through; opacity: 0.75; }
   /* Accent rather than the old code tag's grey: this one appears on few
      cards and means something when it does, so it should read as a mark
      rather than as furniture every card happens to carry. */

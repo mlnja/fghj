@@ -64,6 +64,49 @@ the container to be doing survives the restart untouched, which is what
 lets a container that died while `fghjd` was down come back reading as
 drifted rather than as freshly correct.
 
+## Which commit a container is running
+
+Config drift covers more than `.fghj.yaml`. For a node fghj **builds**, the
+checkout itself is an input: the same `build:` stanza at a different commit
+produces a different container. So the hash that decides `synced` vs
+`drifted` folds in the checkout's `HEAD` and whether its tree was dirty,
+and a `git commit`, `git pull` or rebase moves a built node to **drifted**
+without `.fghj.yaml` changing at all.
+
+That matters because the image tag doesn't move. fghj tags what it builds
+`fghj/<node>:<branch>` — stable across commits by design, so there's no tag
+to notice. Before the checkout was part of the hash, you could pull and the
+node stayed lit as `synced` while serving the old code.
+
+Alongside the hash, each container records the branch and commit it was
+actually built from. The hash is a digest, so on its own it can only report
+*that* something moved; the recorded commit is what lets the UI say
+
+```
+a3f9c1 → 4f4cd9d
+```
+
+— built from one commit, checkout now on another. It's a snapshot taken when
+the container was created and never refreshed: a field that followed the
+checkout would always agree with it and could never show drift. The same two
+facts are also stamped on the container as `fghj.source_branch` and
+`fghj.source_head` labels, so `docker inspect` answers "what commit is this
+running" without fghj in the loop.
+
+Two caveats worth knowing:
+
+- **`dirty` is one bit.** It catches the clean → dirty transition and
+  nothing after it; a second edit to an already-dirty tree moves no field.
+  `HEAD` is the input that moves on every commit, and it's exact.
+- **Nothing acts on this.** Drift is reported, never healed — see above. A
+  `git switch` changes the graph under a live environment constantly, and a
+  background loop recreating containers in response would fight whoever is
+  working in it. Reset the node when *you* want the new code.
+
+A container started by an `fghjd` from before this was recorded reads back
+with no source rather than a guessed one, and the UI says nothing instead of
+claiming a commit fghj never saw.
+
 ## How the proxy finds a container
 
 Each running container carries a list of routes — domain/host-port pairs

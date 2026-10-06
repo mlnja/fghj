@@ -108,8 +108,8 @@ impl WorkspaceDb {
             tx.execute("DELETE FROM containers WHERE run_id = ?1", rusqlite::params![state.run_id])?;
             for c in state.containers.values() {
                 tx.execute(
-                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running, terminating, exit_code, debug_wait)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running, terminating, exit_code, debug_wait, source_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                     rusqlite::params![
                         state.run_id,
                         c.node_id,
@@ -128,6 +128,7 @@ impl WorkspaceDb {
                         c.desired.terminating,
                         c.observed.exit_code,
                         c.desired.debug_wait,
+                        serde_json::to_string(&c.desired.source)?,
                     ],
                 )?;
             }
@@ -186,7 +187,7 @@ impl WorkspaceDb {
             drop(stmt);
 
             let mut stmt = conn.prepare(
-                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running, terminating, exit_code, debug_wait FROM containers",
+                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running, terminating, exit_code, debug_wait, source_json FROM containers",
             )?;
             let rows = stmt.query_map([], |row| {
                 let status: String = row.get(3)?;
@@ -222,6 +223,7 @@ impl WorkspaceDb {
                             // startup" would block the node on a human who
                             // isn't there.
                             debug_wait: row.get::<_, Option<i64>>(16)?.is_some_and(|v| v != 0),
+                            source: json_column(row.get(17)?),
                         },
                         observed: ContainerObserved {
                             status,
@@ -277,6 +279,7 @@ mod tests {
                 additional_hosts: Vec::new(),
                 status_port: Some("8080".to_string()),
                 config_hash: "deadbeef".to_string(),
+                source: None,
                 terminating: false,
                 debug_wait: false,
             },
@@ -352,6 +355,76 @@ mod tests {
 
         let loaded = db.load_runs().await.unwrap();
         assert!(loaded["default"].containers["svc-a"].desired.debug_wait);
+    }
+
+    /// The commit a container was built from has to survive a restart, or the
+    /// drift report degrades to the verdict without the evidence: `fghjd`
+    /// comes back, recomputes a hash that still differs, and can say
+    /// `Drifted` but no longer what it drifted *from*. It is also the one
+    /// field here that cannot be re-derived afterwards — the checkout has
+    /// since moved, which is the whole point.
+    #[tokio::test]
+    async fn the_commit_a_container_was_built_from_survives_a_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
+
+        let mut c = container();
+        c.desired.source = Some(crate::state::ContainerSource {
+            branch: Some("feature/widgets".to_string()),
+            head: Some("a3f9c1d4e5b6a7c8d9e0f1a2b3c4d5e6f7a8b9c0".to_string()),
+            dirty: false,
+        });
+        db.clone()
+            .save_run(RunState {
+                run_id: "default".to_string(),
+                containers: BTreeMap::from([("svc-a".to_string(), c)]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let loaded = db.load_runs().await.unwrap();
+        let source = loaded["default"].containers["svc-a"]
+            .desired
+            .source
+            .clone()
+            .expect("source should round-trip rather than coming back as None");
+        assert_eq!(source.branch.as_deref(), Some("feature/widgets"));
+        assert_eq!(
+            source.head.as_deref(),
+            Some("a3f9c1d4e5b6a7c8d9e0f1a2b3c4d5e6f7a8b9c0")
+        );
+        assert!(!source.dirty);
+    }
+
+    /// A container started before `source_json` existed has to read back as
+    /// `None` rather than as a default `ContainerSource`. The two say very
+    /// different things: `None` is "this fghjd never recorded a commit", a
+    /// zeroed struct would claim the container was built from an unknown
+    /// branch at no commit with a clean tree — a finding fghj never made.
+    #[tokio::test]
+    async fn a_row_predating_the_source_column_reloads_as_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
+
+        db.clone()
+            .save_run(RunState {
+                run_id: "default".to_string(),
+                containers: BTreeMap::from([("svc-a".to_string(), container())]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // Exactly what an older `fghjd` left behind: the column is there
+        // (the migration added it) and nothing ever wrote to it.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE containers SET source_json = NULL", [])
+            .unwrap();
+
+        let loaded = db.load_runs().await.unwrap();
+        assert_eq!(loaded["default"].containers["svc-a"].desired.source, None);
     }
 
     /// The whole reason `desired` and `observed` are stored in separate

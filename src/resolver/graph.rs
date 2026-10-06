@@ -50,8 +50,19 @@ pub struct Node {
     pub domain: String,
     pub downloaded: bool,
     /// Whether the on-disk checkout has uncommitted changes — see
-    /// `concepts/branch-ownership-model.md`. Always `false` for stub
-    /// (`downloaded: false`), backing, and flow nodes, which have no checkout.
+    /// `concepts/branch-ownership-model.md`. `false` for a stub
+    /// (`downloaded: false`) and for a flow node, neither of which has a
+    /// checkout. A backing dependency or task *does* carry one: it inherits
+    /// its owning service's, exactly as it inherits `repo`/`branch`/`head`
+    /// (`resolver::visit_dependency`), because the owner's tree is what its
+    /// image was built from.
+    ///
+    /// Note the failure case is `true`, not `false`: `git_status_dirty` ends
+    /// in `unwrap_or(true)` because it cannot vouch for a tree it could not
+    /// read. A node whose git state is unreadable therefore reports dirty,
+    /// and `branch`/`head` are `None` alongside it — which is the pair the UI
+    /// keys on to say "unreadable" rather than presenting the `true` as a
+    /// finding.
     pub dirty: bool,
     /// The commit the checkout is on, as a full SHA — `None` for a node with
     /// no checkout of its own to read (a stub, a flow) or when the directory

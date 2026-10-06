@@ -82,6 +82,12 @@ pub const ADD_COLUMN_MIGRATIONS: &[&str] = &[
     // `state::ContainerDesired::terminating`.
     "ALTER TABLE containers ADD COLUMN terminating INTEGER",
     "ALTER TABLE containers ADD COLUMN exit_code INTEGER",
+    // The branch/commit the container was built from, as JSON. A row written
+    // before this column existed read back as `None`, which is correct
+    // rather than a guess: that container really was started by an `fghjd`
+    // that never recorded one, so its source is genuinely unknown and the UI
+    // says so instead of claiming the checkout's current commit.
+    "ALTER TABLE containers ADD COLUMN source_json TEXT",
 ];
 
 pub fn init(conn: &Connection) -> Result<()> {

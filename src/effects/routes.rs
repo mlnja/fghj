@@ -96,6 +96,7 @@ mod tests {
                     additional_hosts: Vec::new(),
                     status_port: None,
                     config_hash: String::new(),
+                    source: None,
                     terminating: false,
                     debug_wait: false,
                 },

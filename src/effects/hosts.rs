@@ -67,6 +67,7 @@ mod tests {
                 additional_hosts: additional_hosts.iter().map(|h| h.to_string()).collect(),
                 status_port: None,
                 config_hash: "hash".into(),
+                source: None,
                 terminating: false,
                 debug_wait: false,
             },
