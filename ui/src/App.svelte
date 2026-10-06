@@ -466,7 +466,7 @@
       .map((c) => ({
         id: c.node_id,
         // The id's leaf is the service name; the rest is the owner path,
-        // which is exactly what `crate-tag` would show if this still had a
+        // which is what the card's repo line would show if this still had a
         // repo to point at.
         label: c.node_id.split('.')[0],
         kind: 'service',

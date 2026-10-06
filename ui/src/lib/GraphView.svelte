@@ -1,7 +1,10 @@
 <script>
   let { graph, currentFlow, mode, runContainers, onSelectNode } = $props();
 
-  const NODE_W = 260, NODE_H = 132, LEVEL_GAP = 340, ROW_GAP = 168;
+  // Widened from 260 so two state lanes fit side by side without truncating
+  // a branch name on every card. The gaps keep their old slack (80px across,
+  // 36px down), so the graph reads at the same density per card, just wider.
+  const NODE_W = 320, NODE_H = 146, LEVEL_GAP = 400, ROW_GAP = 182;
 
   function shortRepo(url) {
     if (!url) return '';
@@ -108,15 +111,7 @@
       arr.forEach((n, i) => (pos[n.id] = { x: d * LEVEL_GAP + 20, y: offY + i * ROW_GAP + 10 }));
     });
 
-    const sorted = [...g.nodes].sort((a, b) => a.id.localeCompare(b.id));
-    const codeOf = new Map();
-    let oi = 0;
-    sorted.forEach((n) => {
-      const code = (n.label.replace(/[^a-z0-9]/gi, '').slice(0, 3).toUpperCase() || 'NOD') + '-' + String(++oi).padStart(2, '0');
-      codeOf.set(n.id, code);
-    });
-
-    return { width, height, pos, codeOf };
+    return { width, height, pos };
   }
 
   let l = $derived(layout(graph));
@@ -149,7 +144,17 @@
     {@const inFlow = n.flows.includes(currentFlow)}
     {@const dimmed = currentFlow && !inFlow}
     {@const live = runContainers?.[n.id]}
-    {@const containerState = mode === 'containers' && n.kind !== 'flow' ? containerStateOf(live) : null}
+    <!-- Still gated on `mode`, and it has to be: a repos-mode card is a
+         *group* of services keyed by checkout path (`App.svelte`'s
+         `reposGraph`), not a node, so there is no single container behind it
+         to report on — `runContainers` is keyed by node id and is not even
+         passed for that view. Within containers mode the footer is
+         unconditional, so a node with nothing running reads as ABSENT rather
+         than as a differently-shaped card. A flow node never has a container
+         of its own. -->
+    {@const showDocker = mode === 'containers' && n.kind !== 'flow'}
+    {@const containerState = showDocker ? containerStateOf(live) : null}
+    {@const sha = n.head ? n.head.slice(0, 7) : null}
     <!-- `unknown` is the one verdict with nothing to say (no drift check has
          run yet, or the last one failed to re-resolve), so it renders no pill
          at all. `orphaned` does have something to say — the node is gone from
@@ -176,43 +181,90 @@
           {/if}
           <span class="node-id">{n.label}</span>
         </div>
-        <span class="crate-tag">{l.codeOf.get(n.id)}</span>
+        <!-- The corner used to hold a generated `AIK-01` code: the label's
+             first three letters plus an index into id-sorted order. It
+             restated the name beside it, renumbered whenever a node sorted
+             ahead of it appeared, and existed in no API response, CLI output
+             or drawer, so there was nothing to cross-reference it against.
+             `domain_scope` is the fact worth that corner instead — a stable
+             node drops the run id from its domain, so exactly one run can
+             own that name at a time. It's opt-in and rare, which is what
+             makes it worth marking. -->
+        {#if n.domain_scope === 'stable'}
+          <span class="scope-tag" title="domain_scope: stable — this node's domain has no run id in it, so only one run can hold this name at a time">STABLE</span>
+        {/if}
       </div>
 
-      <!-- Docker half: only ever populated in containers mode, since
-           there's nothing runtime-related to show for a plain repo view. -->
-      {#if sync !== null}
-        <div class="node-meta live-row">
-          <span class="pill" class:drifted={sync === 'drifted'} class:synced={sync === 'synced'} class:orphaned={sync === 'orphaned'} title={SYNC_TITLE[sync]}>
-            {sync.toUpperCase()}
-          </span>
-        </div>
+      <!-- Identity, full width. Which repo a node came from is neither a git
+           *state* nor a docker one, and a whole line keeps `owner/name`
+           readable instead of truncating it into a half-width lane. -->
+      {#if n.repo}
+        <div class="node-repo" title={n.repo}>{shortRepo(n.repo)}</div>
+      {/if}
+      {#if n.services?.length > 1}
+        <div class="node-repo" title={n.services.join(', ')}>{n.services.join(', ')}</div>
       {/if}
 
-      <!-- The literal boundary between the two halves: container status is
-           the one fact that's neither a git nor a repo fact, so it gets the
-           dividing line instead of living inside either half. -->
+      <!-- State, in two lanes: left is what git says about the checkout,
+           right is what Docker says about the container. Both lanes always
+           render, placeholder and all, so the same fact sits in the same
+           place on every card and a missing one reads as absence rather
+           than as a different layout.
+
+           Both lanes are populated for every node kind that has a checkout
+           behind it, not just services: a backing dependency or a task
+           inherits its owning service's repo/branch/dirty/head
+           (`resolver/visit_dependency.rs`), so a database card still says
+           which branch produced it. -->
+      <div class="halves" class:solo={!showDocker}>
+        <div class="half git">
+          {#if n.branch}
+            <div class="lane-line" title={n.branch}>{n.branch}</div>
+            <div class="lane-line pills">
+              {#if n.downloaded !== false}
+                <span class="pill" class:dirty={n.dirty} class:clean={!n.dirty} title="git working tree">{n.dirty ? 'DIRTY' : 'CLEAN'}</span>
+              {/if}
+              {#if sha}
+                <span class="sha" title={n.head}>{sha}</span>
+              {/if}
+            </div>
+          {:else}
+            <div class="lane-line empty" title="no checkout behind this node">&mdash;</div>
+          {/if}
+        </div>
+        {#if showDocker}
+        <div class="half docker">
+          {#if sync !== null}
+            <div class="lane-line pills">
+              <span class="pill" class:drifted={sync === 'drifted'} class:synced={sync === 'synced'} class:orphaned={sync === 'orphaned'} title={SYNC_TITLE[sync]}>
+                {sync.toUpperCase()}
+              </span>
+            </div>
+          {/if}
+          <!-- The image, not the published host port. A `5432->54321`
+               mapping is the thing the raw zone exists to abolish (every raw
+               node answers on its *declared* port at its own address), it is
+               something you copy rather than scan, and the drawer already
+               offers it with `raw_domain` preferred and a copy button. What
+               the stripe and the sync pill between them never say is what
+               this container actually is — which for a backing dependency
+               labelled `db` is the whole question. -->
+          {#if n.image}
+            <div class="lane-line" title={n.image}>{n.image}</div>
+          {:else if sync === null}
+            <div class="lane-line empty" title="no container for this node">&mdash;</div>
+          {/if}
+        </div>
+        {/if}
+      </div>
+
+      <!-- The verdict, and the last thing read. It used to be the divider
+           between the two halves; the lanes now divide themselves, so this
+           is the footer, pushed to the bottom edge and bled past the card's
+           own padding on three sides. -->
       {#if containerState}
         <div class="status-bar state-{containerState}" title={STATE_TITLE[containerState] ?? `container: ${containerState}`}>
           {containerState === 'none' ? 'absent' : containerState}
-        </div>
-      {/if}
-
-      <!-- Git half: always shown, mode-independent. -->
-      {#if mode === 'repos'}
-        <div class="node-domain">{shortRepo(n.repo)}</div>
-      {:else if n.repo}
-        <div class="node-meta">{shortRepo(n.repo)}</div>
-      {/if}
-      {#if n.services?.length > 1}
-        <div class="node-meta">{n.services.join(', ')}</div>
-      {/if}
-      {#if n.branch}
-        <div class="node-meta branch-row">
-          <span>{n.branch}</span>
-          {#if n.downloaded !== false}
-            <span class="pill" class:dirty={n.dirty} class:clean={!n.dirty} title="git working tree">{n.dirty ? 'DIRTY' : 'CLEAN'}</span>
-          {/if}
         </div>
       {/if}
     </div>
@@ -222,21 +274,24 @@
 <style>
   .graph-area { position: relative; }
   .node {
-    position: absolute; width: 260px; min-height: 132px; padding: 14px; border-radius: 6px;
+    position: absolute; width: 320px; min-height: 146px; padding: 14px; border-radius: 6px;
     background: var(--panel-2); border: 1px solid var(--line-strong); cursor: pointer;
     overflow: hidden; transition: opacity 0.15s ease;
+    /* A flex column purely so the status bar can take `margin-top: auto`
+       and sit on the bottom edge however much content is above it. */
+    display: flex; flex-direction: column;
   }
   .node.in-flow { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .node.not-downloaded { border-style: dashed; opacity: 0.7; background: transparent; }
   .node.dimmed { opacity: 0.35; }
-  /* Normal document flow, not absolutely pinned to the card's bottom edge —
+  /* The card's footer. Still in normal flow rather than absolutely pinned —
      an absolutely-positioned bar sat at a fixed height regardless of how
-     much text was above it, overlapping whatever content was there. It's
-     also the literal dividing line between the docker half (above: live
-     port/drift) and the git half (below: repo/branch/dirty) of the card,
-     bled out to the card's left/right edges past its own padding. */
+     much text was above it and overlapped whatever was there. `margin-top:
+     auto` is what puts it on the bottom edge instead, which works at any
+     content height; the negative margins bleed it past the card's own
+     padding on the two sides and the bottom. */
   .status-bar {
-    margin: 10px -14px; height: 26px;
+    margin: auto -14px -14px; height: 26px; flex: 0 0 auto;
     display: flex; align-items: center; justify-content: center;
     font: 700 12px var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em;
   }
@@ -274,14 +329,49 @@
   .kind-icon.service { color: var(--accent); }
   .kind-icon.backing { color: var(--ink-faint); }
   .kind-icon.task { color: var(--ink-faint); }
-  .node-domain { font: 500 11px var(--font-mono); color: var(--ink-faint); word-break: break-all; }
-  .node-meta { font: 500 10px var(--font-mono); color: var(--ink-faint); margin-top: 6px; }
-  .live-row { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+  /* Truncates rather than wrapping (the old `.node-domain` used
+     `word-break: break-all`): a card's height is part of the graph layout,
+     so a long `owner/name` must not be able to push the lanes down. */
+  .node-repo {
+    font: 500 10.5px var(--font-mono); color: var(--ink-faint); margin-top: 4px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* Two fixed-width lanes rather than `auto` columns: equal halves mean a
+     given fact lands at the same x on every card in the graph, which is
+     what makes a column of cards scannable down its left or right edge. */
+  .halves { display: grid; grid-template-columns: 1fr 1fr; margin-top: 10px; }
+  /* Repos mode has no docker side to show, so the git lane takes the whole
+     card rather than sitting next to a permanently empty column. Every card
+     in a given view still matches every other one; it's the two views that
+     differ, which is honest — they are drawing different things. */
+  .halves.solo { grid-template-columns: 1fr; }
+  .halves.solo .half.git { padding-right: 0; }
+  .half { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+  .half.git { padding-right: 10px; }
+  .half.docker { padding-left: 10px; border-left: 1px solid var(--line); }
+  .lane-line {
+    font: 500 10px var(--font-mono); color: var(--ink-faint);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .lane-line.pills { display: flex; align-items: center; gap: 6px; overflow: visible; }
+  /* An empty lane says "nothing to report here", which is a different thing
+     from "this card is laid out differently" — hence a mark rather than a
+     collapsed column. */
+  .lane-line.empty { color: var(--line-strong); }
+  .sha { font: 500 9.5px var(--font-mono); color: var(--ink-faint); opacity: 0.7; }
+  /* Accent rather than the old code tag's grey: this one appears on few
+     cards and means something when it does, so it should read as a mark
+     rather than as furniture every card happens to carry. */
+  .scope-tag {
+    font: 700 8px var(--font-mono); text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--accent); border: 1px solid var(--accent-bg); background: var(--accent-bg);
+    border-radius: 3px; padding: 2px 5px; flex: 0 0 auto; white-space: nowrap;
+  }
   .badge {
     font: 700 8.5px var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint);
     border: 1px dashed var(--line-strong); border-radius: 3px; padding: 2px 5px; flex: 0 0 auto;
   }
-  .branch-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
   .pill {
     font: 700 8px var(--font-mono); text-transform: uppercase; letter-spacing: 0.05em;
     border-radius: 999px; padding: 2px 7px; flex: 0 0 auto;

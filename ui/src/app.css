@@ -73,15 +73,6 @@ a:hover { color: var(--accent-dim); }
   letter-spacing: 0.01em;
 }
 
-.crate-tag {
-  font: 500 10px/1 var(--font-mono);
-  letter-spacing: 0.04em;
-  color: var(--ink-faint);
-  border: 1px solid var(--line-strong);
-  padding: 3px 7px;
-  border-radius: 3px;
-  white-space: nowrap;
-}
 
 .corner-brackets { position: relative; }
 .corner-brackets::before, .corner-brackets::after {
