@@ -17,6 +17,36 @@ use crate::util::label::sanitize_label;
 
 use super::registry::RunRegistry;
 
+/// Build-context size for the events pane. Binary units, one decimal, since
+/// the number is read to answer "is that bigger than I expected" and not to
+/// be added up.
+fn human_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KIB {
+        return format!("{bytes} B context");
+    }
+    for (limit, unit) in [(KIB * KIB, "KiB"), (KIB * KIB * KIB, "MiB")] {
+        if b < limit {
+            return format!("{:.1} {unit} context", b / (limit / KIB));
+        }
+    }
+    format!("{:.1} GiB context", b / (KIB * KIB * KIB))
+}
+
+/// Build duration, at the precision anyone actually reads it at: a build is
+/// either seconds or minutes, and tenths stop mattering past ten seconds.
+fn human_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 10.0 {
+        return format!("{secs:.1}s");
+    }
+    if secs < 60.0 {
+        return format!("{:.0}s", secs);
+    }
+    format!("{}m {:02}s", (secs / 60.0) as u64, (secs % 60.0) as u64)
+}
+
 impl RunRegistry {
     /// Builds `tag` from `build`, rooted at `repo_root`, recording the
     /// attempt into `node_id`'s event stream so a failing build reads as a
@@ -35,13 +65,28 @@ impl RunRegistry {
         platform: Option<&str>,
     ) -> Result<()> {
         let build_dir = repo_root.join(&build.context);
+        // What is being built, not just what it will be called. A node whose
+        // `context`/`dockerfile`/`target` resolved to something other than
+        // what its author expected looks identical in the events pane to one
+        // that didn't, and the tag alone can't tell them apart — the tag is
+        // derived from the node id, so it is the same either way.
+        let mut what = format!("{tag}  ·  {}", build_dir.display());
+        if build.dockerfile != "Dockerfile" {
+            what.push_str(&format!("  ·  -f {}", build.dockerfile));
+        }
+        if let Some(target) = build.target.as_deref() {
+            what.push_str(&format!("  ·  --target {target}"));
+        }
+        if let Some(platform) = platform {
+            what.push_str(&format!("  ·  {platform}"));
+        }
         self.record_event(
             run_id,
             node_id,
             "start",
             "building image",
             "running",
-            Some(tag.to_string()),
+            Some(what),
         )
         .await;
         let secrets = match resolve_build_secrets(repo_root, &build.secrets) {
@@ -98,20 +143,41 @@ impl RunRegistry {
             secrets: &secrets,
             ssh_auth_sock: ssh_auth_sock.as_deref(),
         };
-        if let Err(e) = docker::build_image(&self.docker, &opts).await {
-            self.record_event(
-                run_id,
-                node_id,
-                "start",
-                "building image",
-                "error",
-                Some(format!("{e:#}")),
-            )
-            .await;
-            return Err(e);
-        }
-        self.record_event(run_id, node_id, "start", "building image", "ok", None)
-            .await;
+        let started = std::time::Instant::now();
+        let report = match docker::build_image(&self.docker, &opts).await {
+            Ok(report) => report,
+            Err(e) => {
+                self.record_event(
+                    run_id,
+                    node_id,
+                    "start",
+                    "building image",
+                    "error",
+                    Some(format!("{e:#}")),
+                )
+                .await;
+                return Err(e);
+            }
+        };
+        // A build that succeeded still has two numbers worth seeing: how long
+        // it took, and how much context was shipped to get there. The second
+        // is the one nothing else would ever surface — the context is tarred
+        // and uploaded whole on every build, so a `node_modules` or a `.git`
+        // that should have been in `.dockerignore` shows up here as a cost
+        // paid on every single start, and nowhere else.
+        self.record_event(
+            run_id,
+            node_id,
+            "start",
+            "building image",
+            "ok",
+            Some(format!(
+                "{} in {}",
+                human_bytes(report.context_bytes),
+                human_duration(started.elapsed())
+            )),
+        )
+        .await;
         Ok(())
     }
 
@@ -506,6 +572,38 @@ mod tests {
     use crate::resolver::NodeBuildSecret;
     use crate::resolver::port::PortConfig;
     use crate::runs::testing::{test_graph, test_node};
+
+    /// The context size is the number in this pair that nobody is expecting,
+    /// so it has to be unambiguous at a glance — a stray factor of 1024 here
+    /// would read as a `.dockerignore` problem that isn't one, or hide one
+    /// that is.
+    #[test]
+    fn a_context_size_reads_in_the_unit_a_human_would_pick() {
+        assert_eq!(human_bytes(0), "0 B context");
+        assert_eq!(human_bytes(900), "900 B context");
+        // Exactly at a boundary belongs to the larger unit, not "1024.0 B".
+        assert_eq!(human_bytes(1024), "1.0 KiB context");
+        assert_eq!(human_bytes(1536), "1.5 KiB context");
+        assert_eq!(human_bytes(1024 * 1024), "1.0 MiB context");
+        // The case this exists for: a `node_modules` nobody ignored.
+        assert_eq!(human_bytes(412 * 1024 * 1024), "412.0 MiB context");
+        assert_eq!(human_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB context");
+    }
+
+    #[test]
+    fn a_build_duration_drops_its_tenths_once_they_stop_mattering() {
+        use std::time::Duration;
+        assert_eq!(human_duration(Duration::from_millis(1340)), "1.3s");
+        assert_eq!(human_duration(Duration::from_millis(9949)), "9.9s");
+        // Past ten seconds the tenth is noise, and past a minute the minutes
+        // are what the reader is counting.
+        assert_eq!(human_duration(Duration::from_millis(10_400)), "10s");
+        assert_eq!(human_duration(Duration::from_secs(59)), "59s");
+        assert_eq!(human_duration(Duration::from_secs(60)), "1m 00s");
+        // The seconds stay two digits so a column of these lines up.
+        assert_eq!(human_duration(Duration::from_secs(65)), "1m 05s");
+        assert_eq!(human_duration(Duration::from_secs(8 * 60 + 7)), "8m 07s");
+    }
 
     fn secret(id: &str, file: &str) -> NodeBuildSecret {
         NodeBuildSecret {

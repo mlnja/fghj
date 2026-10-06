@@ -5,6 +5,7 @@ use std::pin::Pin;
 use anyhow::{Context, Result, bail};
 use bollard::Docker;
 use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
+use bollard::grpc::error::GrpcError;
 use bollard::models::{
     ContainerCreateBody, EndpointSettings, HealthConfig, HostConfig, NetworkCreateRequest,
     NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum, VolumeCreateRequest,
@@ -261,6 +262,98 @@ pub async fn pull_image(docker: &Docker, repository: &str, tag: &str) -> Result<
     Ok(())
 }
 
+/// How big the build context was, so the events pane can say it.
+///
+/// A context is tarred and uploaded in full on every build, so a stray
+/// `node_modules` or `.git` inside it is a silent per-build cost that
+/// nothing else in fghj would ever mention.
+#[derive(Debug)]
+pub struct BuildReport {
+    pub context_bytes: u64,
+}
+
+/// Turns a BuildKit solve failure into something an operator can act on.
+///
+/// The raw error arrives saying the same thing three times. `GrpcError`'s
+/// `TonicStatus` variant renders as `status = {code}, message = {message}`
+/// *and*, because thiserror's `#[from]` also makes the status its `source`,
+/// anyhow's `{:#}` chain walks into it and prints the same message again —
+/// so a one-line Go compile failure reaches the events pane as 300-odd
+/// characters of which about 60 are information:
+///
+/// ```text
+/// buildkit build of fghj/x:local failed: Grpc response failure: status =
+/// Unknown error, message = process "/bin/sh -c go build ..." did not
+/// complete successfully: exit code: 1: code: 'Unknown error', message:
+/// "process \"/bin/sh -c go build ...\" did not complete successfully: exit
+/// code: 1"
+/// ```
+///
+/// This takes the status message once and splits it into the two facts it
+/// actually carries — which step, and what it exited with — then says where
+/// the step's own output is, because that is the next thing anyone reads
+/// this message wanting.
+///
+/// The `code` is dropped on purpose: BuildKit reports every failed build
+/// step as `Unknown`, so it distinguishes nothing while costing a line.
+fn describe_solve_failure(opts: &BuildOpts<'_>, err: GrpcError) -> anyhow::Error {
+    let GrpcError::TonicStatus { err: status } = &err else {
+        // Transport, UTF-8 and metadata failures aren't a failing build
+        // step, so there is nothing to take apart — keep the original.
+        return anyhow::Error::from(err).context(format!("buildkit build of {} failed", opts.tag));
+    };
+
+    let message = status.message().trim().to_string();
+    let (step, exit) = split_step_failure(&message);
+
+    let mut out = format!("build of {} failed", opts.tag);
+    match (step, exit) {
+        (Some(step), Some(exit)) => {
+            out.push_str(&format!("\nfailing step: {step}\nexit code: {exit}"));
+        }
+        // Not the `process "..." did not complete successfully` shape — a
+        // missing base image, an unparseable Dockerfile, a secret that
+        // isn't there. Those messages are already a sentence, so they go
+        // through whole rather than being forced into fields.
+        _ => out.push_str(&format!("\n{message}")),
+    }
+
+    out.push_str(&format!(
+        "\n\nStep output is not captured: BuildKit streams it over a gRPC \
+         channel the Docker API client fghjd uses does not expose. To see it:\
+         \n  docker build -f {} {}",
+        opts.dockerfile,
+        opts.context_dir.display()
+    ));
+
+    anyhow::Error::msg(out)
+}
+
+/// Pulls the failing command and its exit code out of BuildKit's standard
+/// step-failure message:
+///
+/// ```text
+/// process "/bin/sh -c go build ./..." did not complete successfully: exit code: 1
+/// ```
+///
+/// Returns `(None, None)` for anything else, which the caller passes through
+/// untouched rather than guessing at.
+fn split_step_failure(message: &str) -> (Option<&str>, Option<&str>) {
+    const MARKER: &str = "\" did not complete successfully: exit code: ";
+    let Some(rest) = message.strip_prefix("process \"") else {
+        return (None, None);
+    };
+    let Some(split) = rest.find(MARKER) else {
+        return (None, None);
+    };
+    let step = &rest[..split];
+    let exit = rest[split + MARKER.len()..].trim();
+    if step.is_empty() || exit.is_empty() {
+        return (None, None);
+    }
+    (Some(step), Some(exit))
+}
+
 /// Builds `opts.tag` from `opts.context_dir`, always through BuildKit.
 ///
 /// There used to be a second, classic-builder path taken by any build that
@@ -273,9 +366,11 @@ pub async fn pull_image(docker: &Docker, repository: &str, tag: &str) -> Result<
 /// builder, and a daemon too old to offer it is a failed build with a clear
 /// message rather than a silently different one. `fghj doctor` checks for it
 /// up front; see `concepts/build-inputs.md`.
-pub async fn build_image(docker: &Docker, opts: &BuildOpts<'_>) -> Result<()> {
+pub async fn build_image(docker: &Docker, opts: &BuildOpts<'_>) -> Result<BuildReport> {
     let tar_bytes = tar_build_context(opts.context_dir).await?;
-    build_image_buildkit(docker, opts, tar_bytes).await
+    let context_bytes = tar_bytes.len() as u64;
+    build_image_buildkit(docker, opts, tar_bytes).await?;
+    Ok(BuildReport { context_bytes })
 }
 
 async fn tar_build_context(context_dir: &Path) -> Result<Vec<u8>> {
@@ -341,7 +436,14 @@ async fn build_image_buildkit(
         }
         None => solve_on_dedicated_thread(docker, tag, frontend, load).await,
     };
-    result.with_context(|| format!("buildkit build of {tag} failed"))
+    // Two layers: the outer is this side failing to run the solve at all
+    // (runtime, thread), the inner is BuildKit rejecting the build. Only the
+    // inner one has a failing step worth taking apart.
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(grpc)) => Err(describe_solve_failure(opts, grpc)),
+        Err(e) => Err(e.context(format!("buildkit build of {tag} failed"))),
+    }
 }
 
 /// Runs one BuildKit solve on a thread of its own.
@@ -357,7 +459,7 @@ async fn solve_on_dedicated_thread(
     tag: &str,
     frontend: bollard::grpc::build::ImageBuildFrontendOptions,
     load: bollard::grpc::build::ImageBuildLoadInput,
-) -> Result<()> {
+) -> Result<Result<(), GrpcError>> {
     use bollard::grpc::driver::Build;
     use bollard::grpc::driver::moby::Moby;
 
@@ -365,18 +467,17 @@ async fn solve_on_dedicated_thread(
     let tag = tag.to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
-        let outcome = (|| -> Result<()> {
+        let outcome = (|| -> Result<Result<(), GrpcError>> {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .context("failed to build a runtime for the buildkit solve")?;
             let local = tokio::task::LocalSet::new();
-            local.block_on(&runtime, async move {
+            Ok(local.block_on(&runtime, async move {
                 Moby::new(&docker)
                     .docker_build(&tag, frontend, load, None, None)
                     .await
-                    .map_err(anyhow::Error::from)
-            })
+            }))
         })();
         let _ = tx.send(outcome);
     });
@@ -920,6 +1021,52 @@ pub async fn exec_exit_code(docker: &Docker, exec_id: &str) -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The exact message BuildKit returned for a failed `go build`, taken
+    /// from a real failure — the one that reached the events pane as three
+    /// copies of itself.
+    #[test]
+    fn a_failed_build_step_splits_into_a_command_and_an_exit_code() {
+        let (step, exit) = split_step_failure(
+            "process \"/bin/sh -c CGO_ENABLED=0 GOOS=linux go build -o /out/aikifactory ./cmd/aikifactory\" did not complete successfully: exit code: 1",
+        );
+        assert_eq!(
+            step,
+            Some(
+                "/bin/sh -c CGO_ENABLED=0 GOOS=linux go build -o /out/aikifactory ./cmd/aikifactory"
+            )
+        );
+        assert_eq!(exit, Some("1"));
+    }
+
+    /// Anything that isn't that shape is passed through whole rather than
+    /// being forced into fields it doesn't have. A missing base image is
+    /// already a sentence; splitting it would lose it.
+    #[test]
+    fn a_message_that_is_not_a_step_failure_is_left_alone() {
+        assert_eq!(
+            split_step_failure("failed to solve: nonexistent: not found"),
+            (None, None)
+        );
+        assert_eq!(split_step_failure(""), (None, None));
+        // The prefix without the marker: truncated or a future wording.
+        assert_eq!(
+            split_step_failure("process \"sh -c x\" exploded"),
+            (None, None)
+        );
+    }
+
+    /// A command containing the marker's own words must not split early —
+    /// `find` is the first match, so a step that echoes the phrase would
+    /// otherwise cut the command in half.
+    #[test]
+    fn the_split_takes_the_quote_before_the_marker() {
+        let (step, exit) = split_step_failure(
+            "process \"/bin/sh -c echo did not complete successfully\" did not complete successfully: exit code: 2",
+        );
+        assert_eq!(step, Some("/bin/sh -c echo did not complete successfully"));
+        assert_eq!(exit, Some("2"));
+    }
     use super::*;
     use std::process::Command;
     use tokio::io::AsyncWriteExt;

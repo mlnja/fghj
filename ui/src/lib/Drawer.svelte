@@ -556,7 +556,14 @@
         {#if events.length}
           <div class="event-list">
             {#each events as e (e.seq)}
-              <div class="event-row" class:error={e.status === 'error'}>
+              <!-- A detail with newlines in it is a report, not a caption: a build
+                   failure names the step, the exit code and the command to run by
+                   hand. Inline it would squeeze that against the step label and
+                   wrap mid-path, so it gets the full width on its own line.
+                   Single-line details stay where they are, which is most of
+                   them. -->
+              {@const block = (e.detail ?? '').includes('\n')}
+              <div class="event-row" class:error={e.status === 'error'} class:block>
                 <span class="event-time">{new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
                 <span class="event-status status-{e.status}">
                   {#if e.status === 'running'}<span class="spinner"></span>{:else if e.status === 'ok'}✓{:else if e.status === 'error'}✕{/if}
@@ -715,16 +722,30 @@
   .loading-more { color: var(--ink-faint); font-style: italic; }
   .event-list { display: flex; flex-direction: column; gap: 2px; }
   .event-row {
-    display: flex; align-items: baseline; gap: 8px; padding: 4px 8px; border-radius: 4px;
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px;
+    padding: 4px 8px; border-radius: 4px;
     font: 500 11px var(--font-mono); background: var(--panel-2);
   }
+  .event-row.block { padding-bottom: 6px; }
   .event-row.error { background: var(--danger-bg, rgba(255, 90, 90, 0.08)); }
   .event-time { color: var(--ink-faint); flex: 0 0 auto; }
   .event-status { flex: 0 0 auto; width: 12px; text-align: center; }
   .event-status.status-ok { color: var(--success, #6fdc8c); }
   .event-status.status-error { color: var(--danger); }
   .event-step { color: var(--ink); text-transform: uppercase; letter-spacing: 0.03em; flex: 0 0 auto; }
-  .event-detail { color: var(--ink-faint); word-break: break-all; }
+  /* `pre-wrap` so the newlines the daemon writes survive, and so the padded
+     `tag  ·  context  ·  --target x` line keeps the spacing it was written
+     with. `anywhere` rather than the old `break-all`: both can break a long
+     image tag or path, but `break-all` also breaks ordinary prose
+     mid-syllable, and these details are now partly prose. */
+  .event-detail {
+    color: var(--ink-faint); min-width: 0;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  /* `flex-basis: 100%` is what moves it below the step rather than beside it.
+     The indent lines it up past the timestamp so the block reads as belonging
+     to the row above it. */
+  .event-row.block .event-detail { flex: 1 1 100%; margin: 3px 0 0 20px; line-height: 1.55; }
   .live-badge {
     display: flex; align-items: center; gap: 4px; font: 700 10px var(--font-mono); text-transform: uppercase;
     letter-spacing: 0.04em; color: var(--success, #6fdc8c);

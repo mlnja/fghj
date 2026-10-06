@@ -87,13 +87,17 @@ impl RunRegistry {
                 bail!(msg);
             }
             Err(e) => {
-                self.record_event(
+                // The backstop. Most failures in here are a build, a secret
+                // or the ssh-agent, and `resolve_node_spec` already recorded
+                // the step that actually broke — recording again would put
+                // the same text in the events pane a second time under
+                // `resolving config`, which is not what failed.
+                self.record_error_unless_reported(
                     run_id,
                     &node.id,
                     "start",
                     "resolving config",
-                    "error",
-                    Some(format!("{e:#}")),
+                    format!("{e:#}"),
                 )
                 .await;
                 return Err(e);

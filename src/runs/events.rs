@@ -54,4 +54,39 @@ impl RunRegistry {
             eprintln!("fghjd: failed to record {action} event '{step}' for node {node_id}: {e:#}");
         }
     }
+
+    /// Records `step` as failed, unless some inner step of this same cycle
+    /// already recorded a failure.
+    ///
+    /// For the outer handlers that wrap a sequence of narrated steps. The
+    /// error they catch is usually the one the inner step already reported,
+    /// and recording it again puts the same text in the pane twice under the
+    /// wrong step name. When nothing inner reported — `resolve_node_spec`
+    /// has `bail!` paths that don't, like a backing node with no image or an
+    /// unreadable `env_file` — this is the only thing that will, so it still
+    /// has to run.
+    ///
+    /// Best-effort in the same way as `record_event`: if the check itself
+    /// fails, record, on the grounds that a duplicate line is a much smaller
+    /// problem than a failure nothing narrates at all.
+    pub(super) async fn record_error_unless_reported(
+        &self,
+        run_id: &str,
+        node_id: &str,
+        action: &str,
+        step: &str,
+        detail: String,
+    ) {
+        let already = self
+            .db
+            .clone()
+            .cycle_has_error(run_id.to_string(), node_id.to_string(), action.to_string())
+            .await
+            .unwrap_or(false);
+        if already {
+            return;
+        }
+        self.record_event(run_id, node_id, action, step, "error", Some(detail))
+            .await;
+    }
 }

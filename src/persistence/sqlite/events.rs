@@ -80,6 +80,34 @@ impl WorkspaceDb {
         .context("append_event task panicked")?
     }
 
+    /// Whether the current cycle of `action` for `(run_id, node_id)` already
+    /// has a step recorded as failed.
+    ///
+    /// Lets an outer handler avoid narrating a failure its inner step already
+    /// narrated. `start_node` wraps `resolve_node_spec`, which records its own
+    /// build/secret/ssh-agent failures — so without this the events pane shows
+    /// the same text twice, the second time labelled `resolving config` when
+    /// what actually broke was a compile inside `building image`.
+    pub async fn cycle_has_error(
+        self: Arc<Self>,
+        run_id: String,
+        node_id: String,
+        action: String,
+    ) -> Result<bool> {
+        tokio::task::spawn_blocking(move || {
+            let conn = self.conn.lock().unwrap();
+            let found: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM events
+                 WHERE run_id = ?1 AND node_id = ?2 AND action = ?3 AND status = 'error'",
+                rusqlite::params![run_id, node_id, action],
+                |row| row.get(0),
+            )?;
+            Ok(found > 0)
+        })
+        .await
+        .context("cycle_has_error task panicked")?
+    }
+
     /// Lists the steps of the current cycle of `action` for `(run_id,
     /// node_id)`, oldest first.
     pub async fn list_events(

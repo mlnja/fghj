@@ -126,6 +126,9 @@ async fn build_locally(docker: &Docker, tag: &str) -> Result<()> {
         },
     )
     .await
+    // The sidecar's context is fghjd's own embedded files, not a user repo,
+    // so its size is a constant and there is no events pane to narrate it to.
+    .map(|_| ())
     .context("failed to build fghj-sidecar image")
 }
 

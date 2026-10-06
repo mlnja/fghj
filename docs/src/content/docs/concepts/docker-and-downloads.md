@@ -31,6 +31,50 @@ shelling out to `docker build`/`docker run`:
   reconciler, route-building, a run's liveness check — can all treat
   "doesn't exist" as ordinary control flow, not an error path.
 
+### What a build tells you, and what it can't
+
+A node's **Events** tab narrates each build as three lines. When it starts,
+the tag alongside the inputs it resolved to — context directory, and
+`-f`/`--target`/platform whenever they differ from the default:
+
+```
+building image   fghj/shop-storefront:main  ·  /Users/me/src/storefront  ·  --target dev
+```
+
+The context directory is there because a `context:` that resolved somewhere
+unexpected looks identical in the events pane to one that didn't — the tag
+is derived from the node id, so it's the same either way.
+
+On success, how long it took and how much context was shipped:
+
+```
+building image   412.0 MiB context in 1m 12s
+```
+
+The size is the number nothing else would surface. The context is tarred and
+uploaded whole on **every** build, so a `node_modules` or a `.git` that
+belongs in `.dockerignore` shows up here as a cost paid on every start.
+
+On failure, the failing step and its exit code, pulled out of BuildKit's
+error:
+
+```
+failing step: /bin/sh -c go build -o /out/app ./cmd/app
+exit code: 1
+```
+
+**What is not there is the step's own output** — the compiler errors. BuildKit
+streams those over a separate gRPC channel that the Docker API client `fghjd`
+uses doesn't expose, so the daemon never sees them. The event says so and
+gives you the command to run by hand:
+
+```
+docker build -f Dockerfile /Users/me/src/storefront
+```
+
+That's a real gap rather than a design choice, and it's the one thing a build
+failure will send you to a terminal for.
+
 ## Volumes: two shapes, one Docker primitive
 
 A volume declaration is either a bind mount or a named volume, never both
