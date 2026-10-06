@@ -259,11 +259,11 @@ migration rather than a silent adoption of somebody else's data.
 |---|---|---|
 | `name` | string | A bare label, matching `[a-z0-9][a-z0-9-]*`. The real volume name is derived from it, folding in the declaring node's id — so the same label in two repos is two volumes unless both opt into `shared`. |
 | `shared` | bool | Drops the node-id qualification so the label alone decides identity, letting any other node with the same `name` + `scope` + `shared: true` reach the same storage. Defaults to `false`. |
-| `scope` | `"run"` \| `"stable"` | Same semantics as `domain_scope`: `"run"` (the default) gives each run (including preview/named runs) its own fresh empty volume; `"stable"` gives the volume one fixed identity that persists across every run. |
+| `scope` | `"run"` \| `"stable"` | Same semantics as `domain_scope`: `"run"` (the default) gives each run (including named runs) its own fresh empty volume; `"stable"` gives the volume one fixed identity that persists across every run. |
 | `container` | string | Mount path inside the container. |
 | `read_only` | bool | Mounts read-only. Defaults to `false`. |
 
-Stopping a `"run"`-scoped volume's named/preview run deletes that volume
+Stopping a `"run"`-scoped volume's named run deletes that volume
 along with its containers and network — since `scope: "run"` under a named
 run derives a run-specific volume name to begin with (folding the run id
 in), there's nothing else that could still be using it once the run
@@ -276,11 +276,11 @@ must leave their data in place.
 :::caution[`scope: "stable"` plus a second run]
 `"stable"` means *one* volume, shared by every run — including two runs that
 are up at the same time. Two Postgres containers (the default run's and a
-review run's) mounting one `pgdata` is two engines on one data directory,
+named run's) mounting one `pgdata` is two engines on one data directory,
 which Postgres does not survive gracefully. Nothing stops you: fghj neither
 warns nor serialises access. Keep `scope: "stable"` for data that tolerates
 concurrent readers, or accept that you'll run one run at a time for that
-node. [Tutorial chapter 6](/tutorial/06-two-runs/) walks through this and the
+node. [Runs](/reference/runs/) walks through this and the
 other two knobs that behave differently once a second run exists.
 :::
 

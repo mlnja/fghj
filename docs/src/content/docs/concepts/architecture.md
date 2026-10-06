@@ -46,8 +46,8 @@ description: How fghj's pieces — the CLI, the superdaemon, the resolver, the p
   [Fog-of-war visibility](/concepts/fog-of-war-visibility/).
 - **The run registry** (`src/runs/`) turns that graph into running Docker
   containers — one shared default environment per workspace, plus
-  disposable named runs that stand up their own isolated copy of the same
-  graph. See
+  [named runs](/reference/runs/) that stand up their own isolated copy of
+  the same graph, from the same checkout. See
   [Run lifecycle & registry](/concepts/run-lifecycle-and-registry/) and
   [Branch ownership model](/concepts/branch-ownership-model/).
 - **The web UI** (Svelte, embedded into `fghjd` at compile time) is how you

@@ -118,7 +118,7 @@ whether the work is still needed.
 **`once` is deliberately not keyed on the config hash.** It could be: the
 spec hash covers the checkout's HEAD commit, so a `git pull` that adds a
 migration does move it (see [config sync in tutorial chapter
-7](/tutorial/07-when-it-goes-wrong/)). It still shouldn't be. `once` means "at most once per run", and an author reaches
+7](/tutorial/06-when-it-goes-wrong/)). It still shouldn't be. `once` means "at most once per run", and an author reaches
 for it exactly when re-running the task is expensive or destructive. "New code
 arrived" is not a reason to re-run something they marked as unsafe to re-run
 — if it were, they'd have left it `on_start`.

@@ -1,11 +1,11 @@
 ---
-title: 7. When it goes wrong
+title: 6. When it goes wrong
 description: The status vocabulary, configuration drift, blocking warnings, and the three places to look when something isn't up.
 sidebar:
-  order: 7
+  order: 6
 ---
 
-Everything worked in the first six chapters because it was written to. This
+Everything worked in the first five chapters because it was written to. This
 chapter is the one you'll come back to.
 
 ## A node's status is a pair, read as one word
@@ -178,7 +178,7 @@ both.
 ## Where to go from here
 
 One chapter left, and it's optional: [attaching a
-debugger](/tutorial/08-attaching-a-debugger/) adds a Python service and a Go
+debugger](/tutorial/07-attaching-a-debugger/) adds a Python service and a Go
 service to the shop, catches a request mid-flight in one and startup code in
 the other, and is the only chapter that touches something you *can't*
 declare in `.fghj.yaml`.

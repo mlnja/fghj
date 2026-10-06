@@ -1,6 +1,6 @@
 ---
 title: Run lifecycle & registry
-description: Default vs. named/review runs, and how fghj keeps run state honest against real Docker state.
+description: Default vs. named runs, and how fghj keeps run state honest against real Docker state.
 ---
 
 ## Two different verbs, one shared registry
@@ -9,10 +9,10 @@ description: Default vs. named/review runs, and how fghj keeps run state honest 
 model for either would either destroy work unnecessarily or silently fail
 to start what you asked for:
 
-- **Starting a named/review run** — "make exactly this run exist, from
+- **Starting a named run** — "make exactly this run exist, from
   scratch." If a run with this id is already up, it's stopped and torn
   down first, then every non-flow-filtered node in the graph is started
-  fresh. A review run is meant to be reproducible from a clean slate every
+  fresh. A named run is meant to be reproducible from a clean slate every
   time you hit start again.
 - **Topping up the default environment** — "make sure everything reachable
   from this flow (or the whole graph) is running; never touch a container

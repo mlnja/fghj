@@ -89,9 +89,8 @@ export default defineConfig({
             { label: '3. A migration', slug: 'tutorial/03-a-migration' },
             { label: '4. A second repo', slug: 'tutorial/04-a-second-repo' },
             { label: '5. Flows', slug: 'tutorial/05-flows' },
-            { label: '6. Two runs at once', slug: 'tutorial/06-two-runs' },
-            { label: '7. When it goes wrong', slug: 'tutorial/07-when-it-goes-wrong' },
-            { label: '8. Attaching a debugger', slug: 'tutorial/08-attaching-a-debugger' },
+            { label: '6. When it goes wrong', slug: 'tutorial/06-when-it-goes-wrong' },
+            { label: '7. Attaching a debugger', slug: 'tutorial/07-attaching-a-debugger' },
           ],
         },
         {
@@ -142,6 +141,11 @@ export default defineConfig({
           label: 'Reference',
           items: [
             { label: 'fghj.yaml', slug: 'reference/fghj-yaml' },
+            // `reference/runs` is deliberately not listed (it sets
+            // `sidebar.hidden`). A named run varies only identity, volume
+            // freshness and which nodes are up — never the source or the
+            // config — so it is a mechanism to document, not a feature to
+            // send a reader looking for. The pages that need it link to it.
           ],
         },
       ],

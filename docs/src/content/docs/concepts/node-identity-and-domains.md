@@ -200,7 +200,7 @@ the http one instead, for the rarer case of needing the proxied identity on
 purpose (e.g. minting a presigned URL meant to be handed to something
 outside the network).
 
-`run_id` is folded in for named/review runs, since more than one can be
+`run_id` is folded in for named runs, since more than one can be
 alive at once and each needs its own identity — but the **default run**
 (the one shared per-workspace environment) drops it, so a service's
 everyday URL is just `cart.myworkspace.fghj.internal`, not
@@ -217,7 +217,7 @@ it's always the same name.
 
 The graph API pre-computes each node's *default-run* domain ahead of time,
 before any container for that node has started, so the UI can show it
-immediately. A named/review run gets a different, run-id-qualified domain
+immediately. A named run gets a different, run-id-qualified domain
 that this pre-computed value doesn't track — so a node's "domain" as shown
 in the UI always reflects its default-run identity, even while you're
 looking at a different run's live containers.

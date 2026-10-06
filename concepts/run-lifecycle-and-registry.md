@@ -8,6 +8,35 @@
 > picture and for what the second copy this registry used to keep actually
 > cost.
 
+## Named runs have no UI affordance, on purpose
+
+`RunControls.svelte` used to carry a `+ Review run` button and a name field.
+Both are gone. The run list and its per-run **Stop** stay, so a run that
+exists is still visible and still stoppable, and `POST /runs` still takes a
+`run_id` — nothing about the mechanism changed.
+
+What changed is the promise. A named run varies exactly three things:
+identity (network, container names, run-qualified domains), the contents of
+its non-`stable` volumes, and which of its nodes are up. It does not vary
+the source — [[branch-ownership-model]] removed the per-run branch pin — and
+it does not vary the configuration, because the config→run map is a constant
+function ([[AUDIT]] E2, open). So two runs stood up from one workspace are
+necessarily identical code with identical config.
+
+That makes "review a PR in a second run" the one thing the feature cannot
+do, and it was exactly what the button's label, the placeholder
+(`review-auth-pr123`) and a numbered tutorial chapter all advertised. The
+honest remaining use is a scratch environment with virgin volumes: point
+something destructive at it and keep the environment you were working in.
+That is a real use, and a narrow one, so it is documented
+(`docs/.../reference/runs.md`, deliberately not in the sidebar) rather than
+offered in the primary controls.
+
+Closing E2 — per-run environment overrides, source identical, config
+different — is what would earn the feature a promotion back. It carries
+neither the mirror-clone permission problem nor the different-graph problem
+that killed the branch pin, because the graph does not move.
+
 ## Two different verbs, one shared registry
 
 `RunRegistry` (`src/runs/`) has two entry points that look similar but
@@ -18,9 +47,9 @@ unnecessarily or silently fail to start what the user asked for:
   from scratch."
   If a run with this `run_id` is already up, it's stopped and torn down
   first (`already_running` check), then every non-flow-filtered node in the
-  graph is started fresh. This is what a **named/review run** always goes
+  graph is started fresh. This is what a **named run** always goes
   through: `POST /runs` with a non-empty `run_id` (`daemon::post_runs`
-  routes on `spec.run_id.is_some()`). A review run is meant to be
+  routes on `spec.run_id.is_some()`). A named run is meant to be
   reproducible from a clean slate every time you hit "start" again.
 - **`ensure_running(graph, flow)`** — "top up the one shared default
   environment so everything reachable from `flow` (or the whole graph, if

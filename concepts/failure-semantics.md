@@ -72,7 +72,7 @@ that the start path can *act* on was the right one.
 
 ## Rollback: the two start paths disagree on purpose
 
-`start` (a named/review run) and `ensure_running` (the shared default
+`start` (a named run) and `ensure_running` (the shared default
 environment) do opposite things when a node fails partway through. This looks
 like an inconsistency and is in fact the same principle applied to two
 different situations.

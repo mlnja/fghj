@@ -18,7 +18,7 @@ because half of what you're learning is *what the files look like* and why.
 ## What you'll build
 
 A tiny shop, split across two repositories the way a real product is
-(plus two more in [chapter 8](/tutorial/08-attaching-a-debugger/)):
+(plus two more in [chapter 7](/tutorial/07-attaching-a-debugger/)):
 
 - **`storefront`** — the thing a shopper opens. It owns a Postgres
   database and a schema migration.
@@ -80,7 +80,7 @@ fghj daemon status
 ## The tutorial deliberately installs no npm packages
 
 Both services are a single file using nothing but Node's standard library —
-no `package.json`, no `npm install`, no lockfile. (Chapter 8 adds a Python
+no `package.json`, no `npm install`, no lockfile. (Chapter 7 adds a Python
 service and a Go service, and holds to the same rule: the standard library,
 plus the one debugger each needs.) Where a real app would
 use a Postgres driver or a Redis client, these open a TCP socket and speak
@@ -100,9 +100,7 @@ somebody's dependency tree.
    and the two addresses every node has.
 5. [Flows](/tutorial/05-flows/) — naming a user journey, and why it
    highlights rather than filters.
-6. [Two runs at once](/tutorial/06-two-runs/) — review runs, and the two
-   escape hatches that break them on purpose.
-7. [When it goes wrong](/tutorial/07-when-it-goes-wrong/) — the status
+6. [When it goes wrong](/tutorial/06-when-it-goes-wrong/) — the status
    vocabulary, drift, `fghj exec`, and the daemon log.
-8. [Attaching a debugger](/tutorial/08-attaching-a-debugger/) — a Python
+7. [Attaching a debugger](/tutorial/07-attaching-a-debugger/) — a Python
    service and a Go service, `debug:`, and the one switch that isn't config.

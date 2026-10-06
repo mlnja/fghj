@@ -83,7 +83,7 @@ B3's fix closed the *cross-repo* half of that hazard and left the
 *cross-run* half open, which is worth stating plainly rather than leaving as
 an implication of the paragraph above. `scope: "stable"` means one volume
 across every run **including two runs that are up at the same time** — the
-default run's Postgres and a review run's Postgres mounting one data
+default run's Postgres and a named run's Postgres mounting one data
 directory is again two engines on one directory. The per-node locks in
 [[concurrency-model]] don't help: they're keyed by `(run_id, node_id)`, so
 two runs are different keys by construction. Nothing checks whether another

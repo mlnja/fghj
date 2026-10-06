@@ -135,7 +135,7 @@ one, for callers that need a real port. [[two-zones-and-raw-ports]] covers
 what each is for and who answers it; everything below applies to both, since
 the suffixes are disjoint.
 
-`run_id` is folded in for named/review runs, since more than one can be
+`run_id` is folded in for named runs, since more than one can be
 alive at once and each needs its own identity — but the **default run**
 (the one shared per-workspace environment every "Start default environment"
 click and every `ensure_running` targets) drops it, so a service's everyday
@@ -318,7 +318,7 @@ this field existed, that whole code path was silently dead — see the
 "Fixed" entry in `PROGRESS.md` for the story.
 
 **Caveat**: `Node.domain` always reflects the *default*-run address. A
-review/named run gets a different, run-id-qualified domain (unless the node
+named run gets a different, run-id-qualified domain (unless the node
 opted into `domain_scope: "stable"`) that this field does not track — so the
 "open via domain" link only lights up while the drawer is showing the
 default run's live containers; for a named run it falls back to the port

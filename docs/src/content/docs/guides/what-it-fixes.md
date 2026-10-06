@@ -86,13 +86,12 @@ is the port, for all of them at once:
 ```bash
 psql -h db.web.storefront.shop.fghj.raw.internal -p 5432
 psql -h db.api.billing.shop.fghj.raw.internal    -p 5432
-psql -h db.web.storefront.pr-123.shop.fghj.raw.internal -p 5432
+psql -h db.worker.search.shop.fghj.raw.internal  -p 5432
 ```
 
-Three different databases, three live connections, all on 5432. The third is
-in a [review run](/tutorial/06-two-runs/) standing beside the other two. The
-port went back to being a property of the protocol, and the hostname carries
-the identity.
+Three different databases, three live connections, all on 5432. The port
+went back to being a property of the protocol, and the hostname carries the
+identity.
 
 ## Redirect URIs that don't change every restart
 
@@ -186,7 +185,6 @@ network.
 | | |
 |---|---|
 | **Migrations as graph nodes** | [`kind: task`](/concepts/terminating-nodes/) runs to completion and *gates* the services that need it — ordered against the database it seeds, recorded, re-runnable. Not a command you remember to type after everything boots. |
-| **Two environments side by side** | A [named run](/tutorial/06-two-runs/) gets its own network, containers, sidecar and domains. Review a PR without tearing down what you were already doing. |
 | **Fog-of-war graph** | The graph shows [what's actually on disk](/concepts/fog-of-war-visibility/). Selecting a flow highlights its slice and dims the rest — it never hides it, so you can always see what you'd pull in next. |
 | **Federated config** | Every repo declares its own dependencies in [its own `.fghj.yaml`](/concepts/flat-workspace-model/). Peers, not a tree with one root, and no central file to merge-conflict over. |
 | **WebSockets and SSE** | Pass straight through. After routing on SNI the proxy relays bytes and rewrites no headers. |

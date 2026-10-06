@@ -128,5 +128,5 @@ buttons act on the same shared default run — see
 
 ---
 
-**Next:** [Two runs at once](/tutorial/06-two-runs/) — and the two knobs
-that break isolation on purpose.
+**Next:** [When it goes wrong](/tutorial/06-when-it-goes-wrong/) — reading
+the status vocabulary, and the three places to look.

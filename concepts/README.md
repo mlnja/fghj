@@ -81,7 +81,7 @@ it in the audit's tracker — the concept files stay the durable record.
 | [[two-zones-and-raw-ports]] | Why there are two domain zones — `fghj.internal` (proxied, TLS, dispatch by name) and `fghj.raw.internal` (a real per-node address, any protocol) — and the virtual-IP allocator that makes the second one work. |
 | [[in-network-sidecar]] | The one-container-per-run DNS+TLS proxy that makes `fghj.internal` names resolve the same way from inside a run's network as they do from the host. |
 | [[host-aliases]] | `additional_hosts`/`wildcard_hosts` — literal hostnames fghj doesn't derive, the `/etc/hosts` block, and the one rule deciding what may ever get a certificate. |
-| [[run-lifecycle-and-registry]] | Default vs. named/review runs, the reconciler, and how run state is kept honest against real Docker state. |
+| [[run-lifecycle-and-registry]] | Default vs. named runs (and why named runs have no UI affordance), the reconciler, and how run state is kept honest against real Docker state. |
 | [[state-and-effects]] | The actor/action/reducer/effects architecture: one store of state, one writer, and why an effect is `extract` + `converge`. |
 | [[concurrency-model]] | What may run at the same time, what may not: per-node locks, merging writes, and the run-wide health budget. |
 | [[config-drift]] | How fghj notices that a running container no longer matches the `.fghj.yaml` underneath it — and why it deliberately does nothing about it. |

@@ -69,15 +69,15 @@ any weight.
 
 One hazard the qualification doesn't close: `scope: "stable"` means one
 volume across every run *including two runs that are up at the same time*,
-so a default run's database and a review run's database can still end up on
+so a default run's database and a named run's database can still end up on
 one data directory. It's documented where an author meets it — the
 [volume table](/reference/fghj-yaml/#setting-a-named-volume) and
-[tutorial chapter 6](/tutorial/06-two-runs/) — and not enforced anywhere
+[Runs](/reference/runs/) — and not enforced anywhere
 yet.
 
 Volumes are never deleted by `fghj` — stopping a run tears down its
 containers and network only, which is what lets a volume survive a
-restart in the first place. A `"run"`-scoped preview run that's stopped
+restart in the first place. A `"run"`-scoped named run that's stopped
 and never restarted leaves its volume behind, with no cleanup command yet.
 
 ## Two log-reading modes

@@ -124,9 +124,9 @@ Two things follow from using the template rather than typing the address:
 
 - You never hand-compute a domain, and a rename can't leave a stale string
   behind.
-- The expansion depends on **which run** the container belongs to. Chapter 6
-  is where that starts to matter, and where a hardcoded address would have
-  quietly broken.
+- The expansion depends on **which run** the container belongs to. There is
+  only ever one run here, but a hardcoded address would have quietly broken
+  the moment there were two — see [Runs](/reference/runs/).
 
 A template that doesn't resolve — a `name` no sibling has — is left in the
 environment verbatim rather than failing the run. A typo shows up as a
@@ -171,12 +171,12 @@ repo are two different volumes.
 `scope` is the interesting part:
 
 - `scope: run` (the default) folds the run id into the volume name. Every
-  run — including each throwaway review run — gets its own empty database.
+  run gets its own empty database.
 - `scope: stable` drops it. One fixed identity, shared by every run, and it
   survives the container being destroyed and recreated.
 
 We chose `stable` because typing your test data in twice is miserable. It's
-a deliberate trade: chapter 6 shows what you gave up.
+a deliberate trade: [Runs](/reference/runs/) shows what you gave up.
 
 ## Restart and see
 

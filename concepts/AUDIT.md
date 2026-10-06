@@ -522,7 +522,7 @@ would be a worse failure than an obviously-empty one.
 The domain suffix is `sanitize_label(workspace_name)`, while `resolve_route`
 walks *every wired workspace*. Two workspaces whose names sanitize identically —
 e.g. the same project checked out at `~/work/shop` and `~/scratch/shop`, which
-is a first-class use case given review runs — produce identical domains, and
+is an ordinary thing to do — produce identical domains, and
 traffic goes to whichever appears first in `BTreeMap` order. Workspaces are
 keyed by *id* in the index but by *name* in the domain.
 
@@ -692,7 +692,7 @@ implementation before being kept.
 
 **Severity: U. Status: open — documented, not enforced.**
 
-Surfaced while writing [tutorial chapter 6](../docs/src/content/docs/tutorial/06-two-runs.md),
+Surfaced while writing [the runs reference](../docs/src/content/docs/reference/runs.md),
 which walks through what changes once a second run is up. Two of the three
 escape hatches from run-scoping behave badly under a second run and *say so*:
 `domain_scope: stable` produces a route collision that is not enforced (which

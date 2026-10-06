@@ -62,7 +62,7 @@ This is the only variable because it is the only fact an image cannot
 determine on its own. Everything else — which port, which debugger, whether
 to load it at all — you already decided when you built the image.
 
-[Tutorial chapter 8](/tutorial/08-attaching-a-debugger/) runs both halves of
+[Tutorial chapter 7](/tutorial/07-attaching-a-debugger/) runs both halves of
 this end to end: a Python breakpoint catching a request in flight, and the
 halt switch catching Go startup code that attaching cannot reach.
 

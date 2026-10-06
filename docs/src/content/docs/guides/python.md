@@ -229,7 +229,7 @@ remote debugger speaks to its own `pydevd-pycharm` package rather than
 `debugpy` — same idea, different pip install.
 
 [Attaching a debugger](/guides/debugging/) has the whole contract, and
-[tutorial chapter 8](/tutorial/08-attaching-a-debugger/) walks through a
+[tutorial chapter 7](/tutorial/07-attaching-a-debugger/) walks through a
 Python breakpoint catching a request mid-flight.
 
 ## Gotchas, collected

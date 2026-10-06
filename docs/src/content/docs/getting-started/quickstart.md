@@ -87,14 +87,12 @@ system trust store on first start. No `-k`, no self-signed warning. See
 works, and [Node identity & domains](/concepts/node-identity-and-domains/)
 for exactly how that domain was derived.
 
-## Starting a second, isolated run
+## Where next
 
-Need a second environment alongside the shared default one — for example
-to try a config change without disturbing whatever's already running?
-Start a **named run** from the **Actual** tab's run controls: it stands up
-its own isolated set of containers on their own network, side by side with
-the default run. Every node still builds from the live workspace
-checkout, the same as the default run — see
-[Run lifecycle & registry](/concepts/run-lifecycle-and-registry/) and
-[Branch ownership model](/concepts/branch-ownership-model/) for why
-there's exactly one checkout, and one branch, per repo, workspace-wide.
+The [tutorial](/tutorial/) builds the same thing from an empty directory and
+keeps going: a database as a backing dependency, a migration that gates it, a
+second repo, flows, and attaching a debugger to a running container.
+
+If something didn't come up the way this page describes, run
+[`fghj doctor`](/cli/doctor/) — it checks everything fghj needs from your
+machine and names the one thing that's missing.

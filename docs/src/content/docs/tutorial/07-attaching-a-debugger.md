@@ -1,8 +1,8 @@
 ---
-title: 8. Attaching a debugger
+title: 7. Attaching a debugger
 description: Two new repos, in Python and Go — catching a request in flight with debugpy, and catching startup code with Delve and the halt switch.
 sidebar:
-  order: 8
+  order: 7
 ---
 
 The shop works. This chapter is about the two kinds of debugging, which look
@@ -578,7 +578,7 @@ happens to it.
 That's deliberate, and it's the load-bearing decision of the whole feature.
 A top-up compares each node's config against what's running and recreates
 anything that drifted — see
-[chapter 7](/tutorial/07-when-it-goes-wrong/). If the halt switch counted as
+[chapter 6](/tutorial/06-when-it-goes-wrong/). If the halt switch counted as
 config, every top-up would read your halted container as wrong and recreate
 it, destroying the session you just set up. So it's applied *after* the
 config hash is taken, not folded into it.
