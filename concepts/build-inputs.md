@@ -116,10 +116,46 @@ The blunter error message is the price, paid uniformly. It's visible in
 `build_image_buildkit`'s own error context rather than hidden behind a
 condition nobody can predict.
 
+### The price may have stopped being necessary
+
+Worth revisiting, because the reasoning above rests on a premise that has
+since changed. The classic path was rejected as "not BuildKit" — no
+`--mount=type=cache` — which made the choice a genuine dilemma: good errors
+*or* a fast dev loop.
+
+bollard then merged `build_image_with_session_providers` (PR #731, August
+2026), which serves `--mount=type=secret` and `--mount=type=ssh` over the
+*legacy streaming* `/build` endpoint when the build asks for
+`BuilderVersion::BuilderBuildKit`. That endpoint is real BuildKit, so cache
+mounts work, and it still returns the `BuildInfo` stream with
+`error_detail.message` and the step output. On paper that is the same engine
+the `Moby` driver reaches, with the same features, plus the logs — which would
+make the trade this section describes unnecessary rather than merely painful.
+
+Two things keep it from being a free swap, and neither has been measured:
+
+- It can only reach **dockerd's embedded** BuildKit, never a buildx
+  container, so taking it would undo [[builder-parity]] — which exists
+  because those two engines disagree about real Dockerfiles. Logs *or* the
+  right engine.
+- Whether it carries everything the driver path does (platforms,
+  cache-to/from) is unverified.
+
+The unblocked version of this is a progress hook on the driver path itself,
+which bollard's maintainer has invited a PR for since
+[issue #454](https://github.com/fussybeaver/bollard/issues/454) (August 2024,
+still open): *"the progress hook in the 'driver'-based build path isn't
+implemented yet... I'm happy if there's any interest in taking a stab at
+that."* Nobody has. That is the fix worth doing; it is deferred, not
+rejected.
+
 The built image lands in the daemon's local image store under the requested
-tag — the `Moby` driver asks for the `docker` exporter — so
-`create_container`, `spec_hash`'s image field and everything else downstream
-see exactly what they did before.
+tag either way, so `create_container`, `spec_hash`'s image field and
+everything else downstream see exactly what they did before. *How* it gets
+there depends on the driver: the `Moby` driver asks for the `docker` exporter
+and the image appears in the store directly, while a container-backed builder
+([[builder-parity]]) has no access to that store at all and must export a
+docker-format tarball that fghj streams back through `/images/load`.
 
 ## Two things bollard forced
 
@@ -141,7 +177,7 @@ exclusive, and the read that matters happens inside the build it brackets.
 handler is a bare `Box<dyn Future>`, so awaiting it inline would make every
 caller up the stack `!Send` — including the `tokio::spawn` in
 `daemon::reconcile`. Rather than restructure the daemon around one
-dependency's boxed future, `solve_on_dedicated_thread` gives the solve a
+dependency's boxed future, `on_dedicated_thread` gives the solve a
 current-thread runtime and a `LocalSet` on a thread of its own and sends only
 the result back over a oneshot.
 

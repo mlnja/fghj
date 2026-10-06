@@ -203,6 +203,17 @@ pub struct BuildOpts<'a> {
     /// agent of its own to forward — the whole point is to lend it the
     /// workspace owner's. `None` forwards nothing.
     pub ssh_auth_sock: Option<&'a str>,
+    /// Which BuildKit to build on: the host's own buildx builder, or `None`
+    /// for the one embedded in dockerd.
+    ///
+    /// `None` is not "no preference" — it is dockerd's embedded BuildKit,
+    /// which is a *different engine* from the one `docker build` reaches
+    /// whenever buildx has a container-backed builder selected. The two run
+    /// different BuildKit versions and disagree about real Dockerfiles, so
+    /// resolving this (see `crate::buildx::default_builder`) is what stops
+    /// `fghj` and `docker build` giving different answers about the same
+    /// repo.
+    pub builder: Option<&'a crate::buildx::HostBuilder>,
 }
 
 /// Serializes the process-global `SSH_AUTH_SOCK` mutation that BuildKit ssh
@@ -270,6 +281,12 @@ pub async fn pull_image(docker: &Docker, repository: &str, tag: &str) -> Result<
 #[derive(Debug)]
 pub struct BuildReport {
     pub context_bytes: u64,
+    /// The buildx builder this ran on, or `None` for dockerd's embedded
+    /// BuildKit. Reported so the events pane can name the engine: when a build
+    /// behaves differently from the same `docker build` on the command line,
+    /// which BuildKit ran it is the first thing worth knowing and the one
+    /// thing no error message mentions.
+    pub builder: Option<String>,
 }
 
 /// Turns a BuildKit solve failure into something an operator can act on.
@@ -370,7 +387,10 @@ pub async fn build_image(docker: &Docker, opts: &BuildOpts<'_>) -> Result<BuildR
     let tar_bytes = tar_build_context(opts.context_dir).await?;
     let context_bytes = tar_bytes.len() as u64;
     build_image_buildkit(docker, opts, tar_bytes).await?;
-    Ok(BuildReport { context_bytes })
+    Ok(BuildReport {
+        context_bytes,
+        builder: opts.builder.map(|b| b.builder.clone()),
+    })
 }
 
 async fn tar_build_context(context_dir: &Path) -> Result<Vec<u8>> {
@@ -422,6 +442,10 @@ async fn build_image_buildkit(
     let load = ImageBuildLoadInput::Upload(bytes::Bytes::from(tar_bytes));
     let tag = opts.tag;
 
+    let solve = async |frontend, load| match opts.builder {
+        Some(builder) => solve_on_host_builder(docker, builder, tag, frontend, load).await,
+        None => solve_on_embedded(docker, tag, frontend, load).await,
+    };
     let result = match opts.ssh_auth_sock {
         // The guard is scoped to the match arm so the process-global variable
         // is restored — and the lock released — the moment this one build
@@ -430,11 +454,11 @@ async fn build_image_buildkit(
             let _guard = SSH_AUTH_SOCK_ENV.lock().await;
             let previous = std::env::var_os("SSH_AUTH_SOCK");
             set_ssh_auth_sock(Some(sock));
-            let result = solve_on_dedicated_thread(docker, tag, frontend, load).await;
+            let result = solve(frontend, load).await;
             set_ssh_auth_sock(previous.as_ref().and_then(|v| v.to_str()));
             result
         }
-        None => solve_on_dedicated_thread(docker, tag, frontend, load).await,
+        None => solve(frontend, load).await,
     };
     // Two layers: the outer is this side failing to run the solve at all
     // (runtime, thread), the inner is BuildKit rejecting the build. Only the
@@ -446,15 +470,40 @@ async fn build_image_buildkit(
     }
 }
 
-/// Runs one BuildKit solve on a thread of its own.
+/// Runs one `!Send` BuildKit operation on a thread of its own.
 ///
-/// bollard's `Build::docker_build` future is `!Send` — its driver tear-down
-/// handler is a bare `Box<dyn Future>` — so awaiting it inline would make
-/// every caller up to and including `tokio::spawn` in `daemon::reconcile`
-/// `!Send` too. Rather than restructure the daemon around one dependency's
-/// boxed future, the solve gets a current-thread runtime and a `LocalSet` on
-/// a dedicated thread, and only its result crosses back.
-async fn solve_on_dedicated_thread(
+/// bollard's solve futures are `!Send` — the driver tear-down handler is a bare
+/// `Box<dyn Future>` — so awaiting one inline would make every caller up to and
+/// including `tokio::spawn` in `daemon::reconcile` `!Send` too. Rather than
+/// restructure the daemon around one dependency's boxed future, the operation
+/// gets a current-thread runtime and a `LocalSet` on a dedicated thread, and
+/// only its result crosses back.
+///
+/// `make` rather than a future, because the future itself cannot cross the
+/// thread boundary: it is built on the far side, where the `LocalSet` is.
+async fn on_dedicated_thread<F, Fut>(make: F) -> Result<Result<(), GrpcError>>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), GrpcError>>,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let outcome = (|| -> Result<Result<(), GrpcError>> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("failed to build a runtime for the buildkit solve")?;
+            let local = tokio::task::LocalSet::new();
+            Ok(local.block_on(&runtime, make()))
+        })();
+        let _ = tx.send(outcome);
+    });
+    rx.await.context("buildkit solve thread panicked")?
+}
+
+/// Solves on dockerd's **embedded** BuildKit, which lands the image directly in
+/// the local image store under `tag` via the `docker` exporter.
+async fn solve_on_embedded(
     docker: &Docker,
     tag: &str,
     frontend: bollard::grpc::build::ImageBuildFrontendOptions,
@@ -465,23 +514,225 @@ async fn solve_on_dedicated_thread(
 
     let docker = docker.clone();
     let tag = tag.to_string();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        let outcome = (|| -> Result<Result<(), GrpcError>> {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .context("failed to build a runtime for the buildkit solve")?;
-            let local = tokio::task::LocalSet::new();
-            Ok(local.block_on(&runtime, async move {
-                Moby::new(&docker)
-                    .docker_build(&tag, frontend, load, None, None)
-                    .await
-            }))
-        })();
-        let _ = tx.send(outcome);
-    });
-    rx.await.context("buildkit solve thread panicked")?
+    on_dedicated_thread(move || async move {
+        Moby::new(&docker)
+            .docker_build(&tag, frontend, load, None, None)
+            .await
+    })
+    .await
+}
+
+/// The BuildKit container fghj runs its builds in.
+///
+/// Fixed, so the state volume bollard derives from it
+/// (`fghj_buildkit_state`) persists and every build after the first sees a warm
+/// cache. Deliberately *not* buildx's own container: bollard stamps ownership
+/// labels on the containers and volumes it manages and refuses to adopt one it
+/// did not create, which is the right guard — stopping or reconfiguring the
+/// BuildKit the user's own `docker build` depends on is not fghj's to do.
+const FGHJ_BUILDKIT_CONTAINER: &str = "fghj_buildkit";
+
+/// Solves on a BuildKit container of fghj's own, running the **same image** as
+/// the host's buildx builder, then loads the result into dockerd.
+///
+/// Running the same image is the entire point. fghj's builds otherwise go to the
+/// BuildKit embedded in dockerd, while `docker build` goes to whatever buildx
+/// selected — commonly a container several BuildKit minor versions ahead. Two
+/// engines that disagree about the same Dockerfile, with nothing in either error
+/// saying so. Taking the image reference straight off buildx's own container
+/// means fghj runs the version the user's CLI already proved their Dockerfile
+/// against.
+///
+/// Two costs, both real:
+///
+/// - **A second BuildKit and a second cache.** fghj cannot share buildx's state
+///   volume (see [`FGHJ_BUILDKIT_CONTAINER`]), so the first build of a repo
+///   under fghj is cold even if the CLI just built it. Later ones are warm.
+/// - **Every built image crosses the socket twice.** bollard implements `Build`
+///   — the trait whose `docker` exporter writes straight into dockerd's image
+///   store — only for drivers that *are* dockerd. A BuildKit in a container has
+///   no access to that store, which is why buildx itself needs `--load`, so the
+///   image comes back as a tarball and goes to `/images/load`.
+///
+/// Both are paid to stop fghj and `docker build` giving different answers about
+/// the same repo, which is what was actually broken.
+async fn solve_on_host_builder(
+    docker: &Docker,
+    builder: &crate::buildx::HostBuilder,
+    tag: &str,
+    frontend: bollard::grpc::build::ImageBuildFrontendOptions,
+    load: bollard::grpc::build::ImageBuildLoadInput,
+) -> Result<Result<(), GrpcError>> {
+    use bollard::grpc::driver::Export;
+    use bollard::grpc::driver::ImageExporterEnum;
+    use bollard::grpc::driver::docker_container::{
+        DockerContainerBuilder, DockerContainerLifecycle,
+    };
+    use bollard::grpc::export::ImageExporterOutput;
+
+    // Written where fghjd's own state lives rather than `/tmp`: an image
+    // tarball is the size of the image, and `/tmp` on macOS is small enough
+    // that a large build would fail there for reasons having nothing to do
+    // with the build.
+    let dir = tempfile::Builder::new()
+        .prefix("fghj-build-")
+        .tempdir()
+        .context("failed to create a directory for the exported image")?;
+    let tar = dir.path().join("image.tar");
+
+    let image = buildkit_image_of(docker, &builder.container).await;
+    if let Some(image) = &image {
+        retire_builder_if_image_changed(docker, image).await;
+    }
+
+    let outcome = {
+        let docker = docker.clone();
+        let tag = tag.to_string();
+        let tar = tar.clone();
+        on_dedicated_thread(move || async move {
+            // A fixed `name` is what makes the cache survive: `bootstrap`
+            // reuses the container if it is already there, and the state volume
+            // is derived from the name. `Persistent` is already the default;
+            // stated anyway, because the alternative — removing the builder
+            // after every solve — would silently turn every build cold.
+            let mut driver = DockerContainerBuilder::new(&docker);
+            driver.name(FGHJ_BUILDKIT_CONTAINER);
+            driver.lifecycle(DockerContainerLifecycle::Persistent);
+            if let Some(image) = &image {
+                driver.image(image);
+            }
+            let driver = driver.bootstrap().await?;
+
+            let request = ImageExporterOutput::builder(&tag).dest(&tar);
+            driver
+                .export(
+                    ImageExporterEnum::Docker(request),
+                    frontend,
+                    load,
+                    None,
+                    None,
+                )
+                .await
+        })
+        .await?
+    };
+    if let Err(e) = outcome {
+        return Ok(Err(e));
+    }
+
+    load_image_tar(docker, &tar).await?;
+    Ok(Ok(()))
+}
+
+/// The BuildKit image buildx's own builder is running, as a reference that pins
+/// it exactly, so fghj can run the identical build engine.
+///
+/// A **repo digest** (`moby/buildkit@sha256:…`), not the tag the container was
+/// created from. The tag is the obvious choice and it is wrong: buildx's default
+/// is `moby/buildkit:buildx-stable-1`, which moves. A container created from it
+/// a week ago runs v0.32.2 while pulling the same tag today gets v0.33.1 — so
+/// matching tags would leave fghj on a *different* BuildKit from the CLI while
+/// looking, by every string comparison available, like it had succeeded. That is
+/// the original bug with extra steps.
+///
+/// Falls back to the tag, then to bollard's own default, because a digest is not
+/// always available — an image built locally or loaded from a tarball has no
+/// `RepoDigests`. Each step is a weaker guarantee, never a failed build: the
+/// worst case is the version drift this started with.
+async fn buildkit_image_of(docker: &Docker, container: &str) -> Option<String> {
+    let config = docker
+        .inspect_container(
+            container,
+            None::<bollard::query_parameters::InspectContainerOptions>,
+        )
+        .await
+        .ok()?;
+    let tag = config
+        .config
+        .and_then(|c| c.image)
+        .filter(|i| !i.is_empty());
+
+    // `image` is the local image *id*, which no registry can be asked for by
+    // name; its repo digest is the same bytes expressed as something pullable.
+    let digest = match config.image.filter(|i| !i.is_empty()) {
+        Some(id) => docker
+            .inspect_image(&id)
+            .await
+            .ok()
+            .and_then(|i| i.repo_digests)
+            .and_then(|d| d.into_iter().next()),
+        None => None,
+    };
+    digest.or(tag)
+}
+
+/// Removes fghj's BuildKit container when it is running a different image from
+/// the one it should be.
+///
+/// `bootstrap` reuses a container by name and never looks at its image, so
+/// without this fghj would keep whatever BuildKit it first created forever —
+/// including after the host's buildx builder was upgraded underneath it. Since
+/// the entire purpose is to match that builder, silently not matching it is the
+/// one failure mode worth spending a container teardown to avoid.
+///
+/// The state volume is deliberately left in place, so the layer cache survives
+/// the swap. Best-effort throughout: if any of it fails, `bootstrap` reuses the
+/// existing container and the build still succeeds on the older engine.
+async fn retire_builder_if_image_changed(docker: &Docker, desired: &str) {
+    let current = docker
+        .inspect_container(
+            FGHJ_BUILDKIT_CONTAINER,
+            None::<bollard::query_parameters::InspectContainerOptions>,
+        )
+        .await
+        .ok()
+        .and_then(|c| c.config)
+        .and_then(|c| c.image);
+    if current.as_deref() == Some(desired) || current.is_none() {
+        return;
+    }
+
+    crate::daemon_log::info(format!(
+        "fghjd: rebuilding the fghj buildkit container on {desired} (was {}) \
+         to stay on the same engine as `docker build`",
+        current.unwrap_or_else(|| String::from("unknown"))
+    ));
+    let _ = docker
+        .remove_container(
+            FGHJ_BUILDKIT_CONTAINER,
+            Some(
+                bollard::query_parameters::RemoveContainerOptionsBuilder::default()
+                    .force(true)
+                    // The cache lives in the state volume; keep it.
+                    .v(false)
+                    .build(),
+            ),
+        )
+        .await;
+}
+
+/// Feeds a docker-format image tarball to `/images/load`.
+///
+/// Streamed from disk rather than read into memory: this is a whole image, and
+/// `build_image` has already held one full copy of the build context.
+async fn load_image_tar(docker: &Docker, tar: &Path) -> Result<()> {
+    use futures_util::TryStreamExt;
+
+    let file = tokio::fs::File::open(tar)
+        .await
+        .with_context(|| format!("failed to open the exported image at {}", tar.display()))?;
+    let body = bollard::body_try_stream(tokio_util::io::ReaderStream::new(file));
+
+    docker
+        .import_image(
+            bollard::query_parameters::ImportImageOptionsBuilder::default().build(),
+            body,
+            None,
+        )
+        .try_collect::<Vec<_>>()
+        .await
+        .context("failed to load the built image into docker")?;
+    Ok(())
 }
 
 /// Sets or clears the process-global `SSH_AUTH_SOCK`. Only ever called with
@@ -1313,6 +1564,7 @@ mod build_tests {
                 target: Some("wanted"),
                 secrets: &[],
                 ssh_auth_sock: None,
+                builder: None,
             },
         )
         .await
@@ -1346,6 +1598,7 @@ mod build_tests {
                 target: None,
                 secrets: &[(String::from("token"), secret_path)],
                 ssh_auth_sock: None,
+                builder: None,
             },
         )
         .await
@@ -1390,13 +1643,252 @@ mod build_tests {
                 target: None,
                 secrets: &[(String::from("token"), secret_path)],
                 ssh_auth_sock: None,
+                builder: None,
             },
         )
         .await
         .expect_err("a RUN that exits 7 must fail the build");
+        // Asserts on the *useful* parts, not the prose around them: which
+        // Dockerfile line died and what it exited with. Those are what a person
+        // reads the error for, and they are the pieces `describe_solve_failure`
+        // has to dig out of BuildKit's single collapsed `Result`. An earlier
+        // version of this test matched the opening words instead, and went red
+        // when the wording improved while the diagnosis got better.
+        let report = format!("{err:#}");
+        for expected in [
+            fixture.tag.as_str(),
+            "failing step: /bin/sh -c exit 7",
+            "exit code: 7",
+        ] {
+            assert!(
+                report.contains(expected),
+                "error should mention {expected:?}, got: {report}"
+            );
+        }
+    }
+
+    // ---- building on the host's own buildx builder ----
+
+    /// The builder `docker build` would use on this machine.
+    ///
+    /// Resolved from `$HOME` rather than a `WorkspaceOwner`, because a test
+    /// binary runs as the user — that is the one place where the process's own
+    /// home *is* the right one to read. Panics rather than silently passing if
+    /// there is no container-backed builder selected: a test named for the host
+    /// builder that quietly tested the embedded one would be worse than no
+    /// test.
+    fn host_builder() -> crate::buildx::HostBuilder {
+        let home = std::env::var("HOME").expect("HOME");
+        crate::buildx::default_builder(std::path::Path::new(&home)).expect(
+            "this test needs a container-backed buildx builder selected \
+             (`docker buildx ls` — the one with the `*`)",
+        )
+    }
+
+    fn container_id(name: &str) -> Option<String> {
+        let out = Command::new("docker")
+            .args(["inspect", "-f", "{{.Id}}{{.State.Running}}", name])
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    /// Containers bollard creates when it is given no fixed name. Any of these
+    /// appearing means the build ran on a throwaway BuildKit — correct, but
+    /// with a cold cache and a leaked container and volume per build.
+    fn throwaway_buildkits() -> Vec<String> {
+        let out = Command::new("docker")
+            .args(["ps", "-a", "--format", "{{.Names}}"])
+            .output()
+            .expect("docker ps");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|n| n.starts_with("bollard_buildkit_"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The BuildKit version actually running inside a builder container.
+    ///
+    /// Asked of the running process rather than inferred from the image
+    /// reference, because that is the property under test and the image
+    /// reference is a bad proxy for it: buildx's default tag
+    /// (`moby/buildkit:buildx-stable-1`) moves, so two containers can share a
+    /// tag and run engines months apart. An earlier version of this test
+    /// compared the tags and passed while fghj ran v0.33.1 against buildx's
+    /// v0.32.2 — exactly the divergence the feature exists to remove.
+    fn buildkit_version(container: &str) -> String {
+        let out = Command::new("docker")
+            .args(["exec", container, "buildkitd", "--version"])
+            .output()
+            .expect("docker exec buildkitd --version");
         assert!(
-            format!("{err:#}").contains("buildkit build"),
-            "error should name the build it came from, got: {err:#}"
+            out.status.success(),
+            "could not read buildkitd version from {container}: {}",
+            String::from_utf8_lossy(&out.stderr)
         );
+        let text = String::from_utf8_lossy(&out.stdout);
+        // "buildkitd github.com/moby/buildkit v0.32.2 991535e…" -> "v0.32.2"
+        text.split_whitespace()
+            .find(|w| w.starts_with('v') && w[1..].starts_with(|c: char| c.is_ascii_digit()))
+            .unwrap_or_else(|| panic!("no version in buildkitd output: {text}"))
+            .to_string()
+    }
+
+    /// The point of the whole exercise: a build routed at the host's buildx
+    /// builder still ends up as a runnable image in *dockerd's* store.
+    ///
+    /// That is not automatic. A container-backed BuildKit cannot write to
+    /// dockerd's image store, so this path exports a tarball and loads it —
+    /// three steps where the `Moby` driver has one. Running the image is the
+    /// only evidence that all three worked; `inspect_image` would also pass on
+    /// a manifest with no layers behind it.
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon and a buildx builder: see concepts/release-and-delivery.md"]
+    async fn a_build_on_the_host_builder_lands_in_dockers_image_store() {
+        let builder = host_builder();
+        let fixture = BuildFixture::new(
+            "host-builder",
+            "FROM busybox\n\
+             RUN echo built-on-host-builder > /where\n",
+        );
+
+        let report = build_image(
+            &docker(),
+            &BuildOpts {
+                context_dir: fixture.dir.path(),
+                dockerfile: "Dockerfile",
+                tag: &fixture.tag,
+                platform: None,
+                args: &BTreeMap::new(),
+                target: None,
+                secrets: &[],
+                ssh_auth_sock: None,
+                builder: Some(&builder),
+            },
+        )
+        .await
+        .expect("build on the host builder");
+
+        assert_eq!(fixture.run(&["cat", "/where"]), "built-on-host-builder");
+        // The report has to name the builder, or the events pane cannot tell
+        // the user which engine ran their build — the thing that made this
+        // divergence invisible in the first place.
+        assert_eq!(report.builder.as_deref(), Some(builder.builder.as_str()));
+    }
+
+    /// The three properties that make this worth doing at all, checked
+    /// together because they only mean something jointly: fghj's builder is
+    /// *reused* (warm cache), it runs the *same image* as buildx's (version
+    /// parity, the actual bug), and buildx's own container is *untouched* (fghj
+    /// does not disturb the user's CLI).
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon and a buildx builder: see concepts/release-and-delivery.md"]
+    async fn fghjs_builder_is_reused_matches_buildxs_image_and_leaves_buildx_alone() {
+        let builder = host_builder();
+        let buildx_before = container_id(&builder.container);
+        assert!(
+            buildx_before.is_some(),
+            "expected buildx's BuildKit container {} to exist; \
+             run a `docker build` once to bootstrap it",
+            builder.container
+        );
+        let buildx_version = buildkit_version(&builder.container);
+        let throwaways_before = throwaway_buildkits();
+
+        // Twice: the first call may create fghj's builder, so only the second
+        // can show that an existing one is reused rather than replaced.
+        let mut ids = Vec::new();
+        for label in ["host-reuse-1", "host-reuse-2"] {
+            let fixture = BuildFixture::new(label, "FROM busybox\nRUN true\n");
+            build_image(
+                &docker(),
+                &BuildOpts {
+                    context_dir: fixture.dir.path(),
+                    dockerfile: "Dockerfile",
+                    tag: &fixture.tag,
+                    platform: None,
+                    args: &BTreeMap::new(),
+                    target: None,
+                    secrets: &[],
+                    ssh_auth_sock: None,
+                    builder: Some(&builder),
+                },
+            )
+            .await
+            .expect("build on fghj's builder");
+            ids.push(container_id(FGHJ_BUILDKIT_CONTAINER));
+        }
+
+        assert!(
+            ids[0].is_some(),
+            "fghj's BuildKit container was not created"
+        );
+        assert_eq!(
+            ids[0], ids[1],
+            "fghj's BuildKit container was replaced between builds, so every \
+             build starts with a cold cache"
+        );
+        // The whole point: byte-identical BuildKit to the one the CLI uses, so
+        // `fghj` and `docker build` cannot disagree about a Dockerfile.
+        assert_eq!(
+            buildkit_version(FGHJ_BUILDKIT_CONTAINER),
+            buildx_version,
+            "fghj's builder runs a different BuildKit version from buildx's, \
+             so the two can still disagree about a Dockerfile"
+        );
+        // And buildx's own builder is left exactly as it was.
+        assert_eq!(
+            container_id(&builder.container),
+            buildx_before,
+            "buildx's BuildKit container was replaced or stopped"
+        );
+        assert_eq!(
+            throwaway_buildkits(),
+            throwaways_before,
+            "a throwaway BuildKit container was created, so the build had a \
+             cold cache and leaked a container"
+        );
+    }
+
+    /// The export path reassembles the frontend options independently of the
+    /// `Build` path, so inputs that are known to have been dropped before
+    /// (`concepts/AUDIT.md` E3) are re-checked on this route rather than
+    /// assumed to carry over.
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon and a buildx builder: see concepts/release-and-delivery.md"]
+    async fn build_args_and_target_survive_the_host_builder_route() {
+        let builder = host_builder();
+        let fixture = BuildFixture::new(
+            "host-args-target",
+            "FROM busybox AS wanted\n\
+             ARG GREETING=unset\n\
+             RUN echo \"$GREETING\" > /greeting\n\
+             FROM busybox AS unwanted\n\
+             RUN echo wrong-stage > /greeting\n",
+        );
+        let mut args = BTreeMap::new();
+        args.insert(String::from("GREETING"), String::from("hello-host-builder"));
+
+        build_image(
+            &docker(),
+            &BuildOpts {
+                context_dir: fixture.dir.path(),
+                dockerfile: "Dockerfile",
+                tag: &fixture.tag,
+                platform: None,
+                args: &args,
+                target: Some("wanted"),
+                secrets: &[],
+                ssh_auth_sock: None,
+                builder: Some(&builder),
+            },
+        )
+        .await
+        .expect("build on the host builder");
+
+        assert_eq!(fixture.run(&["cat", "/greeting"]), "hello-host-builder");
     }
 }

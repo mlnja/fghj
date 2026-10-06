@@ -38,12 +38,14 @@ the tag alongside the inputs it resolved to — context directory, and
 `-f`/`--target`/platform whenever they differ from the default:
 
 ```
-building image   fghj/shop-storefront:main  ·  /Users/me/src/storefront  ·  --target dev
+building image   fghj/shop-storefront:main  ·  /Users/me/src/storefront  ·  --target dev  ·  buildkit: orb-builder
 ```
 
 The context directory is there because a `context:` that resolved somewhere
 unexpected looks identical in the events pane to one that didn't — the tag
-is derived from the node id, so it's the same either way.
+is derived from the node id, so it's the same either way. The `buildkit:`
+field names the engine, which matters more than it sounds like it should:
+see [Which BuildKit builds it](#which-buildkit-builds-it).
 
 On success, how long it took and how much context was shipped:
 
@@ -72,8 +74,58 @@ gives you the command to run by hand:
 docker build -f Dockerfile /Users/me/src/storefront
 ```
 
-That's a real gap rather than a design choice, and it's the one thing a build
-failure will send you to a terminal for.
+That's a real gap rather than a design choice — and a shallow one. BuildKit
+hands back a reference specifically so a caller can subscribe to the build's
+status stream, log lines included; `bollard` just keeps the channel it would
+need crate-private. Until that opens up, a build failure is the one thing that
+will send you to a terminal.
+
+### Which BuildKit builds it
+
+`docker build` on your machine does not necessarily use the BuildKit inside
+`dockerd`. If `buildx` has a container-backed builder selected — OrbStack and
+Docker Desktop both set one up, and `docker buildx ls` marks it with a `*` —
+then the CLI sends your build to *that* container, which runs its own BuildKit
+release on its own schedule. The one embedded in `dockerd` is a different
+engine at a different version.
+
+That produced a genuinely maddening class of bug: a Dockerfile that `docker
+build` compiles happily and `fghj` refuses, with no difference anywhere in
+the repo. On the machine this was first diagnosed on, the gap was three minor
+versions — buildx's builder on BuildKit v0.32.2, `dockerd`'s embedded one on
+v0.29.0 — which is enough for the two to disagree about whether a `RUN` may
+write to a directory that doesn't exist yet.
+
+So `fghjd` reads `~/.docker/buildx/current` and `instances/<name>` — the
+**workspace owner's** home, not the daemon's, since `fghjd` runs as root and
+`/var/root/.docker` holds no buildx config at all — and when a
+container-backed builder is selected it builds on BuildKit at the **same
+image digest** as that builder. The engine is named in the start event so you
+never have to guess which one ran:
+
+```
+building image   fghj/shop-storefront:main  ·  /Users/me/src/storefront  ·  buildkit: orb-builder
+```
+
+It reads `buildkit: dockerd` when no container-backed builder is selected, and
+that path is unchanged from before.
+
+Two things worth knowing about how this is done:
+
+- **`fghj` runs its own BuildKit container** (`fghj_buildkit`, with a
+  `fghj_buildkit_state` cache volume) rather than reusing buildx's. It is
+  pinned to the same image digest, so it is the same engine, but it is a
+  second container and a second build cache — the first `fghj` build of a repo
+  is cold even if you built it on the CLI a minute earlier. This is
+  deliberate: stopping or reconfiguring the builder your own `docker build`
+  depends on is not `fghj`'s to do, and `bollard` enforces that by refusing to
+  adopt containers it didn't create. When the digest moves, `fghj` replaces its
+  container and keeps the cache volume.
+- **The image crosses the socket twice.** A BuildKit running in a container
+  has no access to `dockerd`'s image store — this is why `buildx` itself needs
+  `--load` — so the build exports a docker-format tarball and `fghj` streams
+  it back into `/images/load`. Compared with the embedded builder, that is one
+  extra copy of every image you build.
 
 ## Volumes: two shapes, one Docker primitive
 

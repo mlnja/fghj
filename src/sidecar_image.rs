@@ -123,6 +123,10 @@ async fn build_locally(docker: &Docker, tag: &str) -> Result<()> {
             target: None,
             secrets: &[],
             ssh_auth_sock: None,
+            // Always dockerd's embedded BuildKit. The sidecar is fghj's own
+            // image built from embedded files, not a user repo, so there is no
+            // `docker build` of it for fghj to agree with.
+            builder: None,
         },
     )
     .await

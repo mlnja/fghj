@@ -7,9 +7,22 @@ license = "MIT"
 [dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws"] }
-bollard = { version = "0.21.1", features = ["buildkit", "time"] }
+# Unreleased (0.22.0 on master, nothing published past 0.21.1).
+#
+# fghj needs `DockerContainerBuilder::name()` and `lifecycle()` so a build can
+# run on the *host's own* buildx builder and reuse its state volume. Without
+# them fghj builds on dockerd's embedded BuildKit while `docker build` goes to
+# whatever buildx has selected — two engines, often different versions, which
+# silently disagree about the same Dockerfile. Pinned to a commit rather than a
+# branch: an unreleased dependency that moves under us is worse than one that
+# doesn't.
+bollard = { git = "https://github.com/fussybeaver/bollard", rev = "2cdeaa6b20b2ff6d220033113332f44a10e2579a", features = ["buildkit", "time"] }
 clap = { version = "4.6.6", features = ["derive"] }
 futures-util = "0.3.34"
+# `io` only: `ReaderStream`, to stream an exported image tarball into
+# `/images/load` rather than holding a whole image in memory. Already in the
+# tree via hyper/tonic, so this adds no compile cost.
+tokio-util = { version = "0.7.19", features = ["io"] }
 include_dir = "0.7.4"
 libc = "0.2"
 rcgen = { version = "0.14.9", features = ["x509-parser"] }
@@ -71,3 +84,4 @@ split-debuginfo = "packed"
 
 [profile.dev.package."*"]
 debug = false
+

@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 
 pub mod action;
 pub mod actor;
+pub mod buildx;
 pub mod daemon;
 pub mod daemon_log;
 pub mod dns;

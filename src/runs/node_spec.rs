@@ -65,6 +65,15 @@ impl RunRegistry {
         platform: Option<&str>,
     ) -> Result<()> {
         let build_dir = repo_root.join(&build.context);
+        let owner = self.db.clone().load_owner().await.ok().flatten();
+        // Where `docker build` would have built this, so fghj builds there
+        // too. Read from the *owner's* home, never the process's: `fghjd` is
+        // root, and `/var/root/.docker` holds no buildx config, which would
+        // silently resolve to "use the embedded builder" — the exact wrong
+        // answer. `None` keeps today's behaviour.
+        let builder = owner
+            .as_ref()
+            .and_then(|o| crate::buildx::default_builder(std::path::Path::new(&o.home)));
         // What is being built, not just what it will be called. A node whose
         // `context`/`dockerfile`/`target` resolved to something other than
         // what its author expected looks identical in the events pane to one
@@ -80,6 +89,16 @@ impl RunRegistry {
         if let Some(platform) = platform {
             what.push_str(&format!("  ·  {platform}"));
         }
+        // Which BuildKit, because there are two on a typical machine and they
+        // are not interchangeable: a Dockerfile that builds under `docker
+        // build` can fail here purely because dockerd's embedded BuildKit is
+        // several versions behind the builder buildx selected. `None` means
+        // the CLI uses the embedded one too, so there is nothing to disagree
+        // with.
+        what.push_str(&match &builder {
+            Some(b) => format!("  ·  buildkit: {}", b.builder),
+            None => String::from("  ·  buildkit: dockerd"),
+        });
         self.record_event(
             run_id,
             node_id,
@@ -110,8 +129,7 @@ impl RunRegistry {
         // same reason `WorkspaceOwner::apply_to_command` doesn't trust the
         // stored path either.
         let ssh_auth_sock = if build.ssh {
-            let owner = self.db.clone().load_owner().await.ok().flatten();
-            match owner.and_then(|o| o.live_ssh_auth_sock()) {
+            match owner.as_ref().and_then(|o| o.live_ssh_auth_sock()) {
                 Some(sock) => Some(sock),
                 None => {
                     let e = anyhow::anyhow!(
@@ -142,6 +160,7 @@ impl RunRegistry {
             target: build.target.as_deref(),
             secrets: &secrets,
             ssh_auth_sock: ssh_auth_sock.as_deref(),
+            builder: builder.as_ref(),
         };
         let started = std::time::Instant::now();
         let report = match docker::build_image(&self.docker, &opts).await {
