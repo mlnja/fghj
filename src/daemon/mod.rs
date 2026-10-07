@@ -40,3 +40,32 @@ pub fn socket_path() -> PathBuf {
 pub(crate) fn ca_dir() -> PathBuf {
     persistence::fghjd_root().join("ca")
 }
+
+/// Where the container-facing copies of the CA's two key-free trust files
+/// live — `cert.pem` and `bundle.pem`, exactly as `ca::refresh_trust_files`
+/// writes them, and nothing else.
+///
+/// That "nothing else" is the entire reason this is not just `ca_dir()`,
+/// which is where the same two files are also written: `ca_dir()` holds
+/// `ca-key.pem`, and `fghj` bind-mounts this directory into *every*
+/// container it starts. `:ro` stops a container writing to a mount, not
+/// reading from it, and a container running as root reads a root-owned
+/// `0600` file through a bind mount quite happily. So the directory that
+/// gets mounted has to be one the private key was never in.
+pub(crate) fn certs_dir() -> PathBuf {
+    persistence::fghjd_root().join("certs")
+}
+
+/// Where `certs_dir()` appears inside every container — an fghj-namespaced
+/// path, so it collides with nothing an image already ships, and a stable
+/// one, so a `.fghj.yaml` can name a file under it (in `environment:`) and
+/// keep working.
+///
+/// Mounting is as far as this goes: nothing fghj does activates these certs.
+/// Trusting an extra CA on Unix means *replacing* a file or a variable the
+/// image owns (`SSL_CERT_FILE`, `/etc/ssl/certs/ca-certificates.crt`) —
+/// never adding to it, Node's `NODE_EXTRA_CA_CERTS` being the lone
+/// exception — and silently swapping a container's trust store for fghj's
+/// idea of one is not a thing to do behind an author's back. The files are
+/// simply *there*, costing nothing, for the configs that ask.
+pub(crate) const CERTS_MOUNT: &str = "/etc/fghj/certs";

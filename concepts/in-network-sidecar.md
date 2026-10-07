@@ -26,10 +26,34 @@ The sidecar makes the addressing identical from both sides. One container per
 run, on that run's network, running **the same proxy and CA code the host
 daemon runs** — `web::proxy` and `web::ca`, imported unmodified.
 
+### Identical addressing was not identical trust
+
+The claim above is about *names*, and for a long time it quietly overstated
+the result. A sibling container resolving `other.svc.fghj.internal` reached the
+sidecar and got a cert signed by fghj's CA — which its image had no reason to
+trust. Measured on a distroless Go image in a real run: 150 CAs in its bundle,
+none of them fghj's. The only containers that worked were the ones whose own
+Dockerfile happened to bake the CA in, which is precisely the per-repo
+boilerplate the sidecar exists to delete.
+
+Closed from the other side, in `node_spec`: every container now gets
+`/etc/fghj/certs` bind-mounted read-only, holding both the CA cert and a
+full trust bundle. fghj stops at making them present — see
+[[local-ca-and-tls-proxy]] for why activating them is the author's line of
+`environment:` and not fghj's default.
+
+The pre-existing escape hatch is still there and still cheaper when it fits:
+`routes.json` gives every node a `connect_host` on the raw zone, plain HTTP,
+no CA in the path at all. The sidecar is for the cases that specifically need
+the *same* HTTPS hostname an outside caller would use.
+
 ## Why a separate binary
 
 `fghjd` could have grown a `--sidecar` flag. It did not, for one reason worth
-stating plainly: this container gets **the CA's private key bind-mounted in**.
+stating plainly: this container gets **a CA private key bind-mounted in**.
+(The name-constrained signing CA's, never the root's — see
+[[local-ca-and-tls-proxy]]'s two-CA section for why that distinction is the
+whole reason the signing CA exists.)
 That deserves a minimal entrypoint someone can audit in one sitting, not a
 branch inside a binary that also requires root, installs trust stores, edits
 `/etc/pf.conf` and serves the full control API.

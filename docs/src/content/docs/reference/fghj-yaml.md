@@ -175,6 +175,11 @@ Each entry is **either** a bind mount **or** a named volume, distinguished
 by which key you set — `host` for a bind mount, `name` for a named volume.
 Setting both, or neither, fails `fghj validate`.
 
+Every container also gets one volume you didn't declare: `fghjd`
+bind-mounts its CA trust files read-only at `/etc/fghj/certs` (see
+[above](#reaching-the-tls-proxy-from-inside-a-container)). It is listed
+before your own, so declaring something at that same path overrides it.
+
 ### Setting a bind mount
 
 Use `host` when you want a path on your machine mounted straight into the
@@ -404,7 +409,18 @@ can only have one endpoint configured for both its own calls and the URLs
 it generates.
 
 The container also needs to trust fghj's local CA for that TLS connection
-to succeed — see [Local CA & TLS proxy](/concepts/local-ca-and-tls-proxy/).
+to succeed. The cert and a ready-made full trust bundle are already mounted
+read-only in every container at `/etc/fghj/certs/`, so this is usually one
+line:
+
+```yaml
+environment:
+  SSL_CERT_FILE: /etc/fghj/certs/bundle.pem
+```
+
+See [Trusting fghj's CA inside a
+container](/guides/networking-http-vs-raw/#trusting-fghjs-ca-inside-a-container)
+for which of the two files to use and why, including Node and Java.
 
 This mechanism doesn't depend on any container-runtime-specific gateway
 forwarding — it works the same way on Docker Desktop, OrbStack, and native

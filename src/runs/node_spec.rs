@@ -442,7 +442,21 @@ impl RunRegistry {
         // references it) — `ensure_volume` here labels it so
         // `docker::remove_run_scoped_volumes` can find it in `stop()`.
         // `Iterator::map` can't `.await`, hence the explicit loop.
-        let mut binds: Vec<String> = Vec::with_capacity(node.volumes.len());
+        // Every container gets fghj's trust files, read-only, before its own
+        // volumes. The zone's CA is useless to a service that cannot verify
+        // it, and the alternative was each workspace writing out the same
+        // `volumes:` entry by hand — naming a host path (`/private/var/...`
+        // on macOS, `/var/...` elsewhere) that only fghj can actually know.
+        // A host path nobody has to type is a host path nobody can get wrong.
+        //
+        // No `canonicalize` here, unlike the author-written binds below:
+        // `fghjd_root()` is already resolved symlink-free at the source.
+        let mut binds: Vec<String> = Vec::with_capacity(node.volumes.len() + 1);
+        binds.push(format!(
+            "{}:{}:ro",
+            crate::daemon::certs_dir().display(),
+            crate::daemon::CERTS_MOUNT
+        ));
         for v in &node.volumes {
             match v {
                 VolumeMount::Bind {
@@ -759,6 +773,53 @@ mod tests {
         // ...and the named-port alias the explicit declaration asked for is
         // still registered, which is what would have been lost.
         assert!(spec.aliases.iter().any(|a| a.starts_with("inspector.")));
+    }
+
+    /// A node that declares no volumes at all still gets one: fghj's trust
+    /// files, read-only. This is the assertion that keeps the feature from
+    /// quietly becoming opt-in again, and the `:ro` from quietly dropping
+    /// off — the directory it points at is the daemon's, and a container with
+    /// write access to it could hand every other container on the machine a
+    /// CA of its choosing.
+    #[tokio::test]
+    async fn every_container_mounts_the_trust_files_read_only() {
+        let node = debuggable(None);
+        assert!(
+            node.volumes.is_empty(),
+            "the point is a node that asks for nothing"
+        );
+
+        let spec = spec_for(&node).await;
+
+        let expected = format!(
+            "{}:{}:ro",
+            crate::daemon::certs_dir().display(),
+            crate::daemon::CERTS_MOUNT
+        );
+        assert_eq!(spec.binds, vec![expected]);
+    }
+
+    /// An author's own volumes come *after* fghj's, so a workspace that
+    /// genuinely wants something else at `/etc/fghj/certs` can still put it
+    /// there — Docker takes the last mount at a path. Nothing in fghj needs
+    /// that, but a mount fghj forces and an author cannot override is a
+    /// corner nobody can get out of.
+    #[tokio::test]
+    async fn an_authors_own_volumes_come_after_fghjs() {
+        let mut node = debuggable(None);
+        node.volumes.push(crate::resolver::VolumeMount::Named {
+            name: crate::resolver::name::Name::parse("data").unwrap(),
+            scope: "run".to_string(),
+            container: "/var/lib/data".to_string(),
+            read_only: false,
+            shared: false,
+        });
+
+        let spec = spec_for(&node).await;
+
+        assert_eq!(spec.binds.len(), 2);
+        assert!(spec.binds[0].ends_with(":ro"));
+        assert!(spec.binds[1].ends_with(":/var/lib/data"));
     }
 
     /// `debug` has to reach `spec_hash`, and it does so purely through

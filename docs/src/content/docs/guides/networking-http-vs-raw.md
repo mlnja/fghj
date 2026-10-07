@@ -183,59 +183,108 @@ that domain will fail certificate verification.
 
 ## Trusting fghj's CA inside a container
 
-Neither the host proxy nor the sidecar injects CA trust into any
-container automatically — this is a known, documented limitation (see
-[Local CA & TLS proxy → Limitations](/concepts/local-ca-and-tls-proxy/#limitations)).
-If a container needs to *dial* the http zone itself (not just hand out a
-URL for someone else to dial), you need to get fghj's CA cert into that
-container's trust store yourself.
+The files you need are **already in the container**. `fghjd` bind-mounts one
+directory, read-only, into every container it starts:
 
-`fghjd` maintains two stable, world-readable, key-free files for exactly
-this, refreshed automatically whenever it starts — no `.fghj.yaml` schema
-of its own, just two paths on the host you mount wherever you need them
-via the existing generic `volumes:` mechanism:
+| Path in every container | Contents |
+|---|---|
+| `/etc/fghj/certs/cert.pem` | just fghj's CA cert, PEM-encoded, no key material |
+| `/etc/fghj/certs/bundle.pem` | that same cert **merged with this host's own real root CA store** — a complete trust store, not a single cert. Covers the Admin and System trust domains; a CA trusted only in your login keychain [isn't included](/concepts/local-ca-and-tls-proxy/#trust-files-for-containers). |
 
-| File | Contents | Use for |
-|---|---|---|
-| `/var/lib/fghjd/ca/cert.pem` | just fghj's CA cert | An image with a shell/package manager — point a language-specific trust-store env var at it. |
-| `/var/lib/fghjd/ca/bundle.pem` | fghj's CA cert **merged with this host's own real root CA store** | A drop-in replacement for a container's entire system trust file — real CAs stay trusted too, not just fghj's. |
+There is nothing to mount, no path on the host to name, and no `.fghj.yaml`
+schema for it. What is left is *activating* them, which is one line of
+`environment:`.
 
-**For an image with a shell/package manager**, mount `cert.pem` and point
-the usual language-specific mechanism at it — pick whichever your HTTP
-client actually honors:
+### Pick the file by whether you're adding or replacing
+
+This is the whole decision, and getting it backwards is the one way to break
+a working service:
+
+- **Replacing** a trust store — `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+  overwriting `/etc/ssl/certs/ca-certificates.crt` — means the container now
+  trusts *only* what you pointed it at. Use **`bundle.pem`**. Point one of
+  these at `cert.pem` and the container trusts fghj and nothing else: every
+  genuine external HTTPS call it makes (a real S3, a real OAuth provider)
+  starts failing certificate verification.
+- **Adding** to a trust store. Only Node has a variable for this
+  (`NODE_EXTRA_CA_CERTS`), and a shell can do it by appending. Use
+  **`cert.pem`** — appending a copy of the host's roots to a store that
+  already has them achieves nothing.
+
+### One environment variable, no shell required
+
+The common case, and the only one that also works for a `scratch` or
+distroless image — a statically compiled Go binary, say — because nothing
+has to *run* inside the container:
 
 ```yaml
-volumes:
-  - host: /var/lib/fghjd/ca/cert.pem
-    container: /usr/local/share/fghj-ca.pem
-    read_only: true
 environment:
-  NODE_EXTRA_CA_CERTS: /usr/local/share/fghj-ca.pem   # Node
-  # REQUESTS_CA_BUNDLE: /usr/local/share/fghj-ca.pem  # Python (requests)
-  # SSL_CERT_FILE: /usr/local/share/fghj-ca.pem       # most things on Linux
+  SSL_CERT_FILE: /etc/fghj/certs/bundle.pem
 ```
 
-**For a scratch/distroless image with no shell** (common for a statically
-compiled Go binary, for example), there's nothing to run *inside* the
-container to update trust — but you can mount `bundle.pem` straight over
-the one file the runtime's TLS library reads, exactly the same mechanism
-you'd use to override any other file baked into an image:
+Go, OpenSSL (so `curl`, and anything linked against it), and Python's `ssl`
+module all honor `SSL_CERT_FILE`. Python's `requests` reads
+`REQUESTS_CA_BUNDLE` instead; set both if you're not sure which path a
+library takes.
+
+**Node** is the exception worth knowing, because it's additive — and so it
+wants the other file:
 
 ```yaml
-volumes:
-  - host: /var/lib/fghjd/ca/bundle.pem
-    container: /etc/ssl/certs/ca-certificates.crt
-    read_only: true
+environment:
+  NODE_EXTRA_CA_CERTS: /etc/fghj/certs/cert.pem
 ```
 
-No per-repo file to build or keep in sync — `bundle.pem` is a live file
-maintained by `fghjd` itself (see `ca::refresh_trust_files`), already
-merged with your host's real root CA store, so it's safe even for a
-service that also makes genuine external HTTPS calls (real AWS, a real
-OAuth provider, etc.) alongside its in-zone ones. If fghj's local CA is
-ever regenerated (a fresh `/var/lib/fghjd/ca/` — normally a one-time,
-per-machine event that should never happen in ordinary use), this file is
-regenerated right along with it, so there's nothing to remember to rebuild.
+### Appending into the image's own store
+
+Some things read neither variable and only ever look at the canonical system
+path — Java, and a few statically-linked tools. If the image has a shell and
+a writable root filesystem, append fghj's cert to the store the image already
+has, at startup, before your real process:
+
+```yaml
+command: ["sh", "-c", "cat /etc/fghj/certs/cert.pem >> /etc/ssl/certs/ca-certificates.crt && exec my-server"]
+```
+
+`>>`, not `>`: appending keeps the real CAs. This needs to run as root, and
+it's `cert.pem` rather than `bundle.pem` precisely because it's additive.
+
+**Java honors none of the above** — it reads its own keystore, so it needs an
+import rather than a file path:
+
+```yaml
+command: ["sh", "-c", "keytool -importcert -noprompt -cacerts -storepass changeit -alias fghj -file /etc/fghj/certs/cert.pem && exec java -jar /app.jar"]
+```
+
+### Two things the mount can't do for you
+
+- **It isn't there during a build.** The mount exists for containers, not for
+  BuildKit, so a `RUN apt-get` or `RUN npm install` that needs to dial the http
+  zone can't read `/etc/fghj/certs`. Use
+  [`build.secrets`](/reference/fghj-yaml/#services) to get the cert into a
+  build step, or — usually simpler — have the build talk to the raw
+  zone over plain `http://`, where no CA is involved at all.
+- **It can't help an image with no filesystem at all to write to and no
+  environment support.** That's a short list, and `SSL_CERT_FILE` covers
+  effectively all of it.
+
+### Why fghj doesn't just turn it on
+
+Mounting is free; activating isn't. As the table above says, nearly every
+mechanism Unix offers for trusting an extra CA *replaces* the container's
+trust store rather than extending it. Setting `SSL_CERT_FILE` on every
+container by default would silently swap each one's idea of the public
+internet for fghj's — a change an image's author never asked for, invisible
+until some unrelated outbound call fails. So the files are simply there, at a
+stable path, costing nothing, for the configs that ask.
+
+The files themselves stay correct on their own: `fghjd` rewrites both on every
+start (see `ca::refresh_trust_files`), so if fghj's local CA is ever
+regenerated — normally a one-time, per-machine event that should never happen
+in ordinary use — the mounted copies follow, with nothing to remember to
+rebuild. The host-side originals live in `/var/lib/fghjd/certs/`, separate
+from `/var/lib/fghjd/ca/` so that **no private key is ever inside the
+directory every container can read**.
 
 ## Quick reference
 

@@ -78,10 +78,18 @@ pub(crate) fn refresh_sidecar_ca_copy() -> Result<PathBuf> {
     let dir = sidecar_ca_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {dir:?}"))?;
 
+    // The **signing** CA, not the root. Both land under the filenames the
+    // sidecar already loads (`ca::ensure_ca` against `/etc/fghj-sidecar/ca`),
+    // so nothing in `fghj-sidecar.rs` changes: it loads "a CA" and mints
+    // leaves under it, and that CA now happens to be a name-constrained
+    // subordinate whose certificate the leaf chain carries. The root's own
+    // key stays `0600` in `ca_dir()` and is never copied anywhere — see
+    // `ca::ensure_signing_ca` for why exactly one of the two keys can be
+    // allowed to be world-readable, and which.
     let src_dir = crate::daemon::ca_dir();
     for (src, dest_name) in [
-        (crate::web::ca::ca_cert_path(&src_dir), "ca-cert.pem"),
-        (crate::web::ca::ca_key_path(&src_dir), "ca-key.pem"),
+        (crate::web::ca::signing_cert_path(&src_dir), "ca-cert.pem"),
+        (crate::web::ca::signing_key_path(&src_dir), "ca-key.pem"),
     ] {
         let bytes = std::fs::read(&src).with_context(|| format!("failed to read {src:?}"))?;
         let dest = dir.join(dest_name);

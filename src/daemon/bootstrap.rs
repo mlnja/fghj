@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use crate::daemon::control::DaemonControl;
 use crate::daemon::reconcile::{spawn_reconciler, spawn_sync_reconciler};
 use crate::daemon::registry::WorkspaceRegistry;
-use crate::daemon::{ca_dir, socket_path};
+use crate::daemon::{ca_dir, certs_dir, socket_path};
 use crate::web::api::build_router;
 use crate::web::ca;
 use crate::{daemon_log, dns, persistence, supervisor};
@@ -121,6 +121,30 @@ pub async fn run_control_api() -> Result<()> {
     // a periodic reconciler.
     ca::refresh_trust_files(&ca_dir(), &ca).context("failed to refresh CA trust files")?;
 
+    // The same two files once more, into a directory that holds *only* them,
+    // so it can be bind-mounted read-only into every container without
+    // `ca-key.pem` riding along beside it — see `daemon::certs_dir` for why
+    // the key's own directory can't be the one that gets mounted, and
+    // `node_spec`'s `CERTS_MOUNT` bind for where it lands. Created here, up
+    // front, rather than lazily at container-start time: a bind mount whose
+    // host path doesn't exist yet doesn't fail, it makes Docker invent an
+    // empty directory, which looks like fghj shipping an empty trust store.
+    let certs = certs_dir();
+    std::fs::create_dir_all(&certs)
+        .with_context(|| format!("failed to create {}", certs.display()))?;
+    ca::refresh_trust_files(&certs, &ca).context("failed to refresh container trust files")?;
+
+    // The subordinate CA that actually signs every leaf. The root loaded
+    // above signs only this, and its own key never leaves `ca_dir()` — see
+    // `ca::ensure_signing_ca` for why the key that does leave has to be the
+    // name-constrained one.
+    let signing_ca = {
+        let dir = ca_dir();
+        tokio::task::spawn_blocking(move || ca::ensure_signing_ca(&dir, &ca))
+            .await
+            .context("signing CA setup task panicked")??
+    };
+
     // Best-effort and non-blocking: not every workspace ends up starting a
     // run before `fghjd` itself might need to restart, so a slow or failed
     // fetch here shouldn't hold up `fghjd` starting or fail it outright — a
@@ -150,7 +174,7 @@ pub async fn run_control_api() -> Result<()> {
     let registry = Arc::new(WorkspaceRegistry::load(docker).await);
 
     let cert_resolver = Arc::new(ca::DynamicCertResolver::new(
-        ca,
+        signing_ca,
         provider.clone(),
         registry.clone(),
     ));

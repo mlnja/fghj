@@ -54,10 +54,12 @@ a shared sidecar would mean one run's container list is reachable from
 another run's network.
 
 **A separate `fghj-sidecar` binary (`src/bin/fghj-sidecar.rs`), not a mode
-flag on `fghjd`.** This container gets the CA's private key bind-mounted
-in, so it deserves its own minimal, easy-to-audit entrypoint rather than a
-branch inside a binary that also unconditionally requires root and runs the
-full control API.
+flag on `fghjd`.** This container gets a CA private key bind-mounted in, so
+it deserves its own minimal, easy-to-audit entrypoint rather than a branch
+inside a binary that also unconditionally requires root and runs the full
+control API. The key it gets is the
+[name-constrained signing CA's](/concepts/local-ca-and-tls-proxy/#two-cas-because-one-key-has-to-leave-the-daemon),
+not the root's — which is what bounds what a copy of it could ever certify.
 
 **Widened `RouteResolver` (`src/web/proxy.rs`) to resolve to a full `Backend {
 host, port }`, not just a port.** The host-side proxy always relayed to
@@ -127,22 +129,23 @@ same VM-plus-`/private` architecture as OrbStack — unlike the
 specific container runtime's behavior.
 
 **Docker Desktop/OrbStack's macOS file-sharing bridge runs as the logged-in
-user, not root — even for a container that itself runs as root.** The real
-CA key at `daemon::ca_dir()` is deliberately `0600` and root-owned. Mounting
-it into the sidecar failed with a permission error despite the sidecar
-process reporting `uid=0`, because the host-side bridge process that
+user, not root — even for a container that itself runs as root.** Both CA
+keys under `daemon::ca_dir()` are deliberately `0600` and root-owned.
+Mounting one into the sidecar failed with a permission error despite the
+sidecar process reporting `uid=0`, because the host-side bridge process that
 actually opens the file for sharing runs as the real macOS user and enforces
 its own permission check *before* the request ever reaches the container's
 UID namespace — verified directly: even outside any container, `cat` on
 that file failed the same way as the logged-in user. Fixed by
 `refresh_sidecar_ca_copy()` in `src/runs/route_table.rs`, which keeps a separate `0644`
-world-readable copy of the CA cert+key at `/var/lib/fghjd/sidecar-ca/`,
-refreshed on every sidecar (re)creation, and mounts *that* into the
-sidecar instead of the real CA directory. The real, `0600` CA key is never
-touched or exposed; only a copy is made more permissive, and mounting the
-CA into a container at all was already this feature's accepted tradeoff —
-this only extends readability to whoever can already run `sudo fghjd` on
-the machine.
+world-readable copy of the **signing** CA's cert+key at
+`/var/lib/fghjd/sidecar-ca/`, refreshed on every sidecar (re)creation, and
+mounts *that* into the sidecar instead of the real CA directory. The root's
+key is never touched or copied anywhere at all; what becomes world-readable
+is a signing key that can only certify fghj's own zone and the reserved
+alias TLDs, which is precisely why the
+[two-CA split](/concepts/local-ca-and-tls-proxy/#two-cas-because-one-key-has-to-leave-the-daemon)
+exists.
 
 **A read-only bind mount can't have another mount created inside it.**
 Mounting the routes directory at `/etc/fghj-sidecar` and then trying to

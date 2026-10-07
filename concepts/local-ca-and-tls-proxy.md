@@ -51,6 +51,67 @@ Keychain Access while the persisted CA files remain on disk), the very next
 `fghjd` start notices and re-installs it — prompting exactly once, only
 when trust is actually absent.
 
+## Two CAs: the root signs one certificate, and it isn't a leaf
+
+The root above signs exactly one thing: a subordinate **signing CA**
+(`ca::ensure_signing_ca`, persisted as `ca/signing-{cert,key}.pem`), which
+is what actually issues every leaf. The split is not PKI tidiness — it is
+about where the private keys end up.
+
+- The **root** key stays `0600` in `ca_dir()` and is never copied anywhere.
+  It is the key the OS trust store vouches for, and it is
+  `IsCa::Ca(Unconstrained)`, so a leak of it is a leak of trust for every
+  hostname on the internet.
+- The **signing** key cannot stay that private. `route_table`'s
+  `refresh_sidecar_ca_copy` has to hand it to every run's sidecar container
+  as a world-readable `0644` file, because Docker's macOS bind-mount bridge
+  performs its permission check host-side, as the logged-in user, before
+  the request reaches the container's UID namespace — a `0600` root-owned
+  file is simply unreadable through it (the same constraint
+  `refresh_sidecar_ca_copy`'s own doc comment records).
+
+So one of the two keys is, unavoidably, readable by any local process and
+present inside containers. Before the split that was the root, which is the
+realistic leak path here — not "an attacker already has root". X.509
+`nameConstraints` on the signing CA is what decides what that exposure
+costs: it went from "every site on the internet" to "fghj's own zone and the
+reserved alias TLDs".
+
+`signing_name_constraints` permits exactly `permitted_dns_suffixes()` —
+`dns::ZONE` plus every entry of `dns::RESERVED_ALIAS_TLDS`, read from those
+same two constants so the constraint set cannot drift from what
+`dns::cert_eligible` is willing to mint for. A `permittedSubtrees` of only
+dNSName entries leaves every *other* name type wholly unconstrained, so
+`0.0.0.0/0` and `::/0` are excluded explicitly; nothing fghj issues ever
+carries an IP SAN. `BasicConstraints::Constrained(0)` caps it at signing
+leaves and nothing below them.
+
+### Why the constraints sit on a subordinate and not on the root
+
+Because constraints on a trusted root are permanent in practice. Trust
+settings attach to the root's bytes, so narrowing the root would mean that
+ever supporting a real custom domain over HTTPS requires a *new* root — and
+a fresh Keychain Access approval on every machine, which is precisely the
+friction `ensure_ca`'s durability exists to avoid. With the constraints a
+level down, widening the permitted set is minting a fresh signing CA under
+the root every client already trusts: no re-approval, nothing to re-trust.
+
+Adopting this needed no re-approval either, for the same reason in reverse
+— the existing root was already `Unconstrained`, so it could sign a sub-CA
+the day the code landed.
+
+`ca/signing-generation` records *which* constraint set the persisted signing
+CA was built with, derived from the set itself (`signing_generation()`)
+rather than hand-maintained beside it. Editing `dns::RESERVED_ALIAS_TLDS`
+therefore regenerates every install's signing CA on the next `fghjd` start,
+with no constant to remember to bump. The marker is written last, so a crash
+mid-way leaves it stale — which regenerates, the safe direction.
+
+The sidecar needed no changes at all: `refresh_sidecar_ca_copy` writes the
+signing material under the filenames the sidecar already loads
+(`ca-cert.pem`/`ca-key.pem` in its own directory), so `fghj-sidecar.rs`
+never learns there are two tiers.
+
 ## Issuing leaf certs on the fly
 
 `ca::DynamicCertResolver` implements `rustls::server::ResolvesServerCert`:
@@ -58,9 +119,22 @@ for every incoming TLS handshake, it reads the SNI hostname the client
 asked for, checks it's in-zone (`dns::in_zone` — reused here so "is this
 name ours" has exactly one definition, shared with the DNS server), and
 either returns a cached leaf cert for that exact name or mints a fresh one
-signed by the local CA and caches it. This is what makes an arbitrarily deep
-`*.fghj.internal` name always "just work" over HTTPS without any
-pre-generation step.
+signed by the **signing** CA and caches it. This is what makes an
+arbitrarily deep `*.fghj.internal` name always "just work" over HTTPS
+without any pre-generation step.
+
+What it serves is a two-certificate chain — leaf plus the signing CA.
+Clients trust the root, not the intermediate, so a leaf served alone would
+fail with "unable to get local issuer certificate". Sending it stays correct
+in the tests that hand the resolver a self-signed root instead: a chain may
+include its own trust anchor, and verifiers ignore the extra cert.
+
+That the constraints are *present* is a weaker claim than their being
+*enforced*, so `the_signing_cas_constraints_are_enforced_by_a_real_verifier`
+runs the served chain through the same webpki path a rustls client uses,
+trusting only the root: `cart.fghj.internal` verifies, and a leaf minted for
+`login.microsoftonline.com` — signed perfectly validly, via `issue` directly
+so `cert_eligible` doesn't refuse it first — is rejected.
 
 TLS itself runs over `tokio_rustls` using the pure-Rust `ring` crypto
 backend — deliberately **not** `aws-lc-rs`, which needs `cmake` at build
@@ -147,10 +221,105 @@ lives under `/var/run` and is expected to vanish on reboot, while anything
 that must outlive a restart (the CA, the workspace index, the
 active/idle flag) lives under `/var/lib/fghjd`.
 
+## Two copies of the trust files, one of them mountable
+
+`ca::refresh_trust_files` writes `cert.pem` (the CA cert alone) and
+`bundle.pem` (that cert appended to this host's real root store, via
+`rustls-native-certs`) as `0644`, key-free files. They are written into two
+directories, and the duplication is load-bearing:
+
+- `daemon::ca_dir()` — `/var/lib/fghjd/ca`. The path earlier versions
+  documented for a hand-written `volumes:` entry. Nothing in fghj reads these
+  two copies; they stay because a documented host path that stops existing
+  does not fail a bind mount, it makes Docker invent an empty directory.
+  This directory also holds both CAs' private keys, `0600`.
+- `daemon::certs_dir()` — `/var/lib/fghjd/certs`. Bind-mounted `:ro` at
+  `daemon::CERTS_MOUNT` (`/etc/fghj/certs`) into **every** container, by
+  `node_spec`, ahead of the author's own volumes.
+
+The second directory exists because the first one cannot be mounted. `:ro`
+stops a container writing to a mount, not reading from it, and a container
+running as root reads a root-owned `0600` file through a bind mount without
+complaint — so neither `ca-key.pem` nor `signing-key.pem` may be in the
+directory every container can see. The alternative shapes were worse: mounting the two files individually is
+two binds instead of one and bind-mounting a *file* is the case
+`persistence::fghjd_root`'s symlink resolution exists to work around, and a
+symlink farm reintroduces that same hazard.
+
+### Whose trust store `bundle.pem` actually mirrors
+
+`bundle.pem` is only a safe drop-in replacement for a container's system
+trust file if it really carries the roots this host trusts, so this got
+measured rather than assumed. It is worth writing down because the obvious
+conclusion was wrong.
+
+macOS trust settings live in three domains — User, Admin, System — and
+`rustls-native-certs` reads all three, but "User" means *the calling
+process's* user. `fghjd` is root, so it reads root's own empty user domain
+and, the reasoning went, silently drops every root the actual human trusted
+in their login keychain: OrbStack's development CA lands there, as does a
+corporate TLS-inspecting proxy's often enough. The fix looked obvious — re-
+exec `fghjd` as the console user (uid/gid off `/dev/console`, `HOME` from
+`getpwuid`) behind a `--print-native-roots` flag, and parse the PEM back.
+That was built, and then measured against the root-written `bundle.pem`
+already on disk:
+
+| Enumerated as | Roots returned | Notably present |
+|---|---|---|
+| root (in-process) | 163 | `mitmproxy`, `aikido-l4-mitm-ca.localhost`, `Aikido Endpoint Protection Root CA`, `mkcert` |
+| console user (re-exec) | 131 | `Aikido Endpoint Protection Root CA`, `mkcert` |
+
+Root sees **more**, not less. Dropping privileges lost 32 roots including
+two locally-trusted MITM proxy CAs — precisely the certificates whose
+absence breaks a container's ordinary outbound HTTPS, which is the failure
+the re-exec was built to prevent. And it did not even buy the thing it was
+for: OrbStack's CA, which `security dump-trust-settings` confirms is in the
+User domain with `SSL: kSecTrustSettingsResultTrustRoot`, is absent from
+*both* enumerations — verified by SHA-256 fingerprint, with
+`load_native_certs` reporting no per-domain errors at all. On macOS 26
+`SecTrustSettingsCopyCertificates` simply does not surface it, whoever asks.
+
+So the whole mechanism was removed. `native_root_certs` is a one-line call
+again, and its doc comment records the measurement so the same idea doesn't
+get rebuilt.
+
+The user-domain gap is real, just not fghj's to close by re-execing: a CA
+that exists only in someone's login keychain never reaches `bundle.pem`. The
+fix is to trust it in the admin or System domain — where everything that
+prompts for a password already puts it — or to concatenate it into a bundle
+of one's own.
+
+`merge_bundle` does skip fghj's own CA when the host store already lists it
+— once `install_macos_trust` has run, `load_native_certs` returns it as a
+trusted root like any other, and it was landing in `bundle.pem` twice
+(measured: 2 subject lines out of 163). Harmless to a verifier, but the file
+was lying about how many roots it carried, which is the kind of discrepancy
+that sends someone debugging the wrong thing.
+
+### Why fghj mounts but does not activate
+
+Trusting an extra CA on Unix is almost always *replace*, not *add*:
+`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and overwriting
+`/etc/ssl/certs/ca-certificates.crt` all substitute the whole store, and
+`NODE_EXTRA_CA_CERTS` is the only common additive form. Setting one of the
+replacing kind on every container by default would silently exchange each
+image's view of the public internet for fghj's, and the failure would surface
+somewhere unrelated — a real OAuth provider, a real S3 — long after the
+change. `bundle.pem` is what makes the replacing form safe *when asked for*,
+which is the whole reason it is generated rather than leaving authors to
+concatenate it themselves.
+
+The cost of mounting into every container: `spec::spec_hash` hashes `binds`,
+so adding this made every node in every workspace read as drifted exactly
+once, and get recreated on the first run after the upgrade.
+
 ## Status
 
-Implemented: `src/web/ca.rs` (CA generation/persistence/trust install,
-dynamic per-SNI leaf issuance), `src/web/proxy.rs` (HTTP redirect, TLS
+Implemented: `src/web/ca.rs` (root CA generation/persistence/trust install,
+the name-constrained signing CA, dynamic per-SNI leaf issuance, the two
+key-free trust files and their de-duplicated bundle), the
+`/etc/fghj/certs` bind on every container (`daemon::certs_dir`,
+`runs::node_spec`), `src/web/proxy.rs` (HTTP redirect, TLS
 termination,
 `RouteResolver`, apex vs. per-service dispatch, fancy-404 for unknown in-zone
 names). `daemon::WorkspaceRegistry` implements `RouteResolver` over real run

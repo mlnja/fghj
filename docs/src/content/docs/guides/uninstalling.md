@@ -29,7 +29,7 @@ more than you want:
 | Flag | Keeps |
 |---|---|
 | `--keep-ca` | The root CA trusted, so a reinstall doesn't re-prompt for keychain authorization |
-| `--keep-state` | `/var/lib/fghjd` — every wired workspace and the CA private key |
+| `--keep-state` | `/var/lib/fghjd` — every wired workspace and both CAs' private keys |
 
 Docker resources are left alone either way. See
 [Docker resources](#docker-resources) below.
@@ -85,11 +85,14 @@ directories is the repositories it clones — see
 | Path | What it is |
 |---|---|
 | `ca/ca-cert.pem`, `ca/ca-key.pem` | The local root CA. Deleting these means a new CA on next start, which must be re-trusted. |
+| `ca/signing-cert.pem`, `ca/signing-key.pem` | The name-constrained signing CA that issues every leaf cert. Deleting these costs nothing — a new one is minted under the same root on next start, with no re-trusting. |
+| `ca/signing-generation` | Which constraint set the signing CA above was built with. Deleting it just regenerates the signing CA. |
 | `ca/cert.pem`, `ca/bundle.pem` | World-readable trust files, for containers that need to trust fghj's CA. |
+| `certs/` | The same two trust files, in a directory with no key material in it, bind-mounted read-only into every container at `/etc/fghj/certs`. |
 | `workspaces.json` | The index of wired workspaces. |
 | `daemon-state.json` | Daemon state across restarts. |
 | `runs/<network>/` | Per-run route tables, read by each run's sidecar. |
-| `sidecar-ca/` | CA material mounted into sidecar containers. |
+| `sidecar-ca/` | A world-readable copy of the **signing** CA (certificate and key), mounted into sidecar containers. Never the root's key. |
 | `sidecar-build/` | Scratch space for building the sidecar image from source. |
 
 ```bash
@@ -115,9 +118,13 @@ sudo security delete-certificate -c "fghj local CA" \
   /Library/Keychains/System.keychain
 ```
 
-Leaving a stale local CA trusted is not catastrophic — its private key is
-in `/var/lib/fghjd/ca/`, root-readable only — but there is no reason to keep
-a trusted root you no longer use. Remove it.
+Leaving a stale local CA trusted is not catastrophic — the root's private
+key is in `/var/lib/fghjd/ca/`, root-readable only, and never leaves it —
+but there is no reason to keep a trusted root you no longer use. Remove it.
+
+Only the root is ever in your keychain, under the name above. The signing CA
+is called `fghj signing CA` and is trusted transitively through the root, so
+there is nothing separate to delete for it.
 
 ## Docker resources
 

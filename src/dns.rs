@@ -84,7 +84,12 @@ pub trait ZoneSource: Send + Sync {
 /// `web::ca::DynamicCertResolver::resolve_for`); anything else is treated as
 /// potentially real and only ever gets proxied over plain HTTP, never
 /// certified.
-const RESERVED_ALIAS_TLDS: &[&str] = &["local", "test", "internal", "localhost"];
+/// `pub(crate)` so `web::ca` can build the signing CA's X.509
+/// `nameConstraints` from this exact list rather than restating it. The
+/// constraint set and `cert_eligible` have to agree: a name fghj is willing
+/// to issue for but the certificate forbids would fail verification at the
+/// client with an error naming neither.
+pub(crate) const RESERVED_ALIAS_TLDS: &[&str] = &["local", "test", "internal", "localhost"];
 
 pub fn is_reserved_alias(host: &str) -> bool {
     RESERVED_ALIAS_TLDS

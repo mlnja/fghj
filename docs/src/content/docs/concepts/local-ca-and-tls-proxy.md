@@ -45,14 +45,73 @@ missing (first-ever run, or you manually revoke it while the CA files
 remain on disk), the next `fghjd` start notices and re-installs it,
 prompting exactly once.
 
+## Two CAs, because one key has to leave the daemon
+
+The root CA above signs exactly one certificate, and it isn't a leaf. It
+signs a subordinate **signing CA** (`/var/lib/fghjd/ca/signing-cert.pem`),
+and that is what issues every leaf cert `fghjd` serves.
+
+The reason is that one of the two private keys cannot be kept private. Each
+run gets a [sidecar proxy](#reaching-the-proxy-from-inside-a-runs-own-network)
+that terminates TLS inside the run's own docker network, so it needs a
+signing key of its own — mounted in as a world-readable file, because
+Docker's macOS file sharing checks permissions host-side, as the logged-in
+user, before the request ever reaches the container's user namespace: a
+root-only `0600` file is simply unreadable through it.
+
+So the split is about which key that is:
+
+| | Root CA | Signing CA |
+|---|---|---|
+| Trusted by your OS | yes | no — trusted transitively, through the root |
+| Private key | `0600`, root-only, never leaves `/var/lib/fghjd/ca/` | copied world-readable into every run's sidecar |
+| What it signs | the signing CA, and nothing else | every leaf cert |
+| Names it may certify | anything | only the suffixes below |
+
+The signing CA carries an X.509 `nameConstraints` extension permitting
+`fghj.internal` and the four reserved alias TLDs (`.local`, `.test`,
+`.internal`, `.localhost`) as DNS subtrees, excluding the whole IPv4 and
+IPv6 address space, and capped (`basicConstraints` path length 0) at signing
+leaf certificates rather than further CAs. A `permittedSubtrees` listing
+only DNS names leaves every other name type unconstrained, which is why the
+IP exclusions are there and not merely belt-and-braces. The permitted set is
+built from the same constants the issuance check reads, so the two can't
+drift into disagreeing about which names are eligible.
+
+Concretely: if that world-readable signing key is read by anything on your
+machine, or by anything inside a container, the certificates it can mint are
+limited to fghj's own zone and the reserved special-use TLDs. It cannot
+produce a certificate for `login.microsoftonline.com` that any verifier will
+accept — and that's checked by running the real chain through the same
+verification path a TLS client uses, not just by asserting the extension is
+present. Without the split, the key in that position was the root's, and the
+answer was "any hostname on the internet".
+
+### Why the constraints are on the subordinate, not the root
+
+Constraints on a trusted root are permanent in practice. Trust attaches to
+the root's exact bytes, so narrowing the root would mean that ever
+supporting HTTPS on a real custom domain requires a *new* root CA — and a
+fresh trust-store approval on every machine, which is exactly the friction
+the root's durability exists to avoid. One level down, widening the
+permitted set is just minting a fresh signing CA under the root your machine
+already trusts: no re-approval, nothing to re-trust.
+
+A small marker file, `/var/lib/fghjd/ca/signing-generation`, records which
+constraint set the persisted signing CA was built with, so changing the
+eligible-suffix list regenerates it automatically on the next `fghjd` start.
+
 ## Issuing leaf certs on the fly
 
 For every incoming TLS handshake, `fghjd` reads the SNI hostname the
 client asked for, checks it's in `fghj`'s zone, and either returns a
 cached leaf cert for that exact name or mints a fresh one signed by the
-local CA and caches it. This is what makes an arbitrarily deep
+signing CA and caches it. This is what makes an arbitrarily deep
 `*.fghj.internal` name always "just work" over HTTPS without any
-pre-generation step.
+pre-generation step. What gets served is a two-certificate chain — the leaf
+plus the signing CA — since your machine trusts the root, not the
+intermediate, and a leaf sent on its own would fail with "unable to get
+local issuer certificate".
 
 The same eligibility check also covers a service's declared
 [additional hosts](/reference/fghj-yaml/#additional-hosts): a literal
@@ -67,7 +126,8 @@ all — see below.
 
 ## What's actually in each certificate
 
-Both the root CA and every leaf cert are built with [rcgen](https://docs.rs/rcgen), which
+All three certificates — the root CA, the signing CA and every leaf — are
+built with [rcgen](https://docs.rs/rcgen), which
 defaults to a minimal, RFC-legal-but-not-defensive certificate: no
 `SubjectKeyIdentifier` (SKI), no `AuthorityKeyIdentifier` (AKI), and no
 `basicConstraints`, unless the caller explicitly opts in. `fghjd` opts in
@@ -85,8 +145,15 @@ construction). It's created with:
 - `key_usages = [KeyCertSign, CrlSign]` — the two usages meaningful for a
   CA key: signing certificates and (were fghj ever to issue one) a CRL.
 
-**Every leaf cert** (`ca::DynamicCertResolver::issue`) is signed by that CA
-via `Issuer::from_ca_cert_der`, and is built with:
+**The signing CA** (`ca::ensure_signing_ca`) is signed by that root, and
+adds `nameConstraints` plus `BasicConstraints::Constrained(0)` to the same
+`KeyCertSign`/`CrlSign` usages — see [above](#two-cas-because-one-key-has-to-leave-the-daemon)
+for what those two do and why they're here rather than on the root. Being
+non-self-signed, it carries an AKI pointing back at the root for the same
+RFC 5280 reason every leaf does.
+
+**Every leaf cert** (`ca::DynamicCertResolver::issue`) is signed by the
+*signing* CA via `Issuer::from_ca_cert_der`, and is built with:
 
 - `CertificateParams::new(vec![name])`, which populates the
   `SubjectAlternativeName` extension with `name` as a DNS SAN — the actual
@@ -210,8 +277,9 @@ that case.
 to that run's own docker network, running the exact same `RouteResolver`
 + `serve_https`/`serve_http_redirect` logic as the host-side proxy — a
 separate `fghj-sidecar` binary, not a mode flag on `fghjd`, since it needs
-the CA's private key mounted in and otherwise deserves the smallest
-possible attack surface. It doesn't talk to `fghjd` over the network at
+a signing key mounted in and otherwise deserves the smallest possible
+attack surface. That key is the name-constrained signing CA's, never the
+root's — see [Two CAs](#two-cas-because-one-key-has-to-leave-the-daemon). It doesn't talk to `fghjd` over the network at
 all: `fghjd` writes a small JSON route table to a bind-mounted file every
 time a run's containers or routes change, and the sidecar polls that
 file's mtime once a second and reloads it — no dependency on any
@@ -235,62 +303,103 @@ already has.
 
 ## Trust files for containers
 
-Neither the host-side proxy nor the sidecar injects CA trust into any
-container — a container that dials an in-zone name over HTTPS still needs
-to be told to trust fghj's local CA some other way. `fghjd` keeps this as
-low-friction as it can: alongside the real CA material (`ca-cert.pem` and
-the root-only, `0600` `ca-key.pem`), `ca::refresh_trust_files` maintains
-two more files in that same `/var/lib/fghjd/ca/` directory, refreshed on
-every `fghjd` start —
+A container that dials an in-zone name over HTTPS has to trust fghj's local
+CA, and neither the host-side proxy nor the sidecar can inject that trust
+into the container's TLS library for it. What `fghjd` can do — and does — is
+make sure the material is always *present*, so the author's side of this is
+one line of config rather than a mount, a path and a refresh story.
+
+`ca::refresh_trust_files` writes two world-readable, key-free files on every
+`fghjd` start:
 
 - **`cert.pem`** — just fghj's CA cert, PEM-encoded, no key material.
 - **`bundle.pem`** — that same cert merged with this host's own real root
   CA store (via [`rustls-native-certs`](https://docs.rs/rustls-native-certs)),
-  so it also works as a straight drop-in replacement for a container's
-  *entire* system trust file — real CAs stay trusted too, not just fghj's.
+  so it is a *complete* trust store rather than a single cert: a drop-in
+  replacement for a container's entire system trust file, with the real
+  public CAs still trusted alongside fghj's.
 
-Both files are world-readable and contain no private key, so any
-workspace can mount either one wherever it needs, without any dedicated
-`.fghj.yaml` schema — the existing generic `volumes:` mechanism is enough:
+They are written twice, into two directories, and the duplication is the
+point:
+
+| Directory | Who reads it |
+|---|---|
+| `/var/lib/fghjd/ca/` | Nothing, now — it also holds both CAs' certificates and their `0600` private keys. Kept because it is the path earlier versions documented, and a `volumes:` entry naming a host path that vanished would make Docker invent an empty directory rather than fail. |
+| `/var/lib/fghjd/certs/` | **Every container.** `fghjd` bind-mounts this directory read-only at `/etc/fghj/certs` in every container it starts. |
+
+The split exists for one reason: `:ro` prevents a container *writing* to a
+mount, not *reading* from it, and a container running as root will read a
+root-owned `0600` file through a bind mount quite happily. So the directory
+that gets mounted into every container has to be one no private key was ever
+in. Nothing about the files themselves differs between the two copies.
+
+So from inside any container, both files are simply there:
 
 ```yaml
-# for an image with a shell/package manager: mount cert.pem and point a
-# language-specific trust-store env var at it (NODE_EXTRA_CA_CERTS,
-# REQUESTS_CA_BUNDLE, SSL_CERT_FILE, ...)
-volumes:
-  - host: /var/lib/fghjd/ca/cert.pem
-    container: /usr/local/share/fghj-ca.pem
-    read_only: true
+environment:
+  # replaces the trust store, so it wants the full bundle
+  SSL_CERT_FILE: /etc/fghj/certs/bundle.pem
 ```
 
 ```yaml
-# for a scratch/distroless image with no shell: overlay bundle.pem
-# straight onto the runtime's system trust file
-volumes:
-  - host: /var/lib/fghjd/ca/bundle.pem
-    container: /etc/ssl/certs/ca-certificates.crt
-    read_only: true
+environment:
+  # Node's is additive, so it wants the bare cert
+  NODE_EXTRA_CA_CERTS: /etc/fghj/certs/cert.pem
 ```
 
-`refresh_trust_files` is a separate step from generating/loading the CA,
-not folded into it, because the sidecar's own startup loads the CA against
-a `:ro` bind mount of this same directory (see above) and would fail if
-that shared code path tried to write back into it — only a caller that
-owns a writable copy of the directory (`daemon::run_control_api`, on the
-host) calls it. Since fghj's CA itself is essentially never regenerated in
-ordinary use (it's meant to survive indefinitely, precisely so you never
-have to re-approve trust — see [The local CA](#the-local-ca) above), these
-two files don't need any periodic reconciliation either; a one-time
-refresh at daemon startup keeps them correct. See the [HTTP vs. raw
+`bundle.pem` carries the roots `fghjd` can see, which on macOS is the Admin
+and System trust domains. Certificates trusted only in your **User** domain
+— in your login keychain, without an admin prompt — are not in it. OrbStack's
+development CA is the common example. If a container needs to trust one of
+those, trust it at the admin/System level instead (which is where anything
+that asked you for a password already put it), or concatenate it into a
+bundle of your own.
+
+fghj's own CA is de-duplicated out of the merge, since once it's installed in
+your System keychain the enumeration returns it like any other root and it
+would otherwise appear in the bundle twice.
+
+**Mounting is where fghj stops, deliberately.** Almost every mechanism Unix
+offers for trusting an extra CA *replaces* the trust store instead of
+extending it — `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, overwriting
+`/etc/ssl/certs/ca-certificates.crt`; Node's `NODE_EXTRA_CA_CERTS` is the
+only common additive one. Setting any of the first kind automatically, on
+every container, would swap each image's idea of the public internet for
+fghj's, invisibly, until some unrelated outbound call failed verification.
+That is not a change to make on an author's behalf. `bundle.pem` exists
+precisely so that when an author *does* ask, the replacing form is safe.
+
+`refresh_trust_files` is a separate step from generating/loading the CA, not
+folded into it, because the sidecar's own startup loads the CA against a `:ro`
+bind mount of the CA directory (see above) and would fail if that shared code
+path tried to write back into it — only a caller that owns a writable copy of
+the directory (`daemon::run_control_api`, on the host) calls it. Since fghj's
+CA itself is essentially never regenerated in ordinary use (it's meant to
+survive indefinitely, precisely so you never have to re-approve trust — see
+[The local CA](#the-local-ca) above), these files don't need any periodic
+reconciliation either; a one-time refresh at daemon startup keeps every copy
+correct. See the [HTTP vs. raw
 guide](/guides/networking-http-vs-raw/#trusting-fghjs-ca-inside-a-container)
-for full worked examples, including the presigned-URL case that motivated
-this.
+for full worked examples — Java, a shell that appends rather than replaces,
+and the presigned-URL case that motivated this.
 
 ## Limitations
 
 Non-macOS trust-store installation isn't implemented yet — Linux would
 need `update-ca-certificates` or equivalent, Windows the platform CA
 store.
+
+Nothing *activates* the trust files mounted into each container; they are
+only made available. See the reasoning under [Trust files for
+containers](#trust-files-for-containers) — the mechanisms that would do it
+replace a container's whole trust store, which is not a thing to do
+silently. The one case where this is felt as a real gap is an image with no
+shell, no writable root filesystem and a TLS stack that ignores
+`SSL_CERT_FILE`; there is no known common runtime in that intersection.
+
+The mount is a container-time thing, not a build-time one: a `RUN` step in a
+Dockerfile cannot read `/etc/fghj/certs`, so a build that needs to dial the
+http zone needs `build.secrets` or the raw zone instead.
 
 Making every node's DNS resolution depend on the sidecar being up is a
 larger blast radius than before this split existed, when a node's own
