@@ -114,6 +114,22 @@ Keychain Access prompt (delete `ca/ca-cert.pem`, `ca/ca-key.pem` and the
 machine depends on it, so the cost of rotating is about as low as a root
 rotation ever gets.
 
+One trap, found the hard way by following an earlier version of these
+instructions: the restart has to happen somewhere that can prompt.
+`install_macos_trust` needs Authorization Services, which a launchd *system*
+daemon has no session for, so a `brew services restart` after deleting the
+old root fails with "the authorization was denied since no user interaction
+was possible", exits, and is restarted by `KeepAlive` into the same failure
+forever — while `fghj doctor` reports only "fghjd isn't running", pointing
+nowhere near the cause. `sudo fghjd` once in a terminal is enough; the
+check-first design makes every later start a no-op. The bail message now
+carries the one-line `security add-trusted-cert` invocation for whoever hits
+it anyway, and `install_macos_trust` was moved to *after* the `sidecar-ca`
+scrub in `run_control_api` for the same reason: trust install is the one CA
+step that can fail for reasons outside fghj's control, and it was preventing
+a machine that could not prompt from ever reaching the cleanup that removes
+the old world-readable root key.
+
 ### Why the constraints sit on a subordinate and not on the root
 
 Because constraints on a trusted root are permanent in practice. Trust

@@ -524,9 +524,27 @@ pub fn install_macos_trust(ca_cert_path: &Path) -> Result<()> {
         .status()
         .context("failed to run `security add-trusted-cert`")?;
     if !status.success() {
+        // Nearly always one specific thing: `SecTrustSettingsSetTrustSettings:
+        // The authorization was denied since no user interaction was
+        // possible.` Modifying System trust needs an Authorization Services
+        // prompt, and a launchd *system* daemon has no session to show one in
+        // — root does not bypass that gate. So the failure is not transient,
+        // and with `KeepAlive` set the daemon would otherwise crash-loop on it
+        // forever, logging a bare "failed" with nothing to act on. Hand over
+        // the exact command instead: run from a terminal it can prompt, and
+        // the check at the top of this function makes every later start a
+        // no-op.
         anyhow::bail!(
-            "`security add-trusted-cert` failed for {}",
-            ca_cert_path.display()
+            "`security add-trusted-cert` failed for {cert}\n\
+             If this says the authorization was denied because no user interaction was \
+             possible, fghjd is running without a session to prompt in (a launchd \
+             LaunchDaemon, `brew services`, ssh). Install the trust once from a terminal:\n\
+             \n\
+             \x20   sudo security add-trusted-cert -d -r trustRoot -k {keychain} {cert}\n\
+             \n\
+             then start fghjd again.",
+            cert = ca_cert_path.display(),
+            keychain = SYSTEM_KEYCHAIN,
         );
     }
     println!("fghjd: installed the fghj local CA into the System trust store");

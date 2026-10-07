@@ -111,9 +111,6 @@ pub async fn run_control_api() -> Result<()> {
             .await
             .context("CA setup task panicked")??
     };
-    tokio::task::spawn_blocking(move || ca::install_macos_trust(&cert_path))
-        .await
-        .context("CA trust install task panicked")??;
     // `cert.pem`/`bundle.pem` under the same dir: the whole mechanism by
     // which a container trusts fghj's zone, via a plain `volumes:` mount in
     // its own `.fghj.yaml` — see `ca::refresh_trust_files`. The CA itself
@@ -164,6 +161,17 @@ pub async fn run_control_api() -> Result<()> {
             "fghjd: failed to refresh the sidecar CA copy: {e:#}"
         ));
     }
+
+    // Trust install last of the CA steps, deliberately. It is the only one
+    // that can fail for a reason outside fghj's control — it needs an
+    // Authorization Services prompt, which a launchd system daemon has no
+    // session to show — and everything above either removes a world-readable
+    // private key or writes files containers depend on. Running it first, as
+    // this used to, meant a machine that could not prompt never reached the
+    // `sidecar-ca` scrub above and kept the old root key on disk.
+    tokio::task::spawn_blocking(move || ca::install_macos_trust(&cert_path))
+        .await
+        .context("CA trust install task panicked")??;
 
     // Best-effort and non-blocking: not every workspace ends up starting a
     // run before `fghjd` itself might need to restart, so a slow or failed

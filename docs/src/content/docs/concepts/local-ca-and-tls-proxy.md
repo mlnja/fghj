@@ -102,17 +102,47 @@ any fghj container — could read a private key whose certificate your OS
 trusts for *every* hostname. If that matters to you, regenerate the root:
 
 ```sh
+# 1. stop the daemon, so it isn't restarting mid-rotation
+sudo brew services stop fghj     # or: sudo launchctl bootout system/sh.brew.fghj
+
+# 2. untrust and delete the old root, and the signing CA under it
 sudo security delete-certificate -c "fghj local CA" \
   /Library/Keychains/System.keychain
 sudo rm /var/lib/fghjd/ca/ca-cert.pem /var/lib/fghjd/ca/ca-key.pem \
   /var/lib/fghjd/ca/signing-cert.pem /var/lib/fghjd/ca/signing-key.pem \
   /var/lib/fghjd/ca/signing-generation
+
+# 3. mint the new root and trust it — from a terminal, see below
+sudo fghjd            # Ctrl-C once it logs "control API listening on ..."
+
+# 4. hand it back to the service manager
+sudo brew services start fghj
 ```
 
-Then restart `fghjd`. It mints a fresh root and signing CA and prompts once
-for keychain authorization, as it did on first install. Nothing outside this
-machine depends on the old root, so this costs you one password prompt and
-nothing else.
+:::caution[Step 3 has to come from a terminal]
+Installing a root into the System trust store needs an Authorization
+Services prompt, and **running as root does not bypass it** — that gate is
+about user interaction, not file permissions. A launchd *system* daemon has
+no session to show a prompt in, so `fghjd` started by `brew services` fails
+with `SecTrustSettingsSetTrustSettings: The authorization was denied since
+no user interaction was possible`, exits, and — with `KeepAlive` set — is
+restarted into the same failure indefinitely. `fghj doctor` then reports
+only that the daemon isn't running.
+
+Running `sudo fghjd` once in your own terminal gives it a session to prompt
+in. After that the trust check at the top of every start is a no-op, so the
+service manager can take over again. If you'd rather not run the daemon in
+the foreground at all, install the trust directly — it's the same command
+`fghjd` runs:
+
+```sh
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain /var/lib/fghjd/ca/ca-cert.pem
+```
+:::
+
+Nothing outside this machine depends on the old root, so the whole rotation
+costs one password prompt.
 
 ### Why the constraints are on the subordinate, not the root
 
