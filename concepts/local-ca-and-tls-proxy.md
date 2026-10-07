@@ -86,6 +86,34 @@ dNSName entries leaves every *other* name type wholly unconstrained, so
 carries an IP SAN. `BasicConstraints::Constrained(0)` caps it at signing
 leaves and nothing below them.
 
+### The migration has to scrub, not just stop
+
+Splitting the CAs stops the root key *being copied* anywhere. It does
+nothing about the copy already on disk: every install predating the split
+has the root's private key at `sidecar-ca/ca-key.pem`, mode `0644`, because
+that is what `refresh_sidecar_ca_copy` used to write there. Measured on this
+machine before the upgrade — `-rw-r--r-- root wheel`, readable with no
+`sudo`, and its public key's SHA-256 matching `ca/ca-cert.pem`'s exactly.
+
+Nothing would have overwritten it until the next time a run happened to
+start a sidecar, which on a machine where no run ever starts is never. So
+`run_control_api` calls `refresh_sidecar_ca_copy` once at startup, right
+after `ensure_signing_ca`: the function already writes exactly the bytes
+that should be there, so running it up front *is* the migration. Best-effort
+— a cleanup that fails should not stop the daemon, and `ensure_sidecar`
+calls the same function and will report a real error if the copy is actually
+needed.
+
+Scrubbing is not the same as undisclosing, and that part is not fghj's call
+to make. A key that spent weeks world-readable, and inside every sidecar
+container, should be treated as disclosed: whoever holds a copy can mint a
+cert for *any* hostname that this machine's trust store will accept, because
+the root is `Unconstrained` by design. Regenerating it costs exactly one
+Keychain Access prompt (delete `ca/ca-cert.pem`, `ca/ca-key.pem` and the
+`signing-*` files, untrust the old cert, restart), and nothing outside this
+machine depends on it, so the cost of rotating is about as low as a root
+rotation ever gets.
+
 ### Why the constraints sit on a subordinate and not on the root
 
 Because constraints on a trusted root are permanent in practice. Trust

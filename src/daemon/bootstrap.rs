@@ -145,6 +145,26 @@ pub async fn run_control_api() -> Result<()> {
             .context("signing CA setup task panicked")??
     };
 
+    // Overwrite the sidecar's world-readable CA copy now, rather than leaving
+    // it to the next `ensure_sidecar`. Before the signing CA existed, the key
+    // that got copied here was the **root's**, at `0644` — so on every
+    // install that predates this, a trusted root's private key is sitting on
+    // disk readable by any local process, and would stay there until some run
+    // happened to start a sidecar. Doing it at startup makes the upgrade
+    // itself the fix, with no run required.
+    //
+    // Best-effort: this is a cleanup, and failing it should not stop `fghjd`
+    // from coming up — `ensure_sidecar` calls the same function and will
+    // surface a real error if the copy is actually needed.
+    if let Err(e) = tokio::task::spawn_blocking(crate::runs::route_table::refresh_sidecar_ca_copy)
+        .await
+        .context("sidecar CA refresh task panicked")?
+    {
+        daemon_log::warn(format!(
+            "fghjd: failed to refresh the sidecar CA copy: {e:#}"
+        ));
+    }
+
     // Best-effort and non-blocking: not every workspace ends up starting a
     // run before `fghjd` itself might need to restart, so a slow or failed
     // fetch here shouldn't hold up `fghjd` starting or fail it outright — a

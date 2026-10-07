@@ -62,18 +62,26 @@ pub(crate) fn sidecar_ca_dir() -> PathBuf {
     persistence::fghjd_root().join("sidecar-ca")
 }
 
-/// A world-readable copy of the CA cert+key, refreshed on every sidecar
-/// (re)creation, kept separate from the real `daemon::ca_dir()` — `fghjd`
-/// runs as root and the real `ca-key.pem` is deliberately `0600`
-/// root-owned, but Docker Desktop/OrbStack's bind-mount sharing on macOS is
-/// brokered by a process running as the logged-in user, not root: even a
-/// container claiming to run as `root` can't read a `0600` root-owned file
-/// through that bridge, since the permission check happens on the host side
-/// against the real user, before the request ever reaches the container's
-/// own UID namespace. Mounting the CA into a container at all is already
-/// the accepted tradeoff for this feature (see `fghj-sidecar.rs`'s own
-/// doc comment); this only has to be readable by whoever is already running
-/// `sudo fghjd` on this machine, which is a strictly smaller exposure.
+/// A world-readable copy of the **signing** CA's cert+key, refreshed on
+/// every sidecar (re)creation, kept separate from the real
+/// `daemon::ca_dir()` — `fghjd` runs as root and the real keys are
+/// deliberately `0600` root-owned, but Docker Desktop/OrbStack's bind-mount
+/// sharing on macOS is brokered by a process running as the logged-in user,
+/// not root: even a container claiming to run as `root` can't read a `0600`
+/// root-owned file through that bridge, since the permission check happens
+/// on the host side against the real user, before the request ever reaches
+/// the container's own UID namespace. Mounting a CA key into a container at
+/// all is the accepted tradeoff for this feature (see `fghj-sidecar.rs`'s
+/// own doc comment); what bounds it is that the key made readable here can
+/// only certify fghj's own zone and the reserved alias TLDs — see
+/// `ca::ensure_signing_ca`.
+///
+/// Also called once at daemon startup, not just before creating a sidecar.
+/// Installs that predate the two-CA split left the **root** key sitting in
+/// this directory at `0644`, and nothing would have overwritten it until the
+/// next time a run happened to start a sidecar — on a machine where no run
+/// ever starts, never. Since this function already writes exactly the bytes
+/// that should be there, running it up front is the whole migration.
 pub(crate) fn refresh_sidecar_ca_copy() -> Result<PathBuf> {
     let dir = sidecar_ca_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {dir:?}"))?;

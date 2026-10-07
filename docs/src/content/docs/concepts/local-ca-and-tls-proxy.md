@@ -87,6 +87,33 @@ verification path a TLS client uses, not just by asserting the extension is
 present. Without the split, the key in that position was the root's, and the
 answer was "any hostname on the internet".
 
+### Upgrading from a version before the split
+
+Before the signing CA existed, the key copied into each sidecar was the
+**root's**, and it was world-readable (`0644`) by necessity — the macOS
+bind-mount bridge leaves no alternative. If you ran one of those versions,
+that copy is still on disk at `/var/lib/fghjd/sidecar-ca/ca-key.pem`.
+
+The first `fghjd` start after upgrading overwrites it with the
+name-constrained signing key, so no run or other action is needed on your
+part. But overwriting it is not the same as un-disclosing it. For however
+long it was there, any process on the machine — and anything running inside
+any fghj container — could read a private key whose certificate your OS
+trusts for *every* hostname. If that matters to you, regenerate the root:
+
+```sh
+sudo security delete-certificate -c "fghj local CA" \
+  /Library/Keychains/System.keychain
+sudo rm /var/lib/fghjd/ca/ca-cert.pem /var/lib/fghjd/ca/ca-key.pem \
+  /var/lib/fghjd/ca/signing-cert.pem /var/lib/fghjd/ca/signing-key.pem \
+  /var/lib/fghjd/ca/signing-generation
+```
+
+Then restart `fghjd`. It mints a fresh root and signing CA and prompts once
+for keychain authorization, as it did on first install. Nothing outside this
+machine depends on the old root, so this costs you one password prompt and
+nothing else.
+
 ### Why the constraints are on the subordinate, not the root
 
 Constraints on a trusted root are permanent in practice. Trust attaches to
