@@ -139,6 +139,11 @@ impl RunRegistry {
         // stopped, as opposed to having died on its own.
         updated.desired.running = false;
         updated.observed.status = status;
+        // `container` was cloned mid-action, so it still carries the
+        // `Stopping` mark that got us here. The reducer clears it on settle
+        // regardless, but a method that reports a container as stopped
+        // should not also report an action still pending on it.
+        updated.pending_action = None;
         Ok(updated)
     }
 

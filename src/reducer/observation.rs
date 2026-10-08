@@ -59,7 +59,21 @@ pub(super) fn reduce(
                     // real post-action status/ports/routes, so a partial
                     // merge would leave stale fields no future report will
                     // ever correct.
-                    Ok(Some(info)) => {
+                    Ok(Some(mut info)) => {
+                        // The mark comes off here rather than being left to
+                        // whatever built `info` — settling *is* the action
+                        // being over. `RunRegistry::stop_container` returns
+                        // a clone of the container it was handed, which
+                        // still carries the `Stopping` that triggered it, so
+                        // inserting that verbatim left the node reading
+                        // "stopping" forever even though Docker had already
+                        // stopped it. Worse, every `*Requested` arm rejects
+                        // a container with a pending action as
+                        // `AlreadyInFlight`, so the node could then never be
+                        // started, stopped or deleted again for the life of
+                        // the daemon. `pending_action` is the reducer's own
+                        // field; no effect gets a say in it.
+                        info.pending_action = None;
                         run.containers.insert(node_id, info);
                     }
                     // `None` only ever means a `Removing` action actually
@@ -340,6 +354,35 @@ mod tests {
         assert!(c.pending_action.is_none());
         assert_eq!(c.observed.status, "running");
         assert_eq!(c.observed.published_port, Some(54321));
+    }
+
+    /// `RunRegistry::stop_container` builds its return value by cloning the
+    /// `ContainerInfo` it was handed, which is the one carrying the
+    /// `Stopping` that triggered the call in the first place. Settling must
+    /// clear it anyway: leaving it set stuck the node at "stopping" with the
+    /// container already exited, and every later start/stop/delete request
+    /// for it was then rejected as `AlreadyInFlight`.
+    #[test]
+    fn container_action_settled_clears_a_pending_action_the_effect_echoed_back() {
+        let mut web = container("web");
+        web.pending_action = Some(PendingAction::Stopping);
+        let state = state_with_run("default", vec![web.clone()]);
+        let mut settled = web;
+        settled.desired.running = false;
+        settled.observed.status = "exited".into();
+        let next = reduce(
+            &state,
+            Action::ContainerActionSettled {
+                run_id: "default".into(),
+                node_id: "web".into(),
+                result: Ok(Some(settled)),
+            },
+        )
+        .unwrap();
+        let c = &next.runs["default"].containers["web"];
+        assert!(c.pending_action.is_none());
+        assert_eq!(c.observed.status, "exited");
+        assert!(!c.desired.running);
     }
 
     #[test]
