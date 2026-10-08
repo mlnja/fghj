@@ -158,7 +158,7 @@ Implemented: `schema/component.cue` (`#AdditionalHost`, `#HostAlias`),
 `src/hosts_file.rs` (the marked `/etc/hosts` block),
 `src/effects/hosts.rs` (the fanned-in effect that collects aliases from every
 running container in every workspace), `src/state/query.rs`
-(`resolve_route`'s two passes, `wildcard_suffixes`), `src/dns.rs`
+(`resolve_route`'s two passes, `wildcard_suffixes`), `src/dns/`
 (`is_reserved_alias`, `cert_eligible`, wildcard zone install),
 `src/resolver/uniqueness.rs` (in-workspace collisions). macOS only for
 wildcards.

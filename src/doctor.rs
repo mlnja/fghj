@@ -28,12 +28,13 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
+use anyhow::Result;
 use bollard::Docker;
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::control::DaemonControl;
 use crate::web::proxy::{HTTP_PORT, HTTPS_PORT, PROXY_IP};
-use crate::{dns, web};
+use crate::{dns, raw_net, web};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -127,17 +128,6 @@ fn parse_api_version(v: &str) -> Option<(u32, u32)> {
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     Some((major, minor))
-}
-
-/// Whether `ifconfig lo0` output carries `ip` as an `inet` address.
-/// Separated from the `ifconfig` call so the parse is testable without a
-/// loopback interface to point it at.
-fn lo0_has_alias(ifconfig_output: &str, ip: Ipv4Addr) -> bool {
-    let needle = ip.to_string();
-    ifconfig_output.lines().any(|line| {
-        let mut words = line.split_whitespace();
-        words.next() == Some("inet") && words.next() == Some(needle.as_str())
-    })
 }
 
 async fn docker_checks(docker: &Docker) -> Vec<Check> {
@@ -245,83 +235,73 @@ fn proxy_port_check(port: u16, name: &str, title: &str) -> Check {
     }
 }
 
-fn loopback_alias_check() -> Check {
+/// `present` is `raw_net::loopback_alias_present(PROXY_IP)`, taken as a
+/// parameter so the verdicts are testable without a loopback interface to
+/// probe.
+fn loopback_alias_check(present: Option<Result<bool>>) -> Check {
     let name = "loopback-alias";
     let title = "proxy loopback alias";
-    if !cfg!(target_os = "macos") {
-        // The alias only exists on macOS: everywhere else the whole of
-        // 127/8 already routes to loopback, so there is nothing to check and
+    match present {
+        // Only macOS needs the alias: everywhere else the whole of 127/8
+        // already routes to loopback, so there is nothing to check and
         // nothing that can be missing. See `raw_net::add_loopback_alias`.
-        return Check::pass(
+        None => Check::pass(
             name,
             title,
             format!("{PROXY_IP} needs no alias on this platform"),
-        );
-    }
-    let output = Command::new("ifconfig").arg("lo0").output();
-    match output {
-        Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            if lo0_has_alias(&text, PROXY_IP) {
-                Check::pass(name, title, format!("{PROXY_IP} is up on lo0"))
-            } else {
-                Check::fail(
-                    name,
-                    title,
-                    format!("{PROXY_IP} is not assigned to lo0"),
-                    "run `fghj daemon start` — it re-adds the alias; nothing can reach the \
-                     proxy without it",
-                )
-            }
-        }
-        Ok(o) => Check::warn(
-            name,
-            title,
-            format!(
-                "`ifconfig lo0` failed: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            ),
-            "check the alias by hand with `ifconfig lo0`",
         ),
-        Err(e) => Check::warn(
+        Some(Ok(true)) => Check::pass(name, title, format!("{PROXY_IP} is up on loopback")),
+        Some(Ok(false)) => Check::fail(
             name,
             title,
-            format!("could not run `ifconfig`: {e}"),
-            "check the alias by hand with `ifconfig lo0`",
+            format!("{PROXY_IP} is not assigned to loopback"),
+            "run `fghj daemon start` — it re-adds the alias; nothing can reach the \
+             proxy without it",
+        ),
+        Some(Err(e)) => Check::warn(
+            name,
+            title,
+            format!("{e:#}"),
+            "check the loopback interface's addresses by hand",
         ),
     }
 }
 
-fn resolver_files_check() -> Check {
+/// `routing` is `dns::os_routing_status()`, taken as a parameter for the
+/// same reason as `loopback_alias_check`'s.
+fn resolver_files_check(routing: Option<dns::OsRouting>) -> Check {
     let name = "resolver-files";
-    let title = "/etc/resolver entries";
-    if !cfg!(target_os = "macos") {
+    let Some(routing) = routing else {
         return Check::warn(
             name,
-            title,
+            "OS DNS routing",
             "automatic OS DNS routing isn't implemented on this platform".to_string(),
             "point your resolver at fghjd's DNS port manually, or use the \
              container-side names only",
         );
-    }
-    let zones = dns::managed_resolver_zones(Path::new("/etc/resolver"));
-    let has = |zone: &str| zones.iter().any(|(z, _)| z == zone);
+    };
+    let title = format!("{} entries", routing.location);
+    let has = |zone: &str| routing.zones.iter().any(|(z, _)| z == zone);
     let missing: Vec<&str> = [dns::ZONE, dns::ZONE_RAW]
         .into_iter()
         .filter(|z| !has(z))
         .collect();
     if missing.is_empty() {
-        let listed: Vec<String> = zones
+        let listed: Vec<String> = routing
+            .zones
             .iter()
             .map(|(z, port)| format!("{z} -> 127.0.0.1:{port}"))
             .collect();
-        return Check::pass(name, title, listed.join(", "));
+        return Check::pass(name, &title, listed.join(", "));
     }
     Check::fail(
         name,
-        title,
-        format!("no resolver file for {}", missing.join(" or ")),
-        "run `fghj daemon start` — it rewrites /etc/resolver; needs root",
+        &title,
+        format!("no resolver entry for {}", missing.join(" or ")),
+        &format!(
+            "run `fghj daemon start` — it rewrites {}; needs root",
+            routing.location
+        ),
     )
 }
 
@@ -364,7 +344,11 @@ fn dns_resolution_check() -> Check {
                         "{probe} resolved to [{got}], not {PROXY_IP} — something other than \
                          fghjd is answering for this zone"
                     ),
-                    "check /etc/resolver/fghj.internal, then run `fghj daemon restart`",
+                    &format!(
+                        "check {} for {}, then run `fghj daemon restart`",
+                        dns::os_routing_status().map_or("the OS resolver config", |r| r.location),
+                        dns::ZONE
+                    ),
                 )
             }
         }
@@ -378,10 +362,12 @@ fn dns_resolution_check() -> Check {
     }
 }
 
-fn ca_trust_check() -> Check {
+/// `is_trusted` is `web::trust::is_trusted`, injected so the verdicts are
+/// testable without touching the real trust store. Only called once `cert`
+/// is known to exist.
+fn ca_trust_check(cert: &Path, is_trusted: impl FnOnce(&Path) -> Option<bool>) -> Check {
     let name = "ca-trust";
     let title = "root CA trusted by the system";
-    let cert = web::ca::ca_cert_path(&crate::daemon::ca_dir());
     if !cert.exists() {
         return Check::fail(
             name,
@@ -390,8 +376,8 @@ fn ca_trust_check() -> Check {
             "start fghjd once as root (`sudo fghjd`) — it generates the CA on first run",
         );
     }
-    if !cfg!(target_os = "macos") {
-        return Check::warn(
+    match is_trusted(cert) {
+        None => Check::warn(
             name,
             title,
             format!(
@@ -400,22 +386,23 @@ fn ca_trust_check() -> Check {
             ),
             "add that file to your system trust store by hand so browsers accept \
              fghj's certificates",
-        );
-    }
-    if web::ca::is_trusted_on_macos(&cert) {
-        Check::pass(
+        ),
+        Some(true) => Check::pass(
             name,
             title,
-            format!("{} verifies against the System keychain", cert.display()),
-        )
-    } else {
-        Check::fail(
+            format!(
+                "{} verifies against {}",
+                cert.display(),
+                web::trust::store_name()
+            ),
+        ),
+        Some(false) => Check::fail(
             name,
             title,
             format!("{} is not trusted as a root", cert.display()),
-            "restart fghjd — it re-installs trust on start, which raises the macOS \
+            "restart fghjd — it re-installs trust on start, which may raise an OS \
              authorization prompt you'll need to approve",
-        )
+        ),
     }
 }
 
@@ -426,12 +413,15 @@ fn ca_trust_check() -> Check {
 /// machine.
 fn host_checks() -> Vec<Check> {
     vec![
-        loopback_alias_check(),
+        loopback_alias_check(raw_net::loopback_alias_present(PROXY_IP)),
         proxy_port_check(HTTPS_PORT, "proxy-https", "proxy listening on 443"),
         proxy_port_check(HTTP_PORT, "proxy-http", "proxy listening on 80"),
-        resolver_files_check(),
+        resolver_files_check(dns::os_routing_status()),
         dns_resolution_check(),
-        ca_trust_check(),
+        ca_trust_check(
+            &web::ca::ca_cert_path(&crate::daemon::ca_dir()),
+            web::trust::is_trusted,
+        ),
     ]
 }
 
@@ -524,21 +514,85 @@ mod tests {
     }
 
     #[test]
-    fn lo0_alias_is_found_by_exact_address_not_substring() {
-        let output = "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384\n\
-                      \tinet 127.0.0.1 netmask 0xff000000\n\
-                      \tinet 127.222.0.1 netmask 0xff000000\n";
-        assert!(lo0_has_alias(output, PROXY_IP));
-        assert!(lo0_has_alias(output, Ipv4Addr::new(127, 0, 0, 1)));
-        assert!(!lo0_has_alias(output, Ipv4Addr::new(127, 222, 0, 2)));
+    fn loopback_alias_verdict_follows_the_probe() {
+        let unsupported = loopback_alias_check(None);
+        assert_eq!(unsupported.verdict, Verdict::Pass);
+        assert!(unsupported.detail.contains("needs no alias"));
+
+        assert_eq!(loopback_alias_check(Some(Ok(true))).verdict, Verdict::Pass);
+
+        let missing = loopback_alias_check(Some(Ok(false)));
+        assert_eq!(missing.verdict, Verdict::Fail);
+        assert!(missing.hint.unwrap().contains("fghj daemon start"));
+
+        // Couldn't read the interface: that's "can't tell", not "broken",
+        // and the probe's own error is the detail.
+        let unreadable = loopback_alias_check(Some(Err(anyhow::anyhow!("`ifconfig lo0` failed"))));
+        assert_eq!(unreadable.verdict, Verdict::Warn);
+        assert!(unreadable.detail.contains("ifconfig lo0"));
     }
 
-    /// `127.222.0.1` is a prefix of `127.222.0.10`, so a naive `contains`
-    /// on the whole output would report an alias that isn't there.
+    fn routing(zones: &[(&str, u16)]) -> Option<dns::OsRouting> {
+        Some(dns::OsRouting {
+            location: "/etc/resolver",
+            zones: zones.iter().map(|(z, p)| (z.to_string(), *p)).collect(),
+        })
+    }
+
     #[test]
-    fn a_longer_address_sharing_our_prefix_is_not_a_match() {
-        let output = "\tinet 127.222.0.10 netmask 0xff000000\n";
-        assert!(!lo0_has_alias(output, PROXY_IP));
+    fn resolver_check_warns_where_os_routing_is_unsupported() {
+        let check = resolver_files_check(None);
+        assert_eq!(check.verdict, Verdict::Warn);
+        assert_eq!(check.name, "resolver-files");
+    }
+
+    #[test]
+    fn resolver_check_passes_with_both_fixed_zones_and_lists_every_zone() {
+        let check = resolver_files_check(routing(&[
+            (dns::ZONE, 5353),
+            (dns::ZONE_RAW, 5353),
+            ("myservice.local", 5353),
+        ]));
+        assert_eq!(check.verdict, Verdict::Pass);
+        assert_eq!(check.title, "/etc/resolver entries");
+        assert!(check.detail.contains("myservice.local -> 127.0.0.1:5353"));
+    }
+
+    /// A wildcard zone doesn't stand in for a fixed one: the raw zone alone
+    /// missing is a failure, and the message says which.
+    #[test]
+    fn resolver_check_fails_naming_each_missing_fixed_zone() {
+        let check = resolver_files_check(routing(&[(dns::ZONE, 5353), ("myservice.local", 5353)]));
+        assert_eq!(check.verdict, Verdict::Fail);
+        assert!(check.detail.contains(dns::ZONE_RAW));
+        assert!(check.hint.unwrap().contains("/etc/resolver"));
+
+        let none = resolver_files_check(routing(&[]));
+        assert_eq!(none.verdict, Verdict::Fail);
+        assert!(none.detail.contains(dns::ZONE) && none.detail.contains(dns::ZONE_RAW));
+    }
+
+    #[test]
+    fn ca_trust_check_fails_on_a_missing_cert_without_probing_trust() {
+        let tmp = tempfile::tempdir().unwrap();
+        let check = ca_trust_check(&tmp.path().join("ca.pem"), |_| {
+            panic!("trust must not be probed for a cert that doesn't exist")
+        });
+        assert_eq!(check.verdict, Verdict::Fail);
+        assert!(check.detail.contains("does not exist"));
+    }
+
+    #[test]
+    fn ca_trust_verdict_follows_the_trust_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cert = tmp.path().join("ca.pem");
+        std::fs::write(&cert, "not inspected").unwrap();
+
+        assert_eq!(ca_trust_check(&cert, |_| None).verdict, Verdict::Warn);
+        assert_eq!(ca_trust_check(&cert, |_| Some(true)).verdict, Verdict::Pass);
+        let untrusted = ca_trust_check(&cert, |_| Some(false));
+        assert_eq!(untrusted.verdict, Verdict::Fail);
+        assert!(untrusted.hint.unwrap().contains("restart fghjd"));
     }
 
     #[test]

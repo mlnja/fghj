@@ -11,7 +11,7 @@ anything else on the machine.
 
 ## A hand-rolled server, on purpose
 
-`src/dns.rs` implements the DNS wire format directly — `parse_query`/
+`src/dns/` implements the DNS wire format directly — `parse_query`/
 `build_response` — rather than pulling in a general-purpose DNS server
 crate. The zone is fixed (`ZONE = "fghj.internal"`), the answer is always
 the same (`127.222.0.1`, TTL 5s — short, so a container restart's new
@@ -96,7 +96,7 @@ Two of them are: `fghj.internal` and `fghj.raw.internal`
 whatever `wildcard_hosts` suffixes the currently-running containers declare,
 so they come and go — which is why `install_os_resolver_config` is called on
 every reconcile tick and not only at startup, and why
-`sync_macos_resolver` removes fghjd-authored files for zones that are no
+`macos::sync_resolver` removes fghjd-authored files for zones that are no
 longer live. It only ever touches files it recognizes as its own
 (`is_fghjd_resolver_content`, which parses the port back out of fghjd's own
 template); a hand-written `/etc/resolver` file for some unrelated domain is
@@ -117,6 +117,6 @@ Linux (`systemd-resolved`) and Windows (NRPT) integration are described in
 
 ## Status
 
-Implemented: `src/dns.rs` (wire-format parse/build, `bind`, `serve`,
+Implemented: `src/dns/` (wire-format parse/build, `bind`, `serve`,
 `in_zone`, macOS resolver-file install). macOS-only for OS integration;
 Linux/Windows print a manual-setup message instead of configuring anything.

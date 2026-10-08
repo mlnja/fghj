@@ -1,6 +1,6 @@
 # Two zones: `fghj.internal` and `fghj.raw.internal`
 
-> **Status:** implemented. Zones in `src/dns.rs` (`ZONE`, `ZONE_RAW`,
+> **Status:** implemented. Zones in `src/dns/` (`ZONE`, `ZONE_RAW`,
 > `ZoneSource`) and `src/runs/domain.rs` (`DomainZone`, `derive_domain`);
 > host-side answering in `src/daemon/routing.rs`; in-network answering in
 > `src/bin/fghj-sidecar.rs` (see [[in-network-sidecar]]); virtual IPs and NAT

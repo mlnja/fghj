@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::web::ca;
+use crate::web::trust;
 use crate::{dns, hosts_file, persistence, raw_net};
 
 /// What to leave behind. Both default to `false` (remove everything); the
@@ -97,7 +97,7 @@ pub fn purge(opts: Options, stop_daemon: impl FnOnce() -> Result<bool>) -> Outco
     // certificate is no longer trusted, but a trusted certificate whose key
     // we deleted is still a trusted root.
     if !opts.keep_ca {
-        outcome.certificates_removed = ca::remove_macos_trust();
+        outcome.certificates_removed = trust::remove();
     }
 
     if !opts.keep_state {

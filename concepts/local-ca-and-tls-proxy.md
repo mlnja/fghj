@@ -30,14 +30,14 @@ at `/var/lib/fghjd/ca/{ca-cert,ca-key}.pem` — **not** `/var/run`, because
 reboot would force the user to re-approve a brand-new one in Keychain Access
 on every restart, defeating the entire point of trusting it once.
 
-Installing that CA into the OS trust store (`ca::install_macos_trust`, via
+Installing that CA into the OS trust store (`trust::install`, via
 `security add-trusted-cert` against the System keychain) is kept as a
 **separate step** from generating it, so CA generation itself stays a pure,
 easily-testable filesystem operation with no side effects on the host's
 trust configuration.
 
-`install_macos_trust` is safe to call on **every** `fghjd` start — it first
-runs `security verify-cert` (`ca::is_trusted_on_macos`), a read-only trust
+`trust::install` is safe to call on **every** `fghjd` start — it first
+runs `security verify-cert` (`trust::is_trusted`), a read-only trust
 *evaluation* that never triggers a prompt, and only falls through to the
 actual trust-store write when the cert genuinely isn't trusted yet. This
 matters because modifying System keychain trust settings on macOS always
@@ -116,7 +116,7 @@ rotation ever gets.
 
 One trap, found the hard way by following an earlier version of these
 instructions: the restart has to happen somewhere that can prompt.
-`install_macos_trust` needs Authorization Services, which a launchd *system*
+`trust::install` needs Authorization Services, which a launchd *system*
 daemon has no session for, so a `brew services restart` after deleting the
 old root fails with "the authorization was denied since no user interaction
 was possible", exits, and is restarted by `KeepAlive` into the same failure
@@ -124,7 +124,7 @@ forever — while `fghj doctor` reports only "fghjd isn't running", pointing
 nowhere near the cause. `sudo fghjd` once in a terminal is enough; the
 check-first design makes every later start a no-op. The bail message now
 carries the one-line `security add-trusted-cert` invocation for whoever hits
-it anyway, and `install_macos_trust` was moved to *after* the `sidecar-ca`
+it anyway, and `trust::install` was moved to *after* the `sidecar-ca`
 scrub in `run_control_api` for the same reason: trust install is the one CA
 step that can fail for reasons outside fghj's control, and it was preventing
 a machine that could not prompt from ever reaching the cleanup that removes
@@ -334,7 +334,7 @@ prompts for a password already puts it — or to concatenate it into a bundle
 of one's own.
 
 `merge_bundle` does skip fghj's own CA when the host store already lists it
-— once `install_macos_trust` has run, `load_native_certs` returns it as a
+— once `trust::install` has run, `load_native_certs` returns it as a
 trusted root like any other, and it was landing in `bundle.pem` twice
 (measured: 2 subject lines out of 163). Harmless to a verifier, but the file
 was lying about how many roots it carried, which is the kind of discrepancy

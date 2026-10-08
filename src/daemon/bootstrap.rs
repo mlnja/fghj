@@ -11,7 +11,7 @@ use crate::daemon::reconcile::{spawn_reconciler, spawn_sync_reconciler};
 use crate::daemon::registry::WorkspaceRegistry;
 use crate::daemon::{ca_dir, certs_dir, socket_path};
 use crate::web::api::build_router;
-use crate::web::ca;
+use crate::web::{ca, trust};
 use crate::{daemon_log, dns, persistence, supervisor};
 
 /// Connects to the Docker Engine API, preferring the plain `DOCKER_HOST`/
@@ -169,7 +169,7 @@ pub async fn run_control_api() -> Result<()> {
     // private key or writes files containers depend on. Running it first, as
     // this used to, meant a machine that could not prompt never reached the
     // `sidecar-ca` scrub above and kept the old root key on disk.
-    tokio::task::spawn_blocking(move || ca::install_macos_trust(&cert_path))
+    tokio::task::spawn_blocking(move || trust::install(&cert_path))
         .await
         .context("CA trust install task panicked")??;
 

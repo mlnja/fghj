@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::path::Path;
 use std::sync::Arc;
 
 use axum::Json;
@@ -79,15 +78,17 @@ pub(crate) async fn get_daemon_logs(Query(q): Query<DaemonLogsQuery>) -> Respons
 }
 
 /// Snapshot of the three native-OS integration mechanisms
-/// `effects::spawn_all`'s fanned-in effects maintain — `/etc/hosts`, macOS's
-/// `/etc/resolver`, and the raw-zone virtual-IP NAT routes — read directly
-/// from their actual on-disk/live state (not from what was last *computed*
-/// as desired), so drift between "what fghjd wanted" and "what's actually
-/// installed" would show up here. Backs the telemetry drawer's "DNS / DNAT"
-/// tab.
+/// `effects::spawn_all`'s fanned-in effects maintain — `/etc/hosts`, the
+/// OS's per-zone DNS routing (`dns::os_routing_status`), and the raw-zone
+/// virtual-IP NAT routes — read directly from their actual on-disk/live
+/// state (not from what was last *computed* as desired), so drift between
+/// "what fghjd wanted" and "what's actually installed" would show up here.
+/// Backs the telemetry drawer's "DNS / DNAT" tab.
 pub(crate) async fn get_daemon_net_status(State(daemon): State<Arc<DaemonControl>>) -> Response {
     let hosts = hosts_file::managed_hosts(&hosts_file::hosts_path());
-    let resolver_zones: Vec<_> = dns::managed_resolver_zones(Path::new("/etc/resolver"))
+    let resolver_zones: Vec<_> = dns::os_routing_status()
+        .map(|r| r.zones)
+        .unwrap_or_default()
         .into_iter()
         .map(|(zone, port)| serde_json::json!({ "zone": zone, "port": port }))
         .collect();

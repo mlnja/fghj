@@ -114,7 +114,7 @@ be compared.
 | `src/resolver/name.rs`, `src/resolver/version.rs`, `src/resolver/validate.rs` | [[config-language]] |
 | `src/resolver/warning.rs`, `src/resolver/workspace_scan.rs` | [[failure-semantics]] |
 | `src/web/ca.rs`, `src/web/proxy.rs` | [[local-ca-and-tls-proxy]] |
-| `src/dns.rs` | [[split-dns]], [[two-zones-and-raw-ports]] |
+| `src/dns/` | [[split-dns]], [[two-zones-and-raw-ports]] |
 | `src/raw_net/` | [[two-zones-and-raw-ports]] |
 | `src/sidecar_image.rs`, `src/bin/fghj-sidecar.rs` | [[in-network-sidecar]], [[release-and-delivery]] |
 | `src/actor.rs`, `src/action.rs`, `src/reducer/`, `src/state/`, `src/effects/` | [[state-and-effects]] |

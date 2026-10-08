@@ -10,9 +10,9 @@
 //!   turns `https://<node>.fghj.internal` into a request against the right
 //!   container's published port.
 //! - [`ca`] — the local certificate authority the proxy mints leaf certs
-//!   from, and its installation into the system/container trust stores.
-//!   Exists solely so those `https://` URLs are trusted rather than
-//!   click-through-warning.
+//!   from, and the PEM bundles containers mount to trust it. Exists solely
+//!   so those `https://` URLs are trusted rather than click-through-warning.
+//! - [`trust`] — installing that CA into the OS trust store, per platform.
 //!
 //! The web-only helpers live here too, rather than in `util`, because each
 //! one only makes sense in terms of HTTP: [`mime`] (content type by
@@ -31,4 +31,5 @@ pub mod ca;
 pub mod mime;
 pub mod proxy;
 pub mod query;
+pub mod trust;
 pub mod ui;

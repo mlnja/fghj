@@ -39,7 +39,7 @@ an implementation detail the end user never needs to know.
 hand — no `reqwest`/`ureq` dependency — because the one thing it needs to do
 (one POST, tiny JSON body, localhost, synchronous) doesn't justify pulling
 in a full HTTP client crate. This mirrors the same "hand-roll it, the actual
-surface is tiny" judgment call behind `src/dns.rs` (see [[split-dns]]).
+surface is tiny" judgment call behind `src/dns/` (see [[split-dns]]).
 
 ## The axum control API
 
@@ -144,7 +144,7 @@ thing by construction.
 `GET /daemon/net-status` is the other half, and its design rule is worth
 stating explicitly: it reads the three native-OS integration points back
 from their *actual* live state — `/etc/hosts`, the `/etc/resolver` files
-(via `dns::managed_resolver_zones`, which parses fghjd's own template to
+(via `dns::os_routing_status`, which parses fghjd's own template to
 recognize what it wrote), and `raw_net::current_routes` — rather than
 reporting what fghjd last computed as desired. Reporting the desired state
 would make the endpoint agree with fghjd by construction and therefore be

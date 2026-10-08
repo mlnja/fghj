@@ -351,8 +351,9 @@ fn confirmed(answer: &str) -> bool {
 fn uninstall(yes: bool, keep_ca: bool, keep_state: bool) -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         bail!(
-            "fghj uninstall needs root — it removes a certificate from the System keychain, \
+            "fghj uninstall needs root — it removes a certificate from {}, \
              {}, and fghjd's system configuration.\n\nRun: sudo fghj uninstall",
+            fghj::web::trust::store_name(),
             fghj::persistence::fghjd_root().display()
         );
     }
@@ -365,7 +366,7 @@ fn uninstall(yes: bool, keep_ca: bool, keep_state: bool) -> Result<()> {
             println!(
                 "  - the \"{}\" root certificate from {}",
                 fghj::web::ca::COMMON_NAME,
-                fghj::web::ca::SYSTEM_KEYCHAIN
+                fghj::web::trust::store_name()
             );
         }
         if !keep_state {
@@ -415,8 +416,9 @@ fn uninstall(yes: bool, keep_ca: bool, keep_state: bool) -> Result<()> {
             fghj::web::ca::COMMON_NAME
         ),
         n => println!(
-            "removed {n} \"{}\" certificate(s) from the System keychain",
-            fghj::web::ca::COMMON_NAME
+            "removed {n} \"{}\" certificate(s) from {}",
+            fghj::web::ca::COMMON_NAME,
+            fghj::web::trust::store_name()
         ),
     }
     match &outcome.state_dir_removed {

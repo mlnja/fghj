@@ -277,6 +277,32 @@ pub(super) fn remove_lo0_alias(ip: Ipv4Addr) -> Result<()> {
     run(Command::new("ifconfig").args(["lo0", "-alias", &ip.to_string()]))
 }
 
+/// Reads `ifconfig lo0` live and reports whether `ip` is on it.
+pub(super) fn has_lo0_alias(ip: Ipv4Addr) -> Result<bool> {
+    let output = Command::new("ifconfig")
+        .arg("lo0")
+        .output()
+        .context("could not run `ifconfig lo0`")?;
+    if !output.status.success() {
+        bail!(
+            "`ifconfig lo0` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(lo0_has_alias(&String::from_utf8_lossy(&output.stdout), ip))
+}
+
+/// Whether `ifconfig lo0` output carries `ip` as an `inet` address.
+/// Separated from the `ifconfig` call so the parse is testable without a
+/// loopback interface to point it at.
+fn lo0_has_alias(ifconfig_output: &str, ip: Ipv4Addr) -> bool {
+    let needle = ip.to_string();
+    ifconfig_output.lines().any(|line| {
+        let mut words = line.split_whitespace();
+        words.next() == Some("inet") && words.next() == Some(needle.as_str())
+    })
+}
+
 /// Removes a previously-spliced managed block (if any) from `pf.conf`
 /// content — used both to clear the way for a fresh splice and, on its own,
 /// to produce the "restore pf.conf to its unmodified state" content.
@@ -429,6 +455,25 @@ fn run(cmd: &mut Command) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web::proxy::PROXY_IP;
+
+    #[test]
+    fn lo0_alias_is_found_by_exact_address_not_substring() {
+        let output = "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384\n\
+                      \tinet 127.0.0.1 netmask 0xff000000\n\
+                      \tinet 127.222.0.1 netmask 0xff000000\n";
+        assert!(lo0_has_alias(output, PROXY_IP));
+        assert!(lo0_has_alias(output, Ipv4Addr::new(127, 0, 0, 1)));
+        assert!(!lo0_has_alias(output, Ipv4Addr::new(127, 222, 0, 2)));
+    }
+
+    /// `127.222.0.1` is a prefix of `127.222.0.10`, so a naive `contains`
+    /// on the whole output would report an alias that isn't there.
+    #[test]
+    fn a_longer_address_sharing_our_prefix_is_not_a_match() {
+        let output = "\tinet 127.222.0.10 netmask 0xff000000\n";
+        assert!(!lo0_has_alias(output, PROXY_IP));
+    }
 
     #[test]
     fn diff_ips_computes_additions_and_removals() {

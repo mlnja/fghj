@@ -118,7 +118,7 @@ pub trait RawNetBackend: Send + Sync {
 /// Backend selection: macOS gets the real `pf`/`ifconfig` implementation,
 /// everything else gets a `NoopBackend` that logs once and does nothing —
 /// the same runtime-`cfg!` pattern `dns::install_os_resolver_config` and
-/// `web::ca::install_macos_trust` already use, so the crate keeps compiling
+/// `web::trust::install` already use, so the crate keeps compiling
 /// unconditionally on every platform.
 fn backend() -> &'static dyn RawNetBackend {
     static BACKEND: OnceLock<Box<dyn RawNetBackend>> = OnceLock::new();
@@ -354,6 +354,18 @@ pub fn remove_loopback_alias(ip: Ipv4Addr) -> Result<()> {
     }
 }
 
+/// Whether `ip` is currently assigned to loopback, read live rather than
+/// from what was last applied — backs `doctor`'s alias check. `None` on a
+/// platform where [`add_loopback_alias`] has nothing to do; `Err` when the
+/// interface couldn't be read at all.
+pub fn loopback_alias_present(ip: Ipv4Addr) -> Option<Result<bool>> {
+    if cfg!(target_os = "macos") {
+        Some(macos::has_lo0_alias(ip))
+    } else {
+        None
+    }
+}
+
 /// The route set currently installed — backs the telemetry drawer's
 /// network-status tab (`daemon/`'s `/daemon/net-status`).
 pub fn current_routes() -> Vec<RouteSpec> {
@@ -363,6 +375,20 @@ pub fn current_routes() -> Vec<RouteSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Read-only: probes the real loopback interface without changing it.
+    /// `192.0.2.1` is TEST-NET-1, which nothing assigns to loopback.
+    #[test]
+    fn loopback_alias_present_reads_the_live_interface_or_is_none() {
+        let localhost = loopback_alias_present(Ipv4Addr::LOCALHOST);
+        let test_net = loopback_alias_present(Ipv4Addr::new(192, 0, 2, 1));
+        if cfg!(target_os = "macos") {
+            assert!(localhost.unwrap().unwrap());
+            assert!(!test_net.unwrap().unwrap());
+        } else {
+            assert!(localhost.is_none() && test_net.is_none());
+        }
+    }
 
     #[test]
     fn virtual_ip_for_is_deterministic() {

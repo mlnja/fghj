@@ -45,7 +45,7 @@ in `persistence::DaemonState`. The resolver file is the only record of it.
 
 Which means a resolver file written by a *previous* fghjd process is a
 perfectly well-formed file pointing at a port nobody is listening on. It
-passes any inspection of its contents. `managed_resolver_zones` returns it
+passes any inspection of its contents. `dns::os_routing_status` returns it
 happily. And every `*.fghj.internal` name on the machine silently fails to
 resolve.
 
@@ -93,7 +93,7 @@ Keeping the diagnosis and the repair as separate commands means a recurring
 failure stays legible as a recurring failure.
 
 The one borderline case is `ca_trust_check`, which calls
-`ca::is_trusted_on_macos` — a `security verify-cert`, which is a trust
+`trust::is_trusted` — a `security verify-cert`, which is a trust
 *evaluation* and never raises the Authorization Services prompt that
 `add-trusted-cert` does. Read-only in the sense that matters: it cannot
 change the keychain and cannot block on a human.
@@ -142,7 +142,7 @@ changes on its own: an alias does not come back, trust does not reinstate
 itself. The useful interaction is read it, go fix it, press re-run — which is
 a button, not a timer.
 
-`is_trusted_on_macos` was switched from `status()` to `output()` as part of
+`trust::is_trusted` was switched from `status()` to `output()` as part of
 this, purely to swallow the "certificate verification successful" line
 `security` prints on every call. At startup that was one stray line; on
 demand from a UI it would have scattered through `fghjd`'s log.
