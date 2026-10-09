@@ -205,7 +205,7 @@ So pick one, per node:
   starting a second one.
 - **You run environments in parallel** → `scope: run` (the default), and
   accept that each one starts with an empty database. This is what a
-  [`kind: task`](/concepts/terminating-nodes/) migration is for: every fresh
+  [task](/concepts/terminating-nodes/) migration is for: every fresh
   run gets its schema built automatically.
 
 Nothing enforces this. Two concurrent runs both mounting one stable-scoped

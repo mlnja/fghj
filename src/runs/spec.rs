@@ -75,6 +75,11 @@ pub(crate) fn spec_hash(node: &Node, spec: &NodeSpec) -> String {
         /// could commit, pull or rebase on the same branch and the container
         /// stayed lit as `Synced` while serving a stale image — a branch
         /// *switch* was caught only incidentally, because the tag changed.
+        ///
+        /// For a git build context it is the clone's state, not the
+        /// declaring repo's: the code is built from the clone, and a commit
+        /// in the declaring repo that changes the definition shows up in the
+        /// rest of the hash anyway.
         source: Option<SourceState<'a>>,
     }
 
@@ -115,9 +120,9 @@ pub(crate) fn spec_hash(node: &Node, spec: &NodeSpec) -> String {
         healthcheck: node.healthcheck.as_ref(),
         platform: node.platform.as_deref(),
         build: node.build.as_ref(),
-        source: node.build.as_ref().map(|_| SourceState {
-            head: node.head.as_deref(),
-            dirty: node.dirty,
+        source: node.build_checkout().map(|c| SourceState {
+            head: c.head,
+            dirty: c.dirty,
         }),
     };
     let bytes = serde_json::to_vec(&desired).expect("DesiredSpec always serializes");
@@ -148,6 +153,8 @@ mod tests {
         NodeBuild {
             context: ".".to_string(),
             dockerfile: "Dockerfile".to_string(),
+            dockerfile_inline: None,
+            source: None,
             args: BTreeMap::new(),
             target: None,
             ssh: false,
@@ -210,6 +217,37 @@ mod tests {
         let before = spec_hash(&node, &empty_spec());
 
         node.dirty = true;
+        assert_ne!(before, spec_hash(&node, &empty_spec()));
+    }
+
+    fn sourced(head: &str) -> NodeBuild {
+        NodeBuild {
+            source: Some(crate::resolver::BuildSource {
+                url: "https://example.com/geocoder.git".to_string(),
+                reference: Some("v1".to_string()),
+                path: ".fghj/sources/geocoder@v1".to_string(),
+                downloaded: true,
+                head: Some(head.to_string()),
+                dirty: false,
+            }),
+            ..build()
+        }
+    }
+
+    /// A git build context is built from its clone, so the clone's HEAD is
+    /// what drifts it — and a commit in the repo that merely declares it
+    /// doesn't.
+    #[test]
+    fn a_git_build_context_drifts_with_its_clone_not_the_declaring_repo() {
+        let mut node = test_node("geocoder.api", "geocoder", "service");
+        node.build = Some(sourced(&"a".repeat(40)));
+        node.head = Some("1".repeat(40));
+        let before = spec_hash(&node, &empty_spec());
+
+        node.head = Some("2".repeat(40));
+        assert_eq!(before, spec_hash(&node, &empty_spec()));
+
+        node.build = Some(sourced(&"b".repeat(40)));
         assert_ne!(before, spec_hash(&node, &empty_spec()));
     }
 

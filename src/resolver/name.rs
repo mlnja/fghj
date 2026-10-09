@@ -223,7 +223,7 @@ mod tests {
         // Guards against the filter silently matching nothing and the
         // assertion above never running.
         assert!(
-            found >= 7,
+            found >= 6,
             "expected the schemas to constrain names, found {found}"
         );
     }

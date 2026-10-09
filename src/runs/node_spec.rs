@@ -1,7 +1,6 @@
 //! Derives the launch spec for a single node, including image resolution,
 //! volume binds and environment assembly.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -64,7 +63,36 @@ impl RunRegistry {
         tag: &str,
         platform: Option<&str>,
     ) -> Result<()> {
-        let build_dir = repo_root.join(&build.context);
+        // A git build context builds from its clone in `.fghj/sources/`,
+        // which pull makes and start never does — see
+        // `concepts/git-build-sources.md`.
+        let build_dir = match &build.source {
+            Some(source) if !source.downloaded => {
+                let e = anyhow::anyhow!(
+                    "source not pulled: {} is built from {}, which isn't cloned into {} yet; \
+                     pull this node, its flow or the whole workspace first",
+                    node_id,
+                    source.url,
+                    source.path
+                );
+                self.record_event(
+                    run_id,
+                    node_id,
+                    "start",
+                    "building image",
+                    "error",
+                    Some(format!("{e:#}")),
+                )
+                .await;
+                return Err(e);
+            }
+            Some(source) => self.workspace.join(&source.path).join(&build.context),
+            None => repo_root.join(&build.context),
+        };
+        let dockerfile = match &build.dockerfile_inline {
+            Some(_) => docker::INLINE_DOCKERFILE,
+            None => build.dockerfile.as_str(),
+        };
         let owner = self.db.clone().load_owner().await.ok().flatten();
         // Where `docker build` would have built this, so fghj builds there
         // too. Read from the *owner's* home, never the process's: `fghjd` is
@@ -80,7 +108,12 @@ impl RunRegistry {
         // that didn't, and the tag alone can't tell them apart — the tag is
         // derived from the node id, so it is the same either way.
         let mut what = format!("{tag}  ·  {}", build_dir.display());
-        if build.dockerfile != "Dockerfile" {
+        if let Some(source) = &build.source {
+            what.push_str(&format!("  ·  from {}", source.url));
+        }
+        if build.dockerfile_inline.is_some() {
+            what.push_str("  ·  inline Dockerfile");
+        } else if build.dockerfile != "Dockerfile" {
             what.push_str(&format!("  ·  -f {}", build.dockerfile));
         }
         if let Some(target) = build.target.as_deref() {
@@ -153,7 +186,9 @@ impl RunRegistry {
         };
         let opts = docker::BuildOpts {
             context_dir: &build_dir,
-            dockerfile: &build.dockerfile,
+            dockerfile,
+            dockerfile_inline: build.dockerfile_inline.as_deref(),
+            skip_git_dir: build.source.is_some(),
             tag,
             platform,
             args: &build.args,
@@ -262,129 +297,47 @@ impl RunRegistry {
         );
 
         // Where a node's relative bind-mount `host` / `env_file` paths
-        // resolve against — the repo's checkout root, not `build.context`
-        // (Compose resolves both relative to the compose file's directory;
-        // this is the fghj equivalent). For a service, its own checkout
-        // root; for a backing dependency, which has no checkout of its own,
-        // the *owning* service's checkout root (set below, via the graph's
-        // "owns" edge).
-        let mut volume_base: Option<PathBuf> = None;
+        // resolve against — the checkout root of the repo that declares the
+        // node, not `build.context` (Compose resolves both relative to the
+        // compose file's directory; this is the fghj equivalent). Every
+        // node, backing services and tasks included, belongs to a repo.
+        let repo_root = node.local_path.as_ref().map(|p| self.workspace.join(p));
+        let volume_base = repo_root.clone();
 
-        let image = match node.kind.as_str() {
-            "backing" => {
-                // A backing dependency has no checkout of its own to resolve
-                // a relative `env_file` (or bind-mount `host`) path against —
-                // same rule Compose uses, resolving `env_file` against the
-                // compose file's own directory regardless of `build` vs
-                // `image`. Its equivalent of "the compose file's directory"
-                // is the *owning* service's checkout root: the service whose
-                // .fghj.yaml declares this dependency inline, found via the
-                // graph's "owns" edge (`resolver::visit_dependency` always
-                // pushes owner -> backing).
-                let owner_local_path = graph
-                    .edges
-                    .iter()
-                    .find(|e| e.kind == "owns" && e.to == node.id)
-                    .and_then(|e| graph.nodes.iter().find(|n| n.id == e.from))
-                    .and_then(|n| n.local_path.as_ref());
-                if let Some(owner_local_path) = owner_local_path {
-                    volume_base = Some(self.workspace.join(owner_local_path));
-                }
-                match node.image.clone() {
-                    Some(img) => img,
-                    None => bail!("backing node {} has no image", node.id),
-                }
-            }
-            "task" => {
-                // Same "no checkout of its own" situation as a backing
-                // dependency, and resolved the same way: through the graph's
-                // `owns` edge back to the service that declared it inline.
-                let owner = graph
-                    .edges
-                    .iter()
-                    .find(|e| e.kind == "owns" && e.to == node.id)
-                    .and_then(|e| graph.nodes.iter().find(|n| n.id == e.from));
-                if let Some(local_path) = owner.and_then(|o| o.local_path.as_ref()) {
-                    volume_base = Some(self.workspace.join(local_path));
-                }
-                match node.image.clone() {
-                    Some(img) => img,
-                    None => {
-                        // The common case: a migration is the owning
-                        // service's own code run with a different command,
-                        // so it runs the owning service's image — built
-                        // under the *owner's* tag rather than one of its
-                        // own. The two builds are identical by construction
-                        // (the task inherited `build` wholesale from the
-                        // owner — see `resolver::visit_task_dependency`), and
-                        // a task starts *before* its owner, so a separate
-                        // tag would mean building the same image twice per
-                        // run under two names.
-                        let Some(owner) = owner else {
-                            bail!(
-                                "task node {} has no owning service to inherit an image from",
-                                node.id
-                            );
-                        };
-                        let (Some(build), Some(local_path)) =
-                            (node.build.clone(), owner.local_path.clone())
-                        else {
-                            bail!(
-                                "task node {} declares no image and {} has no build to inherit",
-                                node.id,
-                                owner.id
-                            );
-                        };
-                        let branch = owner.branch.clone().unwrap_or_else(|| "local".to_string());
-                        let tag = format!(
-                            "fghj/{}:{}",
-                            sanitize_label(&owner.id),
-                            sanitize_label(&branch)
-                        );
-                        let repo_root = self.workspace.join(&local_path);
-                        if side_effects {
-                            self.build_node_image(
-                                run_id,
-                                &node.id,
-                                &repo_root,
-                                &build,
-                                &tag,
-                                node.platform.as_deref(),
-                            )
-                            .await?;
-                        }
-                        tag
-                    }
-                }
-            }
-            _ => {
-                let build = node.build.clone().unwrap_or(crate::resolver::NodeBuild {
-                    context: ".".to_string(),
-                    dockerfile: "Dockerfile".to_string(),
-                    args: BTreeMap::new(),
-                    target: None,
-                    ssh: false,
-                    secrets: Vec::new(),
-                });
-
-                let local_path = match node.local_path.clone() {
-                    Some(p) => p,
-                    None => bail!("service node {} has no local_path", node.id),
+        // `build` means fghj builds it, from this node's own repo, under a
+        // tag of its own; otherwise it runs the published `image`. The
+        // resolver refuses a node with both or neither. A task that is the
+        // repo's own code run with another command declares the same
+        // `build` and gets its own tag — Docker's layer cache makes the
+        // second build of identical inputs a no-op.
+        let image = match (&node.build, &node.image) {
+            (Some(build), _) => {
+                let Some(repo_root) = &repo_root else {
+                    bail!(
+                        "node {} has a build but no local_path to build from",
+                        node.id
+                    );
                 };
-                let branch = node.branch.clone().unwrap_or_else(|| "local".to_string());
+                // Named after what the code is: the source's ref for a git
+                // build context, otherwise the repo's branch.
+                let branch = match &build.source {
+                    Some(source) => source
+                        .reference
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string()),
+                    None => node.branch.clone().unwrap_or_else(|| "local".to_string()),
+                };
                 let tag = format!(
                     "fghj/{}:{}",
                     sanitize_label(&node.id),
                     sanitize_label(&branch)
                 );
-                let repo_root = self.workspace.join(&local_path);
-                volume_base = Some(repo_root.clone());
                 if side_effects {
                     self.build_node_image(
                         run_id,
                         &node.id,
-                        &repo_root,
-                        &build,
+                        repo_root,
+                        build,
                         &tag,
                         node.platform.as_deref(),
                     )
@@ -392,6 +345,8 @@ impl RunRegistry {
                 }
                 tag
             }
+            (None, Some(image)) => image.clone(),
+            (None, None) => bail!("node {} has neither a build nor an image", node.id),
         };
 
         // Named ports (`#Port.name`) get their own domain, nested under this

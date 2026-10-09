@@ -4,12 +4,22 @@ use std::collections::BTreeMap;
 
 use crate::resolver::{Edge, Graph, Node};
 
+/// A `required: false` "depends-on" edge: needed at runtime, not to start.
+pub fn runtime_edge(from: &str, to: &str) -> Edge {
+    Edge {
+        required: false,
+        ..edge(from, to, "depends-on")
+    }
+}
+
 pub fn edge(from: &str, to: &str, kind: &str) -> Edge {
     Edge {
         from: from.to_string(),
         to: to.to_string(),
         kind: kind.to_string(),
-        branch: None,
+        required: kind == "depends-on",
+        condition: None,
+        via_flow: None,
         flows: Vec::new(),
     }
 }
@@ -23,12 +33,15 @@ pub fn test_node(id: &str, label: &str, kind: &str) -> Node {
         branch: None,
         repo: None,
         domain_scope: "run".to_string(),
-        local_path: None,
+        // Ids are `{name}.{local_path}`, so the repo is everything after
+        // the first dot.
+        local_path: id.split_once('.').map(|(_, repo)| repo.to_string()),
         domain: String::new(),
         downloaded: true,
         dirty: false,
         head: None,
         flows: Vec::new(),
+        includes: BTreeMap::new(),
         build: None,
         ports: BTreeMap::new(),
         environment: Vec::new(),
@@ -59,6 +72,7 @@ pub fn test_graph(nodes: Vec<Node>, edges: Vec<Edge>) -> Graph {
         workspace_name: "shop".to_string(),
         nodes,
         edges,
+        flows: Vec::new(),
         warnings: Vec::new(),
     }
 }

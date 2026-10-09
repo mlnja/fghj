@@ -171,8 +171,8 @@ by fghj.
 
 ## Repositories fghj cloned
 
-Worth knowing, because it surprises people: when a `.fghj.yaml` declares a
-`kind: service` dependency on another repo, fghj clones it **into your
+Worth knowing, because it surprises people: when a `.fghj.yaml` declares an
+`include:` of another repo, fghj clones it **into your
 workspace directory**, alongside your own repos — not into a hidden cache.
 
 ```

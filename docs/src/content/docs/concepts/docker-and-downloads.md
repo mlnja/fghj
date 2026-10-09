@@ -174,7 +174,7 @@ The qualification makes accidental sharing impossible; deliberate sharing
 is then spelled out with `shared: true` on **both** declarations, which
 drops the qualification so the label alone decides identity. Reach for it
 rarely: the usual reason to want it — several services behind one database
-— is already `kind: shared-backing`, which gives you one *node*, and
+— is already one `services:` entry that they all `depends_on`, which gives you one *node*, and
 therefore one container and one volume, with no name coincidence carrying
 any weight.
 

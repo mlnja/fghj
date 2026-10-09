@@ -94,6 +94,12 @@ impl RunRegistry {
                 sidecar_ip,
                 budget: &RunBudget::single_node(),
                 debug_wait,
+                // Whether anything could be waiting on it: the caller
+                // restarts its dependents after this returns.
+                wait_ready: graph
+                    .edges
+                    .iter()
+                    .any(|e| e.needed_to_start() && e.to == node.id),
             },
         )
         .await

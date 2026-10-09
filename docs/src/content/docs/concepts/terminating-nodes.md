@@ -1,17 +1,17 @@
 ---
 title: Terminating nodes
-description: Why seeds and migrations are a third node kind that runs to completion, not a service with a clever restart policy.
+description: Why seeds and migrations run to completion as tasks, what makes a service one, and why it isn't a clever restart policy.
 ---
 
 ## The hole this fills
 
-Every other node kind denotes a **long-running process**. A `service` and a
-`backing` dependency both mean "start it and keep it up", and the only
+Every other node denotes a **long-running process**. Your own service and
+a stock database image both mean "start it and keep it up", and the only
 ordering primitive across them is a healthcheck — a predicate gated on a
 container reporting Docker-`healthy`, which a container that has exited can
 never do.
 
-So before `kind: task` existed, a database seed could not be a graph node at
+So before tasks existed, a database seed could not be a graph node at
 all. It couldn't be ordered against the database it seeds, it couldn't gate
 the service that needs it, it wasn't recorded, and it didn't re-run. The only
 mechanism available was `fghj exec`: a full-duplex interactive relay that
@@ -19,7 +19,7 @@ needs an already-running container *and a live human at a keyboard*. In
 practice you typed the seed command by hand after the environment came up,
 every time, and nothing in the system knew it had happened.
 
-## Why a kind, not a field
+## Why fghj has to know
 
 The decisive argument is one observation: **`observed.status == "exited"`
 means opposite things for the two.** For a service it's drift — the thing
@@ -30,7 +30,7 @@ reconciler, the UI's status badge, `ensure_running`'s "is this still alive?"
 check, and every state projection all read container state and nothing else.
 A field on the *config* wouldn't reach any of them; only a distinction the
 runtime state itself carries can. That's `ContainerDesired::terminating`, and
-`kind: task` is the one place it's ever decided.
+the resolver marking a node as a task is the one place it's ever decided.
 
 The same observation rules out expressing a task as a service with a clever
 `restart` policy or `healthcheck`. A task has neither field, because a
@@ -39,69 +39,73 @@ forever, and a container that has exited can never report healthy.
 
 ## The language
 
-A task is a third dependency variant, declared **inline by the service that
-needs it** — the same shape as a backing dependency, and for the same reason:
-a migration belongs to the service whose schema it migrates, not to the
-workspace. There is no top-level `tasks:` map.
+A task is an ordinary entry in `services:`. What makes it a task is either
+the thing Docker Compose uses to say "this is meant to exit" (something
+requires it with `condition: service_completed_successfully`) or declaring
+`run:`.
 
 ```yaml
 services:
   api:
-    build:
-      context: .
-    dependencies:
-      - kind: backing
-        name: db
-        image: postgres:16
-        healthcheck:
-          test: ["CMD", "pg_isready"]
-      - kind: task
-        name: migrate
-        # `image:` omitted => runs api's own built image
-        command: ["./bin/migrate"]
-        after: ["db"]
+    build: .
+    depends_on:
+      db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+  migrate:
+    build: .                     # the same code as api
+    command: ["./bin/migrate"]
+    depends_on:
+      db: {condition: service_healthy}
+  db:
+    image: postgres:16
+    healthcheck:
+      test: ["CMD", "pg_isready"]
 ```
 
+There's no `kind:` to write, and no way for two readings to disagree: a
+waiter's condition, or the task's own `run:`, is the statement that it's
+meant to exit.
+
+- **Waiting on a task any other way is a blocking warning.** A second
+  service writing `depends_on: [migrate]` would be expecting it to stay up.
+  fghj refuses that start rather than pick one reading.
 - **`command` is required and non-empty.** A task *is* its command. One
   without would run the image's default `CMD` — typically the service's own
   long-running entrypoint — and never exit, hanging the run until the task
-  budget expired. The schema rejects it, and so does the resolver, which is
-  the enforcing boundary.
-- **`image` is optional.** Omitted, the task inherits the owning service's
-  `build` and runs the service's own image — the common case, since a
-  migration is usually this service's code with a different command. A task
-  with neither an `image` nor an inheritable `build` is a blocking warning.
-  The image is built under the **owner's** tag, not one of its own: the two
-  builds are identical by construction, and a task starts *before* its
-  owner, so a separate tag would build the same image twice per run under two
-  names.
-- **`after` orders a task against its owner's other dependencies.** Entries
-  name sibling dependencies of the same service, resolved in a post-pass once
-  every node exists, because which spelling of an id is right depends on what
-  kind the sibling turns out to be. An `after` naming no sibling is a
-  blocking warning rather than a dangling edge.
-- **A task has no ports, no domain, no healthcheck, and no restart policy.**
-  It's never routed to and never published.
+  budget expired.
+- **Your own code is `build: .`**, like the service it migrates. It's built
+  under its own node's tag; the second build is a cache hit, since both
+  build the same context.
+- **A task has no healthcheck and no restart policy.** Declaring either is a
+  blocking warning.
+- **A task nothing waits on declares `run:`.** A seed only one journey needs
+  has `run: on_start`, its own `depends_on` (on the database it seeds), and is
+  listed in that journey's flow. It starts once what it needs is up, and its
+  clean exit reads as success.
 
-## Ordering: what makes `after` mean anything
+Waiting on another repo with `service_completed_successfully` is refused: a
+flow is waited on until it's up, and never completes. A task is always its
+own repo's business.
 
-Resolution emits an `owns` edge owner → task, and one `after` edge task →
-sibling per `after` entry. For every edge kind, `to` is the dependency and
-`from` the dependent, so those two edges say: **the task starts after its
-`after` targets and before its owner.** The example above orders as
-`db → migrate → api`.
+## Ordering
+
+`depends_on` edges are the only ordering, as for every other node: for every
+edge, `to` is the dependency and `from` the dependent. The example above
+orders as `db → migrate → api`.
 
 Ordering alone would be decoration, though. What makes it load-bearing is
 that a task is not considered *started* until it has **finished**: fghj waits
 for the container to exit, and a task that exits non-zero — or never exits —
-fails the node. Both `start` and `ensure_running` stop their start loop on a
-node error, so a failed migration blocks everything downstream of it instead
-of letting the service come up against an unmigrated database.
+fails the node. A failed node blocks everything that requires it,
+transitively, so a failed migration keeps the service from coming up against
+an unmigrated database. The rest of the run keeps starting, and the run then
+reports what failed and what it blocked. See
+[Dependency kinds](/concepts/dependency-kinds/).
 
-`after` also participates in cycle detection. It has to: the topological
+A cycle of required `depends_on` edges is a blocking warning. It has to be: the topological
 start order deliberately *cannot* fail (on a cycle it appends the leftovers
-in stable sorted order, so a run still starts something), so an `after` cycle
-would otherwise pass silently and produce an arbitrary order.
+in stable sorted order, so a run still starts something), so a cycle would
+otherwise pass silently and produce an arbitrary order.
 
 ## Re-run policy: `on_start` by default
 

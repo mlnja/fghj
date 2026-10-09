@@ -94,7 +94,7 @@ stays true for the rest of the tutorial.
 Now `.fghj.yaml`, in the repo root (note the leading dot):
 
 ```yaml
-version: "1.0"
+version: "2.0"
 
 services:
   web:
@@ -110,9 +110,9 @@ services:
 
 Six things are happening in fourteen lines:
 
-`version: "1.0"` — any `1.x` is accepted. A different *major* is refused
+`version: "2.0"` — any `2.x` is accepted. A different *major* is refused
 outright; a newer *minor* is accepted and merely noted, so one repo can
-adopt a 1.1 feature while its peers stay on 1.0 and they still resolve
+adopt a 2.1 feature while its peers stay on 2.0 and they still resolve
 together. That asymmetry is what removes the flag day from a federated
 config.
 
@@ -142,7 +142,7 @@ writing the file, since it depends on the workspace and the run. Here it
 resolves to this service's own proxied domain, so the page can print the
 address you used to reach it.
 
-There is no `dependencies:` key, which means none. We add the first one in
+There is no `depends_on:` key, which means none. We add the first one in
 the next chapter.
 
 ## Validate it

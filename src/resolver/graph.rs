@@ -1,6 +1,6 @@
 //! The resolved output model the UI and the run layer consume.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::config::Healthcheck;
 use super::port::PortConfig;
@@ -77,8 +77,16 @@ pub struct Node {
     /// `postgres:16` dependency says nothing about that container.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub head: Option<String>,
-    /// names of the flows this node is reachable from, in the full resolved universe
+    /// The flows whose run starts this node, as `{repo}/{flow}` — the
+    /// flow's members plus everything they can't start without. See
+    /// `concepts/flows-v2.md`.
     pub flows: Vec<String>,
+    /// This node's repo's `include:` aliases, resolved to the folder (or
+    /// stub id) each points at. What `${FGHJ_SERVICE_FQDN:alias/name}`
+    /// looks up — carried on the node because `env_file` values are only
+    /// read, and expanded, when the node starts.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub includes: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build: Option<NodeBuild>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
@@ -171,8 +179,18 @@ pub struct Node {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct NodeBuild {
+    /// The build context: a folder of the node's repo or, with `source`, of
+    /// the source's clone (`.` for its root).
     pub context: String,
     pub dockerfile: String,
+    /// The Dockerfile itself, sent in the build tar as `.fghj.Dockerfile`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub dockerfile_inline: Option<String>,
+    /// Set when `build.context` is a git URL: the code comes from there, the
+    /// definition from the node's own repo. See
+    /// `concepts/git-build-sources.md`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source: Option<BuildSource>,
     pub args: BTreeMap<String, String>,
     /// `docker build --target`. `None` builds the Dockerfile's final stage.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -185,6 +203,50 @@ pub struct NodeBuild {
     pub secrets: Vec<NodeBuildSecret>,
 }
 
+/// The clone a git build context is built from.
+#[derive(Debug, Serialize, Clone)]
+pub struct BuildSource {
+    pub url: String,
+    /// Branch, tag or commit. `None` is the remote's default branch.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reference: Option<String>,
+    /// Workspace-relative: `.fghj/sources/<name>@<ref>`.
+    pub path: String,
+    pub downloaded: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub head: Option<String>,
+    #[serde(default)]
+    pub dirty: bool,
+}
+
+/// The checkout a built node's image comes from: the clone for a git build
+/// context, otherwise the node's own repo. What drift, the container labels
+/// and the Drawer's "built from" all describe.
+pub struct Checkout<'a> {
+    pub branch: Option<&'a str>,
+    pub head: Option<&'a str>,
+    pub dirty: bool,
+}
+
+impl Node {
+    /// `None` for a node running a published `image:`.
+    pub fn build_checkout(&self) -> Option<Checkout<'_>> {
+        let build = self.build.as_ref()?;
+        Some(match &build.source {
+            Some(source) => Checkout {
+                branch: source.reference.as_deref(),
+                head: source.head.as_deref(),
+                dirty: source.dirty,
+            },
+            None => Checkout {
+                branch: self.branch.as_deref(),
+                head: self.head.as_deref(),
+                dirty: self.dirty,
+            },
+        })
+    }
+}
+
 /// One `--mount=type=secret` source, resolved against the repo checkout root
 /// at build time — see `#BuildSecret` in `schema/component.cue`.
 #[derive(Debug, Serialize, Clone)]
@@ -193,14 +255,38 @@ pub struct NodeBuildSecret {
     pub file: String,
 }
 
+/// `from` is always the dependent, `to` always the dependency.
 #[derive(Debug, Serialize, Clone)]
 pub struct Edge {
     pub from: String,
     pub to: String,
-    pub kind: String, // "depends-on" | "owns" | "shared-backing"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
+    /// Always "depends-on": a `depends_on` entry. A `depends_on` on another
+    /// repo's flow becomes one of these per member of that flow. Hostname
+    /// templates are not edges — see `concepts/dependency-kinds.md`.
+    pub kind: String,
+    /// `depends_on`'s `required`: `true` is "needed to start" (orders,
+    /// waits, blocks, and brings `to` into any run `from` is in); `false` is
+    /// "needed at runtime", which does none of that. See
+    /// [`Edge::needed_to_start`].
+    #[serde(default)]
+    pub required: bool,
+    /// `depends_on`'s `condition`, for a "depends-on" edge.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub condition: Option<String>,
+    /// For an edge produced by a `depends_on` on another repo's flow: that
+    /// flow's id (`billing/db`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub via_flow: Option<String>,
     pub flows: Vec<String>,
+}
+
+impl Edge {
+    /// Whether `from` can't start without `to`: the one kind of edge that
+    /// orders a start, waits, forms a cycle, and propagates failure, restart
+    /// and stop. See `concepts/dependency-kinds.md`.
+    pub fn needed_to_start(&self) -> bool {
+        self.kind == "depends-on" && self.required
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -208,10 +294,77 @@ pub struct Graph {
     pub workspace_name: String,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
+    /// Every flow's id (`{repo}/{flow}`), including one that starts
+    /// nothing — it still exists, and naming it is not a typo.
+    #[serde(default)]
+    pub flows: Vec<String>,
     pub warnings: Vec<Warning>,
 }
 
+/// `seeds` plus everything they can't start without: the closure over
+/// edges that are [`Edge::needed_to_start`].
+pub fn required_closure(edges: &[Edge], seeds: BTreeSet<String>) -> BTreeSet<String> {
+    let mut set = seeds;
+    let mut queue: Vec<String> = set.iter().cloned().collect();
+    while let Some(id) = queue.pop() {
+        for edge in edges {
+            if edge.needed_to_start() && edge.from == id && set.insert(edge.to.clone()) {
+                queue.push(edge.to.clone());
+            }
+        }
+    }
+    set
+}
+
 impl Graph {
+    /// The node ids a run of `flow` starts — every node when `None`, which
+    /// is what production does. An unknown flow is an error rather than an
+    /// empty run, so a typo can't start nothing and report success.
+    pub fn start_ids(&self, flow: Option<&str>) -> anyhow::Result<Vec<String>> {
+        let Some(flow) = flow else {
+            return Ok(self.nodes.iter().map(|n| n.id.clone()).collect());
+        };
+        if !self.flows.iter().any(|f| f == flow) {
+            anyhow::bail!(
+                "no flow named '{flow}' — flows are written `{{repo}}/{{flow}}`; this \
+                 workspace has: {}",
+                if self.flows.is_empty() {
+                    "none".to_string()
+                } else {
+                    self.flows.join(", ")
+                }
+            );
+        }
+        Ok(self
+            .nodes
+            .iter()
+            .filter(|n| n.flows.iter().any(|f| f == flow))
+            .map(|n| n.id.clone())
+            .collect())
+    }
+
+    /// What a run of `ids` will get wrong, said before it starts: a node
+    /// that needs something at runtime (`required: false`) which this run
+    /// doesn't start. Not blocking — starting a flow without a service you
+    /// know you won't call is the point of flows. A dependency on another
+    /// repo's flow is named once, as the flow, not once per member.
+    pub fn start_advisories(&self, ids: &[String]) -> Vec<String> {
+        let set: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+        let missing: BTreeSet<(&str, &str)> = self
+            .edges
+            .iter()
+            .filter(|e| e.kind == "depends-on" && !e.required)
+            .filter(|e| set.contains(e.from.as_str()) && !set.contains(e.to.as_str()))
+            .map(|e| (e.from.as_str(), e.via_flow.as_deref().unwrap_or(&e.to)))
+            .collect();
+        missing
+            .into_iter()
+            .map(|(from, to)| {
+                format!("'{from}' needs '{to}' at runtime, but this run doesn't start it")
+            })
+            .collect()
+    }
+
     /// The warnings that must stop a start, in declaration order.
     ///
     /// Resolution never fails: a workspace that can't be fully understood
@@ -266,6 +419,7 @@ mod tests {
             workspace_name: "ws".into(),
             nodes: Vec::new(),
             edges: Vec::new(),
+            flows: Vec::new(),
             warnings,
         }
     }

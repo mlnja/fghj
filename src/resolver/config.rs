@@ -1,31 +1,58 @@
-//! Top-level `.fghj.yaml` shapes and the `#RunOptions` pieces shared by
-//! services and backing dependencies.
+//! Top-level `.fghj.yaml` shapes and the `#RunOptions` pieces every
+//! service shares.
 
 use std::collections::BTreeMap;
 
-use super::dependency::Dependency;
 use super::name::Name;
 use super::service::ServiceConfig;
 use super::version::Version;
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct FlowConfig {
-    #[allow(dead_code)]
-    pub(crate) description: Option<String>,
-    #[serde(default)]
-    pub(crate) service: Option<Name>,
-    pub(crate) dependencies: Vec<Dependency>,
-}
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ComponentConfig {
     /// Checked, not decoration — see [`super::version`] for why major is
     /// a barrier and minor is not.
     pub(crate) version: Version,
-    pub(crate) services: BTreeMap<Name, ServiceConfig>,
+    /// Other repos this one uses, keyed by the alias this file refers to
+    /// them by (`billing/pricing`). The only link between repos — see
+    /// `concepts/flows-v2.md`.
     #[serde(default)]
-    pub(crate) flows: BTreeMap<String, FlowConfig>,
+    pub(crate) include: BTreeMap<Name, Include>,
+    pub(crate) services: BTreeMap<Name, ServiceConfig>,
+    /// Named start lists: each entry is one of this repo's services, one
+    /// of its flows, an included repo's flow (`alias/flow`), or a whole
+    /// included repo (`alias`).
+    #[serde(default)]
+    pub(crate) flows: BTreeMap<Name, Vec<String>>,
+}
+
+/// One `include:` entry: either the bare repo URL, or the URL plus the
+/// branch to clone it at the first time.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum Include {
+    Url(String),
+    Detailed {
+        repo: String,
+        /// Read once, at clone time — see `concepts/branch-ownership-model.md`.
+        #[serde(default)]
+        default_branch: Option<String>,
+    },
+}
+
+impl Include {
+    pub(crate) fn repo(&self) -> &str {
+        match self {
+            Include::Url(repo) | Include::Detailed { repo, .. } => repo,
+        }
+    }
+
+    pub(crate) fn default_branch(&self) -> Option<&str> {
+        match self {
+            Include::Url(_) => None,
+            Include::Detailed { default_branch, .. } => default_branch.as_deref(),
+        }
+    }
 }
 
 /// One `--mount=type=secret` source — see `#BuildSecret` in
@@ -36,23 +63,72 @@ pub struct BuildSecret {
     pub(crate) file: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+/// Compose's `build`: either a bare context path (`build: .`) or the full
+/// form.
+#[derive(Debug, Clone)]
 pub struct Build {
-    #[serde(default = "default_context")]
     pub(crate) context: String,
-    #[serde(default = "default_dockerfile")]
     pub(crate) dockerfile: String,
-    #[serde(default)]
+    /// The Dockerfile itself, for a context that has none — see
+    /// `concepts/git-build-sources.md`.
+    pub(crate) dockerfile_inline: Option<String>,
     pub(crate) args: BTreeMap<String, String>,
     /// `docker build --target` — which stage of a multi-stage Dockerfile to
     /// build. `None` builds the final stage.
-    #[serde(default)]
     pub(crate) target: Option<String>,
     /// Forward the workspace owner's ssh-agent into the build.
-    #[serde(default)]
     pub(crate) ssh: bool,
-    #[serde(default)]
     pub(crate) secrets: Vec<BuildSecret>,
+}
+
+#[derive(Deserialize)]
+struct BuildFull {
+    #[serde(default = "default_context")]
+    context: String,
+    #[serde(default = "default_dockerfile")]
+    dockerfile: String,
+    #[serde(default)]
+    dockerfile_inline: Option<String>,
+    #[serde(default)]
+    args: BTreeMap<String, String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    ssh: bool,
+    #[serde(default)]
+    secrets: Vec<BuildSecret>,
+}
+
+impl<'de> Deserialize<'de> for Build {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Context(String),
+            Full(BuildFull),
+        }
+        let full = match Raw::deserialize(de)? {
+            Raw::Context(context) => BuildFull {
+                context,
+                dockerfile: default_dockerfile(),
+                dockerfile_inline: None,
+                args: BTreeMap::new(),
+                target: None,
+                ssh: false,
+                secrets: Vec::new(),
+            },
+            Raw::Full(full) => full,
+        };
+        Ok(Build {
+            context: full.context,
+            dockerfile: full.dockerfile,
+            dockerfile_inline: full.dockerfile_inline,
+            args: full.args,
+            target: full.target,
+            ssh: full.ssh,
+            secrets: full.secrets,
+        })
+    }
 }
 
 pub fn default_context() -> String {

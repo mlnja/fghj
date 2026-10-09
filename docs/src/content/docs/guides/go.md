@@ -36,7 +36,7 @@ ENTRYPOINT ["/app"]
 ```
 
 ```yaml title=".fghj.yaml"
-version: "1.0"
+version: "2.0"
 
 services:
   api:
@@ -193,18 +193,25 @@ default is 10 seconds, matching Docker's.
 
 ## Migrations as a task
 
-A migration is a container that's *supposed* to exit, which is its own node
-kind. With no `image:`, a task runs the owning service's **own built
-image** with a different command — so a `migrate` subcommand in your
-binary needs nothing extra built:
+A migration is a container that's *supposed* to exit — a **task**. It's
+another service built from the same code with a different command, so a
+`migrate` subcommand in your binary needs nothing extra. Your service waits
+for it to complete, which is what makes it a task:
 
 ```yaml
-      - kind: task
-        name: migrate
-        command: ["/app", "migrate"]
-        after: ["db"]
-        environment:
-          DATABASE_URL: postgres://app:dev@${FGHJ_SERVICE_FQDN:db}:5432/app
+services:
+  api:
+    # ...
+    depends_on:
+      db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+  migrate:
+    build: .
+    command: ["/app", "migrate"]
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      DATABASE_URL: postgres://app:dev@${FGHJ_SERVICE_FQDN:db}:5432/app
 ```
 
 A task isn't started until it has *finished*, and a non-zero exit fails the

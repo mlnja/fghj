@@ -9,15 +9,21 @@ a fixed `Header`. All three tabs read from the same resolved graph
 (`universe`, from `GET /universe.json`) — they're different *views* over one
 shared model, not three separately-fetched datasets:
 
-- **Repos** (`reposGraph`): service nodes and `depends-on` edges only — "who
-  requires whom," matching [[flat-workspace-model]]/[[fog-of-war-visibility]]'s
+- **Repos** (`reposGraph`): one node per repo (nodes grouped by
+  `local_path`), with cross-repo edges merged from `depends-on` and `uses` —
+  `depends-on` wins when both connect the same pair. "Who requires whom,"
+  matching [[flat-workspace-model]]/[[fog-of-war-visibility]]'s
   repo-centric graph. Backed by `GraphView` in `mode="repos"`.
-- **Actual** (`containersGraph`): every node kind except `shared-infra`
-  edges — "everything the daemon would eventually run," services and
-  backing dependencies together, overlaid with live container status via
-  `runContainers` (a `node_id → ContainerInfo` map derived from whichever
-  run is currently selected). Backed by `GraphView` in `mode="containers"`,
-  plus `RunControls` for starting/stopping runs.
+- **Actual** (`containersGraph`): every node and edge — "everything the
+  daemon would eventually run," services, images and tasks together,
+  overlaid with live container status via `runContainers` (a
+  `node_id → ContainerInfo` map derived from whichever run is currently
+  selected). Backed by `GraphView` in `mode="containers"`, plus
+  `RunControls` for starting/stopping runs.
+
+Layout uses `depends-on` edges only, since they're the start order. Drawn:
+`depends-on` solid, optional (`required: false`) dashed, `uses` (a hostname
+reference, which orders nothing) dotted and fainter.
 - **Config**: an explicit placeholder — env vars, split-DNS table, issued
   certs — none of that has any real UI surface yet, so the tab says so
   outright rather than showing an empty shell that looks broken.

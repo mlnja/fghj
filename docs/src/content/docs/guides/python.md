@@ -1,6 +1,6 @@
 ---
 title: "Guide: Python services in fghj"
-description: A Python service in fghj from scratch — the Dockerfile, the port, a healthcheck without curl, a Postgres it owns, Alembic as a task, live reload, and debugpy.
+description: A Python service in fghj from scratch — the Dockerfile, the port, a healthcheck without curl, a Postgres, Alembic as a task, live reload, and debugpy.
 ---
 
 Nothing in fghj is Python-aware, and this guide is mostly ordinary Docker
@@ -41,7 +41,7 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 ```yaml title=".fghj.yaml"
-version: "1.0"
+version: "2.0"
 
 services:
   api:
@@ -98,33 +98,33 @@ fghj expands that when the container is created. Your code never computes
 its own hostname, which is right anyway: the hostname depends on the
 workspace directory's name and the run, neither of which the code can know.
 
-## A database it owns
+## A database
 
-A `kind: backing` dependency is an image this service provisions for
-itself. The declaring service owns it; nothing else can see it unless it
-asks by name.
+As in Compose, Postgres is another service, with `image:` instead of
+`build:`, and your service `depends_on` it:
 
 ```yaml
     environment:
       DATABASE_URL: postgresql://app:dev@${FGHJ_SERVICE_FQDN:db}:5432/app
-    dependencies:
-      - kind: backing
-        name: db
-        image: postgres:16
-        environment:
-          POSTGRES_USER: app
-          POSTGRES_PASSWORD: dev
-          POSTGRES_DB: app
-        ports: ["5432"]
-        healthcheck:
-          test: ["CMD-SHELL", "pg_isready -U app"]
-          interval: 2
-          retries: 15
-        stop_grace_period: 30
-        volumes:
-          - name: pgdata
-            scope: stable
-            container: /var/lib/postgresql/data
+    depends_on:
+      db: {condition: service_healthy}
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: app
+    ports: ["5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app"]
+      interval: 2
+      retries: 15
+    stop_grace_period: 30
+    volumes:
+      - name: pgdata
+        scope: stable
+        container: /var/lib/postgresql/data
 ```
 
 `${FGHJ_SERVICE_FQDN:db}` expands to that container's raw domain — direct to
@@ -138,23 +138,29 @@ the binary wheel carries its own libpq, so the image needs no
 
 ## Migrations as a task
 
-A migration is a container that's *supposed* to exit, which is a different
-node kind rather than a flag:
+A migration is a container that's *supposed* to exit. Your service waits
+for it to **complete**, and that's what makes it a task:
 
 ```yaml
-      - kind: task
-        name: migrate
-        command: ["alembic", "upgrade", "head"]
-        after: ["db"]
-        environment:
-          DATABASE_URL: postgresql://app:dev@${FGHJ_SERVICE_FQDN:db}:5432/app
+  api:
+    # ...
+    depends_on:
+      db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      DATABASE_URL: postgresql://app:dev@${FGHJ_SERVICE_FQDN:db}:5432/app
 ```
 
-With no `image:`, the task runs **the owning service's own built image** with
-a different command — which is what a migration almost always wants, since
-it's your code and your `alembic/` directory. `after: ["db"]` orders it
-behind the database, and because `db` declares a healthcheck, "behind" means
-after Postgres is actually accepting connections.
+`build: .` is the same build as your service — your code and your
+`alembic/` directory, with a different command. Its own `depends_on` puts it
+behind the database, and `service_healthy` means after Postgres is actually
+accepting connections.
 
 A task isn't considered started until it has *finished*, and a non-zero exit
 fails the node and blocks everything downstream. A migration that fails

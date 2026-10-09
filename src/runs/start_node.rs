@@ -33,6 +33,12 @@ pub(super) struct StartContext<'a> {
     /// See [`debug_wait_overrides`] for what this changes and why it is
     /// passed in here rather than read off the node.
     pub(super) debug_wait: bool,
+    /// Whether something in the run needs this node to start, and so has
+    /// to wait for its healthcheck. A node only runtime dependents need is
+    /// not waited on: nothing would be held up for it but the rest of the
+    /// run. A task is waited on regardless, since its exit code is its
+    /// result. See `concepts/dependency-kinds.md`.
+    pub(super) wait_ready: bool,
 }
 
 impl RunRegistry {
@@ -57,6 +63,7 @@ impl RunRegistry {
             sidecar_ip,
             budget,
             debug_wait,
+            wait_ready,
         } = start;
         self.begin_event_cycle(run_id, &node.id, "start").await;
         self.record_event(
@@ -115,14 +122,14 @@ impl RunRegistry {
         // without fghj, its database, or a resolved graph in hand. Omitted
         // rather than written empty when git could not be read, so a missing
         // label means unknown instead of "no branch".
-        if node.build.is_some() {
-            if let Some(branch) = node.branch.as_deref() {
+        if let Some(checkout) = node.build_checkout() {
+            if let Some(branch) = checkout.branch {
                 labels.insert("fghj.source_branch".to_string(), branch.to_string());
             }
-            if let Some(head) = node.head.as_deref() {
+            if let Some(head) = checkout.head {
                 labels.insert("fghj.source_head".to_string(), head.to_string());
             }
-            labels.insert("fghj.source_dirty".to_string(), node.dirty.to_string());
+            labels.insert("fghj.source_dirty".to_string(), checkout.dirty.to_string());
         }
 
         // Deliberately *after* `spec_hash` above, and that ordering is the
@@ -399,7 +406,7 @@ impl RunRegistry {
             }
             self.record_event(run_id, &node.id, "start", "waiting for exit", "ok", None)
                 .await;
-        } else if node.healthcheck.is_some() {
+        } else if node.healthcheck.is_some() && wait_ready {
             self.record_event(
                 run_id,
                 &node.id,
@@ -488,10 +495,10 @@ impl RunRegistry {
                 // Gated on `node.build` exactly as `spec_hash`'s own
                 // `source` is, so the container records a checkout on
                 // precisely the nodes whose hash can move because of one.
-                source: node.build.as_ref().map(|_| ContainerSource {
-                    branch: node.branch.clone(),
-                    head: node.head.clone(),
-                    dirty: node.dirty,
+                source: node.build_checkout().map(|c| ContainerSource {
+                    branch: c.branch.map(str::to_string),
+                    head: c.head.map(str::to_string),
+                    dirty: c.dirty,
                 }),
                 terminating: node.kind == "task",
                 debug_wait,
@@ -686,6 +693,7 @@ mod tests {
                         sidecar_ip: None,
                         budget: &super::RunBudget::default(),
                         debug_wait: false,
+                        wait_ready: true,
                     },
                 )
                 .await
@@ -776,6 +784,7 @@ mod tests {
                     sidecar_ip: None,
                     budget: &budget,
                     debug_wait: false,
+                    wait_ready: true,
                 },
             )
             .await

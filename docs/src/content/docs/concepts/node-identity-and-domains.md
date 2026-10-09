@@ -50,25 +50,15 @@ owning scope after:
   what keeps `vite.shop-web` and `php.shop-web` distinct: the map key
   (unique per repo, by construction) is the leaf, the folder name is the
   scope, exactly as it always was for the single-service case.
-- **Backing dependency**: `{dep.name}.{owner's node id}` — e.g.
-  `s3.bff.dept-a-repo`. The specific resource comes first, its owning
-  scope after, matching the same convention used by named ports below.
-  Because the owner's own id is already globally unique, this holds
-  whether the owner is one of several services in the same repo
-  (`mysql.php.shop-web`) or the sole service in its own repo — a repeated
-  backing name like `postgres` or `redis` never collides across owners.
-- **Shared-backing reference**: a service can bind to *another* service's
-  already-declared backing dependency (rather than provisioning a second
-  instance) via `kind: shared-backing`, identifying the owner by `repo` +
-  `service` — a bare service name alone isn't unique (two peer repos, or
-  two services in the same repo, can share one), so both are needed to
-  pick a single unambiguous node. `repo` is optional: omitting it means
-  "a sibling service declared in this same repo," which is exactly what
-  lets two services built from one checkout (`vite` and `php` again)
-  share one backing instance (`mysql`) without either of them owning a
-  second copy. A reference that doesn't resolve to a known backing node is
-  flagged as a non-fatal warning, since a stub (not-yet-pulled) repo can't
-  be checked yet.
+- **Image-only service** (a database, a cache): the same rule. In 2.0
+  Postgres is just another entry in `services:`, so its id is
+  `postgres.auth-service` — no different from a built service's. Two repos
+  each declaring `postgres` still never collide, because the folder name
+  qualifies both.
+- **Sharing one instance**: two services in a repo both `depends_on` the
+  same `postgres` — there's one entry, so one node. Across repos, the
+  owning repo publishes a flow containing it and the other repo depends on
+  that flow; the node keeps its owner's id.
 - **Named port**: `{port.name}.{node's own domain}` — the pattern repeats
   one more level down, at the port granularity.
 
@@ -78,66 +68,60 @@ can share a first name.
 
 ## Worked example
 
-Three repos: `auth-service` (one service), `payment-service` (two
-services sharing a backing), and `shop-web` (two services, one of which
-depends on `payment-service` cross-repo). Every label below is a real
-node id, spelled out leaf-first exactly as described above:
+Three repos: `auth-service` (one service and its Postgres),
+`payment-service` (two services sharing one Redis), and `shop-web` (two
+services sharing one MySQL, depending on the other two repos). Every label
+below is a real node id:
 
 ```mermaid
 flowchart LR
   subgraph REPO_A["📁 auth-service"]
     direction TB
     auth(["auth<br/><small>id: auth.auth-service</small>"])
-    auth_pg[("postgres<br/><small>id: postgres.auth.auth-service</small>")]
-    auth -- owns --> auth_pg
+    auth_pg[("postgres<br/><small>id: postgres.auth-service</small>")]
+    auth --> auth_pg
   end
 
   subgraph REPO_B["📁 payment-service"]
     direction TB
     api(["api<br/><small>id: api.payment-service</small>"])
     worker(["worker<br/><small>id: worker.payment-service</small>"])
-    redis[("redis<br/><small>id: redis.api.payment-service</small>")]
-    api -- owns --> redis
-    worker -. "shared-backing<br/>service: api, name: redis" .-> redis
+    redis[("redis<br/><small>id: redis.payment-service</small>")]
+    api --> redis
+    worker --> redis
   end
 
   subgraph REPO_C["📁 shop-web"]
     direction TB
     vite(["vite<br/><small>id: vite.shop-web</small>"])
     php(["php<br/><small>id: php.shop-web</small>"])
-    mysql[("mysql<br/><small>id: mysql.php.shop-web</small>")]
-    pma[("phpmyadmin<br/><small>id: phpmyadmin.php.shop-web</small>")]
-    php -- owns --> mysql
-    php -- owns --> pma
-    vite -. "shared-backing<br/>service: php, name: mysql" .-> mysql
+    mysql[("mysql<br/><small>id: mysql.shop-web</small>")]
+    php --> mysql
+    vite --> mysql
   end
 
-  php == "kind: service<br/>service: api" ==> api
-  vite == "kind: service<br/>(auth-service has only one service)" ==> auth
+  php == "depends_on: payments/charge" ==> api
+  vite == "depends_on: auth" ==> auth
 
   classDef service fill:#cde4ff,stroke:#4a7fc9,stroke-width:1px,color:#111;
   classDef backing fill:#ffe9b3,stroke:#c99a3a,stroke-width:1px,color:#111;
   class auth,api,worker,vite,php service
-  class auth_pg,redis,mysql,pma backing
+  class auth_pg,redis,mysql backing
 ```
 
 Reading this against the rules above:
 
-- Blue nodes are `#Service`s (buildable containers); orange cylinders are
-  `kind: backing` nodes (provisioned from an image).
-- A solid **owns** edge is a service's own `kind: backing` dependency.
-- A dashed **shared-backing** edge binds to *another* service's already-
-  owned backing instead of provisioning a second one — same-repo
-  (`worker`→`redis`, `vite`→`mysql`) omits `repo` entirely, since the
-  owner is a sibling declared in the same `services:` map.
-- A thick **kind: service** edge is a cross-repo dependency. `php`→`api`
-  needs `service: api` because `payment-service` declares two services;
-  `vite`→`auth` omits it because `auth-service` only declares one.
+- Blue nodes have `build:`; orange cylinders are image-only. Both are
+  plain entries in `services:`, and both are named the same way.
+- A thin arrow is a `depends_on` inside one repo. Sharing is just two
+  arrows into one node — `worker` and `api` both wait on the one `redis`.
+- A thick arrow is a `depends_on` across repos, through an `include:`
+  alias. It names a flow (`payments/charge`, which payment-service
+  publishes as `charge: [api]`) or a whole repo (`auth`) — never another
+  repo's service, which is that repo's internal business.
 - No two ids collide anywhere in this graph, even though `postgres`,
-  `redis`, and `mysql` are all conceptually "the database" — each id's
-  owning-scope suffix (`.auth.auth-service`, `.api.payment-service`,
-  `.php.shop-web`) is unique per owner, so the generic leaf name never
-  needs to be creative to stay collision-free.
+  `redis`, and `mysql` are all conceptually "the database" — the folder
+  name suffix is unique per repo.
 
 ## Ports: a port's role travels with the port
 

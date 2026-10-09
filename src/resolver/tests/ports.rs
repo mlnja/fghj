@@ -1,4 +1,4 @@
-use super::write_component;
+use super::{write_component, write_yaml};
 use crate::resolver::*;
 
 #[test]
@@ -53,24 +53,24 @@ fn warns_when_more_than_one_port_is_primary() {
 }
 
 #[test]
-fn backing_dependency_ports_accepts_bare_list_or_port_map() {
+fn backing_service_ports_accepts_bare_list_or_port_map() {
     let tmp = tempfile::tempdir().unwrap();
-    write_component(
+    write_yaml(
         tmp.path(),
         "myservice",
-        "  dependencies:\n\
-         \x20   - kind: backing\n\
-         \x20     name: postgres\n\
-         \x20     image: postgres:16\n\
-         \x20     ports: [\"5432\"]\n\
-         \x20   - kind: backing\n\
-         \x20     name: minio\n\
-         \x20     image: minio/minio\n\
-         \x20     ports:\n\
-         \x20       \"9000\":\n\
-         \x20         primary: true\n\
-         \x20       \"9001\":\n\
-         \x20         name: console\n",
+        r#"version: "2.0"
+services:
+  postgres:
+    image: postgres:16
+    ports: ["5432"]
+  minio:
+    image: minio/minio
+    ports:
+      "9000":
+        primary: true
+      "9001":
+        name: console
+"#,
     );
 
     let graph = resolve_universe(tmp.path()).unwrap();
@@ -78,8 +78,9 @@ fn backing_dependency_ports_accepts_bare_list_or_port_map() {
     let postgres = graph
         .nodes
         .iter()
-        .find(|n| n.id == "postgres.myservice.myservice")
+        .find(|n| n.id == "postgres.myservice")
         .unwrap();
+    assert_eq!(postgres.kind, "backing");
     assert_eq!(postgres.ports.len(), 1);
     assert!(!postgres.ports["5432"].primary);
     assert!(postgres.ports["5432"].name.is_none());
@@ -87,29 +88,30 @@ fn backing_dependency_ports_accepts_bare_list_or_port_map() {
     let minio = graph
         .nodes
         .iter()
-        .find(|n| n.id == "minio.myservice.myservice")
+        .find(|n| n.id == "minio.myservice")
         .unwrap();
     assert_eq!(minio.ports.len(), 2);
     assert!(minio.ports["9000"].primary);
     assert_eq!(minio.ports["9001"].name.as_deref(), Some("console"));
-    assert!(graph.warnings.is_empty());
+    assert!(graph.warnings.is_empty(), "{:?}", graph.warnings);
 }
 
 #[test]
-fn warns_when_backing_dependency_declares_more_than_one_primary_port() {
+fn warns_when_a_backing_service_declares_more_than_one_primary_port() {
     let tmp = tempfile::tempdir().unwrap();
-    write_component(
+    write_yaml(
         tmp.path(),
         "myservice",
-        "  dependencies:\n\
-         \x20   - kind: backing\n\
-         \x20     name: grafana\n\
-         \x20     image: grafana/grafana\n\
-         \x20     ports:\n\
-         \x20       \"3000\":\n\
-         \x20         primary: true\n\
-         \x20       \"3100\":\n\
-         \x20         primary: true\n",
+        r#"version: "2.0"
+services:
+  grafana:
+    image: grafana/grafana
+    ports:
+      "3000":
+        primary: true
+      "3100":
+        primary: true
+"#,
     );
 
     let graph = resolve_universe(tmp.path()).unwrap();

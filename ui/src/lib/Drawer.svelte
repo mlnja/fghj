@@ -368,6 +368,33 @@
         {#if node.image}
           <div class="row"><span class="k">image</span><span class="v">{node.image}</span></div>
         {/if}
+        <!-- A git build context (`concepts/git-build-sources.md`): the code is
+             a clone in .fghj/sources, made by pull, never by start. -->
+        {#if node.build?.source}
+          {@const bs = node.build.source}
+          <div class="row">
+            <span class="k">source</span>
+            <span class="v">{bs.url}{bs.reference ? `#${bs.reference}` : ''}{node.build.context !== '.' ? `:${node.build.context}` : ''}</span>
+          </div>
+          <div class="row"><span class="k">clone</span><span class="v">{bs.path}</span></div>
+          <div class="row">
+            <span class="k">clone status</span>
+            <span class="v">
+              {#if bs.downloaded}
+                {#if bs.head}<span class="mono">{bs.head.slice(0, 7)}</span>{/if}
+                {bs.dirty ? 'dirty' : 'clean'}
+              {:else if dlStatus === 'running'}
+                <span class="spinner"></span> pulling…
+              {:else}
+                <span class="muted">not pulled{dlStatus === 'error' ? ' — pull failed' : ''}</span>
+                <button class="copy-btn" onclick={download} disabled={downloading}>Pull</button>
+              {/if}
+            </span>
+          </div>
+          {#if !bs.downloaded && dlStatus === 'error' && dlLog}
+            <pre>{dlLog}</pre>
+          {/if}
+        {/if}
         {#each Object.entries(node.ports ?? {}) as [port, cfg]}
           {@const routeDomain = cfg.primary ? node.domain : cfg.name ? `${cfg.name}.${node.domain}` : null}
           {@const isLive = routeDomain && liveInfo?.desired.routes?.some((r) => r.domain === routeDomain)}
@@ -499,7 +526,9 @@
                stating rather than leaving as an absence. -->
           {#if liveInfo.desired.source}
             {@const src = liveInfo.desired.source}
-            {@const moved = src.head && node.head && src.head !== node.head}
+            <!-- What it's built from now: the clone for a git build context. -->
+            {@const now = node.build?.source ?? node}
+            {@const moved = src.head && now.head && src.head !== now.head}
             <div class="row">
               <span class="k">built from</span>
               <span class="v">
@@ -516,11 +545,11 @@
               <div class="row">
                 <span class="k">checkout now</span>
                 <span class="v">
-                  <span class="mono">{node.head.slice(0, 7)}</span>
-                  <span class="pill unsynced" title="the checkout has moved since this container was built, so it is running code that is no longer what {node.local_path ?? 'the repo'} contains. Reset this node to rebuild it.">behind</span>
+                  <span class="mono">{now.head.slice(0, 7)}</span>
+                  <span class="pill unsynced" title="the checkout has moved since this container was built, so it is running code that is no longer what {node.build?.source?.path ?? node.local_path ?? 'the repo'} contains. Reset this node to rebuild it.">behind</span>
                 </span>
               </div>
-            {:else if src.head && !src.dirty && node.dirty}
+            {:else if src.head && !src.dirty && now.dirty}
               <div class="row">
                 <span class="k">checkout now</span>
                 <span class="v">

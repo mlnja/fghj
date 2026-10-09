@@ -70,7 +70,7 @@ useful for piping input into a command or scripting a one-off command
 without a pseudo-terminal's line-editing getting in the way:
 
 ```bash
-echo "select 1;" | fghj exec -T db.web.storefront -- psql -U shop shop
+echo "select 1;" | fghj exec -T db.storefront -- psql -U shop shop
 ```
 
 ## Examples
@@ -80,5 +80,5 @@ echo "select 1;" | fghj exec -T db.web.storefront -- psql -U shop shop
 fghj exec web.storefront -- bash
 
 # a one-off command, output streamed back, exit code propagated
-fghj exec db.web.storefront -- pg_isready
+fghj exec db.storefront -- pg_isready
 ```

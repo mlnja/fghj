@@ -97,7 +97,7 @@ look identical to one it did — that difference is exactly what someone
 debugging a flaky start needs to see.
 
 A run actually carries **two** such deadlines, side by side. The second bounds
-waits on terminating nodes (`kind: task` — seeds, migrations), and it's
+waits on terminating nodes (tasks — seeds, migrations), and it's
 deliberately not the same clock: running out of the health budget means fghj
 stops waiting and carries on, while running out of the task budget *fails* the
 task and blocks everything downstream of it. One shared deadline would let a

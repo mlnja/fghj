@@ -60,12 +60,13 @@
   };
 
   function layout(g) {
-    const edges = g.edges.filter((e) => e.kind !== 'shared-infra').map((e) => [e.from, e.to]);
+    // Columns follow start order, which only required edges decide — a
+    // `required: false` one (needed at runtime) orders nothing.
+    const edges = g.edges.filter((e) => e.required !== false).map((e) => [e.from, e.to]);
 
-    // Dependencies can legitimately form a cycle across flows (e.g. a hard
-    // dependency one way, a flow-scoped one the other way) — drop back-edges
-    // via DFS so the longest-path depth pass below always terminates instead
-    // of growing the layout without bound.
+    // A blocking cycle can still reach the UI (the start is refused, the
+    // map isn't) — drop back-edges via DFS so the longest-path depth pass
+    // below always terminates instead of growing the layout without bound.
     const adj = {};
     edges.forEach(([a, b]) => (adj[a] = adj[a] || []).push(b));
     const dagEdges = [];
@@ -129,12 +130,17 @@
       {@const line = edgeLine(e)}
       {#if line}
         {@const inFlow = e.flows.includes(currentFlow)}
+        {@const runtime = e.required === false}
         <line
           x1={line.x1} y1={line.y1} x2={line.x2} y2={line.y2}
           stroke={inFlow ? 'var(--accent)' : 'var(--accent-dim)'}
           stroke-width={inFlow ? 2 : 1.5}
-          stroke-dasharray="5,4"
-        />
+          stroke-dasharray={runtime ? '6,4' : null}
+        >
+          <title>{runtime
+            ? `${e.from} needs ${e.to} at runtime — doesn't wait on it`
+            : `${e.from} needs ${e.to} to start${e.condition ? ` (${e.condition})` : ''}`}{e.via_flow ? ` — via ${e.via_flow}` : ''}</title>
+        </line>
       {/if}
     {/each}
   </svg>

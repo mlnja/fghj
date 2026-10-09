@@ -14,9 +14,21 @@ package fghj
 	file: string
 }
 
-#Build: {
+// A bare string is the context, as in Compose: `build: .`.
+#Build: string | #BuildFull
+
+#BuildFull: {
+	// A path in this repo, or a git URL, `<url>#<ref>:<subdir>`, to build
+	// someone else's code with your own definition. `ref` and `subdir` are
+	// optional; a URL starts with `https://`, `http://`, `ssh://`, `git@`
+	// or `file://`.
+	// The clone lives in `.fghj/sources/` and is made by pull, never by
+	// start. See `concepts/git-build-sources.md`.
 	context:    string | *"."
 	dockerfile: string | *"Dockerfile"
+	// The Dockerfile itself, for a context that has none. Setting it and a
+	// `dockerfile` other than the default is an error.
+	dockerfile_inline?: string
 	args:       {[string]: string} | *{}
 	// Which stage of a multi-stage Dockerfile to build, `docker build
 	// --target`. Omitted builds the final stage, as Docker does.
@@ -46,7 +58,7 @@ package fghj
 	// random ephemeral one — for protocols whose clients hardcode a port
 	// number and can't go through name-based routing at all (raw MQTT, a
 	// custom TCP protocol, etc). This is the same trade-off as
-	// `#BackingDependency.domain_scope: "stable"`: an explicit, conscious
+	// `#Service.domain_scope: "stable"`: an explicit, conscious
 	// opt-out of per-run isolation — only one run can hold this exact host
 	// port at a time, so starting a second run with the same fixed port
 	// will fail to bind rather than silently getting its own copy.
@@ -60,8 +72,7 @@ package fghj
 	wildcard: bool | *false
 }
 
-// A bind mount (host path) or a named volume (Docker-managed storage), on
-// either a #Service or a #BackingDependency.
+// A bind mount (host path) or a named volume (Docker-managed storage).
 #Volume: {
 	container: string
 	read_only: bool | *false
@@ -91,9 +102,9 @@ package fghj
 	// Off by default, and deliberately awkward to reach for: two engines
 	// with one data directory between them is silent corruption, and the
 	// pair of configs that produce it can be written by two teams who have
-	// never spoken. Sharing a *backing dependency* — the usual reason to
-	// want this — is already expressible as #SharedBackingDependency, which
-	// gives you one node and therefore one volume without any of this.
+	// never spoken. Sharing a *database* — the usual reason to want this —
+	// needs none of it: services in one repo share its `postgres` by
+	// depending on it, and another repo waits on a flow that publishes it.
 	shared: bool | *false
 })
 
@@ -129,84 +140,82 @@ package fghj
 	wildcard: bool | *false
 }
 
+// One entry under `services:` — your own code (`build`), a published image
+// (`image`), or a task (something in this repo waits on it with
+// `condition: service_completed_successfully`). Exactly one of `build` and
+// `image`: fghj names the images it builds itself, so Compose's "both" (tag
+// the build) has nothing to mean here.
 #Service: {
 	#RunOptions
-	build: #Build
-	// Keyed by the literal container port number (e.g. "8080"), published to
-	// Docker as-is — not a semantic label. `#Port.name` is where a label
-	// belongs.
-	ports: [=~"^[0-9]+$"]: #Port
+	{build: #Build} | {image: string & =~"^[a-z0-9][a-z0-9._/-]*(:[a-zA-Z0-9._-]+)?$"}
+	// A bare list of container port numbers, or a map of port number to
+	// `#Port` — published to Docker as-is, not a semantic label.
+	ports: [...string] | {[=~"^[0-9]+$"]: #Port} | *[]
 	// "run" (the default) scopes this service's domain to the run that
-	// started it, same as every other node — two runs of this service never
-	// collide. "stable" drops the run id, giving it one fixed identity
-	// shared across every run of this graph, the same trade-off as
-	// `#BackingDependency.domain_scope: "stable"`: only one run can own that
-	// name from the host at a time, but it's the same name every time.
+	// started it — two runs never collide. "stable" drops the run id,
+	// giving it one fixed identity shared across every run: only one run
+	// can own that name from the host at a time, but it's the same name
+	// every time.
 	domain_scope: *"run" | "stable"
 	environment: #Environment | *[]
-	// Overrides the image's default `CMD`, Compose-`command`-style — e.g.
-	// passing extra flags to a database's entrypoint script. Empty (the
-	// default) leaves the image's own `CMD`/`ENTRYPOINT` untouched.
+	// Overrides the image's default `CMD`, Compose-`command`-style. Empty
+	// (the default) leaves the image's own `CMD`/`ENTRYPOINT` untouched. A
+	// task must set it: a task *is* its command.
 	command: [...string] | *[]
 	volumes: [...#Volume] | *[]
 	// Extra literal hostnames this service also answers on, routed to its
-	// `primary` port — requires one to be set. Each entry is a bare
-	// hostname (exact match) or `{host: ..., wildcard: true}` (also matches
-	// every subdomain of it). See `#HostAlias`.
+	// `primary` port — requires one to be set. See `#HostAlias`.
 	additional_hosts: [...#HostAlias] | *[]
-	// Defaulted to empty like every other list field here, because the Rust
-	// side defaults it too (`#[serde(default)]` on `resolver::Service`): a
-	// leaf service that depends on nothing is an ordinary, valid config, and
-	// leaving this non-concrete would make `cue vet -c` reject a file the
-	// daemon happily accepts. `#Flow.dependencies` below is deliberately the
-	// other way round — a flow with no dependencies describes no journey.
-	dependencies: [...#Dependency] | *[]
+	// Compose's `depends_on`. See `#DependsOn`.
+	depends_on: #DependsOn | *[]
+	// Makes this service a task, like being waited on with
+	// `service_completed_successfully` does — the way to declare a seed
+	// that nothing waits on and only a flow lists. "on_start" (the
+	// default) re-runs the task on every start and top-up — a migration,
+	// whose command is idempotent. "once" runs it at most once per run,
+	// and not again when the code changes; reach for it only when
+	// re-running is expensive or destructive.
+	//
+	// A task can't set `healthcheck` (an exited container is never
+	// healthy) or a `restart` other than "no" (it would restart forever).
+	// The resolver refuses both.
+	run?: "on_start" | "once"
 }
 
-// A user-facing journey through the graph, e.g. "simple login flow". Any repo
-// may declare zero or more of these — there is no distinguished "root" repo.
-#Flow: {
-	description: string
-	// Which of this repo's #services this flow is rooted at. Omit when the
-	// repo declares exactly one service (it's used automatically); required
-	// when it declares more than one, since there's no other way to tell
-	// which service's dependencies the flow is actually describing.
-	service?: string & =~"^[a-z0-9][a-z0-9-]*$"
-	// Required (the Rust `FlowConfig` has no `#[serde(default)]` on it), but
-	// deliberately *not* constrained non-empty: `flows: {smoke: {description:
-	// "...", dependencies: []}}` is a legal, meaningful flow — "this journey
-	// is just the root service" — and the daemon accepts it without comment.
-	// A `& [_, ...]` here used to reject exactly that file, which is the one
-	// thing this schema must never do (see `#ComponentConfig.services`).
-	dependencies: [...#Dependency]
+// Another repo, by URL. The alias is how this file names it: `alias/flow`
+// in a flow or `depends_on`, `alias` for all of it, and `alias/service`
+// only inside `${FGHJ_SERVICE_FQDN:…}`. Resolved to the checkout on disk
+// with that remote, whatever its folder is called; cloned into a folder
+// named after the URL's last segment when it isn't there.
+#Include: string & =~"^(git@|https://|ssh://)" | {
+	repo: string & =~"^(git@|https://|ssh://)"
+	// The branch fghj clones at the first fetch, `main` when omitted. Read
+	// once, at clone time — after that the developer standing in the
+	// checkout decides its branch. See `concepts/branch-ownership-model.md`.
+	default_branch?: string
 }
+
+// A named start list — what to run when you don't want everything. Each
+// entry is one of this repo's services, one of its flows, `alias/flow` (an
+// included repo's flow), or `alias` (all of that repo and what it
+// includes). Never another repo's service: its flows are its contract.
+// Starting a flow starts its entries and everything they can't start
+// without. See `concepts/flows-v2.md`.
+#Flow: [...#Ref]
+
+// A name in this repo, or `alias/name` in an included one.
+#Ref: string & (=~"^[a-z0-9][a-z0-9-]*$" | =~"^[^/]+/[^/]+$")
 
 #ComponentConfig: {
-	// Any 1.x. fghj treats major as a compatibility barrier and minor as
-	// not one: a different major is refused outright, while a newer minor
-	// is accepted and merely noted, so one repo can adopt a 1.1 feature
-	// while its peers stay on 1.0 and they still resolve together. Pinning
-	// the literal "1.0" here would reject a file the daemon accepts, which
-	// would make this schema lie to the person running `fghj validate` and
-	// would put back the flag-day coordination the federated model exists
-	// to avoid. See `src/resolver/version.rs`.
-	version: string & =~"^1\\.[0-9]+$"
-	// Keyed by service name (was a singular `service:` field) — a repo can
-	// build more than one independent container from its own source (e.g. a
-	// dev-server process and a backend API process, each with their own
-	// Dockerfile), each with its own dependencies. See #SharedBackingDependency
-	// for how two services in the same repo (or different repos) can share
-	// one `kind: backing` instance instead of each provisioning their own.
-	//
-	// Required (`!`), not merely constrained: the Rust side has no
-	// `#[serde(default)]` on this field, so a file omitting it entirely is
-	// refused by the daemon with `missing field \`services\``. Leaving it
-	// optional here would let `cue vet` bless a file the daemon then
-	// rejects, which is the one thing this schema must never do — see
-	// `concepts/config-language.md`. An *empty* map is a different case and
-	// stays legal, because serde accepts that too.
+	// Any 2.x. Major is a compatibility barrier and minor is not: a
+	// different major is refused, a newer minor accepted and noted, so one
+	// repo can adopt a 2.1 feature while its peers stay on 2.0. See
+	// `src/resolver/version.rs`.
+	version: string & =~"^2\\.[0-9]+$"
+	include?: [Alias=string & =~"^[a-z0-9][a-z0-9-]*$"]: #Include
+	// Required (`!`), matching the daemon, which refuses a file without
+	// it; an *empty* map stays legal, because the daemon accepts that too.
 	services!: [Name=string & =~"^[a-z0-9][a-z0-9-]*$"]: #Service
-	// Optional, matching `#[serde(default)]` on the Rust side: a repo that
-	// declares services but no flow is the common case.
-	flows?: [string]: #Flow
+	// No flows means the only start list is everything.
+	flows?: [Name=string & =~"^[a-z0-9][a-z0-9-]*$"]: #Flow
 }

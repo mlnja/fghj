@@ -1,6 +1,6 @@
 ---
 title: .fghj.yaml
-description: Full reference for the .fghj.yaml file every repo declares — services, ports, dependencies, and flows.
+description: Full reference for the .fghj.yaml file every repo declares — services, depends_on, include, and flows.
 ---
 
 Every repo that participates in `fghj` carries its own `.fghj.yaml` at its
@@ -9,33 +9,44 @@ validated independently against fghj's CUE schema; see
 [fghj validate](/cli/validate/). The full grammar lives in `schema/component.cue`
 and `schema/dependency.cue` in the fghj repo.
 
+The shape is Docker Compose's on purpose: `services:` with `build:` or
+`image:`, and `depends_on:` between them. What fghj adds is `include:` (the
+other repos this one talks to) and `flows:` (named start lists, so you don't
+have to start everything at once).
+
 ## Top-level shape
 
 ```yaml
-version: "1.0"
+version: "2.0"
+include:
+  <alias>: <git url>
 services:
   <service-name>:
     # ... see Services below
 flows:
-  <flow-name>:
-    # ... see Flows below
+  <flow-name>: [<entry>, ...]
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `version` | string matching `1.<minor>` | Which version of this language the file is written against. **Major is a compatibility barrier; minor is not.** A different major is refused outright — the file says something this build can't correctly interpret, and guessing would be worse than refusing. Any minor is accepted, *including one newer than the daemon knows*, paired with an advisory warning naming the repo and both versions. That asymmetry is what makes staggered adoption possible in a federated config: one repo can start using a `1.1` field while its peers stay on `1.0` and they still resolve into one graph. Without it, every repo in every workspace would have to change on the same day. |
-| `services` | map of name→`#Service` | See [`services`](#services). At least one service or one flow makes the file useful; neither is structurally required. |
-| `flows` | map of name→`#Flow` | See [`flows`](#flows). Any repo may declare flows — there's no distinguished root. |
+| `version` | string matching `2.<minor>` | Which version of this language the file is written against. **Major is a compatibility barrier; minor is not.** A different major is refused outright — the file says something this build can't correctly interpret, and guessing would be worse than refusing. Any minor is accepted, *including one newer than the daemon knows*, paired with an advisory warning naming the repo and both versions. That asymmetry is what makes staggered adoption possible in a federated config: one repo can start using a `2.1` field while its peers stay on `2.0` and they still resolve into one graph. Without it, every repo in every workspace would have to change on the same day. |
+| `include` | map of alias→git URL, or alias→`{repo, default_branch}` | The other repos this one talks to. See [`include`](#include). |
+| `services` | map of name→`#Service` | Required. See [`services`](#services). |
+| `flows` | map of name→list | See [`flows`](#flows). Any repo may declare flows — there's no distinguished root. |
 
 ## `services`
 
-Keyed by service name — a repo can declare more than one independently
-buildable service, each with its own Dockerfile and dependencies (e.g. a
-dev-server process and a backend API process built from the same repo). The
-map key *is* the service's name (lowercase, `[a-z0-9][a-z0-9-]*`) — it's a
-human-readable label, not the node's internal id; see
-[Node identity & domains](/concepts/node-identity-and-domains/) for why
-those differ. Most repos declare exactly one.
+Everything that runs is a service, as in Compose: your own code (with
+`build:`) and the things it needs (with `image:` — a database, a cache, a
+broker). Exactly one of the two is required. The map key is the service's
+name (lowercase, `[a-z0-9][a-z0-9-]*`); its node id is `{name}.{repo
+folder}` — see [Node identity & domains](/concepts/node-identity-and-domains/).
+
+| Declares | Shown as | Means |
+|---|---|---|
+| `build:` | service | Your code, built from this repo's checkout. |
+| `image:` only | backing | A stock image. Nothing to build. |
+| `run:`, or anything something requires with `condition: service_completed_successfully` | task | Runs to completion. Exit 0 is success. See [Tasks](#tasks). |
 
 ```yaml
 services:
@@ -71,16 +82,23 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 10
       retries: 3
-    dependencies:
-      - kind: service
-        repo: git@github.com:acme/auth-service.git
-        default_branch: main
+    depends_on:
+      postgres: {condition: service_healthy}
+      search: {required: false}
+      auth/login: {}
+  postgres:
+    image: postgres:16
+    healthcheck:
+      test: ["CMD", "pg_isready"]
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `build.context` | string | Docker build context. Defaults to `.`. |
+| `build` | string or object | Builds this service from this repo's checkout, or from a git URL. The short form is the context (`build: .`), as in Compose. |
+| `image` | string | Runs a stock image instead. Exactly one of `build` and `image`. |
+| `build.context` | string | Docker build context: a path in this repo, defaulting to `.`, or a git URL `<url>#<ref>:<subdir>`. See [Building from a git URL](#building-from-a-git-url). |
 | `build.dockerfile` | string | Dockerfile path, relative to `context`. Defaults to `Dockerfile`. |
+| `build.dockerfile_inline` | string, optional | The Dockerfile itself, for a context that has none. Setting it and a `dockerfile` other than the default is a blocking warning. |
 | `build.args` | map of string→string | Build-time `--build-arg` values. |
 | `build.target` | string, optional | Which stage of a multi-stage Dockerfile to build — `docker build --target`. Omitted builds the final stage, as Docker does. |
 | `build.ssh` | bool | Forwards the **workspace owner's** ssh-agent into the build as BuildKit's `default` socket, for a Dockerfile doing `RUN --mount=type=ssh` — cloning a private sibling repo, a private Go module, a private Cargo registry. The same agent fghj already forwards to `git clone`. Defaults to `false`. Note the credential comes from the person who owns the workspace, never from this config: a repo cannot ask for a key. |
@@ -88,7 +106,7 @@ services:
 | `ports` | map of container-port→`#Port` | Declared container ports. The map key is the literal container port number (e.g. `"8080"`), published to Docker as-is — not a semantic label. See [Ports](#ports) below. |
 | `domain_scope` | `"run"` \| `"stable"` | Whether this service's derived domain includes the run id. Defaults to `"run"`. See [Node identity & domains](/concepts/node-identity-and-domains/#domain-derivation-one-formula-no-exceptions-two-zones). |
 | `environment` | map or list | Either `{KEY: value}` or a list of `"KEY=value"` strings — mirrors Docker Compose's own `environment` shape. Values can reference a sibling's domain with `${FGHJ_SERVICE_FQDN}`/`${FGHJ_SERVICE_FQDN_HTTP}` — see [Domain templates in `environment`](#domain-templates-in-environment) below. |
-| `env_file` | list of strings | `.env`-style files loaded *before* `environment` — Compose's `env_file`. Each path resolves against this repo's own checkout root, same rule as `#Volume.host`. An explicit `environment` entry always wins over one loaded from a file. Also available on `kind: backing` — see its own field table below for how the path resolves there. Same `${FGHJ_SERVICE_FQDN}` templating as `environment` applies to loaded values too. |
+| `env_file` | list of strings | `.env`-style files loaded *before* `environment` — Compose's `env_file`. Each path resolves against this repo's own checkout root, same rule as `#Volume.host`. An explicit `environment` entry always wins over one loaded from a file. Resolves the same way for an `image:` service. Same `${FGHJ_SERVICE_FQDN}` templating as `environment` applies to loaded values too. |
 | `platform` | string, optional | Pins the platform (`os[/arch[/variant]]`, e.g. `linux/arm64`) passed to `docker build --platform`, for cross-compiling this service's image to a specific architecture. Unset (the default) builds for the host's own platform. |
 | `command` | list of strings | Overrides the image's default `CMD`, Compose-`command`-style. Empty (the default) leaves the image's own `CMD`/`ENTRYPOINT` untouched. |
 | `restart` | `"no"` \| `"always"` \| `"on-failure"` \| `"unless-stopped"` | Compose-equivalent restart policy. Defaults to `"no"` — a stopped container stays stopped; `fghj daemon`'s own `ensure_running` is the usual way a container comes back, not Docker's own restart machinery. |
@@ -104,7 +122,8 @@ services:
 | `healthcheck` | `#Healthcheck`, optional | A Docker `HEALTHCHECK`. See [Healthcheck & start order](#healthcheck--start-order) below. |
 | `volumes` | list of `#Volume` | Bind mounts and named volumes. See [Volumes](#volumes) below. |
 | `additional_hosts` | list of `#HostAlias` | Extra literal hostname aliases this service also answers on, alongside its derived domain — each one optionally wildcarded to also match every subdomain of it. See [Additional hosts](#additional-hosts) below. |
-| `dependencies` | list of `#Dependency` | This service's baseline dependencies — always pulled in regardless of which flow is selected. See [Dependencies](#dependencies) below. |
+| `depends_on` | list or map | What this service needs, to start or at runtime. See [`depends_on`](#depends_on) below. |
+| `run` | `"on_start"` \| `"once"` | Makes this service a task. See [Tasks](#tasks). |
 
 ## Ports
 
@@ -150,24 +169,24 @@ environment:
 | Token | Resolves to |
 |---|---|
 | `${FGHJ_SERVICE_FQDN}` | This node's own **raw** domain (`*.fghj.raw.internal`) — direct, in-network-only, resolved straight to the real container IP. This is the default because it's what nearly every real caller needs: a database connection string, an internal API call, a raw port that isn't HTTP(S) at all. |
-| `${FGHJ_SERVICE_FQDN:name}` | The **raw** domain of whichever sibling is declared with that leaf `name`, same lookup rules as below. |
-| `${FGHJ_SERVICE_FQDN_HTTP}` / `${FGHJ_SERVICE_FQDN_HTTP:name}` | The same lookups, but resolving to the **http** domain (`*.fghj.internal`) instead — proxied, TLS-terminated, the same address in or out of the run's docker network. Use this only when something specifically needs that proxied identity on purpose, e.g. minting a presigned URL meant to be handed to something outside the network. Reachable automatically from inside a container too — see [Reaching the TLS proxy from inside a container](#reaching-the-tls-proxy-from-inside-a-container) below. |
-| `${FGHJ_SERVICE_FQDN:a::b::name}` / `${FGHJ_SERVICE_FQDN_HTTP:a::b::name}` | Same lookup, but disambiguates a leaf `name` that matches more than one sibling by also qualifying it with as many of its owning segments as needed, root-first — the same segments a node's id is built from leaf-first (`{name}.{owner-id}`), just written in the opposite, more-readable order. E.g. `aikifactory::aikifactory::minio` reaches the same node as the id `minio.aikifactory.aikifactory` (before the workspace suffix). |
+| `${FGHJ_SERVICE_FQDN:name}` | The **raw** domain of service `name` in this same repo. |
+| `${FGHJ_SERVICE_FQDN:alias/name}` | The **raw** domain of service `name` in the repo included as `alias`. This is the one place a file may name another repo's service: an address is the network contract, and production config has it too. |
+| `${FGHJ_SERVICE_FQDN_HTTP}` / `${FGHJ_SERVICE_FQDN_HTTP:…}` | The same lookups, but resolving to the **http** domain (`*.fghj.internal`) instead — proxied, TLS-terminated, the same address in or out of the run's docker network. Use this only when something specifically needs that proxied identity on purpose, e.g. minting a presigned URL meant to be handed to something outside the network. Reachable automatically from inside a container too — see [Reaching the TLS proxy from inside a container](#reaching-the-tls-proxy-from-inside-a-container) below. |
 
-The bare `name` lookup (with or without the `_HTTP` suffix) resolves to
-whichever sibling is declared with that leaf `name`: a `kind: backing`
-dependency owned by the same service as the node whose `environment` this
-is (a backing dependency can reference another backing dependency this way
-too, not just the owning service), or — if no such backing dependency
-matches — a service this node directly depends on via `kind: service`
-(same-repo or cross-repo).
+A reference is not an edge. It expands to a hostname, nothing more: it
+never makes anything wait, never pulls anything into a run, and isn't drawn
+in the graph. A service could just as well hardcode the hostname, and fghj
+couldn't see that, so the graph doesn't depend on how an address happened to
+be spelled. If a service needs another, say so in `depends_on`: required to
+start, or `required: false` for one it only calls at runtime. Starting a run
+that leaves out a `required: false` dependency of something it starts gets an
+advisory ("'web.shop' needs 'billing/api' at runtime, but this run doesn't
+start it").
 
-Can't reach a *named port* on a sibling — only its bare domain — and for
-the `kind: service` case, only a dependency this exact node declares
-itself, not a transitively-reached one. A malformed token (missing `}`) or
-a path that doesn't resolve to any sibling is left in the output as literal
-text rather than failing the run, so a typo is diagnosable from the
-container's own env instead of silently swallowed.
+A name that matches nothing — no such service, no such include, or no such
+service in the included repo — is a blocking warning. A repo that isn't
+cloned yet can't be checked, so its names pass until it is. You can't reach
+a *named port* this way, only the service's bare domain.
 
 ## Volumes
 
@@ -214,8 +233,8 @@ volumes:
 ### Setting a named volume
 
 Use `name` instead of `host` when you want Docker-managed storage that
-isn't tied to any host path — the everyday case is a `kind: backing`
-Postgres whose data needs to survive a container restart:
+isn't tied to any host path — the everyday case is a Postgres whose data
+needs to survive a container restart:
 
 ```yaml
 volumes:
@@ -254,9 +273,10 @@ volumes:
 ```
 
 Reach for it rarely. The usual reason to want it — several services behind
-one database — is already `kind: shared-backing`, which gives you one *node*,
-and therefore one container and one volume, without any cross-repo name
-coincidence being load-bearing. Note also that `shared: true` and
+one database — is already one service that the others `depends_on` (or,
+across repos, a flow the database's repo publishes), which gives you one
+*node*, and therefore one container and one volume, without any cross-repo
+name coincidence being load-bearing. Note also that `shared: true` and
 `shared: false` derive *different* names, so flipping it is a visible
 migration rather than a silent adoption of somebody else's data.
 
@@ -445,176 +465,210 @@ services:
 | `interval` / `timeout` / `start_period` | seconds, optional | Same semantics as Docker's `HEALTHCHECK` options of the same name (given in seconds here, not nanoseconds). |
 | `retries` | integer, optional | Consecutive failures before Docker marks the container `unhealthy`. |
 
-There's no separate `depends_on: {condition: ...}` field — a node that
-declares `healthcheck` is automatically waited on: any run that starts it
-blocks (up to two minutes) until Docker reports it `healthy` before moving
-on to the nodes that depend on it. A node with no `healthcheck` behaves
-exactly as before — dependents proceed as soon as it's started, not
-waiting on anything. This applies both to starting a named run from scratch
-and to topping up the default environment for a flow; containers within a
-run always start in dependency order (`depends-on`/`owns` edges), not
-workspace-scan order.
+A node that something in the run can't start without is waited on before
+its dependents start: until Docker reports it `healthy` (up to two minutes)
+if it declares a `healthcheck`, and as soon as it has started otherwise. A
+[task](#tasks) is always waited on until it exits. A node nothing in the run
+requires isn't waited on at all, healthcheck or not, so it never holds up the
+rest of the run. `condition` in `depends_on` doesn't change how long anything
+waits; it states what the dependent expects, and fghj refuses a start where
+that isn't true (see [`depends_on`](#depends_on)). Containers within a run
+start in the order of their required `depends_on` edges, not workspace-scan
+order.
 
-## Dependencies
+## `depends_on`
 
-Four kinds, distinguished by `kind`:
-
-| `kind` | What it is |
-|---|---|
-| [`service`](#kind-service) | Another self-describing repo (or a sibling service in this one). Resolved by cloning. |
-| [`backing`](#kind-backing) | An image this service provisions for itself — a database, cache, broker. One per declaring service. |
-| [`shared-backing`](#kind-shared-backing) | A reference to a `backing` already owned by another service. Binds to that instance instead of starting a second. |
-| [`task`](#kind-task) | A container that runs to completion and stays exited — a migration or seed. |
-
-### `kind: service`
-
-A dependency on another self-describing service repo, resolved by
-cloning it into the workspace (folder named after the repo URL's last
-path segment).
+Compose's syntax. Every edge between two services is declared here, and
+each entry is one of two kinds: **needed to start** (`required: true`, the
+default) or **needed at runtime** (`required: false`).
 
 ```yaml
-# target repo declares one service: omit `services`, it's used automatically
-- kind: service
-  repo: git@github.com:acme/notifications-service.git
-  default_branch: main
+depends_on: [postgres, redis]          # short form
 
-# target repo declares several: one block per repo still, name each one you need
-- kind: service
-  repo: git@github.com:acme/payments-service.git
-  default_branch: main
-  services: [payments-api, payments-worker]
+depends_on:                            # long form
+  postgres: {condition: service_healthy}
+  migrate: {condition: service_completed_successfully}
+  search: {required: false}
+  billing/db: {condition: service_healthy}
+  billing: {}
 ```
 
 | Field | Description |
 |---|---|
-| `repo` | Git URL — `git@…`, `https://…`, or `ssh://…`. |
-| `services` | Which of the target repo's `services` this depends on — a list, so depending on several from the same repo is still one block (`repo`/`default_branch` stated once), not one block per service. Omit when that repo declares exactly one service (used automatically); required when it declares more than one. Each name gets its own `depends-on` edge; a name that doesn't exist there is a warning, not a hard `fghj validate` failure. |
-| `default_branch` | The branch fghj clones this repo at the first time it fetches it — `git clone --branch <it> --single-branch`, defaulting to `main`. Its purpose is that a dependency you've never had on this machine arrives *ready to run*: you're declaring the edge, so you're the one who knows which branch of that repo works against yours. Read once, at clone time. Re-pulling a checkout that already exists only verifies its `origin` and never moves it off the branch you're on, so this is a starting point and never a live pin — see [Branch ownership model](/concepts/branch-ownership-model/). |
+| `condition` | `service_started` (the default, as in Compose), `service_healthy` or `service_completed_successfully`. `service_healthy` needs the target to declare a `healthcheck`. `service_completed_successfully` makes the target a [task](#tasks), and then everything that waits on it has to wait that way. A mismatch is a blocking warning. |
+| `required` | Defaults to `true`. See the table below. |
 
-### `kind: backing`
+| | `required: true` (default): needed to start | `required: false`: needed at runtime |
+|---|---|---|
+| Graph | solid line | dashed line |
+| Which runs start it | every run that starts this service | only a run whose flows list it |
+| Order and waiting | starts first; this service waits until it's ready | none |
+| It fails to start | this service isn't started: "blocked by …", transitively | nothing |
+| It's recreated or stopped | this service is restarted or stopped with it | nothing |
+| A cycle | blocking: none of them can start | can't happen |
+| Not in the run | can't happen | an advisory before start |
 
-A dependency on a backing service — a datastore, broker, or similar —
-provisioned directly from an image. Nothing to clone, no `.fghj.yaml` of
-its own. The declaring service *owns* this instance; other services can
-bind to the same instance via `kind: shared-backing` below.
+Ask one question: **will this service crash, or start broken, if that one
+isn't there when it boots?** A database the connection pool opens at startup
+is required. A webhook receiver nobody calls until a user clicks something
+isn't. `condition: service_completed_successfully` with `required: false` is
+a blocking warning, since "must have finished" only makes sense before a
+start; any other condition on a `required: false` entry is ignored, with an
+advisory.
+
+A `${FGHJ_SERVICE_FQDN:…}` hostname isn't an edge. It must name an existing
+service, but it orders, waits on and starts nothing: declare the dependency
+in `depends_on` if there is one. See
+[Dependency kinds](/concepts/dependency-kinds/).
+
+What an entry can name:
+
+| Entry | Means |
+|---|---|
+| `postgres` | A service in this repo. |
+| `billing/db` | A **flow** of the repo included as `billing`: waits on every member of that flow, and starting this service starts them. |
+| `billing` | All of the repo included as `billing` — its own services. |
+
+Across repos, `depends_on` only ever names flows, never services: another
+repo's services are its internals, and its flows are what it publishes.
+`billing/api` where `api` is a service is a blocking warning that lists the
+flows `billing` does publish. If it publishes none, name `billing` and get
+all of it — and ask its team to publish something smaller. Waiting on another
+repo with `service_completed_successfully` is refused too: a flow is waited
+on until it's up, and it never completes.
+
+`depends_on` describes production, so it's the same in every run. A cycle
+of required entries is a blocking warning: each service waits for the next,
+so none of them can start. Services that call each other at runtime mark one
+side, or both, `required: false`.
+
+## Building from a git URL
+
+To run someone else's code with your own definition (an open-source service
+that ships no Dockerfile, say), give `build.context` a git URL, Compose's
+way:
 
 ```yaml
-- kind: backing
-  name: postgres
-  image: postgres:16
-  ports: ["5432"]
-  environment:
-    POSTGRES_PASSWORD: dev
-  domain_scope: run
-  command: ["mysqld", "--sql_mode=NO_ENGINE_SUBSTITUTION"]
-  platform: linux/amd64
-  env_file:
-    - .env.postgres
-  restart: unless-stopped
-  healthcheck:
-    test: ["CMD", "pg_isready"]
-    interval: 5
-    retries: 5
-  volumes:
-    - name: pgdata
-      container: /var/lib/postgresql/data
+services:
+  geocoder:
+    build:
+      context: https://github.com/acme/geocoder.git#v2.3.1:server
+      dockerfile_inline: |
+        FROM golang:1.23 AS build
+        WORKDIR /src
+        COPY . .
+        RUN go build -o /geocoder ./cmd/geocoder
+        FROM gcr.io/distroless/base
+        COPY --from=build /geocoder /geocoder
+        ENTRYPOINT ["/geocoder"]
+    ports:
+      "8080": {primary: true}
 ```
 
-| Field | Description |
-|---|---|
-| `name` | Lowercase label, unique among this service's own backing dependencies. |
-| `image` | Docker image reference. |
-| `ports` | Either a bare list of container ports to publish (`["5432"]`), or the same `{port: #Port}` map form `service.ports` uses (see [Ports](#ports) above) — e.g. `minio`'s S3 API and web console can each get their own `primary`/`name`/`wildcard`/`host_port` this way, exactly like a service's own ports. |
-| `environment` | Same shape as `service.environment`. |
-| `domain_scope` | `"run"` (default) or `"stable"` — same semantics as `service.domain_scope`. |
-| `command` | Same shape as `service.command` — overrides the image's default `CMD`, e.g. to pass extra startup flags to a stock database image. |
-| `platform` | Pins the image's platform (`os[/arch[/variant]]`, e.g. `linux/amd64`) — for a backing image only published for one architecture, so Docker's platform-aware pull/lookup gets the right one. |
-| `env_file` | Same shape as `service.env_file`, but resolved differently: since a backing dependency has no checkout of its own, each path resolves against the *declaring* service's checkout root instead — the same rule Compose uses, resolving `env_file` against the compose file's own directory regardless of `build` vs `image`. |
-| `restart` / `stop_signal` / `stop_grace_period` / `user` / `working_dir` / `labels` / `cap_add` / `cap_drop` / `privileged` / `extra_hosts` / `healthcheck` / `debug` | Same shape and meaning as the equally-named `service.*` fields above — they come from one shared `#RunOptions` definition, not two parallel ones. A stock database image is the most likely place you'll actually want `stop_grace_period`. |
-| `volumes` | Same shape as `service.volumes` — see [Volumes](#volumes). A volume's own `scope` (default `"run"`) governs its lifecycle independently of this backing dependency's `domain_scope`; a named volume here (like `pgdata` above) is what makes the data survive a restart. |
+- **`<url>#<ref>:<subdir>`.** `ref` is a branch, tag or commit; without it,
+  the remote's default branch. `subdir` is optional and must stay inside the
+  clone. A context is a URL when it starts with `https://`, `http://`,
+  `ssh://`, `git@` or `file://`.
+- **The service is yours.** Its id, domain, flows and `depends_on` are this
+  repo's. The URL's own `.fghj.yaml`, if it has one, means nothing here; use
+  [`include`](#include) for that.
+- **Pull clones it, start never does.** The clone goes to
+  `<workspace>/.fghj/sources/<name>@<ref>`, made by Pull all, a flow's pull or
+  the node's Pull button, as the workspace owner. Starting a service whose
+  source isn't pulled fails with "source not pulled". An existing clone is
+  never fetched again: change the ref to move to a new version.
+- **The clone is a checkout.** Its HEAD drives drift, and the Drawer shows it
+  with its dirty state, so you can patch the code there while debugging. Its
+  `.git` is never sent to the build, and an inline Dockerfile travels in the
+  build context as `.fghj.Dockerfile`, so nothing is written into the clone.
+  The image is tagged `fghj/<id>:<ref>`.
 
-### `kind: shared-backing`
+## `include`
 
-A reference to a `kind: backing` dependency already owned by another
-service in the resolved graph — binds to that same running instance
-instead of provisioning a second one. The owning service can be in
-another repo, or a sibling service declared in this same repo's
-`services` map — e.g. a `vite` dev-server service and a `php` service
-built from the same repo, where `php` owns a `mysql` backing dependency
-that `vite` also needs to reach:
+The other repos this one talks to, by alias:
 
 ```yaml
-# cross-repo: omit `service` if the target repo only declares one
-- kind: shared-backing
-  repo: git@github.com:acme/payments-service.git
-  service: payments-api
-  name: postgres
-
-# same-repo: omit `repo` entirely — refers to a sibling service
-# declared in this repo's own `services` map
-- kind: shared-backing
-  service: php
-  name: mysql
+include:
+  billing: git@github.com:acme/billing.git
+  auth:
+    repo: git@github.com:acme/auth-service.git
+    default_branch: develop
 ```
 
-| Field | Description |
-|---|---|
-| `repo` | The Git URL of the repo that owns the backing dependency. Omit to reference a sibling service in this same repo instead. |
-| `service` | The name of the service (in `repo`, or in this repo if `repo` is omitted) that owns the backing dependency. |
-| `name` | Must match the owning service's declared backing dependency name exactly. A reference that doesn't resolve is flagged as a warning, not a hard failure — the owning repo might just not be cloned yet. |
+The alias is what `depends_on`, `flows` and hostnames use (`billing/db`,
+`${FGHJ_SERVICE_FQDN:billing/api}`). It can be anything, as long as it isn't
+also the name of a service or flow in this file.
 
-### `kind: task`
+fghj finds the repo by its git remote, so the folder it's checked out in can
+be called anything. A repo that isn't cloned yet shows up as one stub node
+and is cloned on pull. `default_branch` is the branch fghj clones it at the
+first time — `git clone --branch <it> --single-branch`, defaulting to `main`.
+It is read once, at clone time: re-pulling a checkout that already exists
+never moves it off the branch you're on, so this is a starting point and
+never a live pin — see [Branch ownership model](/concepts/branch-ownership-model/).
 
-A container that runs **to completion** and then stays exited — a migration,
-a seed, a fixture loader. This is a distinct node kind rather than a flag on a
-service, because `exited` means opposite things for the two: drift for a
-service, success for a task. See
+Including a repo means: when nothing narrower is asked for, start all of
+it too, as production does.
+
+## Tasks
+
+A task is a container that runs **to completion** and then stays exited —
+a migration, a seed, a fixture loader. It's an ordinary service; it's a task
+when it declares `run:`, or when something requires it with
+`condition: service_completed_successfully`:
+
+```yaml
+services:
+  api:
+    build: .
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+  migrate:
+    build: .                      # the same code, another command
+    command: ["./bin/migrate"]
+    depends_on:
+      db: {condition: service_healthy}
+  db:
+    image: postgres:16
+    healthcheck:
+      test: ["CMD", "pg_isready"]
+```
+
+`exited` means opposite things for a service and a task — drift for one,
+success for the other — which is why fghj has to know. See
 [Terminating nodes](/concepts/terminating-nodes/) for the full argument, and
 [tutorial chapter 3](/tutorial/03-a-migration/) for a worked example.
 
-```yaml
-# runs the owning service's own image with a different command
-- kind: task
-  name: migrate
-  command: ["./bin/migrate"]
-  after: ["db"]
-
-# runs a stock image instead
-- kind: task
-  name: seed
-  image: postgres:16
-  command: ["psql", "-v", "ON_ERROR_STOP=1", "-f", "/fixtures.sql"]
-  after: ["db"]
-  run: once
-  environment:
-    PGHOST: ${FGHJ_SERVICE_FQDN:db}
-  volumes:
-    - host: ./fixtures.sql
-      container: /fixtures.sql
-      read_only: true
-```
-
 | Field | Description |
 |---|---|
-| `name` | Lowercase label, unique among this service's own dependencies. The node id becomes `{name}.{owning service's id}`, same as a backing dependency. |
-| `command` | **Required, and non-empty** — a task *is* its command. Without one it would run the image's default `CMD`, which for an inherited image is the service's own long-running entrypoint: it would never exit, and the run would hang until the task budget expired. |
-| `image` | Optional. Omitted, the task runs the **owning service's own built image** — the usual case, since a migration is that service's code with a different command (`rake db:migrate`, `alembic upgrade head`). Give one only for a task that genuinely isn't the owner's code. The owner must declare a `build` if this is omitted, or there's nothing to inherit. |
-| `after` | Order this task after other dependencies of the *same* owning service, named as they name themselves: a sibling backing dependency's or task's `name`, or a sibling `kind: service` dependency's service name. Defaults to `[]`. Scoped to siblings deliberately — ordering against an arbitrary node elsewhere would be an edge between two repos that never agreed to one. An `after` naming no sibling is a blocking warning, not a dangling edge. |
-| `run` | `"on_start"` (the default) re-runs on every start and every top-up, which is what a migration wants — its command is expected to be idempotent. `"once"` runs it at most once per run, for the expensive or destructive case. See the note below on what `once` costs. |
-| `environment` / `volumes` | Same shape as the equally-named `service.*` fields, including `${FGHJ_SERVICE_FQDN}` templating. A bind mount's relative `host` path resolves against the **owning service's** checkout root, since a task has no checkout of its own. |
-| `restart` | Forced to `"no"`, not merely defaulted — a restart policy on a container whose whole purpose is to exit would restart it forever. |
-| `healthcheck` | **Not allowed.** Declaring one is a schema error rather than a silently ignored field: an exited container can never report Docker-`healthy`, which is precisely the hole this kind fills. |
-
-A task has no ports, no domain, and no restart policy. It's never routed to
-and never published.
+| `command` | **Required, and non-empty** — a task *is* its command. Without one it would run the image's default `CMD`, which for your own image is usually the long-running server: it would never exit, and the run would hang until the task budget expired. |
+| `run` | Declaring it makes the service a task. `"on_start"` (the default) re-runs on every start and every top-up, which is what a migration wants — its command is expected to be idempotent. `"once"` runs it at most once per run, for the expensive or destructive case. See the note below on what `once` costs. |
+| `restart` | Not allowed — a restart policy on a container whose whole purpose is to exit would restart it forever. |
+| `healthcheck` | Not allowed — an exited container can never report Docker-`healthy`. |
 
 **Ordering is load-bearing, not decoration.** A task isn't considered
 *started* until it has **finished**: fghj waits for the container to exit, and
-a task that exits non-zero — or never exits — fails the node. Both `start` and
-`ensure_running` stop on a node error, so a failed migration blocks everything
-downstream of it rather than letting the service come up against an
-unmigrated database. With the first example above, the start order is
-`db → migrate → api`.
+a task that exits non-zero — or never exits — fails the node. A failed node
+blocks everything that requires it, transitively, so a failed migration keeps
+the service from coming up against an unmigrated database. Everything else in
+the run keeps starting, and the run then reports what failed and what was
+blocked. Above, the start order is `db → migrate → api`.
+
+A task only one journey needs (a seed) declares `run: on_start` and its own
+`depends_on` (on the database it seeds), and is listed in that journey's flow.
+Nothing waits on it; it starts once what it needs is up.
+
+```yaml
+services:
+  seed:
+    build: .
+    command: ["./bin/seed"]
+    run: on_start
+    depends_on:
+      db: {condition: service_healthy}
+flows:
+  demo: [api, seed]
+```
 
 :::caution[What `run: once` actually means]
 "At most once per run" — full stop. It is **not** re-run when your code
@@ -628,33 +682,36 @@ is never treated as done, so a failure is always retryable.
 
 ## `flows`
 
+A flow is a named, public start list. Starting nothing in particular starts
+everything — every service here and in every included repo, as production
+does. A flow exists so you don't have to.
+
 ```yaml
 flows:
-  checkout:
-    description: End-to-end checkout journey
-    service: cart-service
-    dependencies:
-      - kind: service
-        repo: git@github.com:acme/payments-service.git
-        default_branch: main
+  checkout: [web, billing/pricing]
+  admin: [web, admin-api, checkout]
+  everything-billing: [web, billing]
 ```
 
-Any repo can declare zero or more flows — there's no distinguished "root"
-repo; see [Flat workspace model](/concepts/flat-workspace-model/). Each
-flow is a named user journey: a description plus an additional list of
-dependencies (any of the four kinds above) pulled in only when that flow is
-selected, on top of the service's own baseline `dependencies`.
+| Entry | Means |
+|---|---|
+| `web` | A service in this repo. |
+| `checkout` | Another flow in this repo. |
+| `billing/pricing` | A flow of the repo included as `billing`. |
+| `billing` | All of that repo, and everything it includes. |
 
-`service` says which of this repo's `services` the flow is rooted at.
-Omit it when the repo declares exactly one service (it's used
-automatically); required when it declares more than one, since there's
-no other way to tell which service's dependencies the flow is actually
-describing. An ambiguous or missing reference is a warning, not a hard
-`fghj validate` failure.
+A flow's id is `{repo folder}/{flow}` — `shop/checkout` — so two repos can
+both have a `checkout`. What starting it starts is its entries, expanded,
+plus everything they can't start without (`depends_on` entries that aren't
+`required: false`, followed across repos). Flows may reference each other,
+even in a circle; each is expanded once.
 
-`dependencies` is required, but may be empty. `dependencies: []` is a legal
-flow: it names a journey that needs nothing beyond the root service's own
-baseline graph, and selecting it still does something — a flow selection is
-a highlight, so it dims everything outside that subgraph (see
-[Fog-of-war visibility](/concepts/fog-of-war-visibility/)). Omitting the
-key entirely is a different matter and is refused.
+As with `depends_on`, a flow never names another repo's services. An entry
+that names nothing is a blocking warning, reported once, by the flow it's
+written in. A flow may be empty (`nothing: []`); it still exists, so naming
+it isn't a typo.
+
+**Who writes what.** A repo publishes flows for the slices of itself that
+make sense on their own (`pricing`, `db`). A repo that uses another names
+those flows. Neither has to know the other's internals, and the cost of a
+repo publishing too little is starting too much — slow, never broken.

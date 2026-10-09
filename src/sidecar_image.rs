@@ -117,6 +117,8 @@ async fn build_locally(docker: &Docker, tag: &str) -> Result<()> {
         &docker::BuildOpts {
             context_dir: &scratch,
             dockerfile: "Dockerfile",
+            dockerfile_inline: None,
+            skip_git_dir: false,
             tag,
             platform: None,
             args: &BTreeMap::new(),

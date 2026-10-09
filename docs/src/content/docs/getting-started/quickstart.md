@@ -90,7 +90,7 @@ for exactly how that domain was derived.
 ## Where next
 
 The [tutorial](/tutorial/) builds the same thing from an empty directory and
-keeps going: a database as a backing dependency, a migration that gates it, a
+keeps going: a database next to your service, a migration that gates it, a
 second repo, flows, and attaching a debugger to a running container.
 
 If something didn't come up the way this page describes, run

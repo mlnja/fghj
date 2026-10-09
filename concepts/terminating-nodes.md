@@ -40,75 +40,71 @@ distinction the runtime state itself carries can. That is
 it is ever decided.
 
 The same observation rules out expressing a task as a service with a clever
-`restart` policy or a `healthcheck`: `TaskConfig` has neither field, because
+`restart` policy or a `healthcheck`: a task may declare neither, because
 a restart policy on a container whose purpose is to exit would restart it
 forever, and a container that has exited can never report healthy.
 
 ## The language
 
-A task is a third `#Dependency` variant, declared **inline by the service
-that needs it** — the same shape as a backing dependency, and for the same
-reason: a migration belongs to the service whose schema it migrates, not to
-the workspace. There is no top-level `tasks:` map.
+A task is an ordinary `services:` entry. What makes it one is either
+Compose's own idiom for a one-shot container, something in its repo requiring
+it with `condition: service_completed_successfully`, or declaring `run:`
+(`resolver::visit::mark_tasks`).
 
 ```yaml
 services:
   api:
-    build:
-      context: .
-    dependencies:
-      - kind: backing
-        name: db
-        image: postgres:16
-        healthcheck: { test: ["CMD", "pg_isready"] }
-      - kind: task
-        name: migrate
-        # `image:` omitted => runs api's own built image
-        command: ["./bin/migrate"]
-        after: ["db"]
+    build: .
+    depends_on:
+      db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+  migrate:
+    build: .                     # api's own code, another command
+    command: ["./bin/migrate"]
+    depends_on:
+      db: {condition: service_healthy}
+  db:
+    image: postgres:16
+    healthcheck: { test: ["CMD", "pg_isready"] }
 ```
 
+- **The waiter's condition is the definition**, so the two readings can't
+  disagree. Waiting on a task with any other condition is a blocking
+  warning, and so is waiting on another repo with
+  `service_completed_successfully` — a task is its own repo's business.
 - **`command` is required and non-empty.** A task *is* its command. One
   without would run the image's default `CMD` — typically the service's own
   long-running entrypoint — and never exit, hanging the run until the task
-  budget expired. CUE rejects it (`[_, ...]`) and so does the resolver, which
-  is the enforcing boundary (see [[AUDIT]] B8).
-- **`image` is optional.** Omitted, the task inherits the owning service's
-  `build` and runs the service's own image — the common case, since a
-  migration is usually this service's code with a different command. A task
-  with neither an `image` nor an inheritable `build` is a blocking warning.
-  The image is built under the **owner's** tag, not one of its own: the two
-  builds are identical by construction, and a task starts *before* its owner,
-  so a separate tag would build the same image twice per run under two names.
-- **`after` orders a task against its owner's other dependencies.** Entries
-  name sibling dependencies of the same service, resolved in a post-pass
-  (`resolve_universe`) once every node exists, because which spelling of an
-  id is right depends on what kind the sibling turns out to be. An `after`
-  naming no sibling is a blocking warning rather than a dangling edge.
-- **A task has no ports, no domain, no healthcheck and no restart policy.**
-  It is never routed to and never published.
+  budget expired. The resolver is the enforcing boundary (see [[AUDIT]] B8).
+- **`build: .` is the usual case**, since a migration is usually this
+  repo's code with a different command. It builds under the task's own tag;
+  Docker's layer cache makes the second build of the same context free
+  (`runs::node_spec`).
+- **A task has no healthcheck and no restart policy** — declaring either is
+  blocking.
+- **A task nothing waits on declares `run:`.** A seed only one journey needs
+  has `run: on_start`, its own `depends_on`, and is listed in that journey's
+  flow. Before `run:` made a task, such a container was read as a service and
+  showed as crashed once it exited. See [[dependency-kinds]].
 
-## Ordering: what makes "after" mean anything
+## Ordering
 
-`resolver::visit_task_dependency` emits an `owns` edge owner → task, and one
-`after` edge task → sibling for each `after` entry. For every edge kind, `to`
-is the dependency and `from` the dependent (`runs::topological_start_order`),
-so those two edges say: **the task starts after its `after` targets and
-before its owner.** The worked case from the example above orders as
-`db → migrate → api`.
+A task is ordered by `depends_on` edges like everything else: `to` is the
+dependency and `from` the dependent (`runs::topological_start_order`). The
+example orders as `db → migrate → api`.
 
 Ordering alone would be decoration, though. What makes it load-bearing is
 that `start_node` does not consider a task *started* until it has
 **finished**: it waits for the container to exit, and a task that exits
-non-zero — or never exits — fails the node. Both `start` and `ensure_running`
-stop their start loop on a node error, so a failed migration blocks
-everything downstream of it instead of letting the service come up against
-an unmigrated database.
+non-zero — or never exits — fails the node. A failed node blocks everything
+that requires it, transitively (`runs::order::StartOutcomes`), so a failed
+migration keeps the service from coming up against an unmigrated database.
+The rest of the run keeps starting; see [[dependency-kinds]].
 
-`after` also participates in cycle detection (`resolver::cycles`). It has to:
+A cycle of required `depends_on` edges is blocking (`resolver::cycles`). It has to be:
 `topological_start_order` deliberately *cannot* fail (on a cycle it appends
-the leftovers in stable sorted order so a run still starts something), so an
-`after` cycle would otherwise pass silently and produce an arbitrary order.
+the leftovers in stable sorted order so a run still starts something), so a
+cycle would otherwise pass silently and produce an arbitrary order.
 
 ## Re-run policy: `on_start` by default
 

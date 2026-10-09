@@ -1,13 +1,14 @@
 ---
 title: 5. Flows
-description: Naming a user journey, and why selecting one highlights the graph instead of filtering it.
+description: Starting less than everything — flows as public start lists, and why selecting one highlights the graph instead of filtering it.
 sidebar:
   order: 5
 ---
 
 Five nodes is already more than fits in your head at a glance, and a real
-workspace has fifty. A **flow** is a name for one user journey through the
-graph, and the list of dependencies that journey needs.
+workspace has fifty, across a dozen repos. Starting all of it works — it's
+what production runs — but it's slow and heavy, and most days you're working
+on one journey. A **flow** is a named list of what to start for one.
 
 ## Declare one
 
@@ -16,84 +17,86 @@ of `services:`, not nested inside it:
 
 ```yaml
 flows:
-  browse-and-buy:
-    description: A shopper lands on the storefront, browses the catalog, and checks out.
-    dependencies:
-      - kind: service
-        repo: https://github.com/you/catalog.git
+  browse-and-buy: [web]
 ```
 
-`description` is required, and it's the point: the flow name is for the
-picker, the description is for the colleague who has to work out whether
-this is the journey they're debugging.
+That's a whole flow: a name and a list. Starting it starts `web`, and
+everything `web` can't start without — every `depends_on` entry not marked
+`required: false`, followed all the way down, across repos too. You never
+list the closure by hand:
 
-`dependencies` must have at least one entry. A flow with nothing in it
-describes no journey, so the schema refuses it rather than letting you
-create a label that means nothing.
+```
+service   id=web.storefront      flows=['storefront/browse-and-buy']
+backing   id=db.storefront       flows=['storefront/browse-and-buy']
+task      id=migrate.storefront  flows=['storefront/browse-and-buy']
+service   id=api.catalog         flows=['storefront/browse-and-buy']
+backing   id=cache.catalog       flows=['storefront/browse-and-buy']
+```
 
-The flow's dependency list uses the exact same `#Dependency` shapes a
-service's does — `kind: service`, `kind: backing`, `kind: task`,
-`kind: shared-backing`. Here it names the same catalog repo `web` already
-depends on, which is the common case: the journey needs what the service
-baseline needs. You get one node, now tagged with the flow — not a second
-copy of it.
+The flow's id is `storefront/browse-and-buy`: flows are named by the repo
+that declares them, so another repo's `browse-and-buy` is a different
+flow.
 
-Where a flow earns its keep is the dependency that *isn't* in the baseline.
-An end-to-end checkout journey might need a payments sandbox and a webhook
-receiver that nobody needs for ordinary local work on the storefront. Put
-those in the flow, and they're pulled and started when someone is working
-that journey — and not otherwise.
+Starting **no** flow starts everything — every service here and in every
+repo included, all the way down. That's always correct, because it's
+production. A flow is only ever a way to start less.
 
-## Any repo may declare one
+## Publish one
 
-There's no privileged repo. `catalog` could declare its own flow tomorrow,
-rooted at its own service, without asking anyone. Whichever repo you hand to
-`fghj graph` is the entry point; every flow found anywhere in the workspace
-shows up in the picker.
-
-If a repo declares more than one service, a flow has to say which of them
-it's rooted at:
+Everything is in the flow here, which makes for a dull demo — and the reason
+is `depends_on: catalog`: `web` waits on all of `catalog`. Suppose `catalog`
+grows an `admin` service with its own database, which `web` never talks to.
+`storefront` can't trim it — it can't name `catalog`'s services. `catalog`
+can. In `catalog/.fghj.yaml`:
 
 ```yaml
 flows:
-  browse-and-buy:
-    service: web
-    description: …
+  browse: [api]
 ```
 
-Omit it and the single service is used. Omit it with two services declared
-and you get a blocking warning naming your options:
+That says "for browsing, start `api`" (and so, through `api`'s own
+`depends_on`, its cache). It's `catalog`'s statement about `catalog`, next
+to the code it describes, on the same branch. Now `storefront` can wait on
+just that:
 
-```
-'catalog' declares multiple services (admin, api); specify which one with `service:`
-```
-
-Note that the field is `service:` (one name — a flow has one root), while
-the field on a `kind: service` *dependency* is `services:` (a list — one
-block can want several services from the same repo). The warning names
-whichever one applies to the block you're editing.
-
-## What resolution adds
-
-Resolve again, and every node that's part of the journey has picked up a
-tag:
-
-```
-service   id=web.storefront         flows=['browse-and-buy']
-backing   id=db.web.storefront      flows=['browse-and-buy']
-task      id=migrate.web.storefront flows=['browse-and-buy']
-service   id=api.catalog            flows=['browse-and-buy']
-backing   id=cache.api.catalog      flows=['browse-and-buy']
+```yaml
+services:
+  web:
+    depends_on:
+      # ...
+      catalog/browse: {}
 ```
 
-Edges carry the same tag. Membership is computed by walking outward from the
-flow's root service over `owns` and `depends-on` edges — so you never list
-the transitive closure by hand. Declaring the catalog dependency dragged in
-its Redis cache automatically, because `api.catalog` owns it.
+and `admin` stays stopped when you start `storefront/browse-and-buy`. Each
+fact is written once, by the repo that can know it: `catalog` knows what
+browsing needs from `catalog`; `storefront` knows that its journey browses.
+If `catalog` later needs a search index for browsing, it adds it to
+`browse`, and `storefront` picks it up without changing a line.
 
-Everything is in the flow here, which makes for a dull demo but a real
-point: membership is derived, not declared. Add an admin tool to the
-workspace that nothing in this journey depends on and it stays untagged.
+## What a flow can list
+
+| Entry | Means |
+|---|---|
+| `web` | A service in this repo. |
+| `checkout` | Another flow in this repo. |
+| `catalog/browse` | A flow `catalog` publishes. |
+| `catalog` | All of `catalog`, and everything it includes. |
+
+Never `catalog/api` — the same rule as `depends_on`, and the same blocking
+warning, listing the flows `catalog` does publish. A flow can name flows
+that name it back, even across repos; each is expanded once.
+
+A flow is for what a journey *uses sometimes*. A service that's only needed
+on some paths — a search index for one page — is `required: false` in its
+dependent's `depends_on`: started when a flow lists it, left alone
+otherwise, and never waited on. It's drawn dashed in the graph.
+
+If you start a flow that leaves out a `required: false` dependency of
+something it starts, fghj says so before it starts:
+
+```
+'web.storefront' needs 'search.storefront' at runtime, but this run doesn't start it
+```
 
 ## Highlight, not filter
 
@@ -115,7 +118,7 @@ the one you didn't expect to be there. See
 Two buttons in the header act on the selected flow rather than the whole
 workspace:
 
-- **Pull flow** — clone every not-yet-downloaded repo in this flow. On a
+- **Pull flow** — clone every not-yet-downloaded repo this flow would start. On a
   large workspace this is the difference between fetching four repos and
   fetching forty.
 - **Run flow** — ensure this flow's containers are running, and leave

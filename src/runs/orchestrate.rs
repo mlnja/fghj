@@ -1,12 +1,12 @@
 //! Whole-run orchestration: starting a run and bringing it up to date.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
 
 use super::health::RunBudget;
 use super::naming::{DEFAULT_RUN_ID, resolve_run_id};
-use super::order::topological_start_order;
+use super::order::{StartOutcomes, topological_start_order, waited_on};
 use super::progress::{ProgressSink, RunProgress, report};
 use super::spec::spec_hash;
 use super::start_node::StartContext;
@@ -40,6 +40,13 @@ use super::registry::RunRegistry;
 /// `persistence::rehydrate` drops any container Docker no longer has, so a
 /// task whose container was removed out-of-band runs again rather than being
 /// assumed finished on the strength of a record of it.
+/// Said, not refused — see `Graph::start_advisories`.
+fn log_start_advisories(graph: &Graph, target_ids: &[String]) {
+    for advisory in graph.start_advisories(target_ids) {
+        eprintln!("fghjd: {advisory}");
+    }
+}
+
 fn task_already_done(node: &Node, prior: Option<&ContainerInfo>) -> bool {
     node.kind == "task"
         && node.run_policy.as_deref() == Some("once")
@@ -91,19 +98,62 @@ fn top_up_may_skip(
     alive && fresh_hash.is_none_or(|hash| hash == existing.desired.config_hash)
 }
 
+/// The first of `node`'s requirements that this top-up recreated, if any —
+/// a reason to restart `node` even though it's alive and unchanged: it may
+/// be holding connections to the container that just went away.
+fn recreated_requirement<'a>(
+    graph: &'a Graph,
+    node: &Node,
+    recreated: &HashSet<String>,
+) -> Option<&'a str> {
+    graph
+        .edges
+        .iter()
+        .filter(|e| e.needed_to_start() && e.from == node.id)
+        .map(|e| e.to.as_str())
+        .find(|to| recreated.contains(*to))
+}
+
 impl RunRegistry {
+    /// Narrates a node a start skipped because something it can't start
+    /// without failed.
+    pub(super) async fn record_blocked(&self, run_id: &str, node_id: &str, by: &str) {
+        self.begin_event_cycle(run_id, node_id, "start").await;
+        self.record_event(
+            run_id,
+            node_id,
+            "start",
+            "blocked",
+            "error",
+            Some(format!(
+                "blocked by {by}: it failed, and this can't start without it"
+            )),
+        )
+        .await;
+    }
+
     /// `prior` is whatever the reducer already had for this run id, if
     /// anything — passed in rather than looked up, since the reducer owns
     /// the only copy. A named run always starts clean, so an existing one
     /// is torn down first.
+    ///
+    /// A node that fails blocks what can't start without it, and nothing
+    /// else: the rest of the run keeps starting, and the error carries what
+    /// did come up (`RunCreateError::partial`), the same as
+    /// `ensure_running`. Only failing to set up the network or the sidecar
+    /// rolls the run back, since nothing can start without them.
     pub async fn start(
         &self,
         graph: &Graph,
         spec: RunSpec,
         prior: Option<&RunState>,
         progress: Option<&ProgressSink>,
-    ) -> Result<RunState> {
+    ) -> Result<RunState, RunCreateError> {
         let run_id = resolve_run_id(spec.run_id.as_deref());
+        // Before anything is torn down or created: an unknown flow is a typo,
+        // not a request for an empty run.
+        let target_ids = graph.start_ids(spec.flow.as_deref())?;
+        log_start_advisories(graph, &target_ids);
 
         // starting an already-running run replaces it cleanly
         if let Some(prior) = prior {
@@ -120,24 +170,15 @@ impl RunRegistry {
             Ok(v) => v,
             Err(e) => {
                 docker::remove_network(&self.docker, &network).await;
-                return Err(e);
+                return Err(e.into());
             }
         };
 
         let node_map: HashMap<&str, &Node> =
             graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-        let target_ids: Vec<String> = graph
-            .nodes
-            .iter()
-            .filter(|n| n.kind != "flow")
-            .filter(|n| {
-                spec.flow
-                    .as_deref()
-                    .is_none_or(|flow| n.flows.iter().any(|f| f == flow))
-            })
-            .map(|n| n.id.clone())
-            .collect();
         let ordered_ids = topological_start_order(&target_ids, &graph.edges);
+        let waited = waited_on(&target_ids, &graph.edges);
+        let mut outcomes = StartOutcomes::new(&target_ids, &graph.edges);
 
         let mut containers = BTreeMap::new();
         // One budget for the whole run, not one per node: nodes start
@@ -147,6 +188,11 @@ impl RunRegistry {
         let budget = RunBudget::default();
         for node_id in &ordered_ids {
             let node = node_map[node_id.as_str()];
+            if let Some(by) = outcomes.blocked_by(node_id).map(str::to_string) {
+                self.record_blocked(&run_id, node_id, &by).await;
+                outcomes.block(node_id, &by);
+                continue;
+            }
             match self
                 // A fresh run start never halts for a debugger: the
                 // switch is per container and this container does not
@@ -160,6 +206,7 @@ impl RunRegistry {
                         sidecar_ip: Some(&sidecar_ip),
                         budget: &budget,
                         debug_wait: false,
+                        wait_ready: waited.contains(node_id),
                     },
                 )
                 .await
@@ -180,14 +227,7 @@ impl RunRegistry {
                     );
                     containers.insert(info.node_id.clone(), info);
                 }
-                Err(e) => {
-                    for c in containers.values() {
-                        docker::stop_and_remove(&self.docker, &c.desired.container_name).await;
-                    }
-                    docker::stop_and_remove(&self.docker, &sidecar_container_name).await;
-                    docker::remove_network(&self.docker, &network).await;
-                    return Err(e);
-                }
+                Err(e) => outcomes.fail(node_id, format!("{e:#}")),
             }
         }
 
@@ -199,7 +239,13 @@ impl RunRegistry {
             sidecar_ip: Some(sidecar_ip),
             ..Default::default()
         };
-        Ok(state)
+        match outcomes.error() {
+            None => Ok(state),
+            Some(message) => Err(RunCreateError {
+                message,
+                partial: Some(Box::new(state)),
+            }),
+        }
     }
 
     /// Tops up the single default environment so every node reachable from
@@ -213,14 +259,18 @@ impl RunRegistry {
     /// trusting the persisted `RunState`, since a container can be
     /// stopped/removed out-of-band between calls (see `refresh`).
     ///
-    /// Deliberately does *not* roll back the way `start` does when a node
-    /// fails partway: this tops up the one shared default environment, so
-    /// tearing down the three containers that came up because the fourth
-    /// didn't would destroy exactly the progress the per-node reporting
-    /// below exists to keep. Each node is reported through `progress` as it
-    /// comes up, and the error additionally carries the whole partial state
-    /// (`RunCreateError::partial`), so the containers stay visible and
-    /// routable instead of running unseen.
+    /// A node that fails blocks what can't start without it, and nothing
+    /// else, exactly as in `start`. Tearing down the three containers that
+    /// came up because the fourth didn't would destroy exactly the progress
+    /// the per-node reporting below exists to keep. Each node is reported
+    /// through `progress` as it comes up, and the error additionally carries
+    /// the whole partial state (`RunCreateError::partial`), so the
+    /// containers stay visible and routable instead of running unseen.
+    ///
+    /// A node this top-up recreates also restarts the alive nodes that
+    /// can't start without it, after it is ready again. A task doesn't
+    /// count: `on_start` tasks re-run on every top-up, and bouncing
+    /// everything behind them each time would make a top-up useless.
     pub async fn ensure_running(
         &self,
         graph: &Graph,
@@ -229,6 +279,8 @@ impl RunRegistry {
         progress: Option<&ProgressSink>,
     ) -> Result<RunState, RunCreateError> {
         let run_id = DEFAULT_RUN_ID.to_string();
+        let target_ids = graph.start_ids(flow)?;
+        log_start_advisories(graph, &target_ids);
         let network = format!("fghj-{}-{}", sanitize_label(&graph.workspace_name), run_id);
         docker::ensure_network(&self.docker, &network, &network).await?;
         let (sidecar_container_name, sidecar_ip) = self
@@ -247,14 +299,11 @@ impl RunRegistry {
 
         let node_map: HashMap<&str, &Node> =
             graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-        let target_ids: Vec<String> = graph
-            .nodes
-            .iter()
-            .filter(|n| n.kind != "flow")
-            .filter(|n| flow.is_none_or(|flow| n.flows.iter().any(|f| f == flow)))
-            .map(|n| n.id.clone())
-            .collect();
         let ordered_ids = topological_start_order(&target_ids, &graph.edges);
+        let waited = waited_on(&target_ids, &graph.edges);
+        let mut outcomes = StartOutcomes::new(&target_ids, &graph.edges);
+        // Services (not tasks) this top-up (re)started.
+        let mut recreated: HashSet<String> = HashSet::new();
         let budget = RunBudget::default();
 
         for node_id in &ordered_ids {
@@ -303,21 +352,32 @@ impl RunRegistry {
                 }
                 _ => None,
             };
-            if top_up_may_skip(alive, existing, fresh_hash.as_deref()) {
+            let restart_for = recreated_requirement(graph, node, &recreated);
+            if restart_for.is_none() && top_up_may_skip(alive, existing, fresh_hash.as_deref()) {
+                continue;
+            }
+            if let Some(by) = outcomes.blocked_by(node_id).map(str::to_string) {
+                // An alive container is left as it is: replacing it with
+                // nothing helps no one. Only a node this top-up would have
+                // started is reported as blocked.
+                if !alive {
+                    self.record_blocked(&run_id, node_id, &by).await;
+                    outcomes.block(node_id, &by);
+                }
                 continue;
             }
             if alive {
                 // Narrated, because from the outside a top-up bouncing
                 // something that was running fine looks like a bug.
-                self.record_event(
-                    &run_id,
-                    &node.id,
-                    "create",
-                    "recreating container: config changed since it was started",
-                    "ok",
-                    None,
-                )
-                .await;
+                let why = match restart_for {
+                    Some(dep) => format!(
+                        "restarting container: {dep} was recreated, and this can't start \
+                         without it"
+                    ),
+                    None => "recreating container: config changed since it was started".into(),
+                };
+                self.record_event(&run_id, &node.id, "create", &why, "ok", None)
+                    .await;
             }
             // A stopped-but-not-removed container from a previous run would
             // otherwise collide with create_container's fixed name.
@@ -337,18 +397,20 @@ impl RunRegistry {
                         // `.fghj.yaml` change doesn't silently drop a debug
                         // switch someone has on.
                         debug_wait: existing.is_some_and(|c| c.desired.debug_wait),
+                        wait_ready: waited.contains(node_id),
                     },
                 )
                 .await
             {
                 Ok(info) => info,
                 Err(e) => {
-                    return Err(RunCreateError {
-                        message: format!("{e:#}"),
-                        partial: Some(Box::new(state)),
-                    });
+                    outcomes.fail(node_id, format!("{e:#}"));
+                    continue;
                 }
             };
+            if node.kind != "task" {
+                recreated.insert(node.id.clone());
+            }
             // Reported after every node, not just at the end, so a later
             // failure — or a daemon that dies outright — doesn't lose track
             // of containers that did start successfully.
@@ -365,7 +427,13 @@ impl RunRegistry {
             state.containers.insert(info.node_id.clone(), info);
         }
 
-        Ok(state)
+        match outcomes.error() {
+            None => Ok(state),
+            Some(message) => Err(RunCreateError {
+                message,
+                partial: Some(Box::new(state)),
+            }),
+        }
     }
 }
 

@@ -17,7 +17,7 @@ it did not build.
 Declare the port your debugger listens on *inside* the container:
 
 ```yaml title=".fghj.yaml"
-version: "1.0"
+version: "2.0"
 services:
   api:
     build:

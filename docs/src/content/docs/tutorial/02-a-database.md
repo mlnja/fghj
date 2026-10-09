@@ -1,20 +1,21 @@
 ---
 title: 2. A database
-description: A backing dependency, the raw zone, healthcheck-gated start order, and a volume that survives.
+description: A backing service, depends_on, the raw zone, healthcheck-gated start order, and a volume that survives.
 sidebar:
   order: 2
 ---
 
-The storefront needs Postgres. Postgres is not code you own, has no
-`.fghj.yaml`, and nothing to build — it's a **backing dependency**: an
-image, provisioned by the service that needs it.
+The storefront needs Postgres. Postgres is not code you own and has
+nothing to build — it's a **backing service**: just an image. As in Docker
+Compose, it's declared next to `web` in `services:`, and `web` says it
+`depends_on` it.
 
 ## Declare it
 
-In `storefront/.fghj.yaml`, add a `dependencies:` list to the `web` service:
+In `storefront/.fghj.yaml`:
 
 ```yaml
-version: "1.0"
+version: "2.0"
 
 services:
   web:
@@ -27,33 +28,36 @@ services:
       PORT: "3000"
       OWN_URL: https://${FGHJ_SERVICE_FQDN_HTTP}
       DATABASE_URL: postgres://shop:dev@${FGHJ_SERVICE_FQDN:db}:5432/shop
-    dependencies:
-      - kind: backing
-        name: db
-        image: postgres:16
-        environment:
-          POSTGRES_USER: shop
-          POSTGRES_PASSWORD: dev
-          POSTGRES_DB: shop
-        ports: ["5432"]
-        healthcheck:
-          test: ["CMD-SHELL", "pg_isready -U shop"]
-          interval: 2
-          retries: 15
-        stop_grace_period: 30
-        volumes:
-          - name: pgdata
-            scope: stable
-            container: /var/lib/postgresql/data
+    depends_on:
+      db: {condition: service_healthy}
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: shop
+    ports: ["5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop"]
+      interval: 2
+      retries: 15
+    stop_grace_period: 30
+    volumes:
+      - name: pgdata
+        scope: stable
+        container: /var/lib/postgresql/data
 ```
+
+`image:` instead of `build:` is the whole difference between your code and
+someone else's image. A service has exactly one of the two.
 
 `ports: ["5432"]` is the short form — a bare list of port numbers, each
 implicitly not primary and not named. That's right for Postgres: there is
 no HTTP to route by hostname. (The map form from chapter 1 is available here
-too, for a backing image that exposes a web console alongside its real
-port.)
+too, for an image that exposes a web console alongside its real port.)
 
-## The id chains
+## The id
 
 ```bash
 cd ~/code/shop
@@ -64,11 +68,11 @@ The new node:
 
 ```json
 {
-  "id": "db.web.storefront",
+  "id": "db.storefront",
   "label": "db",
   "kind": "backing",
   "image": "postgres:16",
-  "domain": "db.web.storefront.shop.fghj.internal",
+  "domain": "db.storefront.shop.fghj.internal",
   "ports": { "5432": { "primary": false, "name": null, "host_port": null, "wildcard": false } },
   "environment": ["POSTGRES_DB=shop", "POSTGRES_PASSWORD=dev", "POSTGRES_USER=shop"],
   "volumes": [
@@ -82,27 +86,32 @@ The new node:
 }
 ```
 
-`id: "db.web.storefront"` is `{name}.{owner's id}`. The name `db` is scoped
-by the node that declared it, which is what lets every repo in the workspace
-call its database `db` without collision. The domain is that id plus the
-workspace name, exactly as before — one formula, no exceptions.
+`id: "db.storefront"` is `{name}.{repo folder}`, the same formula as
+`web.storefront`. The name `db` is scoped by the repo that declared it,
+which is what lets every repo in the workspace call its database `db`
+without collision. The domain is that id plus the workspace name, exactly
+as before — one formula, no exceptions. `kind: "backing"` is only how it's
+shown: a service with `image:` and no `build:`.
 
 A new edge appeared too:
 
 ```json
-{ "from": "web.storefront", "to": "db.web.storefront", "kind": "owns" }
+{ "from": "web.storefront", "to": "db.storefront", "kind": "depends-on",
+  "required": true, "condition": "service_healthy", "flows": [] }
 ```
 
-**`owns`** is the strong form of dependency: this node exists *because* that
-node declared it, is named after it, and dies with it.
+It's the `depends_on`. `required: true` is the default — "`web` can't start
+without `db`" — so starting `web` always starts `db` first and waits for it
+to be healthy. The `${FGHJ_SERVICE_FQDN:db}` in `web`'s environment, below,
+adds no edge: a hostname is only an address. Every edge is one you declared.
 
 ## Two addresses, and which one to use
 
 `DATABASE_URL` uses `${FGHJ_SERVICE_FQDN:db}` — "the raw domain of the
-sibling called `db`". At container-create time that expands to:
+service called `db` in this repo". At container-create time that expands to:
 
 ```
-postgres://shop:dev@db.web.storefront.shop.fghj.raw.internal:5432/shop
+postgres://shop:dev@db.storefront.shop.fghj.raw.internal:5432/shop
 ```
 
 Note the zone: **`fghj.raw.internal`**, not `fghj.internal`. Every node has
@@ -128,17 +137,18 @@ Two things follow from using the template rather than typing the address:
   only ever one run here, but a hardcoded address would have quietly broken
   the moment there were two — see [Runs](/reference/runs/).
 
-A template that doesn't resolve — a `name` no sibling has — is left in the
-environment verbatim rather than failing the run. A typo shows up as a
-literal `${FGHJ_SERVICE_FQDN:bd}` in `docker inspect`, which is a much
-better bug report than a run that won't start.
+A template that names nothing — `${FGHJ_SERVICE_FQDN:bd}` — is a blocking
+warning: fghj refuses to start rather than hand `web` an address that will
+never resolve.
 
 ## Wait for healthy, not for started
 
 The `healthcheck` block is Docker's own `HEALTHCHECK`, with intervals in
 **seconds** rather than nanoseconds. Its effect in fghj is start ordering:
 anything that depends on this node waits for Docker to report it
-**healthy** before it starts — not merely "created".
+**healthy** before it starts — not merely "created". `condition:
+service_healthy` in `web`'s `depends_on` says that's what `web` expects;
+fghj checks that `db` really has a healthcheck to wait on.
 
 Without it, `web` would start the instant the Postgres *container* existed,
 which is several seconds before Postgres accepts connections. `pg_isready`
@@ -243,7 +253,7 @@ is rebuilt and recreated — and you get:
 ```
 storefront
 I answer at https://web.storefront.shop.fghj.internal
-database: listening at db.web.storefront.shop.fghj.raw.internal:5432
+database: listening at db.storefront.shop.fghj.raw.internal:5432
 ```
 
 The container resolved that name through Docker's own embedded DNS: a

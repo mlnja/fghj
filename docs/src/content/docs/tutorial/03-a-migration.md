@@ -1,22 +1,25 @@
 ---
 title: 3. A migration
-description: The third node kind — one that is supposed to exit — plus ordering between siblings and why "exited" needs two readings.
+description: A task — a service that is supposed to exit — what makes something one, and why "exited" needs two readings.
 sidebar:
   order: 3
 ---
 
-The database is up but empty. A schema migration is not a service: it runs,
-it finishes, and then it is *correctly* not running. That difference is why
-fghj has a third node kind instead of a flag on the second.
+The database is up but empty. A schema migration is not like `web` or `db`:
+it runs, it finishes, and then it is *correctly* not running. fghj calls
+that a **task**.
 
-## Why a kind and not a flag
+## Why fghj has to know
 
 For a service, `exited` is a problem. For a migration, `exited` is the
 goal. Nothing downstream — the status badge, the reconciler, the "is this
 node healthy" check — can tell those two apart without knowing which kind of
-node it's looking at. A boolean on `#Service` would have left every consumer
-to re-derive the distinction, and one of them would have got it wrong. See
-[Terminating nodes](/concepts/terminating-nodes/).
+node it's looking at. See [Terminating nodes](/concepts/terminating-nodes/).
+
+You don't mark a task as one. You say what Compose says: that `web` waits
+for it to **complete successfully**. That's the only reading of "wait for
+this" that makes sense for something meant to exit, so it's what makes it
+a task.
 
 ## Declare it
 
@@ -31,63 +34,70 @@ create table if not exists orders (
 );
 ```
 
-Then a second entry in `web`'s `dependencies:`, after the `db` block:
+Then a third service, and one more line in `web`'s `depends_on`:
 
 ```yaml
-      - kind: task
-        name: migrate
-        image: postgres:16
-        command: ["psql", "-v", "ON_ERROR_STOP=1", "-f", "/schema.sql"]
-        after: ["db"]
-        environment:
-          PGHOST: ${FGHJ_SERVICE_FQDN:db}
-          PGUSER: shop
-          PGPASSWORD: dev
-          PGDATABASE: shop
-        volumes:
-          - host: ./schema.sql
-            container: /schema.sql
-            read_only: true
+services:
+  web:
+    # ...as before
+    depends_on:
+      db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+
+  migrate:
+    image: postgres:16
+    command: ["psql", "-v", "ON_ERROR_STOP=1", "-f", "/schema.sql"]
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      PGHOST: ${FGHJ_SERVICE_FQDN:db}
+      PGUSER: shop
+      PGPASSWORD: dev
+      PGDATABASE: shop
+    volumes:
+      - host: ./schema.sql
+        container: /schema.sql
+        read_only: true
+
+  db:
+    # ...as before
 ```
 
-Four fields carry the weight here.
+Four things carry the weight here.
+
+**`service_completed_successfully`** is what makes `migrate` a task. Once
+something waits on it that way, everything that waits on it has to: a
+second service waiting on `migrate` with plain `depends_on: [migrate]`
+would be expecting it to stay up, and fghj refuses that start rather than
+guess which one you meant.
 
 **`command` is required.** A task *is* its command. A container with no
 command would just run the image's own long-running `CMD`, which is a
 service.
 
-**`image` is optional, and giving one is the less common case.** Omit it and
-the task runs *the owning service's own built image* — which is what a real
-migration almost always wants (`rake db:migrate`, `alembic upgrade head`,
-`npm run migrate`): your code, a different command, no second Dockerfile and
-no second build. We give an image here only because our migration genuinely
+**`image` here is the less common case.** A real migration is usually your
+own code with another command (`rake db:migrate`, `alembic upgrade head`,
+`npm run migrate`), so it would say `build: .` — the same build as `web`,
+no second Dockerfile. We use an image only because our migration genuinely
 isn't our code — it's stock `postgres:16` running `psql`.
 
-**`after: ["db"]`** orders this task against a *sibling*, named the way that
-sibling names itself. Without it, the only guaranteed ordering is "before
-the owner", and a migration that beats Postgres to the socket fails.
+**`migrate`'s own `depends_on: db`** orders it after Postgres is healthy. A
+migration that beats Postgres to the socket fails.
 
-Note what `after` cannot do: name a node in a different repo. Ordering
-against an arbitrary node elsewhere in the workspace would be an edge
-between two repos that never agreed to one — the exact coupling the flat
-workspace model exists to prevent. `after` is scoped to siblings, and only
-siblings.
-
-**The bind mount** puts your `schema.sql` inside the stock image. `host:
-./schema.sql` is relative, and a task has no checkout of its own, so it
-resolves against the **owning service's** checkout root — the repo whose
-`.fghj.yaml` declared it. Same rule Compose uses for paths relative to the
-compose file.
+The bind mount puts your `schema.sql` inside the stock image. `host:
+./schema.sql` resolves against this repo's checkout root, as every relative
+path in this file does — the same rule Compose uses for paths relative to
+the compose file.
 
 ## What the graph says
 
 ```json
 {
-  "id": "migrate.web.storefront",
+  "id": "migrate.storefront",
   "label": "migrate",
   "kind": "task",
   "image": "postgres:16",
-  "domain": "migrate.web.storefront.shop.fghj.internal",
+  "domain": "migrate.storefront.shop.fghj.internal",
   "environment": ["PGDATABASE=shop", "PGHOST=${FGHJ_SERVICE_FQDN:db}",
                   "PGPASSWORD=dev", "PGUSER=shop"],
   "command": ["psql", "-v", "ON_ERROR_STOP=1", "-f", "/schema.sql"],
@@ -98,22 +108,22 @@ compose file.
 }
 ```
 
-Two edges, doing different jobs:
+The edges, trimmed to the parts that matter here:
 
 ```json
-{ "from": "web.storefront",        "to": "migrate.web.storefront", "kind": "owns" }
-{ "from": "migrate.web.storefront", "to": "db.web.storefront",     "kind": "after" }
+{ "from": "web.storefront",     "to": "db.storefront",      "kind": "depends-on", "condition": "service_healthy" }
+{ "from": "web.storefront",     "to": "migrate.storefront", "kind": "depends-on", "condition": "service_completed_successfully" }
+{ "from": "migrate.storefront", "to": "db.storefront",      "kind": "depends-on", "condition": "service_healthy" }
 ```
 
-`owns` is why the task exists and what it's named after. `after` is purely
-ordering. Start order is a topological walk of both: `db` first, wait for
+Start order is a topological walk of them: `db` first, wait for
 `pg_isready`, then `migrate`, wait for it to exit 0, then `web`.
 
-`restart: "no"` isn't something we wrote — it's *forced* for tasks. A
-restart policy on a container whose purpose is to exit would restart it
-forever.
+`restart: "no"` is what a task gets; writing a `restart` on one is a
+blocking warning, since a restart policy on a container whose purpose is to
+exit would restart it forever.
 
-A `healthcheck` on a task is an error rather than a silently ignored field.
+A `healthcheck` on a task is refused too, rather than silently ignored.
 An exited container can never report Docker-healthy, which is exactly the
 hole this node kind fills; a task's completion predicate is its exit code.
 
@@ -158,16 +168,16 @@ again rather than being assumed complete.
 ## Check it landed
 
 ```bash
-fghj exec db.web.storefront -- psql -U shop -d shop -c '\d orders'
+fghj exec db.storefront -- psql -U shop -d shop -c '\d orders'
 ```
 
-`fghj exec` takes a **node id** — the same `db.web.storefront` you've been
+`fghj exec` takes a **node id** — the same `db.storefront` you've been
 reading in the graph — not a container name. It targets the default run
 unless you pass `--run`, and it's full duplex, so an interactive shell works
 too:
 
 ```bash
-fghj exec db.web.storefront -- psql -U shop -d shop
+fghj exec db.storefront -- psql -U shop -d shop
 ```
 
 ---

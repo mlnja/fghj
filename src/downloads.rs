@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::persistence::WorkspaceOwner;
-use crate::resolver::{self, Node};
+use crate::resolver::{self, BuildSource, Node};
 
 #[derive(Debug, Serialize, Clone)]
 pub struct DownloadState {
@@ -239,14 +239,23 @@ fn run_git_clone_logged(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    run_git_logged(cmd, owner, state)
+        .with_context(|| format!("git clone failed for {repo} (branch {branch})"))
+}
+
+/// Runs a git command as the workspace owner, streaming its output into the
+/// job's log, and fails if it exits non-zero.
+fn run_git_logged(
+    mut cmd: Command,
+    owner: Option<&WorkspaceOwner>,
+    state: &Arc<Mutex<DownloadState>>,
+) -> Result<()> {
     if let Some(owner) = owner {
         owner.apply_to_command(&mut cmd);
     }
     crate::persistence::harden_git_ssh(&mut cmd);
 
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("failed to spawn git clone for {repo}"))?;
+    let mut child = cmd.spawn().context("failed to spawn git")?;
 
     // git clone writes its progress meter to stderr, not stdout.
     let stderr = child.stderr.take().expect("piped stderr");
@@ -256,16 +265,97 @@ fn run_git_clone_logged(
     let stderr_handle = thread::spawn(move || stream_to_log(stderr, stderr_state));
     let stdout_handle = thread::spawn(move || stream_to_log(stdout, stdout_state));
 
-    let status = child
-        .wait()
-        .with_context(|| format!("failed waiting for git clone of {repo}"))?;
+    let status = child.wait().context("failed waiting for git")?;
     let _ = stderr_handle.join();
     let _ = stdout_handle.join();
 
     if !status.success() {
-        bail!("git clone failed for {repo} (branch {branch})");
+        bail!("git exited with {status}");
     }
     Ok(())
+}
+
+/// Clones a git build context into `.fghj/sources/`. An existing clone is
+/// left exactly as it is — never fetched, never reset — so a pinned version
+/// stays pinned and a patch made in the clone survives. See
+/// `concepts/git-build-sources.md`.
+fn clone_source_logged(
+    workspace: &Path,
+    source: &BuildSource,
+    owner: Option<&WorkspaceOwner>,
+    state: &Arc<Mutex<DownloadState>>,
+) -> Result<()> {
+    let dest = workspace.join(&source.path);
+    if dest.exists() {
+        return ensure_checkout_is(&dest, &source.url);
+    }
+    // `.fghj` is the daemon's, so the folder the owner clones into is made
+    // here and handed to them.
+    let sources = workspace.join(resolver::build_source::SOURCES_DIR);
+    std::fs::create_dir_all(&sources)
+        .with_context(|| format!("failed to create {}", sources.display()))?;
+    if let Some(owner) = owner {
+        std::os::unix::fs::chown(&sources, Some(owner.uid), Some(owner.gid))
+            .with_context(|| format!("failed to hand {} to the owner", sources.display()))?;
+    }
+
+    let commit = source
+        .reference
+        .as_deref()
+        .filter(|r| resolver::build_source::looks_like_commit(r));
+    let mut cmd = Command::new("git");
+    cmd.args(["clone", "--progress"]);
+    match (&source.reference, commit) {
+        // `--branch` takes branches and tags only; a commit needs the whole
+        // history, then a checkout.
+        (Some(_), Some(_)) | (None, _) => {}
+        (Some(reference), None) => {
+            cmd.args(["--branch", reference, "--single-branch"]);
+        }
+    }
+    cmd.arg(&source.url)
+        .arg(&dest)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    append_log(
+        state,
+        &format!(
+            "$ git clone {}{} {}\n",
+            match (&source.reference, commit) {
+                (Some(r), None) => format!("--branch {r} "),
+                _ => String::new(),
+            },
+            source.url,
+            source.path
+        ),
+    );
+    run_git_logged(cmd, owner, state)
+        .with_context(|| format!("git clone failed for {}", source.url))?;
+
+    if let Some(commit) = commit {
+        append_log(state, &format!("$ git checkout --detach {commit}\n"));
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(&dest)
+            .args(["checkout", "--detach", commit])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Err(e) = run_git_logged(cmd, owner, state) {
+            // A clone left at the default branch would read as pulled and be
+            // built as the wrong version.
+            let _ = std::fs::remove_dir_all(&dest);
+            return Err(e.context(format!("{} has no commit {commit}", source.url)));
+        }
+    }
+    Ok(())
+}
+
+/// The sources `node` builds from that aren't cloned yet.
+fn missing_source(node: &Node) -> Option<&BuildSource> {
+    node.build
+        .as_ref()
+        .and_then(|b| b.source.as_ref())
+        .filter(|s| !s.downloaded)
 }
 
 fn clone_stub_logged(
@@ -296,6 +386,9 @@ fn clone_node_logged(
         .find(|n| n.id == node_id)
         .with_context(|| format!("no such node: {node_id}"))?;
 
+    if let Some(source) = missing_source(node) {
+        return clone_source_logged(workspace, source, owner, state);
+    }
     if node.downloaded {
         append_log(state, "already downloaded\n");
         return Ok(());
@@ -315,19 +408,29 @@ fn pull_all_logged(
 
     loop {
         let graph = resolver::resolve_universe(workspace)?;
-        let missing: Vec<Node> = graph
+        let wanted = graph.start_ids(flow)?;
+        let wanted: Vec<&Node> = graph
             .nodes
-            .into_iter()
-            .filter(|n| n.kind == "service" && !n.downloaded)
-            .filter(|n| flow.is_none_or(|flow| n.flows.iter().any(|f| f == flow)))
+            .iter()
+            .filter(|n| wanted.contains(&n.id))
             .collect();
+        let missing: Vec<&Node> = wanted.iter().copied().filter(|n| !n.downloaded).collect();
+        // Deduplicated by clone path: services building from the same URL and
+        // ref share one clone.
+        let mut sources: Vec<&BuildSource> =
+            wanted.iter().filter_map(|n| missing_source(n)).collect();
+        sources.sort_by(|a, b| a.path.cmp(&b.path));
+        sources.dedup_by(|a, b| a.path == b.path);
 
-        if missing.is_empty() {
+        if missing.is_empty() && sources.is_empty() {
             append_log(state, "\nnothing left to pull\n");
             return Ok(());
         }
 
-        for node in &missing {
+        for source in sources {
+            clone_source_logged(workspace, source, owner, state)?;
+        }
+        for node in missing {
             clone_stub_logged(workspace, node, owner, state)?;
         }
     }
@@ -401,5 +504,418 @@ mod tests {
     fn a_plain_directory_that_is_not_a_checkout_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(ensure_checkout_is(tmp.path(), "https://github.com/org-a/api.git").is_err());
+    }
+
+    /// Pulling, end to end, against real git remotes on disk: which repos
+    /// get cloned, in which round, and that the loop always ends.
+    mod pull {
+        use super::super::*;
+        use std::fs;
+
+        /// A scratch area with bare remotes under `remotes/` and the
+        /// workspace under `ws/`. `{remotes}` in a config is replaced by the
+        /// remotes' path, so an `include:` can point at them.
+        struct World {
+            root: tempfile::TempDir,
+        }
+
+        fn git(dir: &Path, args: &[&str]) {
+            let out = Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=fghj",
+                    "-c",
+                    "user.email=fghj@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "init.defaultBranch=main",
+                ])
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        impl World {
+            fn new() -> Self {
+                let root = tempfile::tempdir().unwrap();
+                fs::create_dir_all(root.path().join("ws")).unwrap();
+                fs::create_dir_all(root.path().join("remotes")).unwrap();
+                World { root }
+            }
+
+            fn ws(&self) -> PathBuf {
+                self.root.path().join("ws")
+            }
+
+            fn url(&self, name: &str) -> String {
+                self.root
+                    .path()
+                    .join("remotes")
+                    .join(format!("{name}.git"))
+                    .display()
+                    .to_string()
+            }
+
+            /// Publishes `yaml` as the `main` branch of remote `name`.
+            fn remote(&self, name: &str, yaml: &str) -> &Self {
+                let src = self.root.path().join("src").join(name);
+                fs::create_dir_all(&src).unwrap();
+                let remotes = self.root.path().join("remotes").display().to_string();
+                fs::write(src.join(".fghj.yaml"), yaml.replace("{remotes}", &remotes)).unwrap();
+                git(&src, &["init", "-q", "-b", "main"]);
+                git(&src, &["add", "-f", "."]);
+                git(&src, &["commit", "-q", "-m", "init"]);
+                git(
+                    self.root.path(),
+                    &[
+                        "clone",
+                        "-q",
+                        "--bare",
+                        &src.display().to_string(),
+                        &self.url(name),
+                    ],
+                );
+                self
+            }
+
+            /// Clones remote `name` into the workspace, as the user would.
+            fn checkout(&self, name: &str) -> &Self {
+                git(&self.ws(), &["clone", "-q", &self.url(name), name]);
+                self
+            }
+
+            /// Runs a pull and returns the folders it cloned, in order.
+            fn pull(&self, flow: Option<&str>) -> Result<Vec<String>> {
+                let state = Arc::new(Mutex::new(DownloadState {
+                    status: "running".into(),
+                    log: String::new(),
+                }));
+                let result = pull_all_logged(&self.ws(), None, flow, &state);
+                let log = state.lock().unwrap().log.clone();
+                result.map_err(|e| anyhow::anyhow!("{e}\nlog:\n{log}"))?;
+                Ok(log
+                    .lines()
+                    .filter(|l| l.starts_with("$ git clone"))
+                    .map(|l| l.rsplit(' ').next().unwrap().to_string())
+                    .collect())
+            }
+
+            fn on_disk(&self, name: &str) -> bool {
+                self.ws().join(name).join(".fghj.yaml").exists()
+            }
+
+            fn graph(&self) -> resolver::Graph {
+                resolver::resolve_universe(&self.ws()).unwrap()
+            }
+        }
+
+        const SHOP: &str = r#"version: "2.0"
+include:
+  billing: {remotes}/billing.git
+  analytics: {remotes}/analytics.git
+services:
+  web:
+    build: .
+    depends_on: [billing/pricing]
+flows:
+  checkout: [web]
+  reports: [analytics]
+"#;
+
+        const BILLING: &str = r#"version: "2.0"
+include:
+  ledger: {remotes}/ledger.git
+  search: {remotes}/search.git
+services:
+  api:
+    build: .
+    depends_on: [ledger/core]
+  indexer:
+    build: .
+    depends_on: [search]
+flows:
+  pricing: [api]
+"#;
+
+        const LEDGER: &str = r#"version: "2.0"
+services:
+  ledger:
+    build: .
+flows:
+  core: [ledger]
+"#;
+
+        const LEAF: &str = "version: \"2.0\"\nservices:\n  svc:\n    image: busybox\n";
+
+        fn world() -> World {
+            let w = World::new();
+            w.remote("shop", SHOP)
+                .remote("billing", BILLING)
+                .remote("ledger", LEDGER)
+                .remote("search", LEAF)
+                .remote("analytics", LEAF)
+                .checkout("shop");
+            w
+        }
+
+        /// Each round clones what the last one revealed: shop names
+        /// billing and analytics, billing then names ledger and search.
+        #[test]
+        fn pull_all_clones_layer_by_layer_until_nothing_is_missing() {
+            let w = world();
+            let cloned = w.pull(None).unwrap();
+            assert_eq!(cloned.len(), 4, "{cloned:?}");
+            let pos = |n: &str| cloned.iter().position(|c| c == n).unwrap();
+            for first in ["billing", "analytics"] {
+                for second in ["ledger", "search"] {
+                    assert!(pos(first) < pos(second), "{cloned:?}");
+                }
+            }
+            let graph = w.graph();
+            assert!(
+                graph.nodes.iter().all(|n| n.downloaded),
+                "{:?}",
+                graph.nodes
+            );
+            assert!(graph.warnings.is_empty(), "{:#?}", graph.warnings);
+        }
+
+        /// A flow pulls only what it would start: billing (for pricing)
+        /// and ledger (for billing's api) — not analytics, which only
+        /// another flow names, nor search, which only billing's indexer
+        /// needs.
+        #[test]
+        fn a_flow_pulls_only_what_it_would_start() {
+            let w = world();
+            assert_eq!(
+                w.pull(Some("shop/checkout")).unwrap(),
+                ["billing", "ledger"]
+            );
+            assert!(!w.on_disk("analytics"));
+            assert!(!w.on_disk("search"));
+
+            // A later full pull picks up the rest, and nothing twice.
+            let rest = w.pull(None).unwrap();
+            let mut rest_sorted = rest.clone();
+            rest_sorted.sort();
+            assert_eq!(rest_sorted, ["analytics", "search"], "{rest:?}");
+        }
+
+        /// Tags remote `name`'s `main` as `tag` and returns the commit.
+        fn tag(w: &World, name: &str, tag: &str) -> String {
+            let bare = PathBuf::from(w.url(name));
+            git(&bare, &["-c", "tag.gpgsign=false", "tag", tag, "main"]);
+            let out = Command::new("git")
+                .args(["rev-parse", "main"])
+                .current_dir(&bare)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        /// A service of `shop` built from remote `geocoder` at `reference`.
+        fn sourced_shop(w: &World, reference: &str) {
+            w.remote(
+                "shop",
+                &format!(
+                    r#"version: "2.0"
+services:
+  web:
+    build: .
+  geocoder:
+    build:
+      context: file://{{remotes}}/geocoder.git#{reference}
+      dockerfile_inline: FROM scratch
+  geocoder-worker:
+    build:
+      context: file://{{remotes}}/geocoder.git#{reference}
+      dockerfile_inline: FROM scratch
+flows:
+  maps: [geocoder, geocoder-worker]
+  front: [web]
+"#
+                ),
+            )
+            .checkout("shop");
+        }
+
+        fn source_of(graph: &resolver::Graph, id: &str) -> BuildSource {
+            graph
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .and_then(|n| n.build.as_ref()?.source.clone())
+                .unwrap()
+        }
+
+        /// `concepts/git-build-sources.md`: a flow's pull clones the sources
+        /// of what it starts, once per URL and ref, and never again.
+        #[test]
+        fn a_pull_clones_the_sources_of_what_it_would_start() {
+            let w = World::new();
+            w.remote("geocoder", LEAF);
+            let commit = tag(&w, "geocoder", "v1");
+            sourced_shop(&w, "v1");
+
+            assert!(w.pull(Some("shop/front")).unwrap().is_empty());
+            assert!(!source_of(&w.graph(), "geocoder.shop").downloaded);
+
+            assert_eq!(
+                w.pull(Some("shop/maps")).unwrap(),
+                [".fghj/sources/geocoder@v1"]
+            );
+            let graph = w.graph();
+            let source = source_of(&graph, "geocoder.shop");
+            assert!(source.downloaded);
+            assert_eq!(source.head.as_deref(), Some(commit.as_str()));
+            assert!(!source.dirty);
+            // The clone's own `.fghj.yaml` is not a repo of the workspace.
+            assert!(graph.nodes.iter().all(|n| !n.id.ends_with(".geocoder")));
+
+            assert!(w.pull(None).unwrap().is_empty());
+        }
+
+        /// `--branch` takes branches and tags only, so a pinned commit is
+        /// cloned whole and checked out.
+        #[test]
+        fn a_commit_ref_is_checked_out() {
+            let w = World::new();
+            w.remote("geocoder", LEAF);
+            let commit = tag(&w, "geocoder", "v1");
+            sourced_shop(&w, &commit[..12]);
+
+            w.pull(None).unwrap();
+            let source = source_of(&w.graph(), "geocoder.shop");
+            assert_eq!(source.head.as_deref(), Some(commit.as_str()));
+        }
+
+        #[test]
+        fn a_ref_the_remote_lacks_fails_the_pull_and_leaves_nothing() {
+            let w = World::new();
+            w.remote("geocoder", LEAF);
+            sourced_shop(&w, "v9");
+
+            assert!(w.pull(None).is_err());
+            assert!(!w.ws().join(".fghj/sources/geocoder@v9").exists());
+        }
+
+        #[test]
+        fn a_second_pull_clones_nothing() {
+            let w = world();
+            w.pull(None).unwrap();
+            assert!(w.pull(None).unwrap().is_empty());
+        }
+
+        /// Two repos including the same third one: it's one stub, so one
+        /// clone.
+        #[test]
+        fn a_repo_two_others_include_is_cloned_once() {
+            let w = World::new();
+            let includes_ledger = r#"version: "2.0"
+include:
+  ledger: {remotes}/ledger.git
+services:
+  svc:
+    build: .
+    depends_on: [ledger/core]
+"#;
+            w.remote("left", includes_ledger)
+                .remote("right", includes_ledger)
+                .remote("ledger", LEDGER)
+                .remote(
+                    "top",
+                    r#"version: "2.0"
+include:
+  left: {remotes}/left.git
+  right: {remotes}/right.git
+services:
+  svc:
+    build: .
+    depends_on: [left, right]
+"#,
+                )
+                .checkout("top");
+            let cloned = w.pull(None).unwrap();
+            assert_eq!(
+                cloned.iter().filter(|c| *c == "ledger").count(),
+                1,
+                "{cloned:?}"
+            );
+            assert_eq!(
+                cloned.last().map(String::as_str),
+                Some("ledger"),
+                "{cloned:?}"
+            );
+        }
+
+        /// Repos including each other: the one already on disk is never a
+        /// stub, so the pull ends instead of chasing its tail.
+        #[test]
+        fn mutual_includes_terminate() {
+            let w = World::new();
+            w.remote(
+                "a",
+                r#"version: "2.0"
+include:
+  b: {remotes}/b.git
+services:
+  x:
+    build: .
+    depends_on: [b]
+"#,
+            )
+            .remote(
+                "b",
+                r#"version: "2.0"
+include:
+  a: {remotes}/a.git
+services:
+  y:
+    build: .
+    environment:
+      A: http://${FGHJ_SERVICE_FQDN:a/x}
+"#,
+            )
+            .checkout("a");
+            assert_eq!(w.pull(None).unwrap(), ["b"]);
+            assert!(w.graph().warnings.is_empty(), "{:#?}", w.graph().warnings);
+        }
+
+        /// A remote that doesn't exist fails the pull, naming it, instead
+        /// of retrying forever.
+        #[test]
+        fn an_unreachable_remote_fails_the_pull() {
+            let w = World::new();
+            w.remote(
+                "a",
+                r#"version: "2.0"
+include:
+  gone: {remotes}/gone.git
+services:
+  x:
+    build: .
+    depends_on: [gone]
+"#,
+            )
+            .checkout("a");
+            let err = w.pull(None).unwrap_err().to_string();
+            assert!(err.contains("gone"), "{err}");
+        }
+
+        /// An unknown flow is refused before anything is cloned.
+        #[test]
+        fn pulling_an_unknown_flow_clones_nothing() {
+            let w = world();
+            assert!(w.pull(Some("shop/nope")).is_err());
+            assert!(!w.on_disk("billing"));
+        }
     }
 }

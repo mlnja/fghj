@@ -14,8 +14,13 @@
 //! back-edges so the canvas doesn't grow without bound); the code that
 //! actually starts containers did not even mention them.
 //!
-//! So: advisory, not blocking. Report the cycle, name the nodes in it, and
-//! let the run start.
+//! It used to be advisory. With flows v2 it is blocking
+//! (`concepts/flows-v2.md`, case 6): every required edge is something the
+//! author wrote as "can't start before", so a cycle is a contradiction in
+//! the file, not an ambiguity to paper over. Calls in both directions are
+//! `required: false` edges, which never order anything, so the one
+//! legitimate loop — two services calling each other — can't trip this
+//! (`concepts/dependency-kinds.md`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -26,21 +31,12 @@ use super::warning::Warning;
 /// depend on each other so the message reads as the loop it is
 /// (`a -> b -> c -> a`) rather than as an unordered set.
 ///
-/// Only the edge kinds that constrain *start order* participate:
-/// `depends-on`, `owns`, and `after` (a `#Task`'s ordering edge to a
-/// sibling). `shared-backing` is excluded as a cross-reference rather than
-/// a structural requirement.
-///
-/// An `after` cycle has to be caught here because nothing downstream
-/// catches it: `runs::topological_start_order` deliberately cannot fail —
-/// it appends whatever is left in stable sorted order so a cyclic
-/// `.fghj.yaml` still starts *something* — so a task ordered after a task
-/// ordered after it would silently start in an arbitrary order rather than
-/// reporting the contradiction the author wrote.
+/// Only edges that are [`Edge::needed_to_start`] participate: a
+/// `required: false` one orders nothing, so it can't deadlock anything.
 pub(crate) fn check_cycles(edges: &[Edge]) -> Vec<Warning> {
     let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
     for edge in edges {
-        if edge.kind == "depends-on" || edge.kind == "owns" || edge.kind == "after" {
+        if edge.needed_to_start() {
             adjacency
                 .entry(edge.from.as_str())
                 .or_default()
@@ -86,9 +82,9 @@ pub(crate) fn check_cycles(edges: &[Edge]) -> Vec<Warning> {
             seen.insert(key)
         })
         .map(|cycle| {
-            Warning::advisory(format!(
-                "dependency cycle: {} -> {}. Start order can't honour it, so these \
-                 nodes come up in an arbitrary (but stable) order",
+            Warning::blocking(format!(
+                "dependency cycle: {} -> {}. Each waits for the next to start, so none \
+                 of them can",
                 cycle.join(" -> "),
                 cycle[0]
             ))
@@ -124,12 +120,12 @@ fn walk<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runs::testing::edge;
+    use crate::runs::testing::{edge, runtime_edge};
 
     #[test]
     fn an_acyclic_graph_reports_nothing() {
         let edges = vec![
-            edge("app", "db", "owns"),
+            edge("app", "db", "depends-on"),
             edge("app", "cache", "depends-on"),
         ];
         assert!(check_cycles(&edges).is_empty());
@@ -158,23 +154,19 @@ mod tests {
         );
     }
 
-    /// A cycle can't stop a run — `topological_start_order` deliberately
-    /// falls back rather than failing, and this exists to explain that, not
-    /// to override it.
+    /// Every required edge is a "can't start before", so a loop of them can
+    /// never start.
     #[test]
-    fn cycles_are_advisory() {
+    fn cycles_are_blocking() {
         let edges = vec![edge("a", "b", "depends-on"), edge("b", "a", "depends-on")];
-        assert!(!check_cycles(&edges)[0].is_blocking());
+        assert!(check_cycles(&edges)[0].is_blocking());
     }
 
-    /// `shared-backing` is a cross-reference the start order already
-    /// ignores, so a loop through one isn't a start-order problem.
+    /// Two services calling each other is normal, and not a start-order
+    /// problem: a runtime dependency never orders anything.
     #[test]
-    fn shared_backing_edges_do_not_form_a_reportable_cycle() {
-        let edges = vec![
-            edge("a", "b", "depends-on"),
-            edge("b", "a", "shared-backing"),
-        ];
+    fn runtime_edges_do_not_form_a_reportable_cycle() {
+        let edges = vec![edge("a", "b", "depends-on"), runtime_edge("b", "a")];
         assert!(check_cycles(&edges).is_empty());
     }
 

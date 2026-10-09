@@ -85,7 +85,8 @@ pub fn scan_workspace(workspace: &Path) -> Result<ScannedWorkspace> {
                 // kind of quiet wrongness worth a line on screen.
                 if component.version.is_newer_minor_than_supported() {
                     warnings.push(Warning::advisory(format!(
-                        "'{local_path}' declares version {} but this fghj implements {};                          anything added after {} is ignored",
+                        "'{local_path}' declares version {} but this fghj implements {}; \
+                         anything added after {} is ignored",
                         component.version,
                         super::version::SCHEMA_VERSION,
                         super::version::SCHEMA_VERSION
@@ -123,7 +124,7 @@ mod tests {
     }
 
     const GOOD: &str =
-        "version: \"1.0\"\nservices:\n  web:\n    build:\n      dockerfile: Dockerfile\n";
+        "version: \"2.0\"\nservices:\n  web:\n    build:\n      dockerfile: Dockerfile\n";
 
     #[test]
     fn a_clean_workspace_reports_no_warnings() {
@@ -184,14 +185,14 @@ mod tests {
     fn a_newer_minor_version_is_used_and_flagged_as_advisory() {
         let dir = workspace_with(&[(
             "ahead",
-            "version: \"1.9\"\nservices:\n  web:\n    build:\n      dockerfile: Dockerfile\n",
+            "version: \"2.9\"\nservices:\n  web:\n    build:\n      dockerfile: Dockerfile\n",
         )]);
         let scanned = scan_workspace(dir.path()).expect("scan");
         assert!(scanned.components.contains_key("ahead"));
         assert_eq!(scanned.warnings.len(), 1, "{:?}", scanned.warnings);
         assert!(!scanned.warnings[0].is_blocking());
         assert!(
-            scanned.warnings[0].message.contains("1.9"),
+            scanned.warnings[0].message.contains("2.9"),
             "{:?}",
             scanned.warnings
         );
@@ -202,7 +203,7 @@ mod tests {
     #[test]
     fn a_different_major_version_makes_the_repo_unreadable() {
         let dir = workspace_with(&[
-            ("future", "version: \"2.0\"\nservices: {}\n"),
+            ("future", "version: \"3.0\"\nservices: {}\n"),
             ("good", GOOD),
         ]);
         let scanned = scan_workspace(dir.path()).expect("scan");
@@ -211,7 +212,7 @@ mod tests {
         assert_eq!(scanned.warnings.len(), 1, "{:?}", scanned.warnings);
         assert!(scanned.warnings[0].is_blocking());
         assert!(
-            scanned.warnings[0].message.contains("1.x"),
+            scanned.warnings[0].message.contains("2.x"),
             "{:?}",
             scanned.warnings
         );
@@ -225,7 +226,7 @@ mod tests {
         let dir = workspace_with(&[
             (
                 "bad-name",
-                "version: \"1.0\"\nservices:\n  \"My Service!\":\n    build: {}\n",
+                "version: \"2.0\"\nservices:\n  \"My Service!\":\n    build: {}\n",
             ),
             ("good", GOOD),
         ]);

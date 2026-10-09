@@ -102,6 +102,7 @@ export default defineConfig({
             { label: 'Fog-of-war visibility', slug: 'concepts/fog-of-war-visibility' },
             { label: 'Node identity & domains', slug: 'concepts/node-identity-and-domains' },
             { label: 'Terminating nodes', slug: 'concepts/terminating-nodes' },
+            { label: 'Dependency kinds', slug: 'concepts/dependency-kinds' },
             { label: 'Local CA & TLS proxy', slug: 'concepts/local-ca-and-tls-proxy' },
             { label: 'In-network TLS proxy sidecar', slug: 'concepts/sidecar' },
             { label: 'Split DNS', slug: 'concepts/split-dns' },

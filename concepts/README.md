@@ -67,6 +67,9 @@ it in the audit's tracker — the concept files stay the durable record.
 | [[flat-workspace-model]] | No repo is "root" — every repo is a peer, any repo can declare a `flow`, entry point is arbitrary. |
 | [[branch-ownership-model]] | Branch identity lives on the one shared workspace checkout, never on a flow/dependency edge — a diamond dependency can't require two branches of the same repo at once. |
 | [[fog-of-war-visibility]] | What's on the graph is driven by what's pulled to disk, not by flow membership — flows are a highlight layer, not a visibility filter. |
+| [[flows-v2]] | Compose-shaped `services:`/`depends_on`; flows as public start lists; across repos, everything goes through flows. |
+| [[dependency-kinds]] | Every edge is declared. `required: true` means needed to start (ordered, waited on, blocks, restarts and stops with its target); `required: false` means needed at runtime (dashed, started only if a flow lists it). Hostname templates are sugar, not edges. |
+| [[git-build-sources]] | A service of *your* repo may build someone else's code: `build.context` as a git URL, cloned into `.fghj/sources/`, with `dockerfile_inline`. `include:` still means "use their definition". |
 | [[terminating-nodes]] | Seeds and migrations are a third node kind that runs to completion, not a service with a clever restart policy — because "exited" means success for one and drift for the other. |
 | [[language-boundaries]] | What `.fghj.yaml` deliberately cannot say — no host-process node kind, no branch on an edge — and how to tell a boundary from a missing knob. |
 | [[build-inputs]] | A build may carry `target`, file secrets and the workspace owner's forwarded ssh-agent — but the credential path comes from `WorkspaceOwner`, never from the repo's own config, and every build goes through BuildKit, with no classic-builder fallback. |

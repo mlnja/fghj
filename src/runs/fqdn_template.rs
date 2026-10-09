@@ -2,8 +2,8 @@ use super::domain::{DomainZone, derive_domain};
 use crate::resolver::{Graph, Node};
 
 /// Expands `${FGHJ_SERVICE_FQDN}`/`${FGHJ_SERVICE_FQDN:path}` (this node's
-/// own, or a sibling's, `fghj.raw.internal` domain — see `sibling_domain`
-/// for what `path` can look like) and `${FGHJ_SERVICE_FQDN_HTTP}`/
+/// own, or another service's, `fghj.raw.internal` domain — see
+/// `sibling_domain` for what `path` can look like) and `${FGHJ_SERVICE_FQDN_HTTP}`/
 /// `${FGHJ_SERVICE_FQDN_HTTP:path}` (the `fghj.internal` — proxied — domain
 /// instead) in a single `environment`/`env_file` value, so a CUE author can
 /// reference a derived address without hand-computing `derive_domain`'s
@@ -22,7 +22,9 @@ use crate::resolver::{Graph, Node};
 /// token missing its closing `}` is left untouched in the output rather
 /// than erroring — a typo here shouldn't fail an entire run when the
 /// literal fallback is at least diagnosable in logs, the same tolerance
-/// `parse_env_file` extends to a malformed line.
+/// `parse_env_file` extends to a malformed line. (One in `environment` never
+/// gets here: the resolver refuses it — see `fqdn_template_paths`. Only an
+/// `env_file` value, read at start, can.)
 pub(crate) fn expand_service_fqdn_templates(
     value: &str,
     node: &Node,
@@ -69,34 +71,35 @@ pub(crate) fn expand_service_fqdn_templates(
     out
 }
 
-/// Finds the domain `${FGHJ_SERVICE_FQDN:path}` means from `node`'s own
-/// `environment`, in two ways (first match wins):
-///
-/// - A backing dependency matching `path` that shares an "owns" owner with
-///   `node` — the owner is whoever's "owns" edge points at `node` (a
-///   backing dependency looking for a sibling backing dependency), or
-///   `node.id` itself if nothing owns it (a service looking up one of its
-///   own directly-declared backing dependencies).
-/// - A service matching `path` that `node` directly depends on via a
-///   `kind: service` dependency (same-repo or cross-repo — both produce a
-///   "depends-on" edge from `node.id`, see `resolver::visit_dependency`).
-///   This is the only way to reach a sibling *service*: unlike backing
-///   dependencies, services aren't owned, so there's no shared-owner case
-///   to fall back on — only what `node` itself declares a dependency on.
-///
-/// `path` is one bare name (`mysql`) in the common case — matched against
-/// just the candidate's own leaf name — or `::`-separated segments
-/// (`aikifactory::aikifactory::minio`) for the rare case where that's
-/// ambiguous. A node's `id` is already the leaf-first chain the domain
-/// itself is built from (`{name}.{owner-id}`, see `resolver::visit_dependency`
-/// /`visit_local_services`) — root-first is just easier to read/write, so
-/// `path`'s segments are reversed and dot-joined into that same shape
-/// before matching, e.g. `aikifactory::aikifactory::minio` becomes
-/// `minio.aikifactory.aikifactory`, an exact prefix of the real id
-/// `minio.aikifactory.aikifactory` (before the workspace/`fghj.internal`
-/// suffix `derive_domain` appends). Fewer segments than the full id just
-/// means "match any id with this as a trailing-toward-the-root prefix" —
-/// as many as it takes to stop being ambiguous, no more.
+/// Every `path` named by a `${FGHJ_SERVICE_FQDN:path}` or
+/// `${FGHJ_SERVICE_FQDN_HTTP:path}` in `value`, in order — the bare
+/// self-reference forms name nothing. The resolver refuses one that names
+/// nothing, so a typo fails at resolve time instead of leaking a literal
+/// into a container's environment. It never makes an edge: a hostname is
+/// sugar, not a dependency.
+pub fn fqdn_template_paths(value: &str) -> Vec<String> {
+    const TOKEN_RAW: &str = "${FGHJ_SERVICE_FQDN";
+    let mut paths = Vec::new();
+    let mut rest = value;
+    while let Some(start) = rest.find(TOKEN_RAW) {
+        let after = &rest[start + TOKEN_RAW.len()..];
+        let after = after.strip_prefix("_HTTP").unwrap_or(after);
+        let Some(end) = after.find('}') else { break };
+        if let Some(path) = after[..end].strip_prefix(':') {
+            paths.push(path.to_string());
+        }
+        rest = &after[end + 1..];
+    }
+    paths
+}
+
+/// The domain `${FGHJ_SERVICE_FQDN:path}` means from `node`'s own
+/// `environment`. `path` is `name` — a service in `node`'s repo — or
+/// `alias/name`, a service in a repo `node`'s repo includes. The alias is
+/// looked up in `node.includes`, the folder it resolved to; nothing else is
+/// searched, so the same path always means the same service no matter what
+/// is running. `None` when the alias isn't one, or the service isn't in the
+/// graph (a repo not pulled yet).
 pub(crate) fn sibling_domain(
     node: &Node,
     path: &str,
@@ -104,31 +107,9 @@ pub(crate) fn sibling_domain(
     run_id: &str,
     zone: DomainZone,
 ) -> Option<String> {
-    let mut segments: Vec<&str> = path.split("::").collect();
-    segments.reverse();
-    let id_prefix = segments.join(".");
-    let matches = |candidate: &Node| {
-        candidate.id == id_prefix || candidate.id.starts_with(&format!("{id_prefix}."))
-    };
-
-    let owner_id = graph
-        .edges
-        .iter()
-        .find(|e| e.kind == "owns" && e.to == node.id)
-        .map(|e| e.from.as_str())
-        .unwrap_or(node.id.as_str());
-    let sibling = graph
-        .edges
-        .iter()
-        .filter(|e| e.kind == "owns" && e.from == owner_id)
-        .find_map(|e| graph.nodes.iter().find(|n| n.id == e.to && matches(n)))
-        .or_else(|| {
-            graph
-                .edges
-                .iter()
-                .filter(|e| e.kind == "depends-on" && e.from == node.id)
-                .find_map(|e| graph.nodes.iter().find(|n| n.id == e.to && matches(n)))
-        })?;
+    let local_path = node.local_path.as_deref()?;
+    let id = crate::resolver::visit::reference_target_id(local_path, &node.includes, path)?;
+    let sibling = graph.nodes.iter().find(|n| n.id == id)?;
     Some(derive_domain(
         &sibling.id,
         &sibling.domain_scope,
@@ -142,7 +123,7 @@ pub(crate) fn sibling_domain(
 mod tests {
     use super::*;
     use crate::runs::naming::DEFAULT_RUN_ID;
-    use crate::runs::testing::{edge, test_graph, test_node};
+    use crate::runs::testing::{test_graph, test_node};
 
     #[test]
     fn expand_service_fqdn_templates_resolves_self_reference() {
@@ -175,14 +156,10 @@ mod tests {
     }
 
     #[test]
-    fn expand_service_fqdn_templates_resolves_sibling_owned_by_a_service() {
-        // php owns mysql; php's own environment references its sibling by name.
+    fn expand_service_fqdn_templates_resolves_a_service_in_the_same_repo() {
         let php = test_node("php.app", "php", "service");
-        let mysql = test_node("mysql.php.app", "mysql", "backing");
-        let graph = test_graph(
-            vec![php.clone(), mysql],
-            vec![edge("php.app", "mysql.php.app", "owns")],
-        );
+        let mysql = test_node("mysql.app", "mysql", "backing");
+        let graph = test_graph(vec![php.clone(), mysql], vec![]);
         let out = expand_service_fqdn_templates(
             "mysql://${FGHJ_SERVICE_FQDN:mysql}:3306/app",
             &php,
@@ -191,17 +168,14 @@ mod tests {
             &graph,
             DEFAULT_RUN_ID,
         );
-        assert_eq!(out, "mysql://mysql.php.app.shop.fghj.raw.internal:3306/app");
+        assert_eq!(out, "mysql://mysql.app.shop.fghj.raw.internal:3306/app");
     }
 
     #[test]
     fn expand_service_fqdn_templates_http_variant_resolves_a_sibling() {
         let php = test_node("php.app", "php", "service");
-        let mysql = test_node("mysql.php.app", "mysql", "backing");
-        let graph = test_graph(
-            vec![php.clone(), mysql],
-            vec![edge("php.app", "mysql.php.app", "owns")],
-        );
+        let mysql = test_node("mysql.app", "mysql", "backing");
+        let graph = test_graph(vec![php.clone(), mysql], vec![]);
         let out = expand_service_fqdn_templates(
             "https://${FGHJ_SERVICE_FQDN_HTTP:mysql}/",
             &php,
@@ -210,94 +184,55 @@ mod tests {
             &graph,
             DEFAULT_RUN_ID,
         );
-        assert_eq!(out, "https://mysql.php.app.shop.fghj.internal/");
+        assert_eq!(out, "https://mysql.app.shop.fghj.internal/");
     }
 
+    /// `alias/name` goes through the repo's `include:` — the folder it
+    /// points at, whatever it's called on disk.
     #[test]
-    fn expand_service_fqdn_templates_resolves_sibling_owned_by_the_same_owner() {
-        // phpmyadmin and mysql are both owned by php; phpmyadmin references
-        // its sibling mysql, not anything it owns itself (it owns nothing).
-        let php_id = "php.app";
-        let mysql = test_node("mysql.php.app", "mysql", "backing");
-        let phpmyadmin = test_node("phpmyadmin.php.app", "phpmyadmin", "backing");
-        let graph = test_graph(
-            vec![mysql, phpmyadmin.clone()],
-            vec![
-                edge(php_id, "mysql.php.app", "owns"),
-                edge(php_id, "phpmyadmin.php.app", "owns"),
-            ],
-        );
+    fn expand_service_fqdn_templates_resolves_an_included_repos_service() {
+        let mut php = test_node("php.app", "php", "service");
+        php.includes.insert("billing".into(), "billing-svc".into());
+        let api = test_node("api.billing-svc", "api", "service");
+        let graph = test_graph(vec![php.clone(), api], vec![]);
         let out = expand_service_fqdn_templates(
-            "${FGHJ_SERVICE_FQDN:mysql}",
-            &phpmyadmin,
-            "phpmyadmin.php.app.shop.fghj.raw.internal",
-            "phpmyadmin.php.app.shop.fghj.internal",
-            &graph,
-            DEFAULT_RUN_ID,
-        );
-        assert_eq!(out, "mysql.php.app.shop.fghj.raw.internal");
-    }
-
-    #[test]
-    fn expand_service_fqdn_templates_resolves_a_directly_depended_on_sibling_service() {
-        // vite depends on php (same-repo `kind: service`) — and the same
-        // "depends-on" edge shape covers a cross-repo flow dependency, so
-        // this also stands in for that case.
-        let vite = test_node("vite.app", "vite", "service");
-        let php = test_node("php.app", "php", "service");
-        let graph = test_graph(
-            vec![vite.clone(), php],
-            vec![edge("vite.app", "php.app", "depends-on")],
-        );
-        let out = expand_service_fqdn_templates(
-            "http://${FGHJ_SERVICE_FQDN:php}",
-            &vite,
-            "vite.app.shop.fghj.raw.internal",
-            "vite.app.shop.fghj.internal",
-            &graph,
-            DEFAULT_RUN_ID,
-        );
-        assert_eq!(out, "http://php.app.shop.fghj.raw.internal");
-    }
-
-    #[test]
-    fn expand_service_fqdn_templates_disambiguates_a_colliding_leaf_name_with_a_path() {
-        // php owns a backing dependency named "mysql" *and* directly depends
-        // on a cross-repo service that also happens to be named "mysql" —
-        // the bare leaf name is ambiguous, so the backing dependency wins by
-        // default (declared via "owns", checked first), and the qualified
-        // root-first path (mirroring how the id itself, leaf-first, would
-        // read as `mysql.otherrepo`) is needed to reach the other one.
-        let php = test_node("php.app", "php", "service");
-        let mysql_backing = test_node("mysql.php.app", "mysql", "backing");
-        let mysql_service = test_node("mysql.otherrepo", "mysql", "service");
-        let graph = test_graph(
-            vec![php.clone(), mysql_backing, mysql_service],
-            vec![
-                edge("php.app", "mysql.php.app", "owns"),
-                edge("php.app", "mysql.otherrepo", "depends-on"),
-            ],
-        );
-
-        let bare = expand_service_fqdn_templates(
-            "${FGHJ_SERVICE_FQDN:mysql}",
+            "http://${FGHJ_SERVICE_FQDN:billing/api}",
             &php,
             "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
             DEFAULT_RUN_ID,
         );
-        assert_eq!(bare, "mysql.php.app.shop.fghj.raw.internal");
+        assert_eq!(out, "http://api.billing-svc.shop.fghj.raw.internal");
+    }
 
-        let qualified = expand_service_fqdn_templates(
-            "${FGHJ_SERVICE_FQDN:otherrepo::mysql}",
+    /// A bare name never reaches into another repo, however unambiguous
+    /// it would be: the same path always means the same service.
+    #[test]
+    fn expand_service_fqdn_templates_does_not_search_other_repos_for_a_bare_name() {
+        let php = test_node("php.app", "php", "service");
+        let api = test_node("api.billing", "api", "service");
+        let graph = test_graph(vec![php.clone(), api], vec![]);
+        let out = expand_service_fqdn_templates(
+            "${FGHJ_SERVICE_FQDN:api}",
             &php,
             "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
             DEFAULT_RUN_ID,
         );
-        assert_eq!(qualified, "mysql.otherrepo.shop.fghj.raw.internal");
+        assert_eq!(out, "${FGHJ_SERVICE_FQDN:api}");
+    }
+
+    #[test]
+    fn fqdn_template_paths_lists_every_named_path() {
+        assert_eq!(
+            fqdn_template_paths(
+                "A=${FGHJ_SERVICE_FQDN}/${FGHJ_SERVICE_FQDN:db}/${FGHJ_SERVICE_FQDN_HTTP:billing/api}"
+            ),
+            vec!["db".to_string(), "billing/api".to_string()]
+        );
+        assert!(fqdn_template_paths("${FGHJ_SERVICE_FQDN:unterminated").is_empty());
     }
 
     #[test]

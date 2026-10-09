@@ -20,20 +20,20 @@ because half of what you're learning is *what the files look like* and why.
 A tiny shop, split across two repositories the way a real product is
 (plus two more in [chapter 7](/tutorial/07-attaching-a-debugger/)):
 
-- **`storefront`** — the thing a shopper opens. It owns a Postgres
+- **`storefront`** — the thing a shopper opens. It has a Postgres
   database and a schema migration.
 - **`catalog`** — a separate repo, owned (let's pretend) by a different
-  team. It serves the product list and owns a Redis cache.
+  team. It serves the product list from a Redis cache.
 
 By the end, the resolved graph looks like this:
 
 ```mermaid
 graph LR
-  web["web.storefront<br/>service"] -->|owns| db["db.web.storefront<br/>backing · postgres:16"]
-  web -->|owns| migrate["migrate.web.storefront<br/>task · psql"]
-  migrate -.->|after| db
-  web -->|depends-on| api["api.catalog<br/>service"]
-  api -->|owns| cache["cache.api.catalog<br/>backing · redis:7"]
+  web["web.storefront<br/>service"] -->|depends-on| db["db.storefront<br/>backing · postgres:16"]
+  web -->|completed| migrate["migrate.storefront<br/>task · psql"]
+  migrate -->|depends-on| db
+  web -->|depends-on catalog| api["api.catalog<br/>service"]
+  api -->|depends-on| cache["cache.catalog<br/>backing · redis:7"]
 ```
 
 And `storefront` is reachable in your browser at
@@ -92,7 +92,7 @@ somebody's dependency tree.
 
 1. [One service](/tutorial/01-one-service/) — a repo, a Dockerfile, a
    `.fghj.yaml`, and a real HTTPS domain.
-2. [A database](/tutorial/02-a-database/) — a backing dependency, the raw
+2. [A database](/tutorial/02-a-database/) — a database image next to your service, the raw
    zone, healthchecks, and a volume that survives.
 3. [A migration](/tutorial/03-a-migration/) — the third node kind: one
    that's *supposed* to exit.

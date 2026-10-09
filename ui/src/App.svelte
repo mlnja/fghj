@@ -56,7 +56,7 @@
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       universe = data;
-      const flows = [...new Set(data.nodes.flatMap((n) => n.flows))].sort();
+      const flows = data.flows ?? [];
       if (!currentFlow || !flows.includes(currentFlow)) currentFlow = flows[0] ?? null;
     } catch (e) {
       error = String(e);
@@ -383,23 +383,24 @@
       : false
   );
 
-  let flowNames = $derived(universe ? [...new Set(universe.nodes.flatMap((n) => n.flows))].sort() : []);
+  // `repo/flow` ids, every flow any repo publishes — including an empty
+  // one, which no node would carry.
+  let flowNames = $derived(universe?.flows ?? []);
 
   // Repos tab: which repo requires which other repo. The currently selected
   // flow is highlighted (border/edge color), not filtered — every known repo
   // always renders, per the fog-of-war model.
   //
-  // One box per *repo*, not per service: two services declared in the same
-  // repo (e.g. aikido-core's `php` and `vite`) share one checkout, one git
-  // branch/dirty state, and one clone/pull lifecycle, so they collapse into
-  // a single node here. `local_path` (present once a repo is actually on
-  // disk) is the grouping key, since it's the checkout identity — `repo`
-  // alone doesn't group already-downloaded siblings any better and stub
-  // (not-yet-downloaded) nodes have no `local_path` yet, so they fall back
-  // to their own `id` and stay their own single-member group.
+  // One box per *repo*, not per service: everything declared in one repo
+  // (e.g. aikido-core's `php`, `vite` and its postgres) shares one checkout,
+  // one git branch/dirty state, and one clone/pull lifecycle, so it
+  // collapses into a single node here. `local_path` (present once a repo is
+  // actually on disk) is the grouping key, since it's the checkout identity
+  // — stub (not-yet-downloaded) nodes have no `local_path` yet, so they fall
+  // back to their own `id`, which is the repo's folder name.
   let reposGraph = $derived.by(() => {
     if (!universe) return null;
-    const services = universe.nodes.filter((n) => n.kind === 'service');
+    const services = universe.nodes;
     const groupKey = (n) => n.local_path ?? n.id;
 
     const groups = new Map();
@@ -426,22 +427,25 @@
         local_path: repr.local_path,
         domain: repr.domain,
         flows: [...new Set(members.flatMap((m) => m.flows))],
-        services: members.map((m) => m.label).sort(),
+        services: members.filter((m) => m.kind === 'service').map((m) => m.label).sort(),
       });
     }
 
     // Cross-repo edges only — an edge between two services in the same
     // group (e.g. vite -> php) is internal to that repo and has nothing to
-    // do with which *other* repos this one depends on.
+    // do with which *other* repos this one depends on. A repo that needs
+    // another both to start and at runtime is drawn as needing it to
+    // start: that's the stronger of the two.
     const edgeMap = new Map();
     for (const e of universe.edges) {
-      if (e.kind !== 'depends-on') continue;
       const from = nodeToGroup.get(e.from);
       const to = nodeToGroup.get(e.to);
       if (!from || !to || from === to) continue;
       const key = `${from}|${to}`;
-      if (!edgeMap.has(key)) edgeMap.set(key, { from, to, kind: 'depends-on', flows: new Set() });
-      e.flows.forEach((f) => edgeMap.get(key).flows.add(f));
+      if (!edgeMap.has(key)) edgeMap.set(key, { from, to, kind: e.kind, required: false, flows: new Set() });
+      const merged = edgeMap.get(key);
+      if (e.required !== false) merged.required = true;
+      e.flows.forEach((f) => merged.flows.add(f));
     }
     const edges = [...edgeMap.values()].map((e) => ({ ...e, flows: [...e.flows] }));
 
@@ -485,7 +489,7 @@
       }));
     const nodes = [...universe.nodes, ...orphans];
     const ids = new Set(nodes.map((n) => n.id));
-    const edges = universe.edges.filter((e) => e.kind !== 'shared-infra' && ids.has(e.from) && ids.has(e.to));
+    const edges = universe.edges.filter((e) => ids.has(e.from) && ids.has(e.to));
     return { nodes, edges };
   });
 

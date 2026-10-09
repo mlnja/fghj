@@ -1,4 +1,4 @@
-use super::write_component;
+use super::{write_component, write_yaml};
 use crate::resolver::*;
 
 #[test]
@@ -38,17 +38,18 @@ fn service_bind_mount_round_trips_into_graph_node() {
 #[test]
 fn named_volume_round_trips_into_graph_node() {
     let tmp = tempfile::tempdir().unwrap();
-    write_component(
+    write_yaml(
         tmp.path(),
         "myservice",
-        "  dependencies:\n\
-         \x20   - kind: backing\n\
-         \x20     name: postgres\n\
-         \x20     image: postgres:16\n\
-         \x20     ports: [\"5432\"]\n\
-         \x20     volumes:\n\
-         \x20       - name: pgdata\n\
-         \x20         container: /var/lib/postgresql/data\n",
+        r#"version: "2.0"
+services:
+  postgres:
+    image: postgres:16
+    ports: ["5432"]
+    volumes:
+      - name: pgdata
+        container: /var/lib/postgresql/data
+"#,
     );
 
     let graph = resolve_universe(tmp.path()).unwrap();
@@ -56,7 +57,7 @@ fn named_volume_round_trips_into_graph_node() {
     let node = graph
         .nodes
         .iter()
-        .find(|n| n.id == "postgres.myservice.myservice")
+        .find(|n| n.id == "postgres.myservice")
         .unwrap();
     assert_eq!(node.volumes.len(), 1);
     assert!(matches!(
@@ -68,24 +69,25 @@ fn named_volume_round_trips_into_graph_node() {
 }
 
 /// `shared` has to survive the untagged disjunction — it is the field that
-/// decides whether this volume is private to `postgres.myservice.myservice`
+/// decides whether this volume is private to `postgres.myservice`
 /// or workspace-global, so silently defaulting it to `false` on a config
 /// that asked for `true` would quietly un-share storage someone is relying on.
 #[test]
 fn a_shared_named_volume_carries_the_flag_through_resolution() {
     let tmp = tempfile::tempdir().unwrap();
-    write_component(
+    write_yaml(
         tmp.path(),
         "myservice",
-        "  dependencies:\n\
-         \x20   - kind: backing\n\
-         \x20     name: postgres\n\
-         \x20     image: postgres:16\n\
-         \x20     ports: [\"5432\"]\n\
-         \x20     volumes:\n\
-         \x20       - name: pgdata\n\
-         \x20         shared: true\n\
-         \x20         container: /var/lib/postgresql/data\n",
+        r#"version: "2.0"
+services:
+  postgres:
+    image: postgres:16
+    ports: ["5432"]
+    volumes:
+      - name: pgdata
+        shared: true
+        container: /var/lib/postgresql/data
+"#,
     );
 
     let graph = resolve_universe(tmp.path()).unwrap();
@@ -93,7 +95,7 @@ fn a_shared_named_volume_carries_the_flag_through_resolution() {
     let node = graph
         .nodes
         .iter()
-        .find(|n| n.id == "postgres.myservice.myservice")
+        .find(|n| n.id == "postgres.myservice")
         .unwrap();
     assert!(matches!(
         &node.volumes[0],

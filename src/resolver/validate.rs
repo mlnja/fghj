@@ -1,12 +1,11 @@
 //! Declared-config validation: the warnings a component earns for a `ports`
 //! block or a `#RunOptions` field that cannot be carried out as written.
 
-//! `ResolveCtx` — the traversal that walks components and their
-//! dependencies, turning parsed config into graph nodes and edges.
-
 use std::collections::BTreeMap;
 
-use super::config::Healthcheck;
+use super::build_source::{RemoteContext, parse_remote, subdir_is_contained};
+use super::config::{Build, Healthcheck, default_dockerfile};
+use super::normalize_repo_url;
 use super::port::PortConfig;
 use super::service::ServiceConfig;
 
@@ -14,6 +13,58 @@ use super::visit::ResolveCtx;
 use super::warning::Warning;
 
 impl<'a> ResolveCtx<'a> {
+    /// Checks a `build` block and returns its remote context, if the context
+    /// is a git URL. See `concepts/git-build-sources.md`.
+    pub(crate) fn check_build(&mut self, id: &str, build: &Build) -> Option<RemoteContext> {
+        if build.dockerfile_inline.is_some() && build.dockerfile != default_dockerfile() {
+            self.warnings.push(Warning::blocking(format!(
+                "'{id}' sets both `dockerfile` and `dockerfile_inline`; set one: the inline \
+                 Dockerfile, or the path of one in the context"
+            )));
+        }
+        let remote = parse_remote(&build.context)?;
+        if let Some(subdir) = &remote.subdir
+            && !subdir_is_contained(subdir)
+        {
+            self.warnings.push(Warning::blocking(format!(
+                "'{id}' builds from '{subdir}' of {}, which is outside the clone; a subdir \
+                 must be a relative path without `..`",
+                remote.url
+            )));
+        }
+        Some(remote)
+    }
+
+    /// Two different URLs whose clones would share one `.fghj/sources`
+    /// folder: `acme/geocoder#main` and `fork/geocoder#main`. Same URL and
+    /// ref is fine, and shares the clone.
+    pub(crate) fn check_source_paths(&mut self) {
+        let mut by_path: BTreeMap<&str, BTreeMap<String, Vec<&str>>> = BTreeMap::new();
+        for node in self.nodes.values() {
+            if let Some(source) = node.build.as_ref().and_then(|b| b.source.as_ref()) {
+                by_path
+                    .entry(&source.path)
+                    .or_default()
+                    .entry(normalize_repo_url(&source.url))
+                    .or_default()
+                    .push(&node.id);
+            }
+        }
+        for (path, urls) in by_path {
+            if urls.len() > 1 {
+                let mut ids: Vec<&str> = urls.values().flatten().copied().collect();
+                ids.sort_unstable();
+                let urls: Vec<&str> = urls.keys().map(String::as_str).collect();
+                self.warnings.push(Warning::blocking(format!(
+                    "{} build from different repos ({}) that would share the clone {path}; \
+                     pin different refs, or build from one of them",
+                    ids.join(", "),
+                    urls.join(", ")
+                )));
+            }
+        }
+    }
+
     /// Warns (non-fatally) when a node declares more than one `primary` port
     /// — at most one port can sit at the node's own derived domain — or a
     /// `wildcard` port that's neither `primary` nor `name`d, so there's no
@@ -95,11 +146,16 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    pub(crate) fn check_ports(&mut self, service_id: &str, service: &ServiceConfig) {
-        self.check_port_config(service_id, &service.ports);
+    pub(crate) fn check_ports(
+        &mut self,
+        service_id: &str,
+        service: &ServiceConfig,
+        ports: &BTreeMap<String, PortConfig>,
+    ) {
+        self.check_port_config(service_id, ports);
         self.check_stop_signal(service_id, service.stop_signal.as_deref());
         self.check_healthcheck(service_id, service.healthcheck.as_ref());
-        let has_primary = service.ports.values().any(|cfg| cfg.primary);
+        let has_primary = ports.values().any(|cfg| cfg.primary);
         if !service.additional_hosts.is_empty() && !has_primary {
             self.warnings.push(Warning::advisory(format!(
                 "'{service_id}' declares additional_hosts but no primary port; those hosts won't be routed to anything"

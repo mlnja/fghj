@@ -184,7 +184,7 @@ network.
 
 | | |
 |---|---|
-| **Migrations as graph nodes** | [`kind: task`](/concepts/terminating-nodes/) runs to completion and *gates* the services that need it — ordered against the database it seeds, recorded, re-runnable. Not a command you remember to type after everything boots. |
+| **Migrations as graph nodes** | A [task](/concepts/terminating-nodes/) runs to completion and *gates* the services that need it — ordered against the database it seeds, recorded, re-runnable. Not a command you remember to type after everything boots. |
 | **Fog-of-war graph** | The graph shows [what's actually on disk](/concepts/fog-of-war-visibility/). Selecting a flow highlights its slice and dims the rest — it never hides it, so you can always see what you'd pull in next. |
 | **Federated config** | Every repo declares its own dependencies in [its own `.fghj.yaml`](/concepts/flat-workspace-model/). Peers, not a tree with one root, and no central file to merge-conflict over. |
 | **WebSockets and SSE** | Pass straight through. After routing on SNI the proxy relays bytes and rewrites no headers. |

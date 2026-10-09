@@ -63,22 +63,21 @@ without hand-computing it:
 | Token | Zone | Use for |
 |---|---|---|
 | `${FGHJ_SERVICE_FQDN}` | raw (this node's own) | Rare — a node referencing its own raw address. |
-| `${FGHJ_SERVICE_FQDN:name}` | raw (a sibling's) | **The default choice.** `DATABASE_URL`, an internal API base URL, anything container-to-container. |
+| `${FGHJ_SERVICE_FQDN:name}` | raw (service `name` in this repo) | **The default choice.** `DATABASE_URL`, an internal API base URL, anything container-to-container. |
+| `${FGHJ_SERVICE_FQDN:alias/name}` | raw (service `name` in the repo included as `alias`) | The same, across repos. |
 | `${FGHJ_SERVICE_FQDN_HTTP}` | http (this node's own) | This node minting a URL that points back at itself (e.g. an absolute callback URL for its own OAuth flow). |
-| `${FGHJ_SERVICE_FQDN_HTTP:name}` | http (a sibling's) | A sibling's proxied identity — the minio/presigned-URL case below. |
-| `${FGHJ_SERVICE_FQDN:a::b::name}` / `_HTTP` variant | either | Disambiguates a `name` that matches more than one sibling, by qualifying it with owning segments, root-first (mirrors the leaf-first node id, just reversed — see [Node identity & domains](/concepts/node-identity-and-domains/)). |
+| `${FGHJ_SERVICE_FQDN_HTTP:name}` / `:alias/name` | http (another service's) | A sibling's proxied identity — the minio/presigned-URL case below. |
 
-Both macro families resolve a bare `name` the same way: a `kind: backing`
-dependency owned by the same service, or (if none matches) a service this
-node directly depends on via `kind: service`. **They can't reach a named
-port on a sibling** — only its bare domain — so referencing a sibling's
+A name that matches no service is a blocking warning, not a literal left in
+the container's environment. **They can't reach a named port on another
+service** — only its bare domain — so referencing a sibling's
 *named* port (e.g. a `management` port declared via `#Port.name`) has to
 be a hand-typed literal string. That's exactly where the pitfall below
 tends to get introduced.
 
 ## Worked example 1: an ordinary internal call (do this by default)
 
-A `php` service talking to its own `mysql` backing dependency — purely
+A `php` service talking to its own `mysql` — purely
 internal, no external consumer ever sees this hostname:
 
 ```yaml

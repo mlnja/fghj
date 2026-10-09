@@ -176,6 +176,7 @@ mod tests {
             dirty: false,
             head: None,
             flows: vec![],
+            includes: Default::default(),
             build: None,
             ports: Default::default(),
             environment: vec![],

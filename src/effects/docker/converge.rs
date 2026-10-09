@@ -45,6 +45,7 @@ use crate::actor::ActorHandle;
 use crate::daemon_log;
 use crate::effects::Effect;
 use crate::resolver;
+use crate::runs::order::{dependents_of, requirements_of};
 use crate::runs::progress::{ProgressSink, RunProgress};
 use crate::server;
 use crate::state::{
@@ -188,45 +189,112 @@ fn plan_creates(
 /// `Removing`, where there's nothing left to observe) rather than just
 /// `()`, so the caller can report real post-action truth instead of a bare
 /// success/failure.
+///
+/// Starting and stopping follow required edges (`concepts/dependency-kinds.md`):
+/// a start first starts what the node can't start without, if it isn't up,
+/// and afterwards restarts the running nodes that can't start without it; a
+/// stop first stops those. Every other container this touches is pushed
+/// onto `cascaded`, so its real state is reported too — including when the
+/// node itself then fails.
 async fn perform(
     old: &server::WorkspaceState,
     entry: &PendingEntry,
     run: &RunState,
+    cascaded: &mut Vec<ContainerInfo>,
 ) -> anyhow::Result<Option<ContainerInfo>> {
     let container = run.containers.get(&entry.node_id);
     match entry.action {
         PendingAction::Starting => {
-            let path = old.path.clone();
-            let graph = tokio::task::spawn_blocking(move || resolver::resolve_universe(&path))
-                .await
-                .map_err(|e| anyhow::anyhow!("resolve_universe task panicked: {e}"))??;
+            let graph = resolve(old).await?;
             // Starting one node still reads the whole graph (that is how it
             // learns what to link to), so a blocking problem anywhere in
             // the workspace is a blocking problem here too.
             graph.refuse_if_blocked()?;
-            let info = old
-                .runs
-                .restart_container(
-                    &graph,
-                    &entry.run_id,
-                    &entry.node_id,
-                    &run.network,
-                    run.sidecar_ip.as_deref(),
-                    // The reducer has already written the desired value
-                    // (`RunNodeDebugWaitRequested`), so the ordinary
-                    // `Starting` convergence is what applies a flip of the
-                    // debug switch — there is no separate action for it.
-                    // Absent container: a node being started for the first
-                    // time, which never halts.
-                    container.is_some_and(|c| c.desired.debug_wait),
-                )
-                .await?;
+            let restart = |node_id: String, debug_wait: bool| {
+                let graph = &graph;
+                async move {
+                    old.runs
+                        .restart_container(
+                            graph,
+                            &entry.run_id,
+                            &node_id,
+                            &run.network,
+                            run.sidecar_ip.as_deref(),
+                            debug_wait,
+                        )
+                        .await
+                }
+            };
+            for dep in requirements_of(&entry.node_id, &graph.edges) {
+                if !needs_start(run.containers.get(&dep)) {
+                    continue;
+                }
+                match restart(dep.clone(), false).await {
+                    Ok(info) => cascaded.push(info),
+                    Err(e) => anyhow::bail!("blocked by {dep}, which failed to start: {e:#}"),
+                }
+            }
+            // The reducer has already written the desired value
+            // (`RunNodeDebugWaitRequested`), so the ordinary `Starting`
+            // convergence is what applies a flip of the debug switch —
+            // there is no separate action for it. Absent container: a node
+            // being started for the first time, which never halts.
+            let info = restart(
+                entry.node_id.clone(),
+                container.is_some_and(|c| c.desired.debug_wait),
+            )
+            .await?;
+            // A re-run task restarts nothing, as in a top-up.
+            if info.desired.terminating {
+                return Ok(Some(info));
+            }
+            for dependent in dependents_of(&entry.node_id, &graph.edges) {
+                let Some(c) = run.containers.get(&dependent) else {
+                    continue;
+                };
+                if c.pending_action.is_some()
+                    || c.desired.terminating
+                    || c.observed.status != "running"
+                {
+                    continue;
+                }
+                match restart(dependent.clone(), c.desired.debug_wait).await {
+                    Ok(info) => cascaded.push(info),
+                    // Its own event stream says why; this node is fine.
+                    Err(e) => daemon_log::warn(format!(
+                        "fghjd: restarting {dependent} after {} failed: {e:#}",
+                        entry.node_id
+                    )),
+                }
+            }
             Ok(Some(info))
         }
         PendingAction::Stopping => {
             let container = container.ok_or_else(|| {
                 anyhow::anyhow!("no such node in run {}: {}", entry.run_id, entry.node_id)
             })?;
+            // What can't run without this node stops first. Best effort: a
+            // graph that can't be resolved right now only means this node
+            // stops alone, which is still what was asked for.
+            let dependents = match resolve(old).await {
+                Ok(graph) => dependents_of(&entry.node_id, &graph.edges),
+                Err(_) => Vec::new(),
+            };
+            for dependent in dependents.iter().rev() {
+                let Some(c) = run.containers.get(dependent) else {
+                    continue;
+                };
+                if c.pending_action.is_some() || c.observed.status != "running" {
+                    continue;
+                }
+                match old.runs.stop_container(&entry.run_id, dependent, c).await {
+                    Ok(info) => cascaded.push(info),
+                    Err(e) => daemon_log::warn(format!(
+                        "fghjd: stopping {dependent} before {} failed: {e:#}",
+                        entry.node_id
+                    )),
+                }
+            }
             // Returns the stopped container directly, so there is no
             // read-back from a second copy of the run to disagree with.
             let info = old
@@ -244,6 +312,31 @@ async fn perform(
                 .await?;
             Ok(None)
         }
+    }
+}
+
+/// A fresh graph, read off the blocking pool.
+async fn resolve(old: &server::WorkspaceState) -> anyhow::Result<resolver::Graph> {
+    let path = old.path.clone();
+    tokio::task::spawn_blocking(move || resolver::resolve_universe(&path))
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve_universe task panicked: {e}"))?
+}
+
+/// Whether a requirement of a node being started has to be started first:
+/// it has no container, a service that isn't running, or a task that
+/// hasn't exited 0. One someone is already acting on is left to them.
+fn needs_start(container: Option<&ContainerInfo>) -> bool {
+    let Some(c) = container else {
+        return true;
+    };
+    if c.pending_action.is_some() {
+        return false;
+    }
+    if c.desired.terminating {
+        c.observed.exit_code != Some(0)
+    } else {
+        c.observed.status != "running"
     }
 }
 
@@ -270,13 +363,9 @@ async fn perform_create(
     // the `From<anyhow::Error>` conversion's `partial: None` is correct.
     graph.refuse_if_blocked()?;
     if entry.plan.run_id.is_some() {
-        // `start` rolls its own half-built run back, so there is never a
-        // partial state to carry — the `From<anyhow::Error>` conversion's
-        // `partial: None` is the whole truth here.
-        Ok(old
-            .runs
+        old.runs
             .start(&graph, entry.plan.clone(), prior, progress)
-            .await?)
+            .await
     } else {
         old.runs
             .ensure_running(&graph, entry.plan.flow.as_deref(), prior, progress)
@@ -448,13 +537,24 @@ impl DockerConvergeEffect {
         // Taken at spawn time rather than read back out of `RunRegistry`,
         // which no longer keeps one.
         let run = self.actor.current().runs.get(&entry.run_id).cloned();
+        let actor = self.actor.clone();
         supervisor::supervise("container action", async move {
+            let mut cascaded = Vec::new();
             let result = match run {
-                Some(run) => perform(&old, &entry, &run)
+                Some(run) => perform(&old, &entry, &run, &mut cascaded)
                     .await
                     .map_err(|e| format!("{e:#}")),
                 None => Err(format!("no such run: {}", entry.run_id)),
             };
+            for info in cascaded {
+                let _ = actor
+                    .dispatch(Action::ContainerActionSettled {
+                        run_id: entry.run_id.clone(),
+                        node_id: info.node_id.clone(),
+                        result: Ok(Some(info)),
+                    })
+                    .await;
+            }
             guard.settle(result);
         });
     }

@@ -11,26 +11,41 @@ heard of yours.
 
 ## Declare the dependency before the repo exists
 
-In `storefront/.fghj.yaml`, add a third entry to `web`'s `dependencies:`:
+In `storefront/.fghj.yaml`, add an `include:` at the top, and one more
+entry to `web`'s `depends_on`:
 
 ```yaml
-      - kind: service
-        repo: https://github.com/you/catalog.git
+version: "2.0"
+
+include:
+  catalog: https://github.com/you/catalog.git
+
+services:
+  web:
+    # ...as before
+    depends_on:
+      db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+      catalog: {}
 ```
 
-That's the whole declaration. No service name, no port, no path.
+`include:` is the only way a file links to another repo. `catalog` is an
+alias — what the rest of this file calls that repo — and `depends_on:
+catalog` means "wait until all of it is up". No service name, no port, no
+path: you don't know what's in `catalog`, and you don't have to.
 
 There is one more field you could add, and it's worth knowing what it's for:
 
 ```yaml
-      - kind: service
-        repo: https://github.com/you/catalog.git
-        default_branch: main
+include:
+  catalog:
+    repo: https://github.com/you/catalog.git
+    default_branch: main
 ```
 
 `default_branch` answers exactly one question: **when fghj clones this repo for
 the first time, which branch should it land on so the thing is ready to run?**
-You're the one declaring the dependency, so you're the one who knows — maybe
+You're the one including it, so you're the one who knows — maybe
 `catalog`'s default branch is `master`, or maybe `main` is a release branch and
 the branch that actually works against your service is `develop`. Say so here
 and a teammate who pulls your graph gets a working checkout without having to
@@ -55,12 +70,12 @@ full mirror. After that, `default_branch` is never consulted again:
   verifies the `origin` matches and otherwise leaves your tree alone — it will
   not move you off a branch you're working on.
 
-Which is why two edges can disagree about it harmlessly. One repo declaring
-`default_branch: main` for `catalog` and another declaring
+Which is why two repos can disagree about it harmlessly. One repo including
+`catalog` with `default_branch: main` and another with
 `default_branch: develop` is not a conflict, because there's exactly **one
-checkout per repo, workspace-wide** — whichever edge gets there first clones
-it, and from then on the only thing that decides the branch is you, in that
-directory. If an edge could *pin* a branch rather than seed one, two of them
+checkout per repo, workspace-wide** — whichever include gets there first
+clones it, and from then on the only thing that decides the branch is you, in that
+directory. If an include could *pin* a branch rather than seed one, two of them
 could pin different ones and there'd be no correct answer. That failure mode
 isn't resolved here; it's unrepresentable. See
 [Branch ownership model](/concepts/branch-ownership-model/).
@@ -93,9 +108,8 @@ that repo is on disk. `downloaded: false` is the UI's cue to draw it as a
 placeholder with a pull button.
 
 The stub's id is `catalog`, from the folder name the URL implies. Once the
-real repo lands, the id becomes `{its service name}.catalog` and the domain
-changes with it — the placeholder is a guess at a node's identity made
-without the file that defines it.
+real repo lands, the stub is replaced by the nodes its file declares — the
+placeholder stands for a repo whose contents nobody has read yet.
 
 In the normal case you'd click **Pull all** here: the daemon clones what's
 missing, re-resolves, and repeats until nothing new turns up — a loop,
@@ -111,10 +125,10 @@ git init
 git remote add origin https://github.com/you/catalog.git
 ```
 
-The folder name is not a free choice: it must be `catalog`, the last segment
-of the URL your other repo named. That convention is the entire lookup
-mechanism — there's no registry mapping URLs to paths, so the path has to be
-derivable from the URL by anyone, offline.
+fghj finds an included repo by its `origin` remote, not its folder name, so
+this folder could be called anything. `catalog` — the URL's last segment —
+is just what **Pull** would have named it, and what node ids are built
+from.
 
 `Dockerfile`:
 
@@ -178,7 +192,7 @@ http
 And `.fghj.yaml`:
 
 ```yaml
-version: "1.0"
+version: "2.0"
 
 services:
   api:
@@ -190,18 +204,19 @@ services:
     environment:
       PORT: "4000"
       REDIS_HOST: ${FGHJ_SERVICE_FQDN:cache}
-    dependencies:
-      - kind: backing
-        name: cache
-        image: redis:7
-        ports: ["6379"]
-        healthcheck:
-          test: ["CMD", "redis-cli", "ping"]
-          interval: 2
-          retries: 15
+    depends_on:
+      cache: {condition: service_healthy}
+
+  cache:
+    image: redis:7
+    ports: ["6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2
+      retries: 15
 ```
 
-This file mentions `storefront` nowhere. It never will. Dependencies point
+This file mentions `storefront` nowhere. It never will. An include points
 one way only, and the pointing repo is the one that has to know anything.
 
 Validate it and resolve again:
@@ -215,70 +230,73 @@ fghj graph https://github.com/you/storefront.git
 ## Five nodes
 
 ```
-service   id=api.catalog             domain=api.catalog.shop.fghj.internal
-backing   id=cache.api.catalog       domain=cache.api.catalog.shop.fghj.internal
-backing   id=db.web.storefront       domain=db.web.storefront.shop.fghj.internal
-task      id=migrate.web.storefront  domain=migrate.web.storefront.shop.fghj.internal
-service   id=web.storefront          domain=web.storefront.shop.fghj.internal
+service   id=api.catalog         domain=api.catalog.shop.fghj.internal
+backing   id=cache.catalog       domain=cache.catalog.shop.fghj.internal
+backing   id=db.storefront       domain=db.storefront.shop.fghj.internal
+task      id=migrate.storefront  domain=migrate.storefront.shop.fghj.internal
+service   id=web.storefront      domain=web.storefront.shop.fghj.internal
 ```
 
 ```
-web.storefront  -> db.web.storefront       owns
-web.storefront  -> migrate.web.storefront  owns
-api.catalog     -> cache.api.catalog       owns
-web.storefront  -> api.catalog             depends-on
-migrate.web...  -> db.web.storefront       after
+web.storefront      -> db.storefront        depends-on
+web.storefront      -> migrate.storefront   depends-on
+migrate.storefront  -> db.storefront        depends-on
+api.catalog         -> cache.catalog        depends-on
+web.storefront      -> api.catalog          depends-on  via_flow=catalog
+web.storefront      -> cache.catalog        depends-on  via_flow=catalog
 ```
 
-The stub is gone, replaced by `api.catalog` — the service is named `api`, in
-the folder `catalog`. This is why the service in that repo isn't called
-`catalog`: it would have resolved to the id `catalog.catalog`, which is
-legal, unambiguous, and reads like a mistake.
+(plus a `uses` edge for each hostname template, as in chapter 2.)
 
-`depends-on` is the weaker sibling of `owns`. `web.storefront` needs
-`api.catalog` to be up, and that's all: it doesn't name it, didn't create
-it, and doesn't destroy it. Two repos can both depend on `api.catalog` and
-there is still exactly one of it.
+The stub is gone, replaced by `api.catalog` and `cache.catalog` — the
+service named `api` and the one named `cache`, in the folder `catalog`. This
+is why the service in that repo isn't called `catalog`: it would have
+resolved to the id `catalog.catalog`, which is legal, unambiguous, and reads
+like a mistake.
 
-## One dependency, several services
+`depends_on: catalog` became one edge per node in `catalog`, each labelled
+`via_flow=catalog` — the name you waited on. Two repos can both wait on
+`catalog` and there is still exactly one of each node.
 
-If `catalog` had declared more than one service, `repo:` alone would no
-longer name a single node, and the resolver would say so. Then you list what
-you want:
+## Why not just `catalog/api`?
 
-```yaml
-      - kind: service
-        repo: https://github.com/you/catalog.git
-        services: ["api", "admin"]
+Because `api` is `catalog`'s business, not yours. Write
+`depends_on: [catalog/api]` and fghj refuses it:
+
+```
+'web.storefront' names 'catalog/api', which is a service — catalog's services are internal; it publishes none, so name 'catalog' to start all of it
 ```
 
-One entry per service wanted, still one dependency block. And `repo:` itself
-can be omitted entirely to depend on a service declared in *your own* repo's
-`services:` map — nothing to clone, no branch to pick, just ordering.
+If `web` could name `catalog`'s services, `storefront`'s file would go stale
+every time `catalog` renamed, split or added one — on every branch. Across
+repos, `depends_on` names either a whole repo or a **flow** that repo
+publishes: a list of its parts it's willing to be depended on by. `catalog`
+publishes none yet, so all of it is what you get. The next chapter fixes
+that from `catalog`'s side.
 
 ## Reaching across
 
 Give `web` the catalog's address. In `storefront/.fghj.yaml`:
 
 ```yaml
-      CATALOG_URL: http://${FGHJ_SERVICE_FQDN:api}:4000
+      CATALOG_URL: http://${FGHJ_SERVICE_FQDN:catalog/api}:4000
 ```
 
-`${FGHJ_SERVICE_FQDN:api}` resolves by the sibling's **leaf name** — `api`,
-the service's own name — and expands to
-`api.catalog.shop.fghj.raw.internal`. Raw zone, plain HTTP, port 4000: the
-container's real port, one hop, no TLS.
+`${FGHJ_SERVICE_FQDN:catalog/api}` is "service `api` in the repo included
+as `catalog`", and expands to `api.catalog.shop.fghj.raw.internal`. Raw
+zone, plain HTTP, port 4000: the container's real port, one hop, no TLS.
 
-The lookup rules are worth knowing exactly, because they're narrow on
-purpose:
+So a hostname *can* name another repo's service, when `depends_on` can't.
+That's deliberate: an address is the network contract, and production
+config has `catalog`'s address in it too. The two rules, exactly:
 
-- A backing dependency or task owned by the same service as the node whose
-  environment this is — that's how `${FGHJ_SERVICE_FQDN:db}` worked.
-- Otherwise, a service this node **itself declares** a `kind: service`
-  dependency on. Not a transitively-reached one. If you can't name it as a
-  dependency, you can't template its address.
-- If a leaf name is ambiguous, qualify it root-first with `::`:
-  `${FGHJ_SERVICE_FQDN:catalog::api}`.
+- A bare name — `${FGHJ_SERVICE_FQDN:db}` — is a service in this repo.
+- `alias/name` is service `name` in the repo included as `alias`.
+
+A name that matches nothing is a blocking warning. And a hostname never
+makes anything wait: it's drawn as a dotted **uses** edge, `web.storefront
+→ api.catalog`. Two services that call each other is normal; if a hostname
+meant waiting, they would wait on each other forever.
 
 Then in `storefront/server.js`:
 
@@ -308,7 +326,7 @@ try {
 ```
 storefront
 I answer at https://web.storefront.shop.fghj.internal
-database: listening at db.web.storefront.shop.fghj.raw.internal:5432
+database: listening at db.storefront.shop.fghj.raw.internal:5432
  • Reading lamp — $42
  • Oak stool — $79
  • Wool blanket — $55

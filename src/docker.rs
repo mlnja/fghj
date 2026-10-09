@@ -185,6 +185,13 @@ pub async fn list_run_volumes(docker: &Docker, run_id: &str) -> Result<Vec<Strin
 pub struct BuildOpts<'a> {
     pub context_dir: &'a Path,
     pub dockerfile: &'a str,
+    /// `#Build.dockerfile_inline`: sent in the context tar as
+    /// [`INLINE_DOCKERFILE`] and built from, so nothing is written to disk.
+    pub dockerfile_inline: Option<&'a str>,
+    /// Leave the context's `.git` out, whatever `.dockerignore` says — for a
+    /// git build context, whose clone's history is fghj's, not the build's.
+    /// This is what BuildKit does with a git URL context too.
+    pub skip_git_dir: bool,
     pub tag: &'a str,
     pub platform: Option<&'a str>,
     /// `#Build.args` — `docker build --build-arg`. Only the `ARG`s a
@@ -384,7 +391,13 @@ fn split_step_failure(message: &str) -> (Option<&str>, Option<&str>) {
 /// message rather than a silently different one. `fghj doctor` checks for it
 /// up front; see `concepts/build-inputs.md`.
 pub async fn build_image(docker: &Docker, opts: &BuildOpts<'_>) -> Result<BuildReport> {
-    let tar_bytes = tar_build_context(opts.context_dir, opts.dockerfile).await?;
+    let tar_bytes = tar_build_context(
+        opts.context_dir,
+        opts.dockerfile,
+        opts.dockerfile_inline,
+        opts.skip_git_dir,
+    )
+    .await?;
     let context_bytes = tar_bytes.len() as u64;
     build_image_buildkit(docker, opts, tar_bytes).await?;
     Ok(BuildReport {
@@ -393,11 +406,28 @@ pub async fn build_image(docker: &Docker, opts: &BuildOpts<'_>) -> Result<BuildR
     })
 }
 
-async fn tar_build_context(context_dir: &Path, dockerfile: &str) -> Result<Vec<u8>> {
+/// The name an inline Dockerfile has in the context tar. Reserved: a file of
+/// this name in the context is replaced.
+pub const INLINE_DOCKERFILE: &str = ".fghj.Dockerfile";
+
+async fn tar_build_context(
+    context_dir: &Path,
+    dockerfile: &str,
+    inline: Option<&str>,
+    skip_git_dir: bool,
+) -> Result<Vec<u8>> {
     let context_dir = context_dir.to_path_buf();
     let dockerfile = dockerfile.to_string();
+    let inline = inline.map(str::to_string);
     tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
-        let ignore = crate::dockerignore::Dockerignore::load(&context_dir);
+        let ignore = if skip_git_dir {
+            // Last, so no `!` pattern above it can bring `.git` back.
+            let text =
+                std::fs::read_to_string(context_dir.join(".dockerignore")).unwrap_or_default();
+            crate::dockerignore::Dockerignore::parse(&format!("{text}\n.git\n"))
+        } else {
+            crate::dockerignore::Dockerignore::load(&context_dir)
+        };
         let mut builder = tar::Builder::new(Vec::new());
         if ignore.is_empty() {
             builder.append_dir_all("", &context_dir).with_context(|| {
@@ -405,6 +435,15 @@ async fn tar_build_context(context_dir: &Path, dockerfile: &str) -> Result<Vec<u
             })?;
         } else {
             append_filtered(&mut builder, &context_dir, &ignore, &dockerfile)?;
+        }
+        if let Some(inline) = inline {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(inline.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, INLINE_DOCKERFILE, inline.as_bytes())
+                .context("failed to add the inline Dockerfile to the build context")?;
         }
         builder
             .into_inner()
@@ -1356,7 +1395,9 @@ mod tests {
     /// the resulting tar back, which is the only way to see what was actually
     /// uploaded.
     async fn tar_entries(dir: &Path, dockerfile: &str) -> Vec<String> {
-        let bytes = tar_build_context(dir, dockerfile).await.unwrap();
+        let bytes = tar_build_context(dir, dockerfile, None, false)
+            .await
+            .unwrap();
         let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
         archive
             .entries()
@@ -1400,6 +1441,52 @@ mod tests {
             !entries.iter().any(|e| e.starts_with("node_modules")),
             "nothing under node_modules should be uploaded, got: {entries:?}"
         );
+    }
+
+    /// A git build context: the inline Dockerfile rides in the tar, so the
+    /// clone stays untouched, and the clone's `.git` stays out even with no
+    /// `.dockerignore` — and even with one that tries to bring it back.
+    #[tokio::test]
+    async fn an_inline_dockerfile_is_sent_and_a_clones_git_dir_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("main.go"), "package main\n").unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let bytes = tar_build_context(root, INLINE_DOCKERFILE, Some("FROM scratch\n"), true)
+            .await
+            .unwrap();
+        let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
+        let mut entries = Vec::new();
+        let mut inline = String::new();
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().to_string_lossy().into_owned();
+            if path == INLINE_DOCKERFILE {
+                std::io::Read::read_to_string(&mut entry, &mut inline).unwrap();
+            }
+            entries.push(path);
+        }
+        assert_eq!(inline, "FROM scratch\n");
+        assert!(entries.contains(&String::from("main.go")));
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.starts_with(".git/") || e == ".git"),
+            "the clone's .git should not have been uploaded, got: {entries:?}"
+        );
+        assert!(!root.join(INLINE_DOCKERFILE).exists());
+
+        std::fs::write(root.join(".dockerignore"), "*.md\n!.git\n").unwrap();
+        let bytes = tar_build_context(root, "Dockerfile", None, true)
+            .await
+            .unwrap();
+        let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
+        assert!(archive.entries().unwrap().all(|e| {
+            let path = e.unwrap().path().unwrap().to_string_lossy().into_owned();
+            !path.starts_with(".git/") && path != ".git"
+        }));
     }
 
     /// Real `.dockerignore` files exclude the Dockerfile, because `COPY . .`
@@ -1774,6 +1861,8 @@ mod build_tests {
             &BuildOpts {
                 context_dir: fixture.dir.path(),
                 dockerfile: "Dockerfile",
+                dockerfile_inline: None,
+                skip_git_dir: false,
                 tag: &fixture.tag,
                 platform: None,
                 args: &args,
@@ -1808,6 +1897,8 @@ mod build_tests {
             &BuildOpts {
                 context_dir: fixture.dir.path(),
                 dockerfile: "Dockerfile",
+                dockerfile_inline: None,
+                skip_git_dir: false,
                 tag: &fixture.tag,
                 platform: None,
                 args: &BTreeMap::new(),
@@ -1853,6 +1944,8 @@ mod build_tests {
             &BuildOpts {
                 context_dir: fixture.dir.path(),
                 dockerfile: "Dockerfile",
+                dockerfile_inline: None,
+                skip_git_dir: false,
                 tag: &fixture.tag,
                 platform: None,
                 args: &BTreeMap::new(),
@@ -1976,6 +2069,8 @@ mod build_tests {
             &BuildOpts {
                 context_dir: fixture.dir.path(),
                 dockerfile: "Dockerfile",
+                dockerfile_inline: None,
+                skip_git_dir: false,
                 tag: &fixture.tag,
                 platform: None,
                 args: &BTreeMap::new(),
@@ -2024,6 +2119,8 @@ mod build_tests {
                 &BuildOpts {
                     context_dir: fixture.dir.path(),
                     dockerfile: "Dockerfile",
+                    dockerfile_inline: None,
+                    skip_git_dir: false,
                     tag: &fixture.tag,
                     platform: None,
                     args: &BTreeMap::new(),
@@ -2093,6 +2190,8 @@ mod build_tests {
             &BuildOpts {
                 context_dir: fixture.dir.path(),
                 dockerfile: "Dockerfile",
+                dockerfile_inline: None,
+                skip_git_dir: false,
                 tag: &fixture.tag,
                 platform: None,
                 args: &args,

@@ -1,19 +1,22 @@
-use super::write_component;
+use super::{write_component, write_yaml};
 use crate::resolver::*;
 
 #[test]
 fn command_round_trips_into_graph_node_for_service_and_backing() {
     let tmp = tempfile::tempdir().unwrap();
-    write_component(
+    write_yaml(
         tmp.path(),
         "myservice",
-        "  command: [\"npm\", \"run\", \"dev\"]\n\
-         \x20 dependencies:\n\
-         \x20   - kind: backing\n\
-         \x20     name: mysql\n\
-         \x20     image: mysql:8.0.33\n\
-         \x20     ports: [\"3306\"]\n\
-         \x20     command: [\"mysqld\", \"--sql_mode=NO_ENGINE_SUBSTITUTION\"]\n",
+        r#"version: "2.0"
+services:
+  myservice:
+    build: .
+    command: ["npm", "run", "dev"]
+  mysql:
+    image: mysql:8.0.33
+    ports: ["3306"]
+    command: ["mysqld", "--sql_mode=NO_ENGINE_SUBSTITUTION"]
+"#,
     );
 
     let graph = resolve_universe(tmp.path()).unwrap();
@@ -28,7 +31,7 @@ fn command_round_trips_into_graph_node_for_service_and_backing() {
     let backing = graph
         .nodes
         .iter()
-        .find(|n| n.id == "mysql.myservice.myservice")
+        .find(|n| n.id == "mysql.myservice")
         .unwrap();
     assert_eq!(
         backing.command,
@@ -39,38 +42,41 @@ fn command_round_trips_into_graph_node_for_service_and_backing() {
 #[test]
 fn run_options_round_trip_into_graph_node_for_service_and_backing() {
     let tmp = tempfile::tempdir().unwrap();
-    write_component(
+    write_yaml(
         tmp.path(),
         "myservice",
-        "  env_file:\n\
-         \x20   - .env\n\
-         \x20 platform: linux/arm64\n\
-         \x20 restart: always\n\
-         \x20 user: \"1000:1000\"\n\
-         \x20 working_dir: /app\n\
-         \x20 labels:\n\
-         \x20   team: platform\n\
-         \x20 cap_add: [\"NET_ADMIN\"]\n\
-         \x20 cap_drop: [\"ALL\"]\n\
-         \x20 privileged: true\n\
-         \x20 extra_hosts:\n\
-         \x20   - \"metadata:169.254.169.254\"\n\
-         \x20 stop_signal: SIGQUIT\n\
-         \x20 stop_grace_period: 30\n\
-         \x20 dependencies:\n\
-         \x20   - kind: backing\n\
-         \x20     name: postgres\n\
-         \x20     image: postgres:16\n\
-         \x20     ports: [\"5432\"]\n\
-         \x20     platform: linux/amd64\n\
-         \x20     env_file:\n\
-         \x20       - .env.postgres\n\
-         \x20     restart: unless-stopped\n\
-         \x20     stop_grace_period: 120\n\
-         \x20     healthcheck:\n\
-         \x20       test: [\"CMD\", \"pg_isready\"]\n\
-         \x20       interval: 5\n\
-         \x20       retries: 3\n",
+        r#"version: "2.0"
+services:
+  myservice:
+    build: .
+    env_file:
+      - .env
+    platform: linux/arm64
+    restart: always
+    user: "1000:1000"
+    working_dir: /app
+    labels:
+      team: platform
+    cap_add: ["NET_ADMIN"]
+    cap_drop: ["ALL"]
+    privileged: true
+    extra_hosts:
+      - "metadata:169.254.169.254"
+    stop_signal: SIGQUIT
+    stop_grace_period: 30
+  postgres:
+    image: postgres:16
+    ports: ["5432"]
+    platform: linux/amd64
+    env_file:
+      - .env.postgres
+    restart: unless-stopped
+    stop_grace_period: 120
+    healthcheck:
+      test: ["CMD", "pg_isready"]
+      interval: 5
+      retries: 3
+"#,
     );
 
     let graph = resolve_universe(tmp.path()).unwrap();
@@ -99,7 +105,7 @@ fn run_options_round_trip_into_graph_node_for_service_and_backing() {
     let backing = graph
         .nodes
         .iter()
-        .find(|n| n.id == "postgres.myservice.myservice")
+        .find(|n| n.id == "postgres.myservice")
         .unwrap();
     assert_eq!(backing.platform.as_deref(), Some("linux/amd64"));
     assert_eq!(backing.env_file, vec![".env.postgres"]);
@@ -143,25 +149,30 @@ fn run_options_default_to_compose_equivalent_no_ops() {
 #[test]
 fn a_task_carries_the_stop_knobs_even_though_it_has_no_restart_policy() {
     let tmp = tempfile::tempdir().unwrap();
-    write_component(
+    write_yaml(
         tmp.path(),
         "myservice",
-        "  build:\n\
-         \x20   context: .\n\
-         \x20 dependencies:\n\
-         \x20   - kind: task\n\
-         \x20     name: migrate\n\
-         \x20     command: [\"rake\", \"db:migrate\"]\n\
-         \x20     stop_signal: SIGINT\n\
-         \x20     stop_grace_period: 300\n",
+        r#"version: "2.0"
+services:
+  myservice:
+    build: .
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+  migrate:
+    build: .
+    command: ["rake", "db:migrate"]
+    stop_signal: SIGINT
+    stop_grace_period: 300
+"#,
     );
 
     let graph = resolve_universe(tmp.path()).unwrap();
     let task = graph
         .nodes
         .iter()
-        .find(|n| n.id == "migrate.myservice.myservice")
+        .find(|n| n.id == "migrate.myservice")
         .unwrap();
+    assert_eq!(task.kind, "task");
     assert_eq!(task.stop_signal.as_deref(), Some("SIGINT"));
     assert_eq!(task.stop_grace_period, 300);
     assert_eq!(task.restart, "no");
@@ -227,21 +238,21 @@ fn warns_when_a_healthcheck_declares_an_empty_test() {
     assert!(w.message.contains("myservice.myservice"));
 }
 
-/// The same check applies to a backing dependency's healthcheck, which is the
-/// far more common place to write one (a `pg_isready` on a database) — and a
-/// separate call site, so a separate test.
+/// The same check applies to a backing service's healthcheck, which is the
+/// far more common place to write one (a `pg_isready` on a database).
 #[test]
 fn warns_when_a_backing_healthcheck_declares_an_empty_test() {
     let tmp = tempfile::tempdir().unwrap();
-    write_component(
+    write_yaml(
         tmp.path(),
         "myservice",
-        "  dependencies:\n\
-         \x20   - kind: backing\n\
-         \x20     name: db\n\
-         \x20     image: postgres:16\n\
-         \x20     healthcheck:\n\
-         \x20       test: []\n",
+        r#"version: "2.0"
+services:
+  db:
+    image: postgres:16
+    healthcheck:
+      test: []
+"#,
     );
 
     let graph = resolve_universe(tmp.path()).unwrap();

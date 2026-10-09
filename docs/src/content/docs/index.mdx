@@ -83,33 +83,38 @@ Everything below falls out of that.
 ## One file per repo
 
 ```yaml title=".fghj.yaml"
-version: "1.0"
+version: "2.0"
+
+include:
+  payments: git@github.com:acme/payments-service.git
 
 services:
   checkout:
-    build:
-      context: .
+    build: .
     ports:
       "8080":
         primary: true
     environment:
       DATABASE_URL: postgres://app:dev@${FGHJ_SERVICE_FQDN:postgres}:5432/app
-      S3_ENDPOINT: https://${FGHJ_SERVICE_FQDN_HTTP:minio}
-    dependencies:
-      - kind: backing
-        name: postgres
-        image: postgres:16
-        ports: ["5432"]
-      - kind: service
-        repo: git@github.com:acme/payments-service.git
+      PAYMENTS_URL: http://${FGHJ_SERVICE_FQDN:payments/api}:8080
+    depends_on:
+      postgres: {condition: service_healthy}
+      payments/charge: {}
+  postgres:
+    image: postgres:16
+    ports: ["5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready"]
 
 flows:
-  checkout:
-    description: End-to-end checkout journey
-    dependencies:
-      - kind: service
-        repo: git@github.com:acme/payments-service.git
+  checkout: [checkout]
 ```
+
+It reads like a Compose file because it mostly is one. What's added:
+`include:` names the other repos this one talks to, and `payments/charge` is
+a flow the payments repo publishes — the slice of itself it's willing to be
+depended on by. You never name another repo's services, so its team can
+change them without breaking you.
 
 ```bash
 fghj wire git@github.com:acme/checkout-service.git
@@ -117,7 +122,7 @@ fghj wire git@github.com:acme/checkout-service.git
 
 That repo now answers at `https://checkout.shop.fghj.internal` with a
 certificate your system already trusts, and its Postgres at
-`postgres.checkout.shop.fghj.raw.internal:5432`. Neither address is written
+`postgres.checkout-service.shop.fghj.raw.internal:5432`. Neither address is written
 down anywhere — both are derived from the graph.
 
 <CardGrid>

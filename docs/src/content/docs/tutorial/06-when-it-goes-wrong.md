@@ -89,9 +89,8 @@ refusing to start: the workspace has 2 unresolved configuration problems:
 All of them, not the first — they're usually independent mistakes, and
 fixing them one round-trip at a time is miserable. The things that land here
 are ambiguity and real contradictions: a dependency cycle, two nodes deriving
-the same domain, a `kind: service` dependency on a repo with several services
-and no `services:` list, a `shared-backing` pointing at a backing dependency
-nobody declares.
+the same domain, a `depends_on` naming another repo's service instead of one
+of its flows, a hostname template naming a service that doesn't exist.
 
 This is why `fghj validate` is worth running while editing. It won't catch
 these — they're whole-graph properties, not file-level ones — but it catches
@@ -111,7 +110,7 @@ the terminal is unnecessary.
 ```bash
 fghj exec web.storefront -- sh
 fghj exec web.storefront -- env
-fghj exec web.storefront -- getent hosts db.web.storefront.shop.fghj.raw.internal
+fghj exec web.storefront -- getent hosts db.storefront.shop.fghj.raw.internal
 ```
 
 Those three answer, in order: what's in there, did my templates expand to
@@ -187,7 +186,7 @@ Otherwise, what's left is breadth rather than new concepts:
 
 - [.fghj.yaml reference](/reference/fghj-yaml/) — every field, including the
   ones this tutorial skipped: `env_file`, `additional_hosts`, `extra_hosts`,
-  `shared-backing`, `platform`, build secrets and ssh-agent forwarding,
+  `platform`, build secrets and ssh-agent forwarding,
   bind-mounting your source for live reload.
 - [HTTP vs. raw: choosing a zone](/guides/networking-http-vs-raw/) — the long
   version of chapter 2's table.

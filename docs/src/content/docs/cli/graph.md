@@ -8,7 +8,7 @@ fghj graph <entry> [--workspace <path>]
 ```
 
 Resolves the complete dependency universe reachable from an entry repo —
-every flow it declares, every service and backing dependency they pull
+every flow it declares, every service, database and task they pull
 in — and prints the resolved graph as JSON to stdout.
 
 ## Arguments

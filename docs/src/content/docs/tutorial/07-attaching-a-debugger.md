@@ -129,7 +129,7 @@ exits.
 And `.fghj.yaml`:
 
 ```yaml
-version: "1.0"
+version: "2.0"
 
 services:
   prices:
@@ -148,9 +148,8 @@ services:
 ```
 
 The service is called `prices`, not `api` — `catalog` already has an `api`,
-and a leaf name matching two siblings has to be qualified
-(`${FGHJ_SERVICE_FQDN:pricing::api}`) instead of just written. Naming them
-apart is easier. The id becomes `prices.pricing`.
+and two nodes both labelled `api` make the map harder to read. The id
+becomes `prices.pricing`.
 
 Note the healthcheck: `python:3.13-slim` ships no `curl`, so it polls itself
 with the interpreter it already has. `urlopen` raises on a non-2xx, which
@@ -162,15 +161,23 @@ fghj validate .fghj.yaml
 
 ### Wire it into the storefront
 
-In `storefront/.fghj.yaml`, add the dependency and the address:
+In `storefront/.fghj.yaml`, include the repo, wait on it, and add the
+address:
 
 ```yaml
-      PRICING_URL: http://${FGHJ_SERVICE_FQDN:prices}:8000
+include:
+  catalog: https://github.com/you/catalog.git
+  pricing: https://github.com/you/pricing.git
 ```
 
 ```yaml
-      - kind: service
-        repo: https://github.com/you/pricing.git
+    depends_on:
+      # ...
+      pricing: {}
+```
+
+```yaml
+      PRICING_URL: http://${FGHJ_SERVICE_FQDN:pricing/prices}:8000
 ```
 
 And in `storefront/server.js`, fetch it next to the catalog items:
@@ -430,7 +437,7 @@ mention the script.
 `.fghj.yaml`:
 
 ```yaml
-version: "1.0"
+version: "2.0"
 
 services:
   index:
@@ -451,12 +458,19 @@ services:
 Then in `storefront/.fghj.yaml`:
 
 ```yaml
-      SEARCH_URL: http://${FGHJ_SERVICE_FQDN:index}:8080
+include:
+  # ...
+  search: https://github.com/you/search.git
 ```
 
 ```yaml
-      - kind: service
-        repo: https://github.com/you/search.git
+    depends_on:
+      # ...
+      search: {}
+```
+
+```yaml
+      SEARCH_URL: http://${FGHJ_SERVICE_FQDN:search/index}:8080
 ```
 
 and in `storefront/server.js`, below the items:

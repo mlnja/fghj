@@ -11,7 +11,7 @@ certificates, and no `docker-compose.yml` to hand-maintain.
 > **Status: early.** macOS today, with Linux support in progress. Released
 > and installable from the Homebrew
 > tap; building from source (below) also works. The config language is
-> settled enough to write against; the `version: "1.0"` field in
+> settled enough to write against; the `version: "2.0"` field in
 > `.fghj.yaml` is the compatibility hook.
 
 ## The one idea
@@ -21,33 +21,38 @@ file, and any repo can be the entry point:
 
 ```yaml
 # storefront/.fghj.yaml
-version: "1.0"
+version: "2.0"
+
+include:
+  catalog: https://github.com/you/catalog.git
 
 services:
   web:
-    build:
-      context: .
+    build: .
     ports:
       "3000":
         primary: true
     environment:
       DATABASE_URL: postgres://shop:dev@${FGHJ_SERVICE_FQDN:db}:5432/shop
-      CATALOG_URL: http://${FGHJ_SERVICE_FQDN:api}:4000
-    dependencies:
-      - kind: backing
-        name: db
-        image: postgres:16
-        ports: ["5432"]
-      - kind: service
-        repo: https://github.com/you/catalog.git
+      CATALOG_URL: http://${FGHJ_SERVICE_FQDN:catalog/api}:4000
+    depends_on: [db, catalog]
+  db:
+    image: postgres:16
+    ports: ["5432"]
 ```
 
-That's a four-node graph across two repos. `web.storefront` answers at
+If you know Docker Compose, you can read it already. `include:` is the one
+addition: it names another repo, and `depends_on: catalog` waits on it.
+That's a graph across two repos. `web.storefront` answers at
 `https://web.storefront.<workspace>.fghj.internal` with a certificate your
 system already trusts; its Postgres at
-`db.web.storefront.<workspace>.fghj.raw.internal:5432`. Neither address is
+`db.storefront.<workspace>.fghj.raw.internal:5432`. Neither address is
 written down anywhere — both are derived from the node's identity, which is
 why the same config works unchanged in a second, isolated run.
+
+When the whole fleet is too much to boot, a repo publishes **flows** — named
+start lists, like `checkout: [web, catalog/browse]` — and you start one of
+those instead.
 
 ## Install
 
@@ -104,7 +109,7 @@ Full details, including uninstall cleanup:
 fghj validate ./.fghj.yaml          # check a config against the schema
 fghj graph .                        # resolve the whole graph, print JSON
 fghj wire .                         # register the workspace with the daemon
-fghj exec db.web.storefront -- psql -U shop shop
+fghj exec db.storefront -- psql -U shop shop
 fghj daemon {start,stop,restart,status}
 fghj doctor                         # is anything fghj needs from this host missing?
 ```
