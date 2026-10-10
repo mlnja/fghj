@@ -20,7 +20,8 @@ env:
 
 jobs:
   # ── fghj + fghjd: macOS only (fghjd shells out to macOS's `security` CLI
-  # and writes macOS-specific paths for CA/trust-store management) ─────────
+  # and writes macOS-specific paths for CA/trust-store management), and
+  # Apple Silicon only ──────────────────────────────────────────────────────
   build:
     name: Build (${{ matrix.suffix }})
     strategy:
@@ -29,8 +30,6 @@ jobs:
         include:
           - os: macos-latest
             suffix: darwin-arm64
-          - os: macos-15-intel
-            suffix: darwin-amd64
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -217,7 +216,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Only the two macOS binary artifacts. Without a pattern this
+      # Only the macOS binary artifact. Without a pattern this
       # downloads everything the run produced, which also means the
       # `.dockerbuild` build records `docker/build-push-action` uploads and
       # the `sidecar-digest-*` scratch files — none of which this job reads,
@@ -291,7 +290,7 @@ jobs:
 
           sed -i "s/^  version \"[^\"]*\"/  version \"$version\"/" "$formula"
 
-          for platform in darwin-arm64 darwin-amd64; do
+          for platform in darwin-arm64; do
             sha=$(cut -d' ' -f1 < "$(find artifacts -name "fghj-$platform.tar.gz.sha256" | head -1)")
             echo "  $platform  $sha"
             awk -v sha="$sha" -v marker="# $platform" \

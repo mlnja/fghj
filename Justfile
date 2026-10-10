@@ -61,14 +61,14 @@ update-tap version="":
 
     echo "Updating Homebrew tap for v$VERSION..."
 
-    # fghj is macOS-only today — only these two platforms have release assets.
-    PLATFORMS=(darwin-arm64 darwin-amd64)
+    # fghj is macOS on Apple Silicon only — the one platform with release assets.
+    PLATFORMS=(darwin-arm64)
     BASE="https://github.com/mlnja/fghj/releases/download/v$VERSION"
 
     # Wait for the assets to exist before touching the formula.
     #
     # `just release` tags and pushes, and the workflow that starts has to
-    # finish two full release compiles of the crate (the macOS binaries) plus
+    # finish a full release compile of the crate (the macOS binary) plus
     # two more inside Docker (the sidecar, which `create-release` is gated on)
     # before it publishes anything. Running this recipe straight afterwards
     # used to 404 on the first curl, which reads as a broken formula rather

@@ -211,9 +211,9 @@ separate job joins the digests into one manifest list with
 The obvious alternative — one buildx run with
 `--platform linux/amd64,linux/arm64` — emulates the non-native half under
 QEMU. That half is a full release compile of this crate, which turns a
-couple of minutes into most of an hour. Both architectures are needed because
-both are shipped: Docker on an Apple Silicon Mac runs `linux/arm64`, on an
-Intel Mac `linux/amd64`, and the release has assets for both.
+couple of minutes into most of an hour. Docker on an Apple Silicon Mac runs
+`linux/arm64`, which is the only image anyone uses today; `linux/amd64` is
+kept, on its own cheap native runner, for the Linux port.
 
 Pushing by digest rather than by tag is not a detail. Two runners pushing the
 same tag in parallel is just the loser overwriting the winner, and what

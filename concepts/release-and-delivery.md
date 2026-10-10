@@ -71,11 +71,12 @@ writes macOS-specific paths (`/etc/resolver`, the Keychain) — see
 source wouldn't run anywhere else either.
 
 The sidecar is the opposite: it is a Linux container by definition, and it has
-to match whatever architecture the user's Docker runs. On an Apple Silicon Mac
-that is `linux/arm64`; on an Intel Mac, `linux/amd64`. Since the release ships
-`darwin-arm64` and `darwin-amd64` assets, the sidecar needs both Linux
-architectures — so there are two matrices in one workflow with nothing in
-common but the crate they build from. [[in-network-sidecar]] covers how they're
+to match whatever architecture the user's Docker runs. The release ships
+`darwin-arm64` only — Intel Macs were dropped, their runner being the slowest
+job in the release — so in practice that is `linux/arm64`. The sidecar still
+builds `linux/amd64` too, natively and cheaply, for the Linux port. So there
+are two matrices in one workflow with nothing in common but the crate they
+build from. [[in-network-sidecar]] covers how they're
 merged into one manifest list and why they're built on native runners rather
 than under QEMU.
 
