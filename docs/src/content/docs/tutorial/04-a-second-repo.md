@@ -321,7 +321,7 @@ try {
 }
 ```
 
-**Start default environment**, and reload:
+Press **Start** on `web`, and reload:
 
 ```
 storefront

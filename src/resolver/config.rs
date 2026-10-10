@@ -139,10 +139,6 @@ pub fn default_dockerfile() -> String {
     "Dockerfile".to_string()
 }
 
-pub fn default_domain_scope() -> String {
-    "run".to_string()
-}
-
 pub fn default_restart() -> String {
     "no".to_string()
 }

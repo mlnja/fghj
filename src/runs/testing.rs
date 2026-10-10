@@ -32,7 +32,6 @@ pub fn test_node(id: &str, label: &str, kind: &str) -> Node {
         image: None,
         branch: None,
         repo: None,
-        domain_scope: "run".to_string(),
         // Ids are `{name}.{local_path}`, so the repo is everything after
         // the first dot.
         local_path: id.split_once('.').map(|(_, repo)| repo.to_string()),

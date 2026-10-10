@@ -37,10 +37,6 @@ impl RunRegistry {
         if alive && let Some(ip) = docker::inspect_network_ip(&self.docker, &name, network).await? {
             return Ok((name, ip));
         }
-        // A stopped-but-not-removed sidecar from a previous run would
-        // otherwise collide with create_container's fixed name.
-        docker::stop_and_remove(&self.docker, &name).await;
-
         crate::sidecar_image::ensure_built(&self.docker).await?;
 
         let routes_dir = sidecar_routes_dir(network);

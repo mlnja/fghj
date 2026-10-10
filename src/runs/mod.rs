@@ -59,6 +59,6 @@ pub mod testing;
 
 pub use domain::{DomainZone, derive_domain};
 pub use logs::{container_name_for, logs_for_tail};
-pub use naming::{DEFAULT_RUN_ID, resolve_run_id};
+pub use naming::DEFAULT_RUN_ID;
 pub use order::topological_start_order;
 pub use registry::RunRegistry;

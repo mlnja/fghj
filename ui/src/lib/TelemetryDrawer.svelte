@@ -1,12 +1,12 @@
 <script>
   import SideDrawer from './SideDrawer.svelte';
 
-  let { onClose, onFetchDaemonLogs, onFetchNetStatus, onFetchDoctor } = $props();
+  let { initialTab = 'logs', onClose, onFetchDaemonLogs, onFetchNetStatus, onFetchDoctor, onListJobs } =
+    $props();
 
-  let activeTab = $state('logs');
+  let activeTab = $state(initialTab);
 
-  // Logs tab: polling tail, same pattern as OperationsDrawer's pull-queue
-  // log — daemon lifecycle/reconcile messages are low-volume enough that a
+  // Logs tab: polling tail, same pattern as the pull queue below — daemon lifecycle/reconcile messages are low-volume enough that a
   // poll is just as responsive as SSE and much simpler.
   let logLines = $state([]);
   let lastSeq = $state(null);
@@ -63,7 +63,7 @@
   // Loaded from the tab's own click rather than from the `$effect` below:
   // `runDoctor` writes the same state it reads to guard itself, and doing
   // that inside a tracked effect makes the effect re-run on its own writes.
-  // The drawer always opens on `logs`, so a click is the only way in here.
+  // The drawer never opens on `doctor`, so a click is the only way in here.
   let doctorChecks = $state(null);
   let doctorBusy = $state(false);
   let doctorAt = $state(null);
@@ -80,6 +80,24 @@
     }
   }
 
+  // Pull queue tab: clones and downloads, each with its own log.
+  let jobs = $state([]);
+  let selectedJob = $state(null);
+
+  async function pollJobs() {
+    if (!onListJobs) return;
+    jobs = (await onListJobs()) ?? [];
+    if (!selectedJob && jobs.length) selectedJob = jobs[0].key;
+  }
+
+  function jobLabel(key) {
+    if (key === 'pull-all') return 'Pull all repos';
+    if (key.startsWith('node:')) return `Download ${key.slice('node:'.length)}`;
+    return key;
+  }
+
+  let job = $derived(jobs.find((j) => j.key === selectedJob) ?? null);
+
   function openDoctor() {
     activeTab = 'doctor';
     if (doctorChecks === null) runDoctor();
@@ -89,6 +107,11 @@
     if (activeTab === 'logs') {
       pollLogs();
       const timer = setInterval(pollLogs, 1500);
+      return () => clearInterval(timer);
+    }
+    if (activeTab === 'pulls') {
+      pollJobs();
+      const timer = setInterval(pollJobs, 800);
       return () => clearInterval(timer);
     }
     if (activeTab === 'network') {
@@ -127,6 +150,7 @@
   <div class="tabs">
     <div class="tab" class:active={activeTab === 'logs'} onclick={() => (activeTab = 'logs')}>Logs</div>
     <div class="tab" class:active={activeTab === 'network'} onclick={() => (activeTab = 'network')}>DNS / DNAT</div>
+    <div class="tab" class:active={activeTab === 'pulls'} onclick={() => (activeTab = 'pulls')}>Pull queue</div>
     <div class="tab" class:active={activeTab === 'doctor'} onclick={openDoctor}>Doctor</div>
   </div>
 
@@ -211,6 +235,27 @@
           {/if}
         </div>
       {/if}
+    </div>
+  {:else if activeTab === 'pulls'}
+    <div class="ops">
+      <div class="ops-list">
+        {#if !jobs.length}
+          <div class="empty">no pulls yet</div>
+        {/if}
+        {#each jobs as j (j.key)}
+          <div class="ops-row" class:active={j.key === selectedJob} onclick={() => (selectedJob = j.key)}>
+            <span class="dot" class:running={j.status === 'running'} class:done={j.status === 'done'} class:error={j.status === 'error'}></span>
+            <span class="ops-label">{jobLabel(j.key)}</span>
+          </div>
+        {/each}
+      </div>
+      <div class="ops-log">
+        {#if job}
+          <pre>{job.log || '(no output yet)'}</pre>
+        {:else}
+          <div class="empty">select a pull to see its log</div>
+        {/if}
+      </div>
     </div>
   {:else}
     <div class="net">
@@ -309,6 +354,26 @@
   .log-line.warn .msg { color: #f0c177; }
   .log-line.warn .ts { color: #9a7533; }
 
+
+  .ops { display: flex; gap: 16px; height: calc(100vh - 220px); }
+  .ops-list { flex: 0 0 200px; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+  .ops-row {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 5px; cursor: pointer;
+    font: 500 11.5px var(--font-mono); color: var(--ink-dim); border: 1px solid transparent;
+  }
+  .ops-row:hover { background: var(--panel-2); }
+  .ops-row.active { background: var(--panel-2); border-color: var(--line-strong); color: var(--ink); }
+  .ops-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: var(--ink-faint); }
+  .dot.running { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+  .dot.done { background: var(--success, #6fdc8c); }
+  .dot.error { background: var(--danger); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .ops-log { flex: 1; min-width: 0; }
+  .ops-log pre {
+    height: 100%; margin: 0; background: #0c1116; color: #c6d6cc; padding: 12px; border-radius: 6px;
+    border: 1px solid #1d262f; font: 400 11px var(--font-mono); overflow: auto; white-space: pre-wrap; word-break: break-all;
+  }
 
   .net { display: flex; flex-direction: column; gap: 20px; overflow-y: auto; height: calc(100vh - 220px); }
   .net-meta { font: 500 11.5px var(--font-mono); color: var(--ink-dim); }

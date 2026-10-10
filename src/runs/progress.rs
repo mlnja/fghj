@@ -1,6 +1,6 @@
 //! Incremental progress reporting out of a whole-run create/top-up.
 //!
-//! `start`/`ensure_running` bring nodes up one at a time and used to
+//! `ensure_running` bring nodes up one at a time and used to
 //! persist the whole `RunState` to SQLite after each one, so that a daemon
 //! that died partway through still knew about the containers that had
 //! already come up. Persistence is now derived from published state
@@ -11,7 +11,8 @@
 //!
 //! Reporting each node as it comes up restores that guarantee and makes the
 //! create incremental everywhere else too: the UI fills in node by node
-//! instead of staying empty until the last one is healthy.
+//! instead of staying empty until the last one is healthy — and, with
+//! `RunProgress::Working`, shows which node is being worked on right now.
 //!
 //! Deliberately a channel rather than an `ActorHandle`: `runs/` drives
 //! Docker and should not know that actors, actions, or reducers exist. The
@@ -19,14 +20,33 @@
 
 use tokio::sync::mpsc;
 
-use crate::state::ContainerInfo;
+use crate::state::{ContainerInfo, PendingAction};
 
-/// One node having come up, plus the run-level facts that are only known
-/// once the run's network and sidecar exist. Carrying them on every report
-/// (rather than once up front) keeps the receiver from having to sequence
-/// two different kinds of message.
+/// One step of a create/top-up/switch, as it happens.
 #[derive(Debug, Clone)]
-pub struct RunProgress {
+pub enum RunProgress {
+    /// About to start (or, for a flow switch, stop) `node_id` — reported
+    /// before the Docker work rather than after, so the node reads
+    /// "starting…"/"stopping…" for the minutes a build can take instead of
+    /// sitting unchanged while the environment rejects every other action as
+    /// already in flight. `None` takes the mark back off a node whose work
+    /// failed, so it doesn't read as still in progress for the rest of the
+    /// create.
+    Working {
+        run_id: String,
+        node_id: String,
+        action: Option<PendingAction>,
+    },
+    /// A node's state once its work is done.
+    Done(Box<NodeDone>),
+}
+
+/// One node having come up (or been stopped), plus the run-level facts
+/// that are only known once the run's network and sidecar exist. Carrying
+/// them on every report (rather than once up front) keeps the receiver from
+/// having to sequence two different kinds of message.
+#[derive(Debug, Clone)]
+pub struct NodeDone {
     pub run_id: String,
     pub network: String,
     pub sidecar_container_name: String,

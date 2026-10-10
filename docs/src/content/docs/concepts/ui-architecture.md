@@ -15,11 +15,9 @@ shared model, not three separately fetched datasets:
   [Flat workspace model](/concepts/flat-workspace-model/) and
   [Fog-of-war visibility](/concepts/fog-of-war-visibility/).
 - **Actual** — every node kind, services and backing dependencies
-  together, overlaid with live container status from whichever run is
-  currently selected. This is also where run controls live — starting the
-  default environment and running a specific flow. There is deliberately no
-  control for starting a *named* run; the list shows any that exist, with a
-  **Stop**, and creating one is a `POST /runs` ([Runs](/reference/runs/)).
+  together, overlaid with live container status from the workspace's one
+  environment. The header's **Switch to flow** acts on the selected flow
+  here; a single node starts from its drawer.
 - **Config** — reserved for environment variables, the split-DNS table,
   and issued certs; not built out yet.
 
@@ -92,17 +90,15 @@ the current node/edge set on every render:
 ## Drawers
 
 - **Node detail** — general info and logs, opened by clicking any node.
-  Shows the node's default-run domain and, when live, its container
-  status and an "open" link — see
-  [Node identity & domains](/concepts/node-identity-and-domains/) for
-  exactly which run's address that link reflects.
-- **Operations** — lists every download job started this daemon lifetime,
-  most-recent-first, with its live log — the one place to see a "pull
-  all" or an individual clone's raw Git output.
+  Shows the node's domain and, when live, its container status and an
+  "open" link — see
+  [Node identity & domains](/concepts/node-identity-and-domains/).
 - **Telemetry** (the "⚡" button in the header) — the daemon's view of
-  itself rather than of any one workspace: its recent log lines, and a
-  live listing of the managed `/etc/hosts` entries, the `/etc/resolver`
-  zones with the port each points at, and the NAT routes backing the raw
-  zone. It's how you check the plumbing is up without reading `fghjd`'s
+  itself rather than of any one workspace: its recent log lines; a live
+  listing of the managed `/etc/hosts` entries, the `/etc/resolver` zones
+  with the port each points at, and the NAT routes backing the raw zone;
+  the **pull queue** — every clone/download started this daemon lifetime,
+  with its raw Git output (the "☰" next to **Pull all** opens straight
+  to it); and **Doctor**. It's how you check the plumbing is up without reading `fghjd`'s
   output — see [Split DNS](/concepts/split-dns/) and
   [Networking: HTTP vs. raw](/guides/networking-http-vs-raw/).

@@ -152,16 +152,12 @@ No node kind can declare its own raw domain. Every node's domain — in
 either zone — is derived the same way:
 
 ```rust
-fn derive_domain(node_id, domain_scope, workspace_name, run_id, zone) -> String {
+fn derive_domain(node_id, workspace_name, zone) -> String {
     let suffix = match zone {
         DomainZone::Http => "fghj.internal",
         DomainZone::Raw => "fghj.raw.internal",
     };
-    if domain_scope == "stable" || run_id == DEFAULT_RUN_ID {
-        format!("{node_id}.{workspace}.{suffix}")
-    } else {
-        format!("{node_id}.{run_id}.{workspace}.{suffix}")
-    }
+    format!("{node_id}.{workspace_name}.{suffix}")
 }
 ```
 
@@ -184,24 +180,6 @@ the http one instead, for the rarer case of needing the proxied identity on
 purpose (e.g. minting a presigned URL meant to be handed to something
 outside the network).
 
-`run_id` is folded in for named runs, since more than one can be
-alive at once and each needs its own identity — but the **default run**
-(the one shared per-workspace environment) drops it, so a service's
-everyday URL is just `cart.myworkspace.fghj.internal`, not
-`cart.default.myworkspace.fghj.internal`.
-
-The other opt-out is per-node: a service or backing dependency can set
-`domain_scope: "stable"` to drop the run id regardless of which run it's
-in — a deliberate choice for something meant to keep one fixed identity
-across every run of the graph (a shared Postgres instance, say). Only one
-run can actually own a `"stable"`-scoped name from the host at a time, but
-it's always the same name.
-
-## Limitations
-
-The graph API pre-computes each node's *default-run* domain ahead of time,
-before any container for that node has started, so the UI can show it
-immediately. A named run gets a different, run-id-qualified domain
-that this pre-computed value doesn't track — so a node's "domain" as shown
-in the UI always reflects its default-run identity, even while you're
-looking at a different run's live containers.
+A workspace has exactly one environment, so nothing else needs folding
+in: a node's domain is a pure function of where it's declared, known before
+its container exists and unchanged by every restart.

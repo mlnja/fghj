@@ -31,7 +31,6 @@ pub(crate) fn expand_service_fqdn_templates(
     own_raw_domain: &str,
     own_http_domain: &str,
     graph: &Graph,
-    run_id: &str,
 ) -> String {
     // `TOKEN_RAW` is a literal prefix of `TOKEN_HTTP`, so `rest.find`ing it
     // always lands on the truly leftmost occurrence of either token — a
@@ -59,7 +58,7 @@ pub(crate) fn expand_service_fqdn_templates(
         let inner = &rest[start + token_len..end]; // "" or ":name"
         let resolved = match inner.strip_prefix(':') {
             None => Some(own_domain.to_string()),
-            Some(name) => sibling_domain(node, name, graph, run_id, zone),
+            Some(name) => sibling_domain(node, name, graph, zone),
         };
         match resolved {
             Some(domain) => out.push_str(&domain),
@@ -104,25 +103,17 @@ pub(crate) fn sibling_domain(
     node: &Node,
     path: &str,
     graph: &Graph,
-    run_id: &str,
     zone: DomainZone,
 ) -> Option<String> {
     let local_path = node.local_path.as_deref()?;
     let id = crate::resolver::visit::reference_target_id(local_path, &node.includes, path)?;
     let sibling = graph.nodes.iter().find(|n| n.id == id)?;
-    Some(derive_domain(
-        &sibling.id,
-        &sibling.domain_scope,
-        &graph.workspace_name,
-        run_id,
-        zone,
-    ))
+    Some(derive_domain(&sibling.id, &graph.workspace_name, zone))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runs::naming::DEFAULT_RUN_ID;
     use crate::runs::testing::{test_graph, test_node};
 
     #[test]
@@ -135,7 +126,6 @@ mod tests {
             "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
-            DEFAULT_RUN_ID,
         );
         assert_eq!(out, "https://php.app.shop.fghj.raw.internal/");
     }
@@ -150,7 +140,6 @@ mod tests {
             "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
-            DEFAULT_RUN_ID,
         );
         assert_eq!(out, "https://php.app.shop.fghj.internal/");
     }
@@ -166,7 +155,6 @@ mod tests {
             "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
-            DEFAULT_RUN_ID,
         );
         assert_eq!(out, "mysql://mysql.app.shop.fghj.raw.internal:3306/app");
     }
@@ -182,7 +170,6 @@ mod tests {
             "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
-            DEFAULT_RUN_ID,
         );
         assert_eq!(out, "https://mysql.app.shop.fghj.internal/");
     }
@@ -201,7 +188,6 @@ mod tests {
             "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
-            DEFAULT_RUN_ID,
         );
         assert_eq!(out, "http://api.billing-svc.shop.fghj.raw.internal");
     }
@@ -219,7 +205,6 @@ mod tests {
             "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
-            DEFAULT_RUN_ID,
         );
         assert_eq!(out, "${FGHJ_SERVICE_FQDN:api}");
     }
@@ -246,7 +231,6 @@ mod tests {
             "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
-            DEFAULT_RUN_ID,
         );
         assert_eq!(unknown, "${FGHJ_SERVICE_FQDN:nope}");
 
@@ -256,7 +240,6 @@ mod tests {
             "php.app.shop.fghj.raw.internal",
             "php.app.shop.fghj.internal",
             &graph,
-            DEFAULT_RUN_ID,
         );
         assert_eq!(unterminated, "prefix ${FGHJ_SERVICE_FQDN no closing brace");
     }

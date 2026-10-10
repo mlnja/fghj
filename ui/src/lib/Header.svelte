@@ -12,7 +12,8 @@
     onPullFlow,
     onPullFlowStatus,
     onPullFlowComplete,
-    onRunFlow,
+    onSwitchFlow,
+    envBusy,
     onOpenOperations,
     onOpenTelemetry,
     workspaces,
@@ -28,12 +29,14 @@
   let pollTimer = null;
 
   // The flow-scoped action button: git ("Pull flow") on the Repos tab,
-  // docker ("Run flow") on the Actual tab — same currentFlow, different verb
-  // depending which half of fghj's model that tab represents.
+  // docker ("Switch to flow") on the Actual tab — same currentFlow, different verb
+  // depending which half of fghj's model that tab represents. A switch (or a
+  // first node start) keeps running long after its request returns, and every
+  // node action is refused until it ends: `envBusy` is that.
   let flowPulling = $state(false);
   let flowPullState = $state(null); // null | 'running' | 'done' | 'error'
   let flowPollTimer = null;
-  let runningFlow = $state(false);
+  let switchingFlow = $state(false);
 
   // Only tracks completion so the graph can be reloaded and the button's
   // spinner cleared — the actual log lives in the shared operations drawer.
@@ -91,15 +94,15 @@
     }
   }
 
-  async function runFlow() {
-    if (!onRunFlow || !currentFlow || runningFlow) return;
-    runningFlow = true;
+  async function switchFlow() {
+    if (!onSwitchFlow || !currentFlow || switchingFlow) return;
+    switchingFlow = true;
     try {
-      // Idempotent server-side: only tops up whatever this flow still
-      // needs, so clicking again when it's already running is a no-op.
-      await onRunFlow(currentFlow);
+      // Idempotent server-side: once the environment is this flow,
+      // clicking again changes nothing.
+      await onSwitchFlow(currentFlow);
     } finally {
-      runningFlow = false;
+      switchingFlow = false;
     }
   }
 
@@ -181,8 +184,8 @@
       >
     {/if}
   {:else if activeTab === 'containers'}
-    <button class="pull-btn" onclick={runFlow} disabled={!currentFlow || runningFlow} title="ensure this flow's containers are running (leaves everything else untouched)">
-      {#if runningFlow}<span class="spinner"></span> running…{:else}Run flow{/if}
+    <button class="pull-btn" onclick={switchFlow} disabled={!currentFlow || switchingFlow || envBusy} title="start this flow's containers and stop (not remove) every other running one">
+      {#if switchingFlow || envBusy}<span class="spinner"></span> switching…{:else}Switch to flow{/if}
     </button>
   {/if}
 
@@ -196,7 +199,7 @@
         >{pullState === 'done' ? '✓' : '✕'}</span
       >
     {/if}
-    <span class="ops-link" onclick={onOpenOperations} title="view pull/download operations queue">☰</span>
+    <span class="ops-link" onclick={onOpenOperations} title="pull queue">☰</span>
   </div>
 
   <div class="divider"></div>
@@ -207,7 +210,7 @@
   </div>
 
   <div class="divider"></div>
-  <div class="help-btn" onclick={onOpenTelemetry} title="fghjd telemetry (logs, DNS/DNAT status)">⚡</div>
+  <div class="help-btn" onclick={onOpenTelemetry} title="fghjd telemetry (logs, DNS/DNAT, pull queue, doctor)">⚡</div>
   <div class="divider"></div>
   <div class="help-btn" onclick={() => (helpOpen = true)}>?</div>
 </div>

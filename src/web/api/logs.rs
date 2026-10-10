@@ -20,11 +20,12 @@ pub(crate) struct TailQuery {
 }
 
 pub(crate) async fn get_run_logs(
-    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    AxumPath(node_id): AxumPath<String>,
     Query(q): Query<TailQuery>,
     WorkspaceExtractor(state): WorkspaceExtractor,
     ActorExtractor(actor): ActorExtractor,
 ) -> Response {
+    let run_id = runs::DEFAULT_RUN_ID.to_string();
     let tail = q.tail.unwrap_or(200);
     match actor.current().runs.get(&run_id) {
         Some(s) => match runs::logs_for_tail(&state.docker, s, &node_id, tail).await {
@@ -40,10 +41,11 @@ pub(crate) async fn get_run_logs(
 }
 
 pub(crate) async fn get_run_logs_stream(
-    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    AxumPath(node_id): AxumPath<String>,
     WorkspaceExtractor(state): WorkspaceExtractor,
     ActorExtractor(actor): ActorExtractor,
 ) -> Response {
+    let run_id = runs::DEFAULT_RUN_ID.to_string();
     let run_state = match actor.current().runs.get(&run_id).cloned() {
         Some(s) => s,
         None => {
@@ -79,9 +81,10 @@ pub(crate) async fn get_run_logs_stream(
 /// still live, so history for a just-crashed or just-removed container
 /// stays browsable.
 pub(crate) async fn get_run_node_log_generations(
-    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    AxumPath(node_id): AxumPath<String>,
     WorkspaceExtractor(state): WorkspaceExtractor,
 ) -> Response {
+    let run_id = runs::DEFAULT_RUN_ID.to_string();
     match state.db.clone().list_log_generations(run_id, node_id).await {
         Ok(generations) => Json(serde_json::json!({ "generations": generations })).into_response(),
         Err(e) => err_response(e),
@@ -105,10 +108,11 @@ pub(crate) fn default_log_history_limit() -> i64 {
 /// lines) and infinite scroll-back (`before_seq` set to the oldest `seq`
 /// currently loaded).
 pub(crate) async fn get_run_node_log_history(
-    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    AxumPath(node_id): AxumPath<String>,
     Query(q): Query<LogHistoryQuery>,
     WorkspaceExtractor(state): WorkspaceExtractor,
 ) -> Response {
+    let run_id = runs::DEFAULT_RUN_ID.to_string();
     match state
         .db
         .clone()
@@ -130,10 +134,11 @@ pub(crate) struct EventsQuery {
 /// counterpart to the raw container-log history above. Only ever the most
 /// recent cycle of `action`: see `persistence::WorkspaceDb::begin_event_cycle`.
 pub(crate) async fn get_run_node_events(
-    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    AxumPath(node_id): AxumPath<String>,
     Query(q): Query<EventsQuery>,
     WorkspaceExtractor(state): WorkspaceExtractor,
 ) -> Response {
+    let run_id = runs::DEFAULT_RUN_ID.to_string();
     match state
         .db
         .clone()

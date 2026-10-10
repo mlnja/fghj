@@ -82,9 +82,6 @@ enum Commands {
         /// workspace the current directory is inside, else the current directory)
         #[arg(long)]
         workspace: Option<PathBuf>,
-        /// Which run to target (default: the shared default environment)
-        #[arg(long, default_value = "default")]
-        run: String,
         /// Disable pseudo-TTY allocation even if stdin/stdout are TTYs
         #[arg(short = 'T', long)]
         no_tty: bool,
@@ -376,8 +373,8 @@ fn uninstall(yes: bool, keep_ca: bool, keep_state: bool) -> Result<()> {
             );
         }
         println!();
-        println!("Docker containers, networks and volumes are NOT removed (a `scope: stable`");
-        println!("volume may hold data you still want). Neither are the binaries — use");
+        println!("Docker containers, networks and volumes are NOT removed (a volume may");
+        println!("hold data you still want). Neither are the binaries — use");
         println!("`brew uninstall fghj` for those.");
         print!("\nContinue? [y/N] ");
         std::io::stdout().flush().ok();
@@ -501,7 +498,6 @@ fn terminal_size() -> (u16, u16) {
 async fn exec_cmd(
     node: String,
     workspace: Option<PathBuf>,
-    run: String,
     no_tty: bool,
     cmd: Vec<String>,
 ) -> Result<()> {
@@ -547,7 +543,7 @@ async fn exec_cmd(
             )
         })?;
 
-    let url = format!("ws://fghjd/runs/{run}/nodes/{node}/exec/ws?workspace={id}");
+    let url = format!("ws://fghjd/nodes/{node}/exec/ws?workspace={id}");
     let (ws_stream, _response) = tokio_tungstenite::client_async(url, unix_stream)
         .await
         .context("failed to open exec websocket with fghjd")?;
@@ -779,10 +775,9 @@ async fn main() -> Result<()> {
         Commands::Exec {
             node,
             workspace,
-            run,
             no_tty,
             cmd,
-        } => exec_cmd(node, workspace, run, no_tty, cmd).await,
+        } => exec_cmd(node, workspace, no_tty, cmd).await,
     }
 }
 

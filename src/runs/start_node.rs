@@ -736,7 +736,7 @@ mod tests {
     }
 
     /// The whole reason the kind exists: a failed migration must fail its
-    /// node, because `start`/`ensure_running` stop the start loop on an
+    /// node, because `ensure_running` stop the start loop on an
     /// error and the owning service comes *after* its task in
     /// `topological_start_order`. Succeeding here would start the service
     /// against an unmigrated database.

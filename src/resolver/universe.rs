@@ -72,16 +72,10 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     let mut nodes: Vec<Node> = ctx.nodes.into_values().collect();
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
     for node in &mut nodes {
-        // Default-run domain, always known once a node's id and
-        // domain_scope are — see the field's own doc comment for why this
-        // isn't just set at construction time.
-        node.domain = crate::runs::derive_domain(
-            &node.id,
-            &node.domain_scope,
-            &workspace_name,
-            crate::runs::DEFAULT_RUN_ID,
-            crate::runs::DomainZone::Http,
-        );
+        // Always known once a node's id is — see the field's own doc
+        // comment for why this isn't just set at construction time.
+        node.domain =
+            crate::runs::derive_domain(&node.id, &workspace_name, crate::runs::DomainZone::Http);
     }
 
     let edges = ctx.edges;

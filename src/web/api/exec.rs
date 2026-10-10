@@ -41,17 +41,18 @@ pub(crate) enum ExecControl {
     Resize { cols: u16, rows: u16 },
 }
 
-/// `GET /runs/{run_id}/nodes/{node_id}/exec/ws?workspace={id}` — proxies a
+/// `GET /nodes/{node_id}/exec/ws?workspace={id}` — proxies a
 /// real `docker exec` full duplex: see `docker::ExecSession`'s doc comment.
 /// Resolves the run/node the same way `get_run_logs_stream` does, as a plain
 /// pre-upgrade HTTP response, so a bad run/node id gets a clean 404/400
 /// instead of failing mid-handshake.
 pub(crate) async fn get_run_exec_ws(
-    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    AxumPath(node_id): AxumPath<String>,
     WorkspaceExtractor(state): WorkspaceExtractor,
     ActorExtractor(actor): ActorExtractor,
     ws: WebSocketUpgrade,
 ) -> Response {
+    let run_id = runs::DEFAULT_RUN_ID.to_string();
     // Run state comes from the reducer, the only place that keeps it.
     let run_state = match actor.current().runs.get(&run_id).cloned() {
         Some(s) => s,

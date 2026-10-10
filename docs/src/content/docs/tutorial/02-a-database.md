@@ -45,7 +45,6 @@ services:
     stop_grace_period: 30
     volumes:
       - name: pgdata
-        scope: stable
         container: /var/lib/postgresql/data
 ```
 
@@ -133,9 +132,8 @@ Two things follow from using the template rather than typing the address:
 
 - You never hand-compute a domain, and a rename can't leave a stale string
   behind.
-- The expansion depends on **which run** the container belongs to. There is
-  only ever one run here, but a hardcoded address would have quietly broken
-  the moment there were two — see [Runs](/reference/runs/).
+- The expansion follows the node's id, so moving or renaming `db` moves
+  every address that names it.
 
 A template that names nothing — `${FGHJ_SERVICE_FQDN:bd}` — is a blocking
 warning: fghj refuses to start rather than hand `web` an address that will
@@ -172,41 +170,23 @@ container that outlived the daemon that made it. (Its companion,
 `stop_signal`, overrides which signal is sent — nginx, for instance, wants
 `SIGQUIT` for a graceful shutdown.)
 
-**`volumes: [{name: pgdata, scope: stable, ...}]`** — a *named* volume
-(Docker-managed storage), not a bind mount. `name: pgdata` is a bare label,
-like a service name: the real Docker volume name is derived from it, folding
-in the declaring node's id, so `pgdata` in this repo and `pgdata` in another
-repo are two different volumes.
-
-`scope` is the interesting part:
-
-- `scope: run` (the default) folds the run id into the volume name. Every
-  run gets its own empty database.
-- `scope: stable` drops it. One fixed identity, shared by every run, and it
-  survives the container being destroyed and recreated.
-
-We chose `stable` because typing your test data in twice is miserable. It's
-a deliberate trade: [Runs](/reference/runs/) shows what you gave up.
+**`volumes: [{name: pgdata, ...}]`** — a *named* volume (Docker-managed
+storage), not a bind mount. `name: pgdata` is a bare label, like a service
+name: the real Docker volume name is derived from it, folding in the
+declaring node's id, so `pgdata` in this repo and `pgdata` in another repo
+are two different volumes. It survives the container being stopped,
+destroyed and recreated — your test data stays put.
 
 ## Restart and see
 
-Back in the UI's **Actual** tab, press **Start default environment** again.
+Back in the UI's **Actual** tab, press **Start** on `web` again.
 
-This is a top-up, not a restart. It walks the graph in dependency order and,
-for each node, asks three questions: is it running, does fghj know about it,
-and does its configuration still match what `.fghj.yaml` would produce right
-now. Only if all three hold does it skip the node.
+Start first walks `web`'s requirements in dependency order and brings up any
+that aren't running, then recreates `web` itself from what `.fghj.yaml`
+says now.
 
-So: `db` is new and gets created. `web` is running, but its environment
-changed — `DATABASE_URL` wasn't there before — so it is recreated, and the
-event log says so in as many words:
-
-```
-recreating container: config changed since it was started
-```
-
-That line exists because a top-up silently bouncing a container that was
-running fine looks like a bug from the outside.
+So: `db` is new and gets created, waited on until healthy, and then `web`
+is recreated with `DATABASE_URL` in its environment.
 
 Reload `https://web.storefront.shop.fghj.internal`. To have something to
 show, add the database check to `server.js`:
@@ -247,7 +227,7 @@ res.end(
 );
 ```
 
-Press **Start default environment** once more — the image changed, so `web`
+Press **Start** on `web` once more — the image changed, so `web`
 is rebuilt and recreated — and you get:
 
 ```

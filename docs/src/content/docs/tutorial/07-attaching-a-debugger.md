@@ -202,7 +202,7 @@ items = (await catalogItems())
   .join('');
 ```
 
-**Start default environment**, and reload:
+**Switch to flow**, and reload:
 
 ```
  • Reading lamp — $42 · you pay $50.4
@@ -485,7 +485,7 @@ try {
 }
 ```
 
-**Start default environment.** Both new nodes build and come up, and the page
+**Switch to flow.** Both new nodes build and come up, and the page
 gains:
 
 ```
@@ -586,7 +586,7 @@ only so that an `fghjd` restart doesn't silently drop you out of a session.
 
 ### And why it isn't drift
 
-Press **Start default environment** while `index.search` is halted. Nothing
+Press **Switch to flow** while `index.search` is halted. Nothing
 happens to it.
 
 That's deliberate, and it's the load-bearing decision of the whole feature.

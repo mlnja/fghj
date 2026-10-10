@@ -57,8 +57,8 @@ don't want restarted out from under you.
 
 When you do want it applied, the node drawer's **Reset** button stops and
 recreates that one container fresh — and leaves its volumes alone. Or press
-**Start default environment** to top the whole run up, which recreates
-exactly the nodes whose config changed and reports why:
+**Switch to flow** to top up the whole flow, which recreates exactly the
+nodes whose config changed and reports why:
 
 ```
 recreating container: config changed since it was started

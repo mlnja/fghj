@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 
 use crate::action::{Action, ActionRejected};
 use crate::state::{
-    ContainerDesired, ContainerInfo, ContainerObserved, PendingAction, RunState, WorkspaceState,
+    ContainerDesired, ContainerInfo, ContainerObserved, PendingAction, RunSpec, RunState,
+    WorkspaceState,
 };
 
 pub(super) fn reduce(
@@ -29,9 +30,8 @@ pub(super) fn reduce(
             //
             // A run already known under this id keeps its existing
             // `containers`/`volumes` rather than being wiped back to empty:
-            // the common case (`POST /runs` with no explicit `run_id`,
-            // targeting the shared default environment) is an idempotent
-            // top-up of whatever's already running, and clobbering it here
+            // a switch is an idempotent top-up of whatever's already
+            // running, and clobbering it here
             // would make already-live containers flicker to "gone" for as
             // long as convergence takes, even though nothing is actually
             // being torn down.
@@ -112,11 +112,17 @@ fn lookup_mut<'a>(
     run_id: &str,
     node_id: &str,
 ) -> Result<&'a mut ContainerInfo, ActionRejected> {
-    state
+    let run = state
         .runs
         .get_mut(run_id)
-        .ok_or(ActionRejected::RunNotFound)?
-        .containers
+        .ok_or(ActionRejected::RunNotFound)?;
+    // A create/switch owns every container until it settles — the same rule
+    // `start_node` applies. A stop or delete slipped in mid-switch would race
+    // the switch's own Docker work on the same container.
+    if run.pending_create.is_some() {
+        return Err(ActionRejected::AlreadyInFlight);
+    }
+    run.containers
         .get_mut(node_id)
         .ok_or(ActionRejected::NodeNotFound)
 }
@@ -177,10 +183,26 @@ fn start_node(
     node_id: &str,
 ) -> Result<WorkspaceState, ActionRejected> {
     let mut next = state.clone();
-    let run = next
-        .runs
-        .get_mut(run_id)
-        .ok_or(ActionRejected::RunNotFound)?;
+    // No environment yet: this start is what creates it. Its network and
+    // sidecar have to exist before any container can, so the start goes
+    // through the same create/top-up `RunPlanned` does, scoped to this node
+    // and what it can't start without.
+    let Some(run) = next.runs.get_mut(run_id) else {
+        next.runs.insert(
+            run_id.to_string(),
+            RunState {
+                run_id: run_id.to_string(),
+                pending_create: Some(RunSpec::Node(node_id.to_string())),
+                ..Default::default()
+            },
+        );
+        return Ok(next);
+    };
+    // Still being created or switched: the network may not be there yet,
+    // and the create may be about to start this very node.
+    if run.pending_create.is_some() {
+        return Err(ActionRejected::AlreadyInFlight);
+    }
     match run.containers.get_mut(node_id) {
         Some(container) => {
             if container.pending_action.is_some() {
@@ -190,39 +212,44 @@ fn start_node(
             container.pending_action = Some(PendingAction::Starting);
         }
         None => {
-            run.containers.insert(
-                node_id.to_string(),
-                ContainerInfo {
-                    node_id: node_id.to_string(),
-                    desired: ContainerDesired {
-                        running: true,
-                        container_name: String::new(),
-                        domain: String::new(),
-                        raw_domain: String::new(),
-                        routes: Vec::new(),
-                        additional_hosts: Vec::new(),
-                        status_port: None,
-                        config_hash: String::new(),
-                        // Nothing has been built yet, so there is no
-                        // checkout this container came from — and unlike the
-                        // empty strings above, `None` is the value this
-                        // field would legitimately hold forever for a
-                        // non-built node, so it is not misread as resolved.
-                        source: None,
-                        // A placeholder for a node nothing has resolved yet
-                        // — `start_node` overwrites the whole `desired` from
-                        // the real graph when it reports back, and that is
-                        // the only place `terminating` is ever decided.
-                        terminating: false,
-                        debug_wait: false,
-                    },
-                    observed: ContainerObserved::default(),
-                    pending_action: Some(PendingAction::Starting),
-                },
-            );
+            run.containers
+                .insert(node_id.to_string(), starting_placeholder(node_id));
         }
     }
     Ok(next)
+}
+
+/// What a node being started for the first time looks like until the start
+/// reports back: marked `Starting`, with nothing resolved yet. Whatever
+/// settles the start replaces it wholesale.
+pub(super) fn starting_placeholder(node_id: &str) -> ContainerInfo {
+    ContainerInfo {
+        node_id: node_id.to_string(),
+        desired: ContainerDesired {
+            running: true,
+            container_name: String::new(),
+            domain: String::new(),
+            raw_domain: String::new(),
+            routes: Vec::new(),
+            additional_hosts: Vec::new(),
+            status_port: None,
+            config_hash: String::new(),
+            // Nothing has been built yet, so there is no
+            // checkout this container came from — and unlike the
+            // empty strings above, `None` is the value this
+            // field would legitimately hold forever for a
+            // non-built node, so it is not misread as resolved.
+            source: None,
+            // A placeholder for a node nothing has resolved yet
+            // — `start_node` overwrites the whole `desired` from
+            // the real graph when it reports back, and that is
+            // the only place `terminating` is ever decided.
+            terminating: false,
+            debug_wait: false,
+        },
+        observed: ContainerObserved::default(),
+        pending_action: Some(PendingAction::Starting),
+    }
 }
 
 fn set_pending(
@@ -392,10 +419,7 @@ mod tests {
     #[test]
     fn run_planned_creates_an_empty_run_with_pending_create_set() {
         let state = WorkspaceState::default();
-        let plan = crate::state::RunSpec {
-            run_id: None,
-            flow: None,
-        };
+        let plan = crate::state::RunSpec::Flow("app/main".into());
         let next = reduce(
             &state,
             Action::RunPlanned {
@@ -416,10 +440,7 @@ mod tests {
             &state,
             Action::RunPlanned {
                 run_id: "default".into(),
-                plan: crate::state::RunSpec {
-                    run_id: None,
-                    flow: None,
-                },
+                plan: crate::state::RunSpec::Flow("app/main".into()),
             },
         )
         .unwrap();
@@ -435,10 +456,7 @@ mod tests {
             &state,
             Action::RunPlanned {
                 run_id: "default".into(),
-                plan: crate::state::RunSpec {
-                    run_id: None,
-                    flow: None,
-                },
+                plan: crate::state::RunSpec::Flow("app/main".into()),
             },
         )
         .unwrap();
@@ -446,10 +464,7 @@ mod tests {
             &first,
             Action::RunPlanned {
                 run_id: "default".into(),
-                plan: crate::state::RunSpec {
-                    run_id: None,
-                    flow: None,
-                },
+                plan: crate::state::RunSpec::Flow("app/main".into()),
             },
         )
         .unwrap_err();
@@ -489,17 +504,34 @@ mod tests {
     }
 
     #[test]
-    fn node_start_requested_rejects_unknown_run() {
-        let state = WorkspaceState::default();
+    fn node_start_with_no_environment_creates_it_for_that_node() {
+        let next = reduce(
+            &WorkspaceState::default(),
+            Action::RunNodeStartRequested {
+                run_id: "default".into(),
+                node_id: "web".into(),
+            },
+        )
+        .unwrap();
+        let run = next.runs.get("default").unwrap();
+        assert_eq!(run.pending_create, Some(RunSpec::Node("web".into())));
+        assert!(run.containers.is_empty());
+    }
+
+    #[test]
+    fn node_start_waits_for_an_environment_still_being_created() {
+        let mut state = state_with_run("default", vec![]);
+        state.runs.get_mut("default").unwrap().pending_create =
+            Some(RunSpec::Flow("app/main".into()));
         let err = reduce(
             &state,
             Action::RunNodeStartRequested {
-                run_id: "missing".into(),
+                run_id: "default".into(),
                 node_id: "web".into(),
             },
         )
         .unwrap_err();
-        assert_eq!(err, ActionRejected::RunNotFound);
+        assert_eq!(err, ActionRejected::AlreadyInFlight);
     }
 
     #[test]
@@ -541,6 +573,22 @@ mod tests {
         let c = &next.runs["default"].containers["web"];
         assert_eq!(c.pending_action, Some(PendingAction::Stopping));
         assert!(!c.desired.running);
+    }
+
+    #[test]
+    fn node_stop_requested_waits_for_an_in_flight_create() {
+        let mut state = state_with_run("default", vec![container("web")]);
+        state.runs.get_mut("default").unwrap().pending_create =
+            Some(RunSpec::Flow("app/main".into()));
+        let err = reduce(
+            &state,
+            Action::RunNodeStopRequested {
+                run_id: "default".into(),
+                node_id: "web".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err, ActionRejected::AlreadyInFlight);
     }
 
     #[test]

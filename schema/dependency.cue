@@ -60,7 +60,7 @@ package fghj
 	//
 	// The default grace period is 10s, matching Docker's own. Raise it for
 	// anything that needs to finish writing before it dies — a database
-	// flushing to a `scope: stable` volume is the case this exists for. The
+	// flushing to a named volume is the case this exists for. The
 	// signal defaults to whatever the image declares (`STOPSIGNAL`, or
 	// SIGTERM); override it only for an image whose process listens for a
 	// different one (e.g. nginx's "quit" is SIGQUIT).

@@ -61,7 +61,6 @@ services:
         primary: true
       "9090":
         name: admin
-    domain_scope: run
     environment:
       - PORT=8080
     env_file:
@@ -104,14 +103,13 @@ services:
 | `build.ssh` | bool | Forwards the **workspace owner's** ssh-agent into the build as BuildKit's `default` socket, for a Dockerfile doing `RUN --mount=type=ssh` — cloning a private sibling repo, a private Go module, a private Cargo registry. The same agent fghj already forwards to `git clone`. Defaults to `false`. Note the credential comes from the person who owns the workspace, never from this config: a repo cannot ask for a key. |
 | `build.secrets` | list of `{id, file}` | BuildKit secret mounts — `id` is what the Dockerfile names (`RUN --mount=type=secret,id=npmrc`), `file` is where the bytes come from, resolved against this repo's checkout root exactly like a bind mount's `host`. There is deliberately **no `env:` variant**, which BuildKit itself supports: `fghjd` is a root daemon with no access to your shell environment, so there'd be nothing to read one from. |
 | `ports` | map of container-port→`#Port` | Declared container ports. The map key is the literal container port number (e.g. `"8080"`), published to Docker as-is — not a semantic label. See [Ports](#ports) below. |
-| `domain_scope` | `"run"` \| `"stable"` | Whether this service's derived domain includes the run id. Defaults to `"run"`. See [Node identity & domains](/concepts/node-identity-and-domains/#domain-derivation-one-formula-no-exceptions-two-zones). |
 | `environment` | map or list | Either `{KEY: value}` or a list of `"KEY=value"` strings — mirrors Docker Compose's own `environment` shape. Values can reference a sibling's domain with `${FGHJ_SERVICE_FQDN}`/`${FGHJ_SERVICE_FQDN_HTTP}` — see [Domain templates in `environment`](#domain-templates-in-environment) below. |
 | `env_file` | list of strings | `.env`-style files loaded *before* `environment` — Compose's `env_file`. Each path resolves against this repo's own checkout root, same rule as `#Volume.host`. An explicit `environment` entry always wins over one loaded from a file. Resolves the same way for an `image:` service. Same `${FGHJ_SERVICE_FQDN}` templating as `environment` applies to loaded values too. |
 | `platform` | string, optional | Pins the platform (`os[/arch[/variant]]`, e.g. `linux/arm64`) passed to `docker build --platform`, for cross-compiling this service's image to a specific architecture. Unset (the default) builds for the host's own platform. |
 | `command` | list of strings | Overrides the image's default `CMD`, Compose-`command`-style. Empty (the default) leaves the image's own `CMD`/`ENTRYPOINT` untouched. |
 | `restart` | `"no"` \| `"always"` \| `"on-failure"` \| `"unless-stopped"` | Compose-equivalent restart policy. Defaults to `"no"` — a stopped container stays stopped; `fghj daemon`'s own `ensure_running` is the usual way a container comes back, not Docker's own restart machinery. |
 | `stop_signal` | string matching `SIG[A-Z0-9]+`, optional | The signal Docker sends to stop this container — Compose's `stop_signal`. Unset (the default) uses whatever the image declares via `STOPSIGNAL`, or SIGTERM. Override it only for an image whose process listens for something else (nginx's graceful "quit" is `SIGQUIT`). |
-| `stop_grace_period` | non-negative integer (seconds) | How long Docker waits after the stop signal before following up with `SIGKILL`. Defaults to `10`, matching Docker's own. Raise it for anything that needs to finish writing before it dies — a database flushing to a `scope: stable` volume is the case this exists for. |
+| `stop_grace_period` | non-negative integer (seconds) | How long Docker waits after the stop signal before following up with `SIGKILL`. Defaults to `10`, matching Docker's own. Raise it for anything that needs to finish writing before it dies — a database flushing to a named volume is the case this exists for. |
 | `user` | string, optional | Overrides the image's default container user, e.g. `"1000:1000"` or `"postgres"`. |
 | `working_dir` | string, optional | Overrides the image's default working directory. |
 | `labels` | map of string→string | Extra container labels, merged under fghj's own `com.docker.compose.*` labels — fghj's own always win on a key conflict. |
@@ -244,14 +242,13 @@ volumes:
 
 `name` is a bare label, like `#Port.name` — the real Docker volume name is
 *derived* from it, never the literal string you write. The derivation folds
-in the workspace, the declaring node's id, and (depending on `scope`) the
-run.
+in the workspace and the declaring node's id.
 
 The node id in there is what makes the label **private to the node that
 declared it**. `name: data` in one repo and `name: data` in another are two
 different volumes, exactly as two services both called `api` are two
 different nodes. This is deliberate: an unqualified volume namespace lets two
-repos that each declare `{name: data, scope: stable}` for their own Postgres
+repos that each declare `{name: data}` for their own Postgres
 end up with one volume and two engines writing to it — silent corruption,
 produced by two individually valid configs written by teams who have never
 spoken.
@@ -265,7 +262,7 @@ volumes:
     container: /app/.cache
     shared: true
 
-# service B's .fghj.yaml — same name, same scope, and shared on both sides
+# service B's .fghj.yaml — same name, and shared on both sides
 volumes:
   - name: shared-cache
     container: /var/cache/app
@@ -283,31 +280,13 @@ migration rather than a silent adoption of somebody else's data.
 | Field | Type | Description |
 |---|---|---|
 | `name` | string | A bare label, matching `[a-z0-9][a-z0-9-]*`. The real volume name is derived from it, folding in the declaring node's id — so the same label in two repos is two volumes unless both opt into `shared`. |
-| `shared` | bool | Drops the node-id qualification so the label alone decides identity, letting any other node with the same `name` + `scope` + `shared: true` reach the same storage. Defaults to `false`. |
-| `scope` | `"run"` \| `"stable"` | Same semantics as `domain_scope`: `"run"` (the default) gives each run (including named runs) its own fresh empty volume; `"stable"` gives the volume one fixed identity that persists across every run. |
+| `shared` | bool | Drops the node-id qualification so the label alone decides identity, letting any other node with the same `name` + `shared: true` reach the same storage. Defaults to `false`. |
 | `container` | string | Mount path inside the container. |
 | `read_only` | bool | Mounts read-only. Defaults to `false`. |
 
-Stopping a `"run"`-scoped volume's named run deletes that volume
-along with its containers and network — since `scope: "run"` under a named
-run derives a run-specific volume name to begin with (folding the run id
-in), there's nothing else that could still be using it once the run
-stops. The default run and any `"stable"`-scoped volume are never deleted
-this way: a `"stable"` volume's entire point is to persist across every
-run, and the default run's own `"run"`-scoped volumes get the exact same
-derived name on every start, so stopping and restarting the default run
-must leave their data in place.
-
-:::caution[`scope: "stable"` plus a second run]
-`"stable"` means *one* volume, shared by every run — including two runs that
-are up at the same time. Two Postgres containers (the default run's and a
-named run's) mounting one `pgdata` is two engines on one data directory,
-which Postgres does not survive gracefully. Nothing stops you: fghj neither
-warns nor serialises access. Keep `scope: "stable"` for data that tolerates
-concurrent readers, or accept that you'll run one run at a time for that
-node. [Runs](/reference/runs/) walks through this and the
-other two knobs that behave differently once a second run exists.
-:::
+A volume is never deleted by fghj: stopping a node, switching flows or
+stopping the whole environment leaves it in place, and the next start
+mounts the same data. Removing one is a `docker volume rm` you run yourself.
 
 ## Additional hosts
 

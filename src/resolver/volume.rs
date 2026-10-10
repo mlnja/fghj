@@ -1,12 +1,11 @@
 //! Volume mounts and the extra hostnames a service also answers on.
 
-use super::config::default_domain_scope;
 use super::name::Name;
 use serde::{Deserialize, Serialize};
 
 /// A bind mount or a named volume, on either a service or a backing
 /// dependency. Mirrors `#Volume` in `schema/component.cue` — the untagged
-/// shapes match its `{host,...}` vs `{name,scope,...}` disjunction directly.
+/// shapes match its `{host,...}` vs `{name,...}` disjunction directly.
 /// A named volume's real Docker name is derived (never author-declared),
 /// the same way a node's domain is — see `runs::derive_volume_name`, which
 /// folds in the declaring node's id unless `shared` is set.
@@ -21,8 +20,6 @@ pub enum VolumeMount {
     },
     Named {
         name: Name,
-        #[serde(default = "default_domain_scope")]
-        scope: String,
         container: String,
         #[serde(default)]
         read_only: bool,

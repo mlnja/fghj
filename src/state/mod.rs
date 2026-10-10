@@ -4,7 +4,7 @@
 //! data-only: no I/O, no async, nothing that can fail. Wired into the
 //! running daemon via `action.rs`/`reducer/`/`actor.rs`/`registry.rs`/
 //! `effects/`, and serialized straight to the frontend by
-//! `daemon::get_runs`/`post_runs` and the per-node lifecycle handlers —
+//! `web::api::runs`'s environment and the per-node lifecycle handlers —
 //! these types *are* the HTTP contract, there is no view layer in between.
 
 pub mod container;

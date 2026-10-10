@@ -129,7 +129,7 @@ hole this node kind fills; a task's completion predicate is its exit code.
 
 ## Run it
 
-**Start default environment.** In the UI, `migrate` appears, goes
+Press **Start** on `web`. In the UI, `migrate` appears, goes
 `running` briefly, and settles on **completed** — with a tooltip that says
 what that means:
 
@@ -172,8 +172,7 @@ fghj exec db.storefront -- psql -U shop -d shop -c '\d orders'
 ```
 
 `fghj exec` takes a **node id** — the same `db.storefront` you've been
-reading in the graph — not a container name. It targets the default run
-unless you pass `--run`, and it's full duplex, so an interactive shell works
+reading in the graph — not a container name. It's full duplex, so an interactive shell works
 too:
 
 ```bash

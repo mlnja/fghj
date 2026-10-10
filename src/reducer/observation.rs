@@ -13,7 +13,8 @@
 
 use crate::action::{Action, ActionRejected};
 use crate::state::{
-    PendingAction, RunCreateError, VolumeDesired, VolumeInfo, VolumeObserved, WorkspaceState,
+    ContainerInfo, PendingAction, RunCreateError, RunState, VolumeDesired, VolumeInfo,
+    VolumeObserved, WorkspaceState,
 };
 
 pub(super) fn reduce(
@@ -103,14 +104,15 @@ pub(super) fn reduce(
             // the route table advertising containers that no longer exist.
             let present = next.runs.contains_key(&run_id);
             match result {
-                Ok(run) => {
+                Ok(mut run) => {
                     if present {
+                        clear_create_marks(&mut run);
                         next.runs.insert(run_id, run);
                     }
                 }
                 // A top-up that failed partway still left containers
                 // running; taking its partial state is the only way they
-                // become visible to `GET /runs` and routable from the host.
+                // become visible to `GET /environment` and routable from the host.
                 // `pending_create` is cleared explicitly rather than relying
                 // on the partial carrying `None`, since it is a snapshot of
                 // a working copy, not a freshly-built run.
@@ -120,13 +122,39 @@ pub(super) fn reduce(
                 }) => {
                     if present {
                         run.pending_create = None;
+                        clear_create_marks(&mut run);
                         next.runs.insert(run_id, *run);
                     }
                 }
                 Err(_) => {
                     if let Some(run) = next.runs.get_mut(&run_id) {
                         run.pending_create = None;
+                        clear_create_marks(run);
                     }
+                }
+            }
+            Ok(next)
+        }
+
+        Action::RunCreateWorking {
+            run_id,
+            node_id,
+            action,
+        } => {
+            let mut next = state.clone();
+            // Same no-resurrection rule as `RunCreateProgress` below.
+            if let Some(run) = next.runs.get_mut(&run_id) {
+                match (action, run.containers.get_mut(&node_id)) {
+                    (Some(action), Some(container)) => container.pending_action = Some(action),
+                    (Some(_), None) => {
+                        run.containers
+                            .insert(node_id.clone(), super::run::starting_placeholder(&node_id));
+                    }
+                    (None, Some(container)) if is_placeholder(container) => {
+                        run.containers.remove(&node_id);
+                    }
+                    (None, Some(container)) => container.pending_action = None,
+                    (None, None) => {}
                 }
             }
             Ok(next)
@@ -137,7 +165,7 @@ pub(super) fn reduce(
             network,
             sidecar_container_name,
             sidecar_ip,
-            info,
+            mut info,
         } => {
             let mut next = state.clone();
             // `RunPlanned` already created the entry, but a progress report
@@ -147,6 +175,9 @@ pub(super) fn reduce(
                 run.network = network;
                 run.sidecar_container_name = sidecar_container_name;
                 run.sidecar_ip = sidecar_ip;
+                // The node's work is done, so its `RunCreateWorking` mark
+                // comes off with it.
+                info.pending_action = None;
                 run.containers.insert(info.node_id.clone(), info);
             }
             Ok(next)
@@ -218,6 +249,23 @@ pub(super) fn reduce(
         other => unreachable!(
             "reducer::observation::reduce called with a non-observation action: {other:?}"
         ),
+    }
+}
+
+/// A `starting_placeholder` that nothing has replaced: no container was
+/// ever created for it.
+fn is_placeholder(container: &ContainerInfo) -> bool {
+    container.desired.container_name.is_empty()
+}
+
+/// Takes off every `RunCreateWorking` mark once the create is over — the
+/// settled state is the truth now, and a mark left behind would keep its
+/// node reading "starting…" (and rejecting actions) forever. A placeholder
+/// for a node that never got a container goes with it.
+fn clear_create_marks(run: &mut RunState) {
+    run.containers.retain(|_, c| !is_placeholder(c));
+    for container in run.containers.values_mut() {
+        container.pending_action = None;
     }
 }
 
@@ -472,10 +520,8 @@ mod tests {
     #[test]
     fn run_create_settled_clears_pending_create_without_touching_containers_on_failure() {
         let mut existing = state_with_run("default", vec![container("web")]);
-        existing.runs.get_mut("default").unwrap().pending_create = Some(crate::state::RunSpec {
-            run_id: None,
-            flow: None,
-        });
+        existing.runs.get_mut("default").unwrap().pending_create =
+            Some(crate::state::RunSpec::Flow("app/main".into()));
         let next = reduce(
             &existing,
             Action::RunCreateSettled {
@@ -491,15 +537,13 @@ mod tests {
 
     /// B7: a top-up that fails on node 3 leaves nodes 1-2 running. They are
     /// already in Docker and in SQLite; without adopting the partial they
-    /// would be absent from reducer state, which is what `GET /runs` and
+    /// would be absent from reducer state, which is what `GET /environment` and
     /// `state::query::resolve_route` both read.
     #[test]
     fn run_create_settled_adopts_the_partial_state_of_a_failed_top_up() {
         let mut existing = state_with_run("default", vec![container("web")]);
-        existing.runs.get_mut("default").unwrap().pending_create = Some(crate::state::RunSpec {
-            run_id: None,
-            flow: None,
-        });
+        existing.runs.get_mut("default").unwrap().pending_create =
+            Some(crate::state::RunSpec::Flow("app/main".into()));
 
         // `web` was already up; `api` came up during this top-up before
         // `worker` failed.
@@ -515,10 +559,7 @@ mod tests {
             sidecar_ip: Some("172.20.0.2".into()),
             // A working copy, not a freshly-built run — the reducer must
             // clear this itself rather than assume it arrives clear.
-            pending_create: Some(crate::state::RunSpec {
-                run_id: None,
-                flow: None,
-            }),
+            pending_create: Some(crate::state::RunSpec::Flow("app/main".into())),
             pending_teardown: false,
         };
 
@@ -727,5 +768,89 @@ mod tests {
         )
         .unwrap();
         assert!(after_partial.runs.is_empty());
+    }
+
+    fn working(node_id: &str, action: Option<PendingAction>) -> Action {
+        Action::RunCreateWorking {
+            run_id: "default".into(),
+            node_id: node_id.into(),
+            action,
+        }
+    }
+
+    /// A switch can take minutes and refuses every node action meanwhile;
+    /// the node it is on right now has to say so, including one that has
+    /// no container yet.
+    #[test]
+    fn run_create_working_marks_the_node_being_worked_on() {
+        let state = state_with_run("default", vec![container("web")]);
+        let next = reduce(&state, working("web", Some(PendingAction::Stopping))).unwrap();
+        let next = reduce(&next, working("db", Some(PendingAction::Starting))).unwrap();
+        let run = &next.runs["default"];
+        assert_eq!(
+            run.containers["web"].pending_action,
+            Some(PendingAction::Stopping)
+        );
+        assert_eq!(
+            run.containers["db"].pending_action,
+            Some(PendingAction::Starting)
+        );
+    }
+
+    /// Giving up on a node takes its mark off, and a placeholder that never
+    /// became a container goes with it rather than lingering as a ghost.
+    #[test]
+    fn run_create_working_none_unmarks_and_drops_a_placeholder() {
+        let state = state_with_run("default", vec![container("web")]);
+        let next = reduce(&state, working("web", Some(PendingAction::Starting))).unwrap();
+        let next = reduce(&next, working("db", Some(PendingAction::Starting))).unwrap();
+        let next = reduce(&next, working("web", None)).unwrap();
+        let next = reduce(&next, working("db", None)).unwrap();
+        let run = &next.runs["default"];
+        assert_eq!(run.containers["web"].pending_action, None);
+        assert!(!run.containers.contains_key("db"));
+    }
+
+    #[test]
+    fn run_create_progress_takes_the_working_mark_off() {
+        let state = state_with_run("default", vec![]);
+        let next = reduce(&state, working("web", Some(PendingAction::Starting))).unwrap();
+        let mut info = container("web");
+        info.pending_action = Some(PendingAction::Starting);
+        let next = reduce(
+            &next,
+            Action::RunCreateProgress {
+                run_id: "default".into(),
+                network: "fghj-net".into(),
+                sidecar_container_name: "fghj-sidecar".into(),
+                sidecar_ip: None,
+                info,
+            },
+        )
+        .unwrap();
+        assert_eq!(next.runs["default"].containers["web"].pending_action, None);
+    }
+
+    /// However the create ends, nothing it marked may stay marked: every
+    /// node action on a marked node is refused as already in flight.
+    #[test]
+    fn run_create_settled_err_clears_every_working_mark() {
+        let mut state = state_with_run("default", vec![container("web")]);
+        state.runs.get_mut("default").unwrap().pending_create =
+            Some(crate::state::RunSpec::Flow("app/main".into()));
+        let next = reduce(&state, working("web", Some(PendingAction::Stopping))).unwrap();
+        let next = reduce(&next, working("db", Some(PendingAction::Starting))).unwrap();
+        let next = reduce(
+            &next,
+            Action::RunCreateSettled {
+                run_id: "default".into(),
+                result: Err(RunCreateError::bare("boom")),
+            },
+        )
+        .unwrap();
+        let run = &next.runs["default"];
+        assert_eq!(run.pending_create, None);
+        assert_eq!(run.containers["web"].pending_action, None);
+        assert!(!run.containers.contains_key("db"));
     }
 }

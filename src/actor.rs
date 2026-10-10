@@ -128,7 +128,7 @@ mod tests {
     async fn dispatch_surfaces_a_reducer_rejection() {
         let handle = spawn(WorkspaceState::default());
         let result = handle
-            .dispatch(Action::RunNodeStartRequested {
+            .dispatch(Action::RunNodeStopRequested {
                 run_id: "missing".into(),
                 node_id: "web".into(),
             })

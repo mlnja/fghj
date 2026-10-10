@@ -1,4 +1,6 @@
 <script>
+  import dagre from '@dagrejs/dagre';
+
   let { graph, currentFlow, mode, runContainers, onSelectNode } = $props();
 
   // Widened from 260 so two state lanes fit side by side without truncating
@@ -59,80 +61,144 @@
     orphaned: 'this node is no longer declared in the workspace (usually a branch switch) — the container is still running and nothing will reconcile it',
   };
 
+  // Each connected group of nodes is laid out on its own, left to right in
+  // start order, and the groups are stacked top to bottom. Laying out the
+  // whole graph at once put every root of every group in one column, which
+  // made that column as tall as the workspace and stretched every edge into
+  // a long diagonal. Nodes with no edges at all are packed into a grid
+  // underneath: they have nothing to line up with.
+  //
+  // Within a group dagre does the actual work: it orders each column to cut
+  // crossings, and routes an edge that skips columns through the gaps
+  // between cards instead of straight across whatever card sits in between.
+  // Layout depends only on the graph's structure, never on which flow is
+  // selected, and nodes go in sorted by id so it's stable across refreshes.
+  const PAD = 20, GROUP_GAP = 60;
+
   function layout(g) {
-    // Columns follow start order, which only required edges decide — a
-    // `required: false` one (needed at runtime) orders nothing.
-    const edges = g.edges.filter((e) => e.required !== false).map((e) => [e.from, e.to]);
+    const ids = g.nodes.map((n) => n.id).sort();
+    const known = new Set(ids);
+    const edges = g.edges.filter((e) => known.has(e.from) && known.has(e.to) && e.from !== e.to);
 
-    // A blocking cycle can still reach the UI (the start is refused, the
-    // map isn't) — drop back-edges via DFS so the longest-path depth pass
-    // below always terminates instead of growing the layout without bound.
-    const adj = {};
-    edges.forEach(([a, b]) => (adj[a] = adj[a] || []).push(b));
-    const dagEdges = [];
-    const visitState = {}; // undefined = unvisited, 1 = in-progress, 2 = done
-    function dfs(u) {
-      visitState[u] = 1;
-      for (const v of adj[u] || []) {
-        if (visitState[v] === 1) continue; // back-edge: would reopen a cycle, drop it
-        dagEdges.push([u, v]);
-        if (!visitState[v]) dfs(v);
-      }
-      visitState[u] = 2;
-    }
-    g.nodes.forEach((n) => { if (!visitState[n.id]) dfs(n.id); });
-
-    const depth = {};
-    g.nodes.forEach((n) => (depth[n.id] = 0));
-    let changed = true, guard = 0;
-    while (changed && guard < g.nodes.length + 1) {
-      changed = false; guard++;
-      dagEdges.forEach(([a, b]) => {
-        const d = (depth[a] || 0) + 1;
-        if (d > (depth[b] || 0)) { depth[b] = d; changed = true; }
-      });
-    }
-
-    // Layout depends only on the graph's structure (nodes/edges), never on
-    // which flow is selected — sort by id so row order within a depth level
-    // is stable regardless of the input array's order.
-    const byDepth = {};
-    const sortedNodes = [...g.nodes].sort((a, b) => a.id.localeCompare(b.id));
-    sortedNodes.forEach((n) => (byDepth[depth[n.id]] = byDepth[depth[n.id]] || []).push(n));
-    const maxDepth = Math.max(0, ...Object.values(depth));
-    const maxPerLevel = Math.max(1, ...Object.values(byDepth).map((a) => a.length));
-    const width = (maxDepth + 1) * LEVEL_GAP + NODE_W - 10;
-    const height = Math.max(300, maxPerLevel * ROW_GAP + 40);
-
-    const pos = {};
-    Object.keys(byDepth).forEach((d) => {
-      const arr = byDepth[d];
-      const totalH = arr.length * ROW_GAP;
-      const offY = (height - totalH) / 2;
-      arr.forEach((n, i) => (pos[n.id] = { x: d * LEVEL_GAP + 20, y: offY + i * ROW_GAP + 10 }));
+    // Weakly connected components, by union-find.
+    const parent = Object.fromEntries(ids.map((id) => [id, id]));
+    const find = (x) => (parent[x] === x ? x : (parent[x] = find(parent[x])));
+    edges.forEach((e) => (parent[find(e.from)] = find(e.to)));
+    const groups = new Map();
+    ids.forEach((id) => {
+      const root = find(id);
+      if (!groups.has(root)) groups.set(root, []);
+      groups.get(root).push(id);
     });
+    const connected = [...groups.values()].filter((m) => m.length > 1);
+    const isolated = [...groups.values()].filter((m) => m.length === 1).map((m) => m[0]);
+    // Biggest group first: it's usually the one being worked on.
+    connected.sort((a, b) => b.length - a.length || a[0].localeCompare(b[0]));
 
-    return { width, height, pos };
+    const pos = {}, routes = new Map(), bottom = {};
+    let y = PAD, width = 0;
+    for (const members of connected) {
+      const inGroup = new Set(members);
+      const dg = new dagre.graphlib.Graph({ multigraph: true });
+      // ranksep/nodesep are the gaps between cards: across a column, and
+      // down one.
+      dg.setGraph({ rankdir: 'LR', ranksep: LEVEL_GAP - NODE_W, nodesep: ROW_GAP - NODE_H, edgesep: 16 });
+      dg.setDefaultEdgeLabel(() => ({}));
+      members.forEach((id) => dg.setNode(id, { width: NODE_W, height: NODE_H }));
+      // Needed-to-start edges pull harder than needed-at-runtime ones, so
+      // the start order is what the columns mostly read as.
+      edges.filter((e) => inGroup.has(e.from)).forEach((e, i) =>
+        dg.setEdge(e.from, e.to, { weight: e.required === false ? 1 : 4 }, `${e.from}|${e.to}|${i}`),
+      );
+      dagre.layout(dg);
+
+      const gw = dg.graph().width, gh = dg.graph().height;
+      members.forEach((id) => {
+        const n = dg.node(id);
+        pos[id] = { x: PAD + n.x - NODE_W / 2, y: y + n.y - NODE_H / 2 };
+        bottom[id] = y + gh;
+      });
+      dg.edges().forEach((ref) => {
+        const key = `${ref.v}|${ref.w}`;
+        if (!routes.has(key)) routes.set(key, dg.edge(ref).points.map((p) => ({ x: PAD + p.x, y: y + p.y })));
+      });
+      width = Math.max(width, gw);
+      y += gh + GROUP_GAP;
+    }
+
+    if (isolated.length) {
+      // As many per row as the widest group spans, and at least three.
+      const perRow = Math.max(3, Math.floor((width + LEVEL_GAP - NODE_W) / LEVEL_GAP));
+      isolated.forEach((id, i) => {
+        pos[id] = { x: PAD + (i % perRow) * LEVEL_GAP, y: y + Math.floor(i / perRow) * ROW_GAP };
+      });
+      width = Math.max(width, Math.min(isolated.length, perRow) * LEVEL_GAP - (LEVEL_GAP - NODE_W));
+      y += Math.ceil(isolated.length / perRow) * ROW_GAP - (ROW_GAP - NODE_H) + GROUP_GAP;
+    }
+
+    return { width: width + 2 * PAD, height: Math.max(300, y - GROUP_GAP + PAD), pos, routes, bottom };
   }
 
   let l = $derived(layout(graph));
 
-  function edgeLine(e) {
-    const a = l.pos[e.from], b = l.pos[e.to];
-    if (!a || !b) return null;
-    return { x1: a.x + NODE_W, y1: a.y + NODE_H / 2, x2: b.x, y2: b.y + NODE_H / 2 };
+  // An edge leaves the middle of its source's right side and enters the
+  // middle of its target's left side; dagre's corner-clipped endpoints are
+  // replaced with those, and only its waypoints in the gaps between cards
+  // are kept. Each hop is a curve that leaves and arrives horizontally, so
+  // the edge reads as flowing left to right.
+  //
+  // The exception is an edge that points backwards, which only a cycle
+  // produces (a blocking one still reaches the map). It leaves to the right
+  // as usual, runs back underneath its whole group, and comes in from the
+  // left, so it can't be mistaken for a forward edge.
+  const BACK_GAP = 18;
+  function backPath(start, end, below) {
+    const r = 10, out = start.x + BACK_GAP, back = end.x - BACK_GAP;
+    return `M${start.x},${start.y} H${out - r} Q${out},${start.y} ${out},${start.y + r}`
+      + ` V${below - r} Q${out},${below} ${out - r},${below} H${back + r}`
+      + ` Q${back},${below} ${back},${below - r} V${end.y + r} Q${back},${end.y} ${back + r},${end.y} H${end.x}`;
+  }
+
+  function edgePath(e) {
+    const a = l.pos[e.from], b = l.pos[e.to], route = l.routes.get(`${e.from}|${e.to}`);
+    if (!a || !b || !route) return null;
+    const start = { x: a.x + NODE_W, y: a.y + NODE_H / 2 };
+    const end = { x: b.x, y: b.y + NODE_H / 2 };
+    if (end.x < start.x) return backPath(start, end, l.bottom[e.from] + BACK_GAP);
+    // In each column the edge skips over, dagre reserves it a slot between
+    // the cards there, and its waypoint is that slot's centre. The edge
+    // crosses that column as a straight line through the slot and curves
+    // only in the gaps between columns, so it can't clip a card. dagre's
+    // other waypoints, its bends in the gaps, are dropped: they sit at
+    // whatever height it spread the edges to, and only make edges loop.
+    const gap = LEVEL_GAP - NODE_W;
+    const slots = route.filter((p) => p.x > start.x + gap && p.x < end.x - gap);
+    let d = `M${start.x},${start.y}`, p = start;
+    const curveTo = (q) => {
+      const dx = (q.x - p.x) / 2;
+      d += ` C${p.x + dx},${p.y} ${q.x - dx},${q.y} ${q.x},${q.y}`;
+      p = q;
+    };
+    for (const s of slots) {
+      curveTo({ x: s.x - NODE_W / 2, y: s.y });
+      p = { x: s.x + NODE_W / 2, y: s.y };
+      d += ` H${p.x}`;
+    }
+    curveTo(end);
+    return d;
   }
 </script>
 
 <div class="graph-area" style="width:{l.width}px;height:{l.height}px">
   <svg width={l.width} height={l.height} style="position:absolute;top:0;left:0;overflow:visible">
     {#each graph.edges as e}
-      {@const line = edgeLine(e)}
-      {#if line}
+      {@const d = edgePath(e)}
+      {#if d}
         {@const inFlow = e.flows.includes(currentFlow)}
         {@const runtime = e.required === false}
-        <line
-          x1={line.x1} y1={line.y1} x2={line.x2} y2={line.y2}
+        <path
+          {d}
+          fill="none"
           stroke={inFlow ? 'var(--accent)' : 'var(--accent-dim)'}
           stroke-width={inFlow ? 2 : 1.5}
           stroke-dasharray={runtime ? '6,4' : null}
@@ -140,7 +206,7 @@
           <title>{runtime
             ? `${e.from} needs ${e.to} at runtime — doesn't wait on it`
             : `${e.from} needs ${e.to} to start${e.condition ? ` (${e.condition})` : ''}`}{e.via_flow ? ` — via ${e.via_flow}` : ''}</title>
-        </line>
+        </path>
       {/if}
     {/each}
   </svg>
@@ -201,18 +267,6 @@
           {/if}
           <span class="node-id">{n.label}</span>
         </div>
-        <!-- The corner used to hold a generated `AIK-01` code: the label's
-             first three letters plus an index into id-sorted order. It
-             restated the name beside it, renumbered whenever a node sorted
-             ahead of it appeared, and existed in no API response, CLI output
-             or drawer, so there was nothing to cross-reference it against.
-             `domain_scope` is the fact worth that corner instead — a stable
-             node drops the run id from its domain, so exactly one run can
-             own that name at a time. It's opt-in and rare, which is what
-             makes it worth marking. -->
-        {#if n.domain_scope === 'stable'}
-          <span class="scope-tag" title="domain_scope: stable — this node's domain has no run id in it, so only one run can hold this name at a time">STABLE</span>
-        {/if}
       </div>
 
       <!-- Identity, full width. Which repo a node came from is neither a git
@@ -418,11 +472,6 @@
   /* Accent rather than the old code tag's grey: this one appears on few
      cards and means something when it does, so it should read as a mark
      rather than as furniture every card happens to carry. */
-  .scope-tag {
-    font: 700 8px var(--font-mono); text-transform: uppercase; letter-spacing: 0.05em;
-    color: var(--accent); border: 1px solid var(--accent-bg); background: var(--accent-bg);
-    border-radius: 3px; padding: 2px 5px; flex: 0 0 auto; white-space: nowrap;
-  }
   .badge {
     font: 700 8.5px var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint);
     border: 1px dashed var(--line-strong); border-radius: 3px; padding: 2px 5px; flex: 0 0 auto;

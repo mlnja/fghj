@@ -46,7 +46,7 @@ use crate::daemon_log;
 use crate::effects::Effect;
 use crate::resolver;
 use crate::runs::order::{dependents_of, requirements_of};
-use crate::runs::progress::{ProgressSink, RunProgress};
+use crate::runs::progress::{NodeDone, ProgressSink, RunProgress};
 use crate::server;
 use crate::state::{
     ContainerInfo, PendingAction, RunCreateError, RunSpec, RunState, WorkspaceState,
@@ -68,6 +68,11 @@ fn extract_pending(state: &WorkspaceState) -> Vec<PendingEntry> {
     state
         .runs
         .iter()
+        // While a create/switch is in flight, the marks on its containers
+        // are `RunCreateWorking`'s — a picture of what the create is doing,
+        // not work for this effect. Acting on them started each node a
+        // second time, concurrently with the create starting it.
+        .filter(|(_, run)| run.pending_create.is_none())
         .flat_map(|(run_id, run)| {
             run.containers.values().filter_map(move |c| {
                 c.pending_action.map(|action| PendingEntry {
@@ -157,11 +162,10 @@ fn plan(
 }
 
 /// `plan`'s counterpart for run-level creation jobs, deduped by `run_id`
-/// alone (not `(run_id, node_id)`): `RunRegistry::start`/`ensure_running`
-/// each operate on a whole run atomically, so calling either one twice
-/// concurrently for the same `run_id` would be actively destructive —
-/// `start` in particular tears down and recreates an already-running run
-/// out from under its own in-flight sibling call.
+/// alone (not `(run_id, node_id)`): `RunRegistry::ensure_running`
+/// operates on a whole run, so two concurrent calls for the same `run_id`
+/// would race each other over the same containers — a switch stopping what
+/// the other is starting.
 fn plan_creates(
     in_flight: &HashSet<String>,
     snapshot: &[PendingCreate],
@@ -340,15 +344,9 @@ fn needs_start(container: Option<&ContainerInfo>) -> bool {
     }
 }
 
-/// `perform`'s counterpart for a whole-run create/top-up: resolves a fresh
-/// graph (same reasoning as `perform`'s `Starting` case), then reuses
-/// `RunRegistry::start` (a named run always starts fresh) or
-/// `RunRegistry::ensure_running` (the unnamed/default-environment case only
-/// tops up whatever isn't already running) exactly as `daemon::post_runs`
-/// called them directly before migration phase 5 — `entry.plan.run_id`
-/// (the caller's original, possibly-absent intent) is what decides which,
-/// not `entry.run_id` (always concrete, since it's the map key `RunState`
-/// is filed under).
+/// `perform`'s counterpart for bringing the environment up to date: resolves
+/// a fresh graph (same reasoning as `perform`'s `Starting` case), then hands
+/// `entry.plan` to `RunRegistry::ensure_running`.
 async fn perform_create(
     old: &server::WorkspaceState,
     entry: &PendingCreate,
@@ -362,15 +360,9 @@ async fn perform_create(
     // Nothing has been created yet, so there is no partial state to carry:
     // the `From<anyhow::Error>` conversion's `partial: None` is correct.
     graph.refuse_if_blocked()?;
-    if entry.plan.run_id.is_some() {
-        old.runs
-            .start(&graph, entry.plan.clone(), prior, progress)
-            .await
-    } else {
-        old.runs
-            .ensure_running(&graph, entry.plan.flow.as_deref(), prior, progress)
-            .await
-    }
+    old.runs
+        .ensure_running(&graph, &entry.plan, prior, progress)
+        .await
 }
 
 /// Dispatches `Action::ContainerActionSettled` when dropped, unless
@@ -577,15 +569,34 @@ impl DockerConvergeEffect {
             let progress_actor = actor.clone();
             let drain = tokio::spawn(async move {
                 while let Some(p) = rx.recv().await {
-                    let _ = progress_actor
-                        .dispatch(Action::RunCreateProgress {
-                            run_id: p.run_id,
-                            network: p.network,
-                            sidecar_container_name: p.sidecar_container_name,
-                            sidecar_ip: p.sidecar_ip,
-                            info: p.info,
-                        })
-                        .await;
+                    let action = match p {
+                        RunProgress::Working {
+                            run_id,
+                            node_id,
+                            action,
+                        } => Action::RunCreateWorking {
+                            run_id,
+                            node_id,
+                            action,
+                        },
+                        RunProgress::Done(done) => {
+                            let NodeDone {
+                                run_id,
+                                network,
+                                sidecar_container_name,
+                                sidecar_ip,
+                                info,
+                            } = *done;
+                            Action::RunCreateProgress {
+                                run_id,
+                                network,
+                                sidecar_container_name,
+                                sidecar_ip,
+                                info,
+                            }
+                        }
+                    };
+                    let _ = progress_actor.dispatch(action).await;
                 }
             });
             let result = perform_create(&old, &entry, prior.as_ref(), Some(&tx)).await;
@@ -739,6 +750,23 @@ mod tests {
         assert_eq!(snapshot[0].node_id, "web");
     }
 
+    /// The marks a create/switch puts on the containers it is working on
+    /// are not jobs: performing them started each node a second time,
+    /// concurrently with the create, and the two collided on the container
+    /// name.
+    #[test]
+    fn extract_pending_ignores_the_marks_of_an_in_flight_create() {
+        let mut state = WorkspaceState::default();
+        state.runs.insert(
+            "default".into(),
+            run_state(
+                vec![container("web", Some(PendingAction::Starting))],
+                Some(RunSpec::Flow("app/main".into())),
+            ),
+        );
+        assert!(extract_pending(&state).is_empty());
+    }
+
     #[test]
     fn extract_pending_of_an_idle_workspace_is_empty() {
         let state = state_with(vec![container("web", None)]);
@@ -750,13 +778,7 @@ mod tests {
         let mut state = WorkspaceState::default();
         state.runs.insert(
             "default".into(),
-            run_state(
-                vec![],
-                Some(RunSpec {
-                    run_id: None,
-                    flow: None,
-                }),
-            ),
+            run_state(vec![], Some(RunSpec::Flow("app/main".into()))),
         );
         state.runs.insert("other".into(), run_state(vec![], None));
         let snapshot = extract_pending_creates(&state);
@@ -835,10 +857,7 @@ mod tests {
         let in_flight = HashSet::new();
         let snapshot = vec![PendingCreate {
             run_id: "default".into(),
-            plan: RunSpec {
-                run_id: None,
-                flow: None,
-            },
+            plan: RunSpec::Flow("app/main".into()),
         }];
         let (to_spawn, still_in_flight) = plan_creates(&in_flight, &snapshot);
         assert_eq!(to_spawn.len(), 1);
@@ -851,10 +870,7 @@ mod tests {
         in_flight.insert("default".to_string());
         let snapshot = vec![PendingCreate {
             run_id: "default".into(),
-            plan: RunSpec {
-                run_id: None,
-                flow: None,
-            },
+            plan: RunSpec::Flow("app/main".into()),
         }];
         let (to_spawn, still_in_flight) = plan_creates(&in_flight, &snapshot);
         assert!(to_spawn.is_empty());
@@ -933,13 +949,7 @@ mod tests {
         let mut state = WorkspaceState::default();
         state.runs.insert(
             run_id.into(),
-            run_state(
-                vec![],
-                Some(RunSpec {
-                    run_id: None,
-                    flow: None,
-                }),
-            ),
+            run_state(vec![], Some(RunSpec::Flow("app/main".into()))),
         );
         crate::actor::spawn(state)
     }

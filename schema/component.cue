@@ -49,7 +49,7 @@ package fghj
 // Neither set: still published to an ephemeral localhost port, just with no
 // `*.fghj.internal` name — e.g. a raw TCP protocol the proxy can't route by
 // Host/SNI. `name` is a bare label, like `#Service.name` — fghj derives the
-// actual domain from it (scoped by workspace and run like everything else),
+// actual domain from it (scoped by workspace like everything else),
 // there's no way to declare a raw domain here that would bypass that.
 #Port: {
 	primary: bool | *false
@@ -57,11 +57,9 @@ package fghj
 	// Pin the host-side published port instead of letting Docker assign a
 	// random ephemeral one — for protocols whose clients hardcode a port
 	// number and can't go through name-based routing at all (raw MQTT, a
-	// custom TCP protocol, etc). This is the same trade-off as
-	// `#Service.domain_scope: "stable"`: an explicit, conscious
-	// opt-out of per-run isolation — only one run can hold this exact host
-	// port at a time, so starting a second run with the same fixed port
-	// will fail to bind rather than silently getting its own copy.
+	// custom TCP protocol, etc). Only one container on the machine can hold
+	// a given host port, so two workspaces pinning the same one can't run
+	// at once.
 	host_port?: uint & >0 & <=65535
 	// When this port is `primary` and/or `name`d, also match every
 	// subdomain of its derived domain, not just the exact name — same idea
@@ -84,19 +82,14 @@ package fghj
 } | {
 	// Named volume: a bare label, like `#Port.name` — the real Docker
 	// volume name is derived (never author-declared), folding in the
-	// declaring node's id plus workspace/run, the same way a node's domain
+	// declaring node's id plus the workspace, the same way a node's domain
 	// is. The node id is what keeps this label private to the node that
 	// declared it: `data` in one repo and `data` in another are two
 	// volumes, not one, exactly as two services both called `api` are two
 	// nodes.
 	name: string & =~"^[a-z0-9][a-z0-9-]*$"
-	// Same semantics as `domain_scope` below: "run" (the default) folds the
-	// run id into the derived volume name, so a preview run gets its own
-	// fresh empty storage. "stable" drops it, giving the volume one fixed
-	// identity shared across every run.
-	scope: *"run" | "stable"
 	// Opt in to sharing this volume with any other node that declares the
-	// same `name` + `scope` + `shared: true`, anywhere in the workspace.
+	// same `name` + `shared: true`, anywhere in the workspace.
 	// Drops the node-id qualification, so the label alone decides identity.
 	//
 	// Off by default, and deliberately awkward to reach for: two engines
@@ -151,12 +144,6 @@ package fghj
 	// A bare list of container port numbers, or a map of port number to
 	// `#Port` — published to Docker as-is, not a semantic label.
 	ports: [...string] | {[=~"^[0-9]+$"]: #Port} | *[]
-	// "run" (the default) scopes this service's domain to the run that
-	// started it — two runs never collide. "stable" drops the run id,
-	// giving it one fixed identity shared across every run: only one run
-	// can own that name from the host at a time, but it's the same name
-	// every time.
-	domain_scope: *"run" | "stable"
 	environment: #Environment | *[]
 	// Overrides the image's default `CMD`, Compose-`command`-style. Empty
 	// (the default) leaves the image's own `CMD`/`ENTRYPOINT` untouched. A

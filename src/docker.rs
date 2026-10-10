@@ -13,7 +13,6 @@ use bollard::models::{
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, InspectContainerOptionsBuilder,
     ListVolumesOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-    RemoveVolumeOptionsBuilder,
 };
 use futures_util::StreamExt;
 use futures_util::stream::Stream;
@@ -80,27 +79,15 @@ pub async fn remove_network(docker: &Docker, name: &str) {
 /// doesn't exist yet, but never labels it. Calling this explicitly first
 /// (mirrors `ensure_network` above) attaches the same
 /// `com.docker.compose.project` bookkeeping label containers/networks
-/// already get, plus fghj's own `fghj.scope`/`fghj.run` — which is what
-/// lets `remove_run_scoped_volumes` below find and clean up a `scope:
-/// "run"` preview/named run's volumes once that run stops, closing the "no
-/// `docker compose down -v` equivalent" gap called out in the `#Volume`
-/// docs. Unlike `create_network`, creating a volume that already exists
+/// already get. Unlike `create_network`, creating a volume that already exists
 /// isn't an error — the API just returns the existing one — so there's no
 /// "already exists" case to special-case.
-pub async fn ensure_volume(
-    docker: &Docker,
-    name: &str,
-    project: &str,
-    scope: &str,
-    run_id: &str,
-) -> Result<()> {
+pub async fn ensure_volume(docker: &Docker, name: &str, project: &str) -> Result<()> {
     let mut labels = HashMap::new();
     labels.insert(
         "com.docker.compose.project".to_string(),
         project.to_string(),
     );
-    labels.insert("fghj.scope".to_string(), scope.to_string());
-    labels.insert("fghj.run".to_string(), run_id.to_string());
     docker
         .create_volume(VolumeCreateRequest {
             name: Some(name.to_string()),
@@ -110,44 +97,6 @@ pub async fn ensure_volume(
         .await
         .context("docker create_volume failed")?;
     Ok(())
-}
-
-/// Best-effort removal of every `scope: "run"` named volume `ensure_volume`
-/// labeled for `run_id` — the other half of closing the "no `docker
-/// compose down -v` equivalent" gap. Docker ANDs multiple `label=`
-/// filter values together (unlike most other filter types, which OR), so
-/// this only matches a volume carrying *both* labels — never a `scope:
-/// "stable"` volume, even one created under the same run, since that
-/// scope's entire point is to outlive any one run.
-///
-/// Deliberately never called for the *default* run (see
-/// `RunRegistry::stop`'s own call site) — a `"run"`-scoped volume there
-/// gets the exact same derived name on every start (`derive_domain`, which
-/// `derive_volume_name` reuses, only folds the run id in for a *named*
-/// run), so deleting it on stop would silently wipe data the next
-/// default-run start expects to still be there.
-pub async fn remove_run_scoped_volumes(docker: &Docker, run_id: &str) {
-    let mut filters: HashMap<&str, Vec<String>> = HashMap::new();
-    filters.insert(
-        "label",
-        vec![format!("fghj.run={run_id}"), "fghj.scope=run".to_string()],
-    );
-    let Ok(listed) = docker
-        .list_volumes(Some(
-            ListVolumesOptionsBuilder::new().filters(&filters).build(),
-        ))
-        .await
-    else {
-        return;
-    };
-    for volume in listed.volumes.unwrap_or_default() {
-        let _ = docker
-            .remove_volume(
-                &volume.name,
-                Some(RemoveVolumeOptionsBuilder::new().force(true).build()),
-            )
-            .await;
-    }
 }
 
 /// Lists the name of every Docker volume `ensure_volume` has ever labeled
@@ -954,7 +903,14 @@ pub struct RunOpts<'a> {
     pub platform: Option<&'a str>,
 }
 
+/// Creates and starts `opts.name`, replacing whatever container already
+/// holds that name — fghj's container names are deterministic, so anything
+/// there is a previous incarnation of this same container (stopped, crashed,
+/// half-created, or out of date), and leaving it to every caller to clear it
+/// first is how one path forgot and failed on a name conflict.
 pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
+    stop_and_remove(docker, opts.name).await;
+
     // User-declared labels first, so fghj's own bookkeeping labels below
     // always win on a key conflict — see `RunOpts.labels`'s doc comment.
     let mut labels: HashMap<String, String> = opts
@@ -1063,17 +1019,16 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
         create_opts_builder = create_opts_builder.platform(platform);
     }
     let create_opts = create_opts_builder.build();
-    let result = async {
-        docker.create_container(Some(create_opts), body).await?;
-        docker.start_container(opts.name, None).await?;
-        Ok::<(), bollard::errors::Error>(())
-    }
-    .await;
+    docker
+        .create_container(Some(create_opts), body)
+        .await
+        .with_context(|| format!("docker run {} failed", opts.name))?;
 
-    if let Err(e) = result {
-        // Docker can leave a container behind in `Created` state if start
-        // fails post-create (e.g. network attach failure) — best-effort clean
-        // it up so callers never leak a dangling container blocking retries.
+    if let Err(e) = docker.start_container(opts.name, None).await {
+        // Docker leaves the container behind in `Created` state when start
+        // fails post-create (e.g. network attach failure) — clean it up so
+        // it doesn't sit there half-made. Only here, never after a failed
+        // create: then the container under that name isn't this one.
         let _ = docker
             .remove_container(
                 opts.name,
@@ -1099,8 +1054,8 @@ pub async fn stop_container(docker: &Docker, name: &str) {
 /// `force` is SIGKILL with no grace period at all, and this function is on
 /// ordinary paths: stopping a whole run, restarting a single node,
 /// reconciling a container whose config changed. A dev database with an
-/// hour of seeded state in a `scope: stable` volume would be killed
-/// mid-write by a routine action — the opposite of what a stable volume
+/// hour of seeded state in a named volume would be killed
+/// mid-write by a routine action — the opposite of what a volume
 /// promises. So stop first and let the container's own `StopSignal` /
 /// `StopTimeout` (stamped on at create time by `run_container`) run their
 /// course; Docker escalates to SIGKILL itself once the grace period expires,

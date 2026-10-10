@@ -262,16 +262,8 @@ impl RunRegistry {
         // is only the bare declared name and can collide, e.g. when two
         // peer repos each declare a same-named service, or two different
         // services each own their own same-named backing dependency.
-        // `run_id` is folded in just like it is for
-        // `container_name`/the network name above, *except* for the default
-        // run: fghj models one shared, singular default environment per
-        // workspace (see `ensure_running`), so it needs no disambiguating
-        // segment — only a named/review run does, since more than one of
-        // those can be alive at once. `node.domain_scope == "stable"` is the
-        // other opt-out (CUE `#Service.domain_scope` /
-        // `#BackingDependency.domain_scope`): a deliberate, explicit choice
-        // by the CUE author to give a node one fixed identity shared across
-        // every run, not just the default one.
+        // There is one environment per workspace, so nothing else needs
+        // folding in.
         //
         // `domain` (the `fghj.internal` zone) is never registered as a
         // Docker alias on this node's own container — the run's sidecar
@@ -281,20 +273,8 @@ impl RunRegistry {
         // it with too. `raw_domain` (`fghj.raw.internal`) is the real
         // Docker network alias registered below: in-network-only, resolved
         // straight to this container's own IP by Docker's embedded DNS.
-        let domain = derive_domain(
-            &node.id,
-            &node.domain_scope,
-            &graph.workspace_name,
-            run_id,
-            DomainZone::Http,
-        );
-        let raw_domain = derive_domain(
-            &node.id,
-            &node.domain_scope,
-            &graph.workspace_name,
-            run_id,
-            DomainZone::Raw,
-        );
+        let domain = derive_domain(&node.id, &graph.workspace_name, DomainZone::Http);
+        let raw_domain = derive_domain(&node.id, &graph.workspace_name, DomainZone::Raw);
 
         // Where a node's relative bind-mount `host` / `env_file` paths
         // resolve against — the checkout root of the repo that declares the
@@ -441,7 +421,6 @@ impl RunRegistry {
                 }
                 VolumeMount::Named {
                     name,
-                    scope,
                     container,
                     read_only,
                     shared,
@@ -450,17 +429,10 @@ impl RunRegistry {
                     // only way two nodes can land on one volume — see
                     // `derive_volume_name` for why that's opt-in.
                     let owner = (!shared).then_some(node.id.as_str());
-                    let volume_name =
-                        derive_volume_name(name, scope, owner, &graph.workspace_name, run_id);
+                    let volume_name = derive_volume_name(name, owner, &graph.workspace_name);
                     if side_effects {
-                        docker::ensure_volume(
-                            &self.docker,
-                            &volume_name,
-                            &graph.workspace_name,
-                            scope,
-                            run_id,
-                        )
-                        .await?;
+                        docker::ensure_volume(&self.docker, &volume_name, &graph.workspace_name)
+                            .await?;
                     }
                     binds.push(format!(
                         "{volume_name}:{container}{}",
@@ -492,8 +464,7 @@ impl RunRegistry {
         }
         env.extend(node.environment.iter().cloned());
         for entry in &mut env {
-            *entry =
-                expand_service_fqdn_templates(entry, node, &raw_domain, &domain, graph, run_id);
+            *entry = expand_service_fqdn_templates(entry, node, &raw_domain, &domain, graph);
         }
 
         // Nothing is appended here for `node.debug`, and that absence is
@@ -764,7 +735,6 @@ mod tests {
         let mut node = debuggable(None);
         node.volumes.push(crate::resolver::VolumeMount::Named {
             name: crate::resolver::name::Name::parse("data").unwrap(),
-            scope: "run".to_string(),
             container: "/var/lib/data".to_string(),
             read_only: false,
             shared: false,

@@ -66,12 +66,13 @@ dependency it declares shows up as a not-yet-downloaded node. Click
 the graph, clones anything missing, re-resolves, and repeats until nothing
 new turns up (a repo's own dependencies aren't known until *it's* cloned).
 
-## 5. Start the default environment
+## 5. Start it
 
-From the **Actual** tab, **Start default environment** brings up every
-node currently on disk. This is the one shared environment for the
-workspace — running it again after pulling more of the graph only starts
-whatever's newly reachable, and never restarts what's already up. See
+From the **Actual** tab, pick a flow and press **Switch to flow**: it
+brings up that flow's nodes and stops anything else that's running. To
+start a single node instead, click it and press **Start** — the first start
+creates the workspace's one environment either way. Switching again after
+pulling more of the graph only starts what's new or changed. See
 [Run lifecycle & registry](/concepts/run-lifecycle-and-registry/).
 
 ## 6. Open a service over HTTPS

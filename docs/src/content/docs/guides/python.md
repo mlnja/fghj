@@ -123,7 +123,6 @@ As in Compose, Postgres is another service, with `image:` instead of
     stop_grace_period: 30
     volumes:
       - name: pgdata
-        scope: stable
         container: /var/lib/postgresql/data
 ```
 

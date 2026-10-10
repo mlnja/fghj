@@ -1,13 +1,13 @@
 ---
 title: Run lifecycle & registry
-description: Default vs. named runs, and how fghj keeps run state honest against real Docker state.
+description: The workspace's one environment — how it's started, switched between flows, and kept honest against real Docker state.
 ---
 
-## Two different verbs, one shared registry
+## One environment, two verbs
 
-`fghj` has two ways of starting containers, and picking the wrong mental
-model for either would either destroy work unnecessarily or silently fail
-to start what you asked for:
+A workspace has exactly **one** environment: one docker network, one
+sidecar, one set of containers. There is nothing to create or name — the
+first start creates it. Two verbs act on it:
 
 - **Starting a named run** — "make exactly this run exist, from
   scratch." If a run with this id is already up, it's stopped and torn

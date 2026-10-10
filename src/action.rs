@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use crate::persistence::WorkspaceOwner;
-use crate::state::{ContainerInfo, RunCreateError, RunSpec, RunState, SyncStatus};
+use crate::state::{ContainerInfo, PendingAction, RunCreateError, RunSpec, RunState, SyncStatus};
 
 /// Split into two families by who originates them: `Run*`/`OwnerSet` are
 /// *requests* — dispatched by an HTTP handler (or, later, an internal
@@ -92,13 +92,13 @@ pub enum Action {
     /// Reported by `effects::docker::converge` once a `RunPlanned` intent
     /// (`RunState::pending_create`) actually finishes being created/topped
     /// up against real Docker. `Ok(run)` wholesale-replaces the run's entry
-    /// with the freshly re-observed state (mirroring how `RunRegistry::start`/
-    /// `ensure_running` return the whole `RunState` they just produced).
+    /// with the freshly re-observed state (mirroring how
+    /// `RunRegistry::ensure_running` returns the whole `RunState` it produced).
     /// `Err` clears `pending_create` and, when the failure left containers
     /// actually running (`RunCreateError::partial` — an `ensure_running`
     /// top-up that got part way), replaces the run's entry with that partial
     /// state rather than guessing. Without it, those containers are running
-    /// and persisted but invisible to `GET /runs` and to host routing. With
+    /// and persisted but invisible to `GET /environment` and to host routing. With
     /// no partial (nothing started, or a path like `start` that rolled
     /// itself back) the run's last-known-good state is left untouched, which
     /// is still the right answer.
@@ -126,6 +126,18 @@ pub enum Action {
         sidecar_container_name: String,
         sidecar_ip: Option<String>,
         info: ContainerInfo,
+    },
+    /// Reported by `effects::docker::converge` as a still-in-flight
+    /// create/top-up/switch is about to start or stop `node_id` (`Some`), or
+    /// has given up on it (`None`) — so the node carries the same
+    /// `pending_action` mark a single-node start or stop would, rather than
+    /// sitting unchanged while the environment rejects every node action as
+    /// already in flight. `RunCreateProgress` and `RunCreateSettled` take the
+    /// mark back off.
+    RunCreateWorking {
+        run_id: String,
+        node_id: String,
+        action: Option<PendingAction>,
     },
     /// Reported by `effects::docker::converge` once a `RunStopRequested`
     /// intent (`RunState::pending_teardown`) has actually torn the run down
@@ -173,7 +185,7 @@ pub enum ActionRejected {
     /// The action named a `run_id` this workspace doesn't currently have a
     /// `RunState` for.
     RunNotFound,
-    /// The action named a `node_id` that isn't a key of the named run's
+    /// The action named a `node_id` that isn't a key of the run's
     /// `containers` map.
     NodeNotFound,
 }

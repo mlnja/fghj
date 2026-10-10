@@ -169,7 +169,6 @@ mod tests {
             image: None,
             branch: None,
             repo: None,
-            domain_scope: "run".into(),
             local_path: None,
             domain: domain.into(),
             downloaded: true,

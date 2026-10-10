@@ -183,7 +183,6 @@ somewhere, and any repo will do — there's no root. Since
       "label": "web",
       "kind": "service",
       "repo": "https://github.com/you/storefront.git",
-      "domain_scope": "run",
       "local_path": "storefront",
       "domain": "web.storefront.shop.fghj.internal",
       "downloaded": true,
@@ -219,8 +218,7 @@ Read the three derived fields:
   never switches a branch or commits on your behalf.
 
 `environment` is still showing the raw template. Templates are expanded
-when a container is created, not when the graph is resolved — the run id is
-one of the inputs, and at resolve time there is no run.
+when a container is created, not when the graph is resolved.
 
 `warnings: []` is worth noticing. Warnings are advisory findings that
 don't stop a resolve (two primary ports, a wildcard on a port that has no
@@ -244,12 +242,12 @@ the graph.
 
 Open `https://fghj.internal/` — that's `fghjd`'s own UI, served over the
 same TLS proxy your services will use. Pick the `shop` workspace, then the
-**Actual** tab, then **Start default environment**.
+**Actual** tab, click the `web` node, and press **Start** in its drawer.
 
-The **default run** is the one shared environment per workspace. It tops up
-idempotently: press the button again later and it starts whatever's newly
-reachable, leaves alone what's already correct, and recreates only what
-changed.
+There is one environment per workspace, and the first Start creates it.
+Start is also how you pick up a change later: it recreates the node from
+what `.fghj.yaml` says now, first bringing up anything it depends on that
+isn't running.
 
 Watch the node card go through `creating` and settle on `running`. Behind
 it, in order: a docker network for the run, a sidecar container (more on

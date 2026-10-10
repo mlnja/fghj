@@ -135,9 +135,9 @@ Everything fghj creates is prefixed `fghj-`:
 
 | Resource | Name |
 |---|---|
-| Containers | `fghj-<workspace>-<run-id>-<node>` |
-| Sidecars | `fghj-<workspace>-<run-id>-sidecar` |
-| Networks | `fghj-<workspace>-<run-id>` |
+| Containers | `fghj-<workspace>-default-<node>` |
+| Sidecars | `fghj-<workspace>-default-sidecar` |
+| Networks | `fghj-<workspace>-default` |
 | Volumes | `fghj-vol-<derived>` |
 | Sidecar image | `ghcr.io/mlnja/fghj-sidecar` |
 
@@ -160,8 +160,8 @@ docker volume rm  $(docker volume ls -q  --filter "name=^fghj-")
 docker rmi        $(docker images -q "ghcr.io/mlnja/fghj-sidecar")
 ```
 
-Volumes are the ones worth pausing over: a `scope: stable` volume is
-deliberately designed to survive across runs, so it may hold database
+Volumes are the ones worth pausing over: a named volume is
+deliberately designed to outlive its container, so it may hold database
 contents you still want. `docker volume ls --filter "name=^fghj-"` before
 deleting.
 

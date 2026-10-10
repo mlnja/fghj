@@ -62,8 +62,8 @@ services:
     assert_eq!(node.volumes.len(), 1);
     assert!(matches!(
         &node.volumes[0],
-        VolumeMount::Named { name, scope, container, read_only, shared }
-            if name == "pgdata" && scope == "run" && container == "/var/lib/postgresql/data"
+        VolumeMount::Named { name, container, read_only, shared }
+            if name == "pgdata" && container == "/var/lib/postgresql/data"
                 && !read_only && !shared
     ));
 }

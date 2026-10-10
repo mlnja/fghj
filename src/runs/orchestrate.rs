@@ -1,18 +1,19 @@
 //! Whole-run orchestration: starting a run and bringing it up to date.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
 use super::health::RunBudget;
-use super::naming::{DEFAULT_RUN_ID, resolve_run_id};
-use super::order::{StartOutcomes, topological_start_order, waited_on};
-use super::progress::{ProgressSink, RunProgress, report};
+use super::naming::DEFAULT_RUN_ID;
+use super::order::{StartOutcomes, requirements_of, topological_start_order, waited_on};
+use super::progress::{NodeDone, ProgressSink, RunProgress, report};
 use super::spec::spec_hash;
 use super::start_node::StartContext;
+use crate::daemon_log;
 use crate::docker;
 use crate::resolver::{Graph, Node};
-use crate::state::{ContainerInfo, RunCreateError, RunSpec, RunState};
+use crate::state::{ContainerInfo, PendingAction, RunCreateError, RunSpec, RunState};
 use crate::util::label::sanitize_label;
 
 use super::registry::RunRegistry;
@@ -74,8 +75,7 @@ fn task_already_done(node: &Node, prior: Option<&ContainerInfo>) -> bool {
 ///    expensive of the two mistakes.
 ///
 /// Condition 3 is the one that makes a top-up mean what a user expects. A
-/// top-up is an explicit action (`POST /runs` with no run id — "Run flow",
-/// `fghj up`), and the mental model people bring to it is `docker compose
+/// top-up is an explicit action (switching to a flow), and the mental model people bring to it is `docker compose
 /// up`'s: my edits take effect. Before this, a container flagged `Drifted`
 /// was skipped precisely *because* it was alive, so editing `.fghj.yaml` and
 /// pressing the button did nothing at all — [[config-drift]]'s "observe but
@@ -132,128 +132,14 @@ impl RunRegistry {
         .await;
     }
 
-    /// `prior` is whatever the reducer already had for this run id, if
-    /// anything — passed in rather than looked up, since the reducer owns
-    /// the only copy. A named run always starts clean, so an existing one
-    /// is torn down first.
+    /// Brings the workspace's environment up to date for `spec` — creating
+    /// its network and sidecar if they don't exist yet — without
+    /// restarting a container that's already alive and current.
     ///
-    /// A node that fails blocks what can't start without it, and nothing
-    /// else: the rest of the run keeps starting, and the error carries what
-    /// did come up (`RunCreateError::partial`), the same as
-    /// `ensure_running`. Only failing to set up the network or the sidecar
-    /// rolls the run back, since nothing can start without them.
-    pub async fn start(
-        &self,
-        graph: &Graph,
-        spec: RunSpec,
-        prior: Option<&RunState>,
-        progress: Option<&ProgressSink>,
-    ) -> Result<RunState, RunCreateError> {
-        let run_id = resolve_run_id(spec.run_id.as_deref());
-        // Before anything is torn down or created: an unknown flow is a typo,
-        // not a request for an empty run.
-        let target_ids = graph.start_ids(spec.flow.as_deref())?;
-        log_start_advisories(graph, &target_ids);
-
-        // starting an already-running run replaces it cleanly
-        if let Some(prior) = prior {
-            self.stop(&run_id, prior).await?;
-        }
-
-        let network = format!("fghj-{}-{}", sanitize_label(&graph.workspace_name), run_id);
-        docker::ensure_network(&self.docker, &network, &network).await?;
-
-        let (sidecar_container_name, sidecar_ip) = match self
-            .ensure_sidecar(&graph.workspace_name, &run_id, &network)
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                docker::remove_network(&self.docker, &network).await;
-                return Err(e.into());
-            }
-        };
-
-        let node_map: HashMap<&str, &Node> =
-            graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-        let ordered_ids = topological_start_order(&target_ids, &graph.edges);
-        let waited = waited_on(&target_ids, &graph.edges);
-        let mut outcomes = StartOutcomes::new(&target_ids, &graph.edges);
-
-        let mut containers = BTreeMap::new();
-        // One budget for the whole run, not one per node: nodes start
-        // sequentially, so a per-node limit bounded nothing an impatient
-        // person cares about. See `HealthBudget`, and `RunBudget` for why
-        // health waits and task waits get separate deadlines.
-        let budget = RunBudget::default();
-        for node_id in &ordered_ids {
-            let node = node_map[node_id.as_str()];
-            if let Some(by) = outcomes.blocked_by(node_id).map(str::to_string) {
-                self.record_blocked(&run_id, node_id, &by).await;
-                outcomes.block(node_id, &by);
-                continue;
-            }
-            match self
-                // A fresh run start never halts for a debugger: the
-                // switch is per container and this container does not
-                // exist yet.
-                .start_node(
-                    graph,
-                    node,
-                    StartContext {
-                        run_id: &run_id,
-                        network: &network,
-                        sidecar_ip: Some(&sidecar_ip),
-                        budget: &budget,
-                        debug_wait: false,
-                        wait_ready: waited.contains(node_id),
-                    },
-                )
-                .await
-            {
-                Ok(info) => {
-                    // Reported before being folded into the local map so a
-                    // daemon that dies on the *next* node still leaves a
-                    // record of this one.
-                    report(
-                        progress,
-                        RunProgress {
-                            run_id: run_id.clone(),
-                            network: network.clone(),
-                            sidecar_container_name: sidecar_container_name.clone(),
-                            sidecar_ip: Some(sidecar_ip.clone()),
-                            info: info.clone(),
-                        },
-                    );
-                    containers.insert(info.node_id.clone(), info);
-                }
-                Err(e) => outcomes.fail(node_id, format!("{e:#}")),
-            }
-        }
-
-        let state = RunState {
-            run_id: run_id.clone(),
-            network,
-            containers,
-            sidecar_container_name,
-            sidecar_ip: Some(sidecar_ip),
-            ..Default::default()
-        };
-        match outcomes.error() {
-            None => Ok(state),
-            Some(message) => Err(RunCreateError {
-                message,
-                partial: Some(Box::new(state)),
-            }),
-        }
-    }
-
-    /// Tops up the single default environment so every node reachable from
-    /// `flow` (or every node in the graph, if `flow` is `None`) is running —
-    /// unlike `start`, this never touches a container that's already alive.
-    /// fghj models one shared set of running containers per workspace, not a
-    /// separate environment per flow, so picking a flow should never restart
-    /// (or duplicate) whatever's already up.
+    /// Switching to a flow first stops every running container outside it,
+    /// dependents before what they depend on. Stopped, not removed:
+    /// switching back starts the same containers on the same volumes.
+    /// Starting a single node stops nothing.
     ///
     /// Liveness is checked directly against docker on every call rather than
     /// trusting the persisted `RunState`, since a container can be
@@ -274,12 +160,22 @@ impl RunRegistry {
     pub async fn ensure_running(
         &self,
         graph: &Graph,
-        flow: Option<&str>,
+        spec: &RunSpec,
         prior: Option<&RunState>,
         progress: Option<&ProgressSink>,
     ) -> Result<RunState, RunCreateError> {
         let run_id = DEFAULT_RUN_ID.to_string();
-        let target_ids = graph.start_ids(flow)?;
+        let target_ids = match spec {
+            RunSpec::Flow(flow) => graph.start_ids(Some(flow))?,
+            RunSpec::Node(id) => {
+                if !graph.nodes.iter().any(|n| &n.id == id) {
+                    return Err(anyhow::anyhow!("no such node: {id}").into());
+                }
+                let mut ids = requirements_of(id, &graph.edges);
+                ids.push(id.clone());
+                ids
+            }
+        };
         log_start_advisories(graph, &target_ids);
         let network = format!("fghj-{}-{}", sanitize_label(&graph.workspace_name), run_id);
         docker::ensure_network(&self.docker, &network, &network).await?;
@@ -294,8 +190,14 @@ impl RunRegistry {
             sidecar_ip: Some(sidecar_ip.clone()),
             ..Default::default()
         });
+        state.network = network.clone();
         state.sidecar_container_name = sidecar_container_name;
         state.sidecar_ip = Some(sidecar_ip);
+
+        if matches!(spec, RunSpec::Flow(_)) {
+            self.stop_outside(&run_id, graph, &target_ids, &mut state, progress)
+                .await;
+        }
 
         let node_map: HashMap<&str, &Node> =
             graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
@@ -379,9 +281,7 @@ impl RunRegistry {
                 self.record_event(&run_id, &node.id, "create", &why, "ok", None)
                     .await;
             }
-            // A stopped-but-not-removed container from a previous run would
-            // otherwise collide with create_container's fixed name.
-            docker::stop_and_remove(&self.docker, &container_name).await;
+            working(progress, &run_id, node_id, Some(PendingAction::Starting));
 
             let info = match self
                 .start_node(
@@ -404,6 +304,7 @@ impl RunRegistry {
             {
                 Ok(info) => info,
                 Err(e) => {
+                    working(progress, &run_id, node_id, None);
                     outcomes.fail(node_id, format!("{e:#}"));
                     continue;
                 }
@@ -414,16 +315,7 @@ impl RunRegistry {
             // Reported after every node, not just at the end, so a later
             // failure — or a daemon that dies outright — doesn't lose track
             // of containers that did start successfully.
-            report(
-                progress,
-                RunProgress {
-                    run_id: run_id.clone(),
-                    network: network.clone(),
-                    sidecar_container_name: state.sidecar_container_name.clone(),
-                    sidecar_ip: state.sidecar_ip.clone(),
-                    info: info.clone(),
-                },
-            );
+            report_done(progress, &state, info.clone());
             state.containers.insert(info.node_id.clone(), info);
         }
 
@@ -435,6 +327,75 @@ impl RunRegistry {
             }),
         }
     }
+
+    /// The other half of switching to a flow: stops every running container
+    /// in `state` that isn't one of `keep`, in reverse start order so
+    /// nothing is left running without what it needs. Best effort — a
+    /// container that won't stop is logged and left, since failing the
+    /// switch over it would also leave the flow itself not started.
+    async fn stop_outside(
+        &self,
+        run_id: &str,
+        graph: &Graph,
+        keep: &[String],
+        state: &mut RunState,
+        progress: Option<&ProgressSink>,
+    ) {
+        let outside: Vec<String> = state
+            .containers
+            .values()
+            .filter(|c| c.observed.status == "running" && !keep.contains(&c.node_id))
+            .map(|c| c.node_id.clone())
+            .collect();
+        for node_id in topological_start_order(&outside, &graph.edges)
+            .into_iter()
+            .rev()
+        {
+            let container = state.containers[&node_id].clone();
+            working(progress, run_id, &node_id, Some(PendingAction::Stopping));
+            match self.stop_container(run_id, &node_id, &container).await {
+                Ok(info) => {
+                    report_done(progress, state, info.clone());
+                    state.containers.insert(node_id, info);
+                }
+                Err(e) => {
+                    working(progress, run_id, &node_id, None);
+                    daemon_log::warn(format!(
+                        "fghjd: stopping {node_id}, which isn't in the flow, failed: {e:#}"
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn working(
+    progress: Option<&ProgressSink>,
+    run_id: &str,
+    node_id: &str,
+    action: Option<PendingAction>,
+) {
+    report(
+        progress,
+        RunProgress::Working {
+            run_id: run_id.to_string(),
+            node_id: node_id.to_string(),
+            action,
+        },
+    );
+}
+
+fn report_done(progress: Option<&ProgressSink>, state: &RunState, info: ContainerInfo) {
+    report(
+        progress,
+        RunProgress::Done(Box::new(NodeDone {
+            run_id: state.run_id.clone(),
+            network: state.network.clone(),
+            sidecar_container_name: state.sidecar_container_name.clone(),
+            sidecar_ip: state.sidecar_ip.clone(),
+            info,
+        })),
+    );
 }
 
 #[cfg(test)]

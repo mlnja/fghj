@@ -4,7 +4,7 @@ description: Run a command inside a running node's container — a full-duplex d
 ---
 
 ```bash
-fghj exec <node> [--workspace <path>] [--run <run>] [-T] -- <cmd>...
+fghj exec <node> [--workspace <path>] [-T] -- <cmd>...
 ```
 
 Runs a command inside an already-running node's container, proxied full
@@ -19,7 +19,6 @@ resizing your terminal resizes the remote one too.
 |---|---|
 | `node` | Node id to exec into — see `fghj graph` for ids. Its container must already be running. |
 | `--workspace <path>` | Workspace root directory holding sibling repo checkouts. Defaults to [the wired workspace you're standing in](#the-workspace-is-derived-from-where-you-are), falling back to the current directory. |
-| `--run <run>` | Which run to target. Defaults to `default`, the shared default environment. |
 | `-T`, `--no-tty` | Disable pseudo-TTY allocation even if stdin/stdout are real terminals. |
 | `<cmd>...` | The command and its arguments to run inside the container. Put `--` before it if it has flags of its own that could otherwise confuse `fghj`'s own argument parsing. |
 
@@ -57,8 +56,7 @@ one](/cli/wire/#workspaces-cannot-nest), in either direction.
 ## Requirements
 
 `fghjd` must be running and the workspace must already be
-[wired](/cli/wire/) with the target node's container started (via the UI or
-`fghj graph`/the run API) — `exec` fails immediately with a clear error if
+[wired](/cli/wire/) with the target node's container started (from the UI) — `exec` fails immediately with a clear error if
 either isn't true.
 
 ## TTY behavior

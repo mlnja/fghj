@@ -163,7 +163,7 @@ A named volume's real Docker name is *derived*, never the literal string
 you write — the same principle as a node's `*.fghj.internal` domain (see
 [Node identity & domains](/concepts/node-identity-and-domains/)). It's
 built from the volume's own `name`, **qualified by the id of the node that
-declared it**, and folding in the run id unless `scope` is `"stable"`.
+declared it**.
 
 The node-id qualification is the part worth understanding, because it used
 to be absent. Keying only on the author-chosen `name` meant two unrelated
@@ -178,18 +178,10 @@ rarely: the usual reason to want it — several services behind one database
 therefore one container and one volume, with no name coincidence carrying
 any weight.
 
-One hazard the qualification doesn't close: `scope: "stable"` means one
-volume across every run *including two runs that are up at the same time*,
-so a default run's database and a named run's database can still end up on
-one data directory. It's documented where an author meets it — the
-[volume table](/reference/fghj-yaml/#setting-a-named-volume) and
-[Runs](/reference/runs/) — and not enforced anywhere
-yet.
-
-Volumes are never deleted by `fghj` — stopping a run tears down its
-containers and network only, which is what lets a volume survive a
-restart in the first place. A `"run"`-scoped named run that's stopped
-and never restarted leaves its volume behind, with no cleanup command yet.
+Volumes are never deleted by `fghj` — stopping the environment tears down
+its containers and network only, which is what lets a volume survive a
+restart in the first place. Removing one is a `docker volume rm` you run
+yourself.
 
 ## Two log-reading modes
 

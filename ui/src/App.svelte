@@ -3,8 +3,6 @@
   import GraphView from './lib/GraphView.svelte';
   import Drawer from './lib/Drawer.svelte';
   import Placeholder from './lib/Placeholder.svelte';
-  import RunControls from './lib/RunControls.svelte';
-  import OperationsDrawer from './lib/OperationsDrawer.svelte';
   import TelemetryDrawer from './lib/TelemetryDrawer.svelte';
 
   let universe = $state(null);
@@ -12,11 +10,12 @@
   let activeTab = $state('repos');
   let currentFlow = $state(null);
   let selectedNode = $state(null);
-  let opsOpen = $state(false);
-  let telemetryOpen = $state(false);
-  let runs = $state([]);
-  let selectedRunId = $state(null);
-  let runsPoll = null;
+  // `null` when closed, else the tab it opens on.
+  let telemetryTab = $state(null);
+  // The workspace's one environment (`GET /environment`), or null before
+  // anything has been started.
+  let env = $state(null);
+  let envPoll = null;
 
   let workspaces = $state([]);
   let currentWorkspaceId = $state(
@@ -45,8 +44,7 @@
     universe = null;
     error = null;
     selectedNode = null;
-    runs = [];
-    selectedRunId = null;
+    env = null;
     load();
   }
 
@@ -64,29 +62,13 @@
   }
   load();
 
-  async function loadRuns() {
+  async function loadEnv() {
     try {
-      const res = await fetch(withWs('/runs'));
-      runs = await res.json();
-      if (!selectedRunId && runs.length) selectedRunId = runs[0].run_id;
-      if (selectedRunId && !runs.find((r) => r.run_id === selectedRunId)) {
-        selectedRunId = runs.length ? runs[0].run_id : null;
-      }
+      const res = await fetch(withWs('/environment'));
+      env = await res.json();
     } catch (e) {
       // best-effort polling; ignore transient failures
     }
-  }
-
-  async function startRun(spec) {
-    const res = await fetch(withWs('/runs'), { method: 'POST', body: JSON.stringify(spec) });
-    const state = await res.json();
-    if (!state.error) selectedRunId = state.run_id;
-    await loadRuns();
-  }
-
-  async function stopRun(runId) {
-    await fetch(withWs(`/runs/${runId}/stop`), { method: 'POST' });
-    await loadRuns();
   }
 
   async function pullAll() {
@@ -113,8 +95,14 @@
     return await res.json();
   }
 
-  async function runFlow(flow) {
-    await startRun({ run_id: null, flow });
+  // Starts the flow's containers and stops (not removes) everything else.
+  async function switchFlow(flow) {
+    await fetch(withWs('/switch'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ flow }),
+    });
+    await loadEnv();
   }
 
   async function listPullJobs() {
@@ -161,15 +149,13 @@
   }
 
   async function fetchLogs(nodeId) {
-    if (!selectedRunId) return '';
-    const res = await fetch(withWs(`/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/logs`));
+    const res = await fetch(withWs(`/nodes/${encodeURIComponent(nodeId)}/logs`));
     const data = await res.json();
     return data.logs ?? data.error ?? '';
   }
 
   function logStreamUrl(nodeId) {
-    if (!selectedRunId) return null;
-    return withWs(`/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/logs/stream`);
+    return withWs(`/nodes/${encodeURIComponent(nodeId)}/logs/stream`);
   }
 
   // Persisted-log-history support (see `store::WorkspaceDb`'s `logs` table):
@@ -178,9 +164,8 @@
   // oldest-first, for both the initial load and scroll-triggered
   // infinite-scroll-back.
   async function fetchLogGenerations(nodeId) {
-    if (!selectedRunId) return [];
     const res = await fetch(
-      withWs(`/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/logs/generations`),
+      withWs(`/nodes/${encodeURIComponent(nodeId)}/logs/generations`),
     );
     if (!res.ok) return [];
     const data = await res.json();
@@ -188,8 +173,7 @@
   }
 
   async function fetchLogHistory(nodeId, generation, beforeSeq) {
-    if (!selectedRunId) return [];
-    let path = `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/logs/history?generation=${generation}`;
+    let path = `/nodes/${encodeURIComponent(nodeId)}/logs/history?generation=${generation}`;
     if (beforeSeq != null) path += `&before_seq=${beforeSeq}`;
     const res = await fetch(withWs(path));
     if (!res.ok) return [];
@@ -203,10 +187,9 @@
   // stdout/stderr. Only the current cycle of `action` is ever returned —
   // see `store::WorkspaceDb::begin_event_cycle`.
   async function fetchEvents(nodeId, action) {
-    if (!selectedRunId) return [];
     const res = await fetch(
       withWs(
-        `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/events?action=${action}`,
+        `/nodes/${encodeURIComponent(nodeId)}/events?action=${action}`,
       ),
     );
     if (!res.ok) return [];
@@ -267,7 +250,7 @@
       message = String(e);
     }
     logAction(job.nodeId, job.action, ok, message);
-    await loadRuns();
+    await loadEnv();
     actionQueue = actionQueue.slice(1);
     activeAction = null;
     processQueue();
@@ -285,9 +268,9 @@
   // can never disagree with reality the way a frontend-only guess could
   // (e.g. after a page reload, or from a second browser tab).
   // `activeAction`/`actionQueue` above stay only as an optimistic fill-in
-  // for the ~1s gap between firing a request and the next `/runs` poll
+  // for the ~1s gap between firing a request and the next `/environment` poll
   // picking up the backend's own flag.
-  let backendPending = $derived(Object.values(selectedRun?.containers ?? {}).filter((c) => c.pending_action));
+  let backendPending = $derived(Object.values(env?.containers ?? {}).filter((c) => c.pending_action));
   const ACTION_GERUNDS = { start: 'starting', stop: 'stopping', delete: 'removing', reset: 'resetting' };
   let displayPending = $derived.by(() => {
     if (backendPending.length) return backendPending.map((c) => ({ nodeId: c.node_id, action: c.pending_action }));
@@ -296,18 +279,15 @@
   });
 
   function startNode(nodeId) {
-    if (!selectedRunId) return;
-    enqueueNodeAction(nodeId, 'start', `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/start`);
+    enqueueNodeAction(nodeId, 'start', `/nodes/${encodeURIComponent(nodeId)}/start`);
   }
 
   function stopNode(nodeId) {
-    if (!selectedRunId) return;
-    enqueueNodeAction(nodeId, 'stop', `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/stop`);
+    enqueueNodeAction(nodeId, 'stop', `/nodes/${encodeURIComponent(nodeId)}/stop`);
   }
 
   function deleteNode(nodeId) {
-    if (!selectedRunId) return;
-    enqueueNodeAction(nodeId, 'delete', `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/delete`);
+    enqueueNodeAction(nodeId, 'delete', `/nodes/${encodeURIComponent(nodeId)}/delete`);
   }
 
   // Container-only "Reset": force a fresh container in one click while the
@@ -319,8 +299,7 @@
   // `nodeLifecycle` in Drawer.svelte for the full state/action legality
   // table).
   function resetNode(nodeId) {
-    if (!selectedRunId) return;
-    enqueueNodeAction(nodeId, 'reset', `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/start`);
+    enqueueNodeAction(nodeId, 'reset', `/nodes/${encodeURIComponent(nodeId)}/start`);
   }
 
   // The per-container debug switch (`FGHJ_DEBUG_WAIT`). Goes through the
@@ -333,20 +312,19 @@
   // would block every teammate's start of this node. See
   // `concepts/debugging-in-containers.md`.
   function setDebugWait(nodeId, wait) {
-    if (!selectedRunId) return;
     enqueueNodeAction(
       nodeId,
       wait ? 'debug-wait on' : 'debug-wait off',
-      `/runs/${selectedRunId}/nodes/${encodeURIComponent(nodeId)}/debug-wait`,
+      `/nodes/${encodeURIComponent(nodeId)}/debug-wait`,
       { wait },
     );
   }
 
   $effect(() => {
     if (activeTab === 'containers') {
-      loadRuns();
-      runsPoll = setInterval(loadRuns, 1000);
-      return () => clearInterval(runsPoll);
+      loadEnv();
+      envPoll = setInterval(loadEnv, 1000);
+      return () => clearInterval(envPoll);
     }
   });
 
@@ -362,10 +340,9 @@
     return () => clearInterval(id);
   });
 
-  let selectedRun = $derived(runs.find((r) => r.run_id === selectedRunId) ?? null);
   // `RunState.containers` is already keyed by node id on the backend, so
   // this is a rename, not an index build.
-  let runContainers = $derived(selectedRun?.containers ?? {});
+  let runContainers = $derived(env?.containers ?? {});
   let liveInfo = $derived(selectedNode ? runContainers[selectedNode.id] : null);
   // Scoped to the selected node only, not the whole workspace: the backend
   // already serializes lifecycle calls *execution-order-wise* per workspace
@@ -373,11 +350,12 @@
   // same container name), but that's invisible latency, not a reason to
   // stop the user from even queuing an action on an unrelated container.
   // `liveInfo?.pending_action` is the backend's own per-node truth;
-  // `activeAction`/`actionQueue` fill the ~1s gap before the next `/runs`
+  // `activeAction`/`actionQueue` fill the ~1s gap before the next `/environment`
   // poll would otherwise reflect a just-fired request for *this* node.
   let selectedNodeBusy = $derived(
     selectedNode
-      ? liveInfo?.pending_action != null ||
+      ? env?.pending_create != null ||
+          liveInfo?.pending_action != null ||
           activeAction?.nodeId === selectedNode.id ||
           actionQueue.some((j) => j.nodeId === selectedNode.id)
       : false
@@ -423,7 +401,6 @@
         branch: repr.branch,
         dirty: members.some((m) => m.dirty),
         downloaded: members.every((m) => m.downloaded),
-        domain_scope: repr.domain_scope,
         local_path: repr.local_path,
         domain: repr.domain,
         flows: [...new Set(members.flatMap((m) => m.flows))],
@@ -475,7 +452,6 @@
         label: c.node_id.split('.')[0],
         kind: 'service',
         domain: c.desired.domain,
-        domain_scope: 'run',
         downloaded: true,
         dirty: false,
         flows: [],
@@ -516,9 +492,10 @@
     onPullFlow={pullFlow}
     onPullFlowStatus={pullFlowStatus}
     onPullFlowComplete={onPullAllComplete}
-    onRunFlow={runFlow}
-    onOpenOperations={() => (opsOpen = true)}
-    onOpenTelemetry={() => (telemetryOpen = true)}
+    onSwitchFlow={switchFlow}
+    envBusy={env?.pending_create != null}
+    onOpenOperations={() => (telemetryTab = 'pulls')}
+    onOpenTelemetry={() => (telemetryTab = 'logs')}
     workspaces={workspaces}
     currentWorkspaceId={currentWorkspaceId}
     onOpenWorkspaces={loadWorkspaces}
@@ -545,18 +522,7 @@
       {#if activeTab === 'repos'}
         <GraphView graph={reposGraph} {currentFlow} mode="repos" onSelectNode={(n) => (selectedNode = n)} />
       {:else if activeTab === 'containers'}
-        <Placeholder
-          eyebrow="Actual — live container state"
-          text="Start the default environment to build and run every service/infra as real Docker containers on an isolated workspace network, or start a second, named review run alongside it. Each node gets a trusted HTTPS domain under *.fghj.internal, served by the daemon's proxy, plus a per-node address under *.fghj.raw.internal for anything that isn't HTTP — click a node to see and open both."
-        >
-          <RunControls
-            {runs}
-            onStart={startRun}
-            onStop={stopRun}
-            onOpenOperations={() => (opsOpen = true)}
-          />
-          <GraphView graph={containersGraph} {currentFlow} mode="containers" {runContainers} onSelectNode={(n) => (selectedNode = n)} />
-        </Placeholder>
+        <GraphView graph={containersGraph} {currentFlow} mode="containers" {runContainers} onSelectNode={(n) => (selectedNode = n)} />
       {:else}
         <Placeholder
           eyebrow="Config — secrets, split-DNS, root CA"
@@ -583,7 +549,6 @@
       {liveInfo}
       actionLog={actionLog.filter((a) => a.nodeId === selectedNode.id)}
       busy={selectedNodeBusy}
-      runId={selectedRunId}
       onFetchLogs={fetchLogs}
       onFetchLogGenerations={fetchLogGenerations}
       onFetchLogHistory={fetchLogHistory}
@@ -600,13 +565,11 @@
     />
   {/if}
 
-  {#if opsOpen}
-    <OperationsDrawer onClose={() => (opsOpen = false)} onListJobs={listPullJobs} />
-  {/if}
-
-  {#if telemetryOpen}
+  {#if telemetryTab}
     <TelemetryDrawer
-      onClose={() => (telemetryOpen = false)}
+      initialTab={telemetryTab}
+      onClose={() => (telemetryTab = null)}
+      onListJobs={listPullJobs}
       onFetchDaemonLogs={fetchDaemonLogs}
       onFetchNetStatus={fetchDaemonNetStatus}
       onFetchDoctor={fetchDaemonDoctor}

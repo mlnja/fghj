@@ -45,13 +45,12 @@ description: How fghj's pieces — the CLI, the superdaemon, the resolver, the p
   [Flat workspace model](/concepts/flat-workspace-model/), and
   [Fog-of-war visibility](/concepts/fog-of-war-visibility/).
 - **The run registry** (`src/runs/`) turns that graph into running Docker
-  containers — one shared default environment per workspace, plus
-  [named runs](/reference/runs/) that stand up their own isolated copy of
-  the same graph, from the same checkout. See
+  containers — one environment per workspace, switched between flows.
+  See
   [Run lifecycle & registry](/concepts/run-lifecycle-and-registry/) and
   [Branch ownership model](/concepts/branch-ownership-model/).
 - **The web UI** (Svelte, embedded into `fghjd` at compile time) is how you
-  browse the graph, start/stop runs, and tail logs. See
+  browse the graph, start/stop nodes, switch flows, and tail logs. See
   [UI architecture](/concepts/ui-architecture/).
 - **Persistence** (`src/persistence/`) is split into a root-owned index of
   known workspaces and a per-workspace SQLite database for run/container

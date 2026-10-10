@@ -25,28 +25,15 @@ pub struct Node {
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
-    /// "run" | "stable" — every node's actual `*.fghj.internal` domain is
-    /// derived from `id` + workspace (+ run id) by `runs::start_node`; there
-    /// is no CUE-declared domain override for any node kind, so this can
-    /// never be bypassed. "run" (the default) folds the run id in so two
-    /// runs never collide; "stable" (opt-in via `#Service.domain_scope` /
-    /// `#BackingDependency.domain_scope`) drops it, for a node a CUE author
-    /// deliberately wants one fixed identity shared across every run — only
-    /// one run can own that name from the host at a time. Stub (not-yet-
-    /// pulled) nodes are always "run": the real value is unknown until the
-    /// repo is actually pulled and its `.fghj.yaml` read.
-    pub domain_scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_path: Option<String>,
-    /// This node's canonical `*.fghj.internal` address for the *default*
-    /// run — the same value `runs::start_node` derives when it actually
-    /// launches a container for this node under `runs::DEFAULT_RUN_ID`.
+    /// This node's canonical `*.fghj.internal` address — derived from `id`
+    /// and the workspace by `runs::derive_domain`, never declared, the same
+    /// value `runs::start_node` uses when it launches the container.
     /// Populated as a final pass in `resolve_universe` (not at node
     /// construction time, since it needs the workspace name, only known
     /// once resolution is complete) so the UI can show/link to a node's
-    /// expected address before any container is running. A node started
-    /// under a *named* run gets a different, run-id-qualified domain (see
-    /// `runs::derive_domain`) that this field does not reflect.
+    /// address before any container is running.
     pub domain: String,
     pub downloaded: bool,
     /// Whether the on-disk checkout has uncommitted changes — see
@@ -373,7 +360,7 @@ impl Graph {
     /// That is right for a *view* and wrong for an *actuation* — before
     /// this, `resolve_universe` would happily hand a graph containing "'a'
     /// depends on a service name that does not exist" straight to
-    /// `RunRegistry::start`, which would then bring up a subset of the
+    /// `RunRegistry::ensure_running`, which would then bring up a subset of the
     /// environment that nobody asked for and report success.
     ///
     /// So the severity split lives on the warning and the refusal lives at

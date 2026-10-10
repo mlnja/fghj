@@ -27,6 +27,7 @@ pub fn reduce(state: &WorkspaceState, action: Action) -> Result<WorkspaceState, 
 
         Action::ContainerObserved { .. }
         | Action::ContainerActionSettled { .. }
+        | Action::RunCreateWorking { .. }
         | Action::RunCreateProgress { .. }
         | Action::RunCreateSettled { .. }
         | Action::RunTeardownSettled { .. }

@@ -19,8 +19,8 @@ The obvious shortcut — issue a single cert for `*.fghj.internal` once,
 reuse it everywhere — doesn't work. X.509 wildcards only match one
 leftmost label (RFC 6125): `*.fghj.internal` covers
 `cart.fghj.internal` but not `cart.myworkspace.fghj.internal`, and fghj's
-names are arbitrarily deep (`admin.cart.default.myworkspace.fghj.internal`
-for a named port on a named run). A wildcard-per-depth-level scheme would
+names are arbitrarily deep (`admin.cart.billing.myworkspace.fghj.internal`
+for a named port on a service in the `billing` repo). A wildcard-per-depth-level scheme would
 need regenerating every time the naming scheme grows a level, and still
 wouldn't handle depth generically.
 

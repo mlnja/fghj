@@ -74,7 +74,7 @@ wrong shape, however convenient.
 **The binaries.** Use `brew uninstall fghj`.
 
 **Docker containers, networks, volumes and images.** Not an oversight: a
-`scope: stable` volume is *designed* to outlive a run and may hold a
+named volume is *designed* to outlive its container and may hold a
 database you still want, and fghj identifies its own resources by an
 `fghj-` name prefix — a filter, not proof of ownership. Deleting data on a
 name match is not a call an uninstall command gets to make. It points you

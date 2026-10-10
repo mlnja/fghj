@@ -35,8 +35,8 @@ use logs::{
     get_run_node_log_history,
 };
 use runs::{
-    get_runs, post_run_node_debug_wait, post_run_node_delete, post_run_node_start,
-    post_run_node_stop, post_run_stop, post_runs,
+    get_environment, post_run_node_debug_wait, post_run_node_delete, post_run_node_start,
+    post_run_node_stop, post_stop, post_switch,
 };
 use workspaces::{get_universe, get_workspaces, post_workspaces, post_workspaces_stop};
 
@@ -52,45 +52,28 @@ pub(crate) fn build_router(registry: Arc<WorkspaceRegistry>, daemon: Arc<DaemonC
         .route("/pull/{node_id}", post(post_pull_node))
         .route("/pull/{node_id}/status", get(get_pull_node_status))
         .route("/pull-jobs", get(get_pull_jobs))
-        .route("/runs", get(get_runs).post(post_runs))
-        .route("/runs/{run_id}/stop", post(post_run_stop))
+        .route("/environment", get(get_environment))
+        .route("/switch", post(post_switch))
+        .route("/stop", post(post_stop))
+        .route("/nodes/{node_id}/start", post(post_run_node_start))
+        .route("/nodes/{node_id}/stop", post(post_run_node_stop))
+        .route("/nodes/{node_id}/delete", post(post_run_node_delete))
         .route(
-            "/runs/{run_id}/nodes/{node_id}/start",
-            post(post_run_node_start),
-        )
-        .route(
-            "/runs/{run_id}/nodes/{node_id}/stop",
-            post(post_run_node_stop),
-        )
-        .route(
-            "/runs/{run_id}/nodes/{node_id}/delete",
-            post(post_run_node_delete),
-        )
-        .route(
-            "/runs/{run_id}/nodes/{node_id}/debug-wait",
+            "/nodes/{node_id}/debug-wait",
             post(post_run_node_debug_wait),
         )
-        .route("/runs/{run_id}/nodes/{node_id}/logs", get(get_run_logs))
+        .route("/nodes/{node_id}/logs", get(get_run_logs))
+        .route("/nodes/{node_id}/logs/stream", get(get_run_logs_stream))
         .route(
-            "/runs/{run_id}/nodes/{node_id}/logs/stream",
-            get(get_run_logs_stream),
-        )
-        .route(
-            "/runs/{run_id}/nodes/{node_id}/logs/generations",
+            "/nodes/{node_id}/logs/generations",
             get(get_run_node_log_generations),
         )
         .route(
-            "/runs/{run_id}/nodes/{node_id}/logs/history",
+            "/nodes/{node_id}/logs/history",
             get(get_run_node_log_history),
         )
-        .route(
-            "/runs/{run_id}/nodes/{node_id}/events",
-            get(get_run_node_events),
-        )
-        .route(
-            "/runs/{run_id}/nodes/{node_id}/exec/ws",
-            get(get_run_exec_ws),
-        )
+        .route("/nodes/{node_id}/events", get(get_run_node_events))
+        .route("/nodes/{node_id}/exec/ws", get(get_run_exec_ws))
         .with_state(registry);
 
     let daemon_api = Router::new()

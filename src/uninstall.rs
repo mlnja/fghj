@@ -55,8 +55,8 @@ pub struct Outcome {
 /// whether a daemon was actually there to stop.
 ///
 /// Docker containers, networks, volumes and images are left alone, and that
-/// is not an oversight. A `scope: stable` volume is *designed* to outlive a
-/// run — it can hold a database the user still wants — and fghj identifies
+/// is not an oversight. A named volume is *designed* to outlive its
+/// containers — it can hold a database the user still wants — and fghj identifies
 /// its Docker resources by an `fghj-` name prefix, which is a filter, not
 /// proof of ownership. Deleting data on a name match during an uninstall is
 /// not a call this command gets to make; it reports them instead.

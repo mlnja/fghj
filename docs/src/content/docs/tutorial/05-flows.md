@@ -121,12 +121,12 @@ workspace:
 - **Pull flow** — clone every not-yet-downloaded repo this flow would start. On a
   large workspace this is the difference between fetching four repos and
   fetching forty.
-- **Run flow** — ensure this flow's containers are running, and leave
-  everything else untouched. Not "stop the others": fghj doesn't tear down
-  what you didn't ask about.
+- **Switch to flow** — make the environment this flow: start its
+  containers (recreating any whose config changed), and stop every other
+  running container. Stop, not remove — their volumes and their state stay,
+  and switching back starts them again.
 
-So the flow is a *scope* for work, not a boundary in the environment. Both
-buttons act on the same shared default run — see
+Both act on the workspace's one environment — see
 [Run lifecycle & registry](/concepts/run-lifecycle-and-registry/).
 
 ---

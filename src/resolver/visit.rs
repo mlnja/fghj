@@ -19,8 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use super::config::{
-    ComponentConfig, default_domain_scope, default_restart, default_run_policy,
-    default_stop_grace_period,
+    ComponentConfig, default_restart, default_run_policy, default_stop_grace_period,
 };
 use super::dependency::{Condition, Target};
 use super::git::{git_head_sha, git_remote_and_branch, git_status_dirty};
@@ -124,7 +123,6 @@ impl<'a> ResolveCtx<'a> {
                     image: service.image.clone(),
                     branch: branch.clone(),
                     repo: repo.clone(),
-                    domain_scope: service.domain_scope.clone(),
                     local_path: Some(local_path.to_string()),
                     domain: String::new(),
                     downloaded: true,
@@ -259,7 +257,6 @@ impl<'a> ResolveCtx<'a> {
             image: None,
             branch: default_branch.map(str::to_string),
             repo: Some(repo.to_string()),
-            domain_scope: default_domain_scope(),
             local_path: Some(stub_id.clone()),
             domain: String::new(),
             downloaded: false,

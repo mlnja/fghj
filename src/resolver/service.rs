@@ -5,10 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use super::config::{
-    Build, Environment, Healthcheck, default_domain_scope, default_restart,
-    default_stop_grace_period,
-};
+use super::config::{Build, Environment, Healthcheck, default_restart, default_stop_grace_period};
 use super::dependency::DependsOn;
 use super::port::BackingPorts;
 use super::volume::{HostAliasConfig, VolumeMount};
@@ -26,8 +23,6 @@ pub struct ServiceConfig {
     /// A bare list of container ports, or a map of port to `#Port`.
     #[serde(default)]
     pub(crate) ports: BackingPorts,
-    #[serde(default = "default_domain_scope")]
-    pub(crate) domain_scope: String,
     #[serde(default)]
     pub(crate) environment: Environment,
     #[serde(default)]

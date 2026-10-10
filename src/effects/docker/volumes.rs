@@ -9,7 +9,7 @@
 //! observed diff+actuation": real desired-state volume tracking would need
 //! a volume's identity threaded through `RunSpec`/`Action::RunPlanned` from
 //! the resolved `.fghj.yaml` graph, which `RunSpec` doesn't carry (see
-//! `state::run::RunSpec`'s doc — it's deliberately thin, `{run_id, flow}`)
+//! `state::run::RunSpec`'s doc — it's deliberately thin)
 //! and `runs::orchestrate` doesn't populate either (it builds every
 //! `RunState` with `volumes: BTreeMap::new()`). Plumbing real volume specs
 //! through would mean

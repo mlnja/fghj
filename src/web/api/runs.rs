@@ -1,4 +1,4 @@
-//! Starting, stopping and inspecting runs and the nodes inside them.
+//! Starting, stopping and inspecting the environment and the nodes in it.
 
 use axum::Json;
 use axum::body::Bytes;
@@ -34,95 +34,45 @@ pub(crate) fn container_response(
     }
 }
 
-/// Every run the reducer knows about, as a JSON array — the UI picks runs
-/// out of it by `run_id`, so the order the `BTreeMap` iterates in (by id)
-/// is the whole contract.
-pub(crate) async fn get_runs(ActorExtractor(actor): ActorExtractor) -> Response {
-    let current = actor.current();
-    let runs: Vec<&state::RunState> = current.runs.values().collect();
-    Json(runs).into_response()
+/// The workspace's environment — every container fghj knows about — or
+/// `null` before anything has been started.
+pub(crate) async fn get_environment(ActorExtractor(actor): ActorExtractor) -> Response {
+    Json(actor.current().runs.get(runs::DEFAULT_RUN_ID)).into_response()
 }
 
-/// Builds the response for a successful `RunPlanned` dispatch: whatever
-/// `run_id` names in the actor's freshly-published state, per the same
-/// "respond once the reducer has recorded intent, not once Docker has
-/// actually finished" contract `dispatch_node_action` already uses (see the
-/// architecture plan's "HTTP handler contract"). `RunPlanned`'s reducer arm
-/// always inserts an entry under `run_id` (empty on a brand new run,
-/// top-up-preserved on an existing one), so the `None` branch is
-/// practically unreachable — kept only for symmetry with
-/// `container_response`.
-pub(crate) fn run_response(actor: &actor::ActorHandle, run_id: &str) -> Response {
-    match actor.current().runs.get(run_id) {
-        Some(run) => Json(run).into_response(),
-        None => Json(serde_json::json!({ "ok": true, "run_id": run_id })).into_response(),
+/// Switches the environment to a flow: body `{"flow": "repo/flow"}`. Starts
+/// the flow's nodes and stops (not removes) every running container outside
+/// it. Returns once the intent is recorded; `effects::docker::converge` does
+/// the Docker work and reports back via `Action::RunCreateSettled`.
+pub(crate) async fn post_switch(ActorExtractor(actor): ActorExtractor, body: Bytes) -> Response {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        flow: String,
     }
-}
-
-/// Dispatches `Action::RunPlanned` through the workspace actor instead of
-/// calling `runs::RunRegistry::start`/`ensure_running` directly — migration
-/// phase 5's HTTP cutover. Unlike the old synchronous handler, this returns
-/// as soon as the reducer has recorded the still-unfulfilled intent
-/// (`RunState::pending_create`); `effects::docker::converge`'s
-/// `DockerConvergeEffect` (already wired per-workspace, see
-/// `WorkspaceRegistry::wire_actor`) is what actually resolves the graph and
-/// calls Docker afterwards, reporting the result back via
-/// `Action::RunCreateSettled`. This is the same async contract migration
-/// phase 4 already gave node-lifecycle endpoints — run creation was the one
-/// endpoint still on the old fully-synchronous path, purely because of a
-/// JSON-shape mismatch between the two container models that collapsing to
-/// a single model removed, not because of anything about creation itself
-/// that needed different timing.
-///
-/// A freshly-created run's first response (and the `GET /runs` polls
-/// immediately after it) can therefore show 0 containers for as long as
-/// convergence takes, where the old handler always returned the fully
-/// populated result — the same "trust `pending_action`/poll for the rest"
-/// model the UI already applies to node start/stop/delete, just not
-/// something it has a "run is being created" affordance for yet
-/// (`pending_create` is deliberately never serialized — see its doc).
-pub(crate) async fn post_runs(ActorExtractor(actor): ActorExtractor, body: Bytes) -> Response {
-    let spec: state::RunSpec = if body.is_empty() {
-        state::RunSpec {
-            run_id: None,
-            flow: None,
-        }
-    } else {
-        match serde_json::from_slice(&body) {
-            Ok(s) => s,
-            Err(e) => return bad_request(e),
-        }
+    let body: Body = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return bad_request(e),
     };
-
-    let run_id = runs::resolve_run_id(spec.run_id.as_deref());
     let action = action::Action::RunPlanned {
-        run_id: run_id.clone(),
-        plan: spec,
+        run_id: runs::DEFAULT_RUN_ID.to_string(),
+        plan: state::RunSpec::Flow(body.flow),
     };
     match actor.dispatch(action).await {
-        Ok(()) => run_response(&actor, &run_id),
+        Ok(()) => Json(actor.current().runs.get(runs::DEFAULT_RUN_ID)).into_response(),
         Err(e) => action_rejected_response(e),
     }
 }
 
-/// Whole-run teardown, on the same dispatch-and-return contract as every
-/// other mutating handler: the reducer records the intent
+/// Tears the whole environment down — containers, network and sidecar.
+/// Volumes are kept. Same dispatch-and-return contract as every other
+/// mutating handler: the reducer records the intent
 /// (`RunState::pending_teardown`) and `effects::docker::converge` performs
-/// the actual Docker teardown afterwards, dropping the run from state via
-/// `Action::RunTeardownSettled` — which is in turn what makes
-/// `effects::persist` delete the database row and `effects::routes` remove
-/// the sidecar route table.
-///
-/// This used to be the one mutating endpoint still calling `RunRegistry`
-/// directly, because whole-run teardown (network, sidecar, volumes) has no
-/// representation in the per-container `pending_action` model. Giving it a
-/// run-level flag of its own is what closed that gap.
-pub(crate) async fn post_run_stop(
-    AxumPath(run_id): AxumPath<String>,
-    ActorExtractor(actor): ActorExtractor,
-) -> Response {
+/// it, dropping the run from state via `Action::RunTeardownSettled`.
+pub(crate) async fn post_stop(ActorExtractor(actor): ActorExtractor) -> Response {
     match actor
-        .dispatch(action::Action::RunStopRequested { run_id })
+        .dispatch(action::Action::RunStopRequested {
+            run_id: runs::DEFAULT_RUN_ID.to_string(),
+        })
         .await
     {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
@@ -149,9 +99,10 @@ pub(crate) async fn dispatch_node_action(
 }
 
 pub(crate) async fn post_run_node_start(
-    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    AxumPath(node_id): AxumPath<String>,
     ActorExtractor(actor): ActorExtractor,
 ) -> Response {
+    let run_id = runs::DEFAULT_RUN_ID.to_string();
     let action = action::Action::RunNodeStartRequested {
         run_id: run_id.clone(),
         node_id: node_id.clone(),
@@ -168,10 +119,11 @@ pub(crate) async fn post_run_node_start(
 /// the container to already exist — a node with nothing running has nothing
 /// to halt.
 pub(crate) async fn post_run_node_debug_wait(
-    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    AxumPath(node_id): AxumPath<String>,
     ActorExtractor(actor): ActorExtractor,
     body: Bytes,
 ) -> Response {
+    let run_id = runs::DEFAULT_RUN_ID.to_string();
     #[derive(serde::Deserialize)]
     struct Body {
         wait: bool,
@@ -199,9 +151,10 @@ pub(crate) async fn post_run_node_debug_wait(
 }
 
 pub(crate) async fn post_run_node_stop(
-    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    AxumPath(node_id): AxumPath<String>,
     ActorExtractor(actor): ActorExtractor,
 ) -> Response {
+    let run_id = runs::DEFAULT_RUN_ID.to_string();
     let action = action::Action::RunNodeStopRequested {
         run_id: run_id.clone(),
         node_id: node_id.clone(),
@@ -210,9 +163,10 @@ pub(crate) async fn post_run_node_stop(
 }
 
 pub(crate) async fn post_run_node_delete(
-    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    AxumPath(node_id): AxumPath<String>,
     ActorExtractor(actor): ActorExtractor,
 ) -> Response {
+    let run_id = runs::DEFAULT_RUN_ID.to_string();
     let action = action::Action::RunNodeDeleteRequested {
         run_id: run_id.clone(),
         node_id: node_id.clone(),

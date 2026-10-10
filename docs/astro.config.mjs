@@ -143,11 +143,6 @@ export default defineConfig({
           label: 'Reference',
           items: [
             { label: 'fghj.yaml', slug: 'reference/fghj-yaml' },
-            // `reference/runs` is deliberately not listed (it sets
-            // `sidebar.hidden`). A named run varies only identity, volume
-            // freshness and which nodes are up — never the source or the
-            // config — so it is a mechanism to document, not a feature to
-            // send a reader looking for. The pages that need it link to it.
           ],
         },
       ],

@@ -11,7 +11,6 @@
     // close/reopen — see App.svelte's actionQueue for why a locally-scoped
     // busy flag here couldn't be trusted across that remount.
     busy = false,
-    runId,
     onLogStreamUrl,
     onFetchLogGenerations,
     onFetchLogHistory,
@@ -305,16 +304,16 @@
           <span class="ctrl-status"><span class="spinner"></span> {lifecycle}…</span>
         {:else}
           {#if lifecycle === 'absent' || lifecycle === 'stopped'}
-            <button class="ctrl-btn" onclick={startNode} disabled={!runId || busy}>Start</button>
+            <button class="ctrl-btn" onclick={startNode} disabled={busy}>Start</button>
           {/if}
           {#if lifecycle === 'running'}
-            <button class="ctrl-btn" onclick={stopNode} disabled={!runId || busy}>Stop</button>
+            <button class="ctrl-btn" onclick={stopNode} disabled={busy}>Stop</button>
           {/if}
           {#if lifecycle !== 'absent'}
-            <button class="ctrl-btn danger" onclick={deleteNode} disabled={!runId || busy}>Delete</button>
+            <button class="ctrl-btn danger" onclick={deleteNode} disabled={busy}>Delete</button>
           {/if}
           {#if lifecycle === 'running'}
-            <button class="ctrl-btn" onclick={resetNode} disabled={!runId || busy} title="Stop and recreate this container fresh. Volumes are untouched.">Reset</button>
+            <button class="ctrl-btn" onclick={resetNode} disabled={busy} title="Stop and recreate this container fresh. Volumes are untouched.">Reset</button>
           {/if}
         {/if}
       </div>
@@ -454,7 +453,7 @@
                 class="toggle"
                 class:on={debugWait}
                 onclick={toggleDebugWait}
-                disabled={!runId || busy || !liveInfo}
+                disabled={busy || !liveInfo}
                 title={liveInfo
                   ? 'Sets FGHJ_DEBUG_WAIT=1 and recreates this container. Your image decides what that means — typically --inspect-brk, suspend=y, or wait_for_client(). While it is on, fghj stops health-checking this node, since a process stopped before line 0 can never report healthy.'
                   : 'Start this node first — there is no container to halt yet.'}

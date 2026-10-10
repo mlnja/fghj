@@ -2,11 +2,9 @@
 
 use anyhow::{Result, bail};
 
-use super::naming::DEFAULT_RUN_ID;
 use crate::docker;
 use crate::resolver::Graph;
 use crate::state::{ContainerInfo, RunState};
-use crate::util::label::sanitize_label;
 
 use super::health::RunBudget;
 use super::registry::RunRegistry;
@@ -14,8 +12,9 @@ use super::route_table::sidecar_routes_dir;
 use super::start_node::StartContext;
 
 impl RunRegistry {
-    /// Tears a whole run down: every container, the sidecar, the network,
-    /// and — for a named run only — its volumes.
+    /// Tears the environment down: every container, the sidecar and the
+    /// network. Volumes are kept — they hold the data the next start
+    /// expects to find.
     ///
     /// Takes the run rather than looking it up: the reducer owns the only
     /// copy, and the caller (`effects::docker::converge`) already has it.
@@ -44,19 +43,11 @@ impl RunRegistry {
         }
         let _ = std::fs::remove_dir_all(sidecar_routes_dir(&state.network));
         docker::remove_network(&self.docker, &state.network).await;
-        // The default run's `scope: "run"` volumes get the exact same
-        // derived name on every start (`derive_volume_name` only folds the
-        // run id in for a *named* run) — deleting them here would silently
-        // wipe data a plain stop+restart expects to still be there. Only a
-        // named/preview run's volumes are safe to clean up.
-        if run_id != DEFAULT_RUN_ID {
-            docker::remove_run_scoped_volumes(&self.docker, run_id).await;
-        }
         Ok(())
     }
 
     /// (Re)starts a single node's container within an already-running run —
-    /// the per-node counterpart to `start`/`ensure_running`'s whole-run
+    /// the per-node counterpart to `ensure_running`'s whole-run
     /// granularity, backing the Drawer's "Start" button. Always recreates
     /// from scratch (mirrors `ensure_running`'s stop-then-start dance) so a
     /// `.fghj.yaml` change since the container last started is actually
@@ -75,14 +66,6 @@ impl RunRegistry {
         let Some(node) = graph.nodes.iter().find(|n| n.id == node_id) else {
             bail!("no such node: {node_id}");
         };
-        let container_name = format!(
-            "fghj-{}-{}-{}",
-            sanitize_label(&graph.workspace_name),
-            run_id,
-            sanitize_label(&node.id)
-        );
-        docker::stop_and_remove(&self.docker, &container_name).await;
-
         // Restarting one node is not sharing a budget with anything, so it
         // gets a full per-node health allowance.
         self.start_node(
