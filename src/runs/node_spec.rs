@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use super::domain::{DomainZone, derive_domain};
 use super::fqdn_template::expand_service_fqdn_templates;
-use super::naming::derive_volume_name;
+use super::naming::{container_name, derive_volume_name};
 use super::spec::NodeSpec;
 use crate::docker;
 use crate::resolver::{Graph, Node, VolumeMount};
@@ -249,8 +249,7 @@ impl RunRegistry {
         run_id: &str,
         side_effects: bool,
     ) -> Result<Option<NodeSpec>> {
-        let workspace = sanitize_label(&graph.workspace_name);
-        let container_name = format!("fghj-{workspace}-{run_id}-{}", sanitize_label(&node.id));
+        let container_name = container_name(&graph.workspace_name, run_id, &node.id);
         // Every node's domain is derived the same way, unconditionally —
         // there's no CUE-declared override for any node kind (services
         // included) that could bypass this, so two nodes can never collide

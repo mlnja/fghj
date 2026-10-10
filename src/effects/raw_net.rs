@@ -1,9 +1,6 @@
-//! Fans every registered workspace's raw-zone containers into the existing,
-//! already-working `raw_net::reconcile` — the architecture plan's
-//! (rosy-soaring-teapot.md) "First real slice: raw-net" migration step, and
-//! the first concrete `FannedInEffect`. `daemon::spawn_reconciler` must
-//! never also call `raw_net::reconcile` directly once this is spawned — two
-//! schedules touching the same `pf` state is the exact bug class documented
+//! Fans every registered workspace's raw-zone containers into
+//! `raw_net::reconcile`, as a `FannedInEffect`. Nothing else may call
+//! `raw_net::reconcile` while this effect runs — two schedules touching the same `pf` state is the exact bug class documented
 //! in `raw_net::macos`'s module doc.
 //!
 //! The projection itself lives in `state::query::raw_endpoints`, shared

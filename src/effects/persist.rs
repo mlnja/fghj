@@ -1,12 +1,6 @@
 //! Mirrors workspace state into the per-workspace SQLite store.
 //!
-//! Persistence used to be a hand-placed `save_run` after every mutation in
-//! `runs/`, each one writing a `RunState` snapshot taken before the Docker
-//! work it was recording. Two concurrent per-node operations could
-//! therefore each persist a view that had already lost the other's
-//! container.
-//!
-//! As an effect it is derived, not remembered: whatever the actor has
+//! Derived, not remembered: whatever the actor has
 //! published is what lands in the database, and the reducer is the only
 //! thing that decides what that is.
 

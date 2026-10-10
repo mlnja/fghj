@@ -9,19 +9,22 @@ A workspace has exactly **one** environment: one docker network, one
 sidecar, one set of containers. There is nothing to create or name — the
 first start creates it. Two verbs act on it:
 
-- **Starting a named run** — "make exactly this run exist, from
-  scratch." If a run with this id is already up, it's stopped and torn
-  down first, then every non-flow-filtered node in the graph is started
-  fresh. A named run is meant to be reproducible from a clean slate every
-  time you hit start again.
-- **Topping up the default environment** — "make sure everything reachable
-  from this flow (or the whole graph) is running; never touch a container
-  that's already alive." This backs both "Start default environment" and
-  "Run flow" — both are just different scopes of the same idempotent
-  top-up. `fghj` models **one** shared set of running containers per
-  workspace, not a separate environment per flow, so picking a flow to run
-  must never restart — or duplicate — whatever's already up because some
-  other flow needed it too.
+- **Start a node** — bring up whatever that node requires that isn't
+  running, then (re)create the node itself from the current config, then
+  restart its running dependents so they pick up the new container. On a
+  workspace with no environment yet, this is what creates it, with just
+  that node and its requirements in it.
+- **Switch to a flow** — make the environment that flow: top up the flow's
+  nodes (start what's missing, recreate what drifted, leave alone what's
+  already correct), then stop — never remove — every running container
+  outside it, dependents before their requirements. Stopped containers
+  keep their volumes; switching back starts them again.
+
+There is no "stop the environment" action: stopping single nodes, or
+switching flows, covers day-to-day use. The environment's containers,
+network and sidecar are only torn down when the workspace itself is
+stopped (`POST /workspaces/stop`), and even then every volume stays, so
+the next start mounts the same data.
 
 Liveness is checked directly against Docker on every call, never trusted
 from persisted state alone — a container can be stopped or removed

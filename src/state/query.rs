@@ -137,7 +137,7 @@ pub fn raw_endpoints(states: &BTreeMap<String, Arc<WorkspaceState>>) -> Vec<RawE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ContainerDesired, ContainerObserved, RunState};
+    use crate::state::testing;
 
     fn route(domain: &str, host_port: u16, wildcard: bool, container_port: &str) -> PortRoute {
         PortRoute {
@@ -150,27 +150,11 @@ mod tests {
     }
 
     fn container(node_id: &str, status: &str, routes: Vec<PortRoute>) -> ContainerInfo {
-        ContainerInfo {
-            node_id: node_id.to_string(),
-            desired: ContainerDesired {
-                running: status == "running",
-                container_name: format!("fghj-{node_id}-1"),
-                domain: format!("{node_id}.fghj.internal"),
-                raw_domain: format!("{node_id}.fghj.raw.internal"),
-                routes,
-                additional_hosts: vec![],
-                status_port: None,
-                config_hash: "hash".into(),
-                source: None,
-                terminating: false,
-                debug_wait: false,
-            },
-            observed: ContainerObserved {
-                status: status.to_string(),
-                ..Default::default()
-            },
-            pending_action: None,
-        }
+        let mut c = testing::container(node_id);
+        c.desired.running = status == "running";
+        c.desired.routes = routes;
+        c.observed.status = status.to_string();
+        c
     }
 
     /// `id -> WorkspaceState` holding a single `default` run, built from
@@ -181,23 +165,7 @@ mod tests {
         workspaces
             .into_iter()
             .map(|(id, containers)| {
-                let run = RunState {
-                    run_id: "default".into(),
-                    network: "fghj-net".into(),
-                    containers: containers
-                        .into_iter()
-                        .map(|c| (c.node_id.clone(), c))
-                        .collect(),
-                    volumes: BTreeMap::new(),
-                    sidecar_container_name: "fghj-sidecar".into(),
-                    sidecar_ip: None,
-                    pending_create: None,
-                    pending_teardown: false,
-                };
-                let state = WorkspaceState {
-                    runs: BTreeMap::from([("default".to_string(), run)]),
-                    ..Default::default()
-                };
+                let state = testing::workspace(containers);
                 (id.to_string(), Arc::new(state))
             })
             .collect()

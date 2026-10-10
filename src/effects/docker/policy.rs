@@ -1,5 +1,4 @@
-//! The switch named in the plan's "Container drift policy: observer-only
-//! by default" section: flipping `effects::docker::converge::DockerConvergeEffect::extract`
+//! Container drift policy, observer-only by default: flipping `effects::docker::converge::DockerConvergeEffect::extract`
 //! to fold `observed` into its snapshot (alongside `desired`) would make it
 //! try to restart a container `effects::docker::observe` reports as
 //! crashed, rather than just surfacing the drift. That's a real behavior

@@ -1,13 +1,9 @@
-//! Daemon-wide directory of currently-live per-workspace actors — see the
-//! architecture plan (rosy-soaring-teapot.md)'s "The registry:
-//! infrastructure, not decision state" section. Deliberately named
-//! `ActorRegistry`, not `WorkspaceRegistry`: `daemon::WorkspaceRegistry`
-//! already exists and still owns today's pre-migration
-//! `RunRegistry`/`WorkspaceDb`/Docker-client wiring (unchanged by this
-//! phase); this type only ever answers "which workspace actors currently
-//! exist and how do I reach them," which is routing/discovery
-//! infrastructure, never something a decision is made from. The two are
-//! expected to merge once a later migration phase retires the old one.
+//! Daemon-wide directory of currently-live per-workspace actors. It only
+//! answers "which workspace actors exist and how do I reach them" —
+//! routing/discovery, never something a decision is made from.
+//! `daemon::WorkspaceRegistry` owns everything else about a workspace
+//! (its `RunRegistry`, database and Docker client) and keeps this one in
+//! step as workspaces come and go.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -18,10 +14,7 @@ use crate::actor::ActorHandle;
 use crate::state::WorkspaceState;
 
 /// Everything needed to reach one workspace's actor — currently just the
-/// handle itself, kept as its own type (rather than using `ActorHandle`
-/// directly as the registry's value) so a later phase can attach
-/// routing-only metadata (e.g. the workspace's id or path) without
-/// changing `ActorHandle` itself.
+/// handle itself.
 #[derive(Clone)]
 pub struct WorkspaceHandle {
     pub actor: ActorHandle,

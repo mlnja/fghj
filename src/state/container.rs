@@ -61,9 +61,8 @@ fn cert_eligible_by_default() -> bool {
 /// (`container.pending_action.is_some()` → `ActionRejected::AlreadyInFlight`),
 /// and clears it on `Action::ContainerActionSettled` once the effect doing
 /// the real Docker call finishes — see `reducer::run` and
-/// `reducer::observation`. `RunRegistry` used to keep a second, separate
-/// `pending` map guarding the same thing, which meant two gates that could
-/// disagree about whether a node was busy.
+/// `reducer::observation`. It is the only such gate, so nothing can
+/// disagree about whether a node is busy.
 ///
 /// Also the one truth the UI needs to answer "what is this node doing right
 /// now", so it never has to infer that from its own click history.

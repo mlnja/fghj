@@ -1,5 +1,5 @@
-//! The pure core of the Redux-style migration (see the architecture plan,
-//! rosy-soaring-teapot.md): `reduce` is the only function allowed to turn
+//! The pure core of the daemon's state machine: `reduce` is the only
+//! function allowed to turn
 //! an `Action` into a new `state::WorkspaceState`. It does no I/O, is
 //! never `async`, and never panics on a malformed `Action` — every lookup
 //! that might not find its target either returns `Err(ActionRejected)`
@@ -19,7 +19,6 @@ use crate::state::WorkspaceState;
 pub fn reduce(state: &WorkspaceState, action: Action) -> Result<WorkspaceState, ActionRejected> {
     match action {
         Action::RunPlanned { .. }
-        | Action::RunStopRequested { .. }
         | Action::RunNodeStartRequested { .. }
         | Action::RunNodeStopRequested { .. }
         | Action::RunNodeDeleteRequested { .. }
@@ -30,7 +29,6 @@ pub fn reduce(state: &WorkspaceState, action: Action) -> Result<WorkspaceState, 
         | Action::RunCreateWorking { .. }
         | Action::RunCreateProgress { .. }
         | Action::RunCreateSettled { .. }
-        | Action::RunTeardownSettled { .. }
         | Action::VolumeObserved { .. }
         | Action::ConfigDriftObserved { .. } => observation::reduce(state, action),
 

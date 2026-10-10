@@ -37,12 +37,10 @@ impl FromRequestParts<Arc<WorkspaceRegistry>> for WorkspaceExtractor {
     }
 }
 
-/// Extracts the new-system `actor::ActorHandle` for the workspace named by
-/// `?workspace=<id>` — the migration-phase-4 counterpart of
-/// `WorkspaceExtractor` for handlers that dispatch an `Action` instead of
-/// calling `runs::RunRegistry` directly. Kept as its own extractor rather
-/// than folded into `WorkspaceExtractor` (which every other handler still
-/// uses unchanged) since only the three node-lifecycle handlers need it.
+/// Extracts the `actor::ActorHandle` for the workspace named by
+/// `?workspace=<id>` — the counterpart of `WorkspaceExtractor` for
+/// handlers that dispatch an `Action` instead of calling
+/// `runs::RunRegistry` directly.
 pub(crate) struct ActorExtractor(pub(crate) actor::ActorHandle);
 
 impl FromRequestParts<Arc<WorkspaceRegistry>> for ActorExtractor {

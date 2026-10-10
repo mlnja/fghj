@@ -22,10 +22,7 @@ impl RunRegistry {
     /// `desired` — that asymmetry is the entire reason the two are separate
     /// fields. The verdicts go to `effects::docker::observe::report`, which
     /// dispatches them as `Action::ContainerObserved`; the reducer is the
-    /// only thing that writes them down. Until migration phase 5 this also
-    /// folded them into a second copy of the run state kept right here,
-    /// which is how an observation could reach the database ahead of the
-    /// reducer that was supposed to own it.
+    /// only thing that writes them down.
     ///
     /// A container Docker restarted onto a different ephemeral host port
     /// needs no route rewriting either: `state::query::live_host_port`

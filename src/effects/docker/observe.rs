@@ -1,31 +1,18 @@
-//! Closes the gap `effects::docker::converge`'s module doc names: since
-//! `effects::bridge`/`Action::WorkspaceMirrored` were deleted (migration
-//! phase 5), nothing dispatches `Action::ContainerObserved` for a container
-//! that changed state for a reason neither `converge` nor an HTTP-dispatched
-//! request caused (crashed, `docker stop`'d by hand, a restart-policy-
-//! triggered restart) — so `observed != desired` never became visible in
-//! the new system's state, only in the old one.
+//! Reports containers that changed state for a reason neither `converge`
+//! nor an HTTP-dispatched request caused (crashed, `docker stop`'d by hand,
+//! a restart-policy-triggered restart) as `Action::ContainerObserved`, so
+//! `observed != desired` becomes visible in actor state.
 //!
 //! Deliberately does **not** run its own independent Docker-inspection
 //! timer. `daemon::spawn_reconciler` calls `report` once a second, and
 //! `report` does the inspecting itself (`RunRegistry::inspect_containers`);
 //! a second, independent Docker-polling loop here would double the real
-//! Docker API load for the exact same information. The "never leave two
-//! mechanisms driving the same resource
-//! concurrently" rule from the migration plan is about *actuation* (two
-//! things deciding to start/stop the same container), not about a single
-//! read being reported to two readers, so reusing `refresh`'s already-fresh
-//! result here doesn't violate it.
+//! Docker API load for the exact same information.
 //!
-//! This is now the *only* way a container's real status reaches anything
+//! This is the *only* way a container's real status reaches anything
 //! that acts on it: live HTTPS routing and DNS answering read the reducer
 //! state these reports feed (`state::query`), not `runs::RunRegistry`. If
 //! this stops being called, routes go stale.
-//!
-//! `report` is the "-> ContainerObserved" half of the plan's "Docker
-//! poller -> ContainerObserved" module: `daemon::spawn_reconciler` calls
-//! `runs.refresh().await` (the poller, unchanged) and then this function
-//! (the translation), once per tick, once per workspace.
 //!
 //! Container drift is deliberately only ever *reported*, never fed back
 //! into `converge`: `effects::docker::converge::DockerConvergeEffect::extract`
@@ -47,14 +34,9 @@ use super::volumes;
 
 /// Re-inspects every container the actor currently records and reports
 /// what Docker actually says about it — plus each run's real volumes —
-/// back into the actor's state.
-///
-/// Both halves of that used to be separate steps: `RunRegistry::refresh`
-/// inspected Docker and wrote the answers into its own copy of the run
-/// state, and this function then re-read that copy and forwarded it. The
-/// copy is gone (migration phase 5), so the inspection now takes the
-/// actor's state as its input and its results go straight out as actions
-/// — one read, one writer.
+/// back into the actor's state: the inspection takes the actor's state as
+/// its input and its results go straight out as actions — one read, one
+/// writer.
 pub async fn report(runs: &RunRegistry, actor: &ActorHandle) {
     let state = actor.current();
     for (run_id, observed) in runs.inspect_containers(&state.runs).await {
@@ -118,29 +100,16 @@ fn container_observed(run_id: &str, node_id: &str, observed: &ContainerObserved)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ContainerDesired, ContainerInfo};
+    use crate::state::ContainerInfo;
     use std::collections::BTreeMap;
 
     fn container(node_id: &str, status: &str) -> ContainerInfo {
-        ContainerInfo {
-            node_id: node_id.into(),
-            desired: ContainerDesired {
-                running: true,
-                container_name: format!("fghj-{node_id}-1"),
-                domain: format!("{node_id}.fghj.internal"),
-                raw_domain: format!("{node_id}.fghj.raw.internal"),
-                status_port: Some("http".into()),
-                config_hash: "hash".into(),
-                ..Default::default()
-            },
-            observed: ContainerObserved {
-                status: status.into(),
-                published_port: Some(8080),
-                ports: BTreeMap::from([("http".to_string(), Some(8080))]),
-                ..Default::default()
-            },
-            pending_action: None,
-        }
+        let mut c = crate::state::testing::container(node_id);
+        c.desired.status_port = Some("http".into());
+        c.observed.status = status.into();
+        c.observed.published_port = Some(8080);
+        c.observed.ports = BTreeMap::from([("http".to_string(), Some(8080))]);
+        c
     }
 
     #[test]
@@ -194,45 +163,9 @@ mod tests {
 
     #[tokio::test]
     async fn report_dispatches_observed_for_a_crashed_container_without_changing_desired() {
-        use crate::state::{
-            ContainerDesired, ContainerInfo as NewContainerInfo, ContainerObserved, RunState,
-            WorkspaceState,
-        };
-
-        let mut state = WorkspaceState::default();
-        state.runs.insert(
-            "default".into(),
-            RunState {
-                run_id: "default".into(),
-                network: "fghj-net".into(),
-                containers: BTreeMap::from([(
-                    "web".to_string(),
-                    NewContainerInfo {
-                        node_id: "web".into(),
-                        desired: ContainerDesired {
-                            running: true,
-                            container_name: "fghj-web-1".into(),
-                            domain: "web.fghj.internal".into(),
-                            raw_domain: "web.fghj.raw.internal".into(),
-                            routes: vec![],
-                            additional_hosts: vec![],
-                            status_port: Some("http".into()),
-                            config_hash: "hash".into(),
-                            source: None,
-                            terminating: false,
-                            debug_wait: false,
-                        },
-                        observed: ContainerObserved::default(),
-                        pending_action: None,
-                    },
-                )]),
-                volumes: BTreeMap::new(),
-                sidecar_container_name: "fghj-sidecar".into(),
-                sidecar_ip: None,
-                pending_create: None,
-                pending_teardown: false,
-            },
-        );
+        let mut web = crate::state::testing::container("web");
+        web.desired.status_port = Some("http".into());
+        let state = crate::state::testing::workspace(vec![web]);
         let handle = crate::actor::spawn(state);
 
         let observed = container("web", "exited");

@@ -8,14 +8,10 @@ use crate::supervisor;
 /// The Docker-facing half of run management: it owns the clients and
 /// handles needed to *do* things (create a container, wait on a
 /// healthcheck, stream logs) and the locks that keep those calls from
-/// interleaving with themselves. It deliberately holds no run state.
-///
-/// Until migration phase 5 it kept its own `BTreeMap<String, RunState>`
-/// alongside the actor's, and the two were reconciled by a poller. Two
-/// copies of one fact is two chances to disagree, and every lifecycle call
-/// had to remember to write both. Now the actor's published
-/// `state::WorkspaceState` is the only store: callers pass in whatever
-/// prior state a call needs and dispatch the result back as an action.
+/// interleaving with themselves. It deliberately holds no run state: the
+/// actor's published `state::WorkspaceState` is the only store, so callers
+/// pass in whatever prior state a call needs and dispatch the result back
+/// as an action.
 pub struct RunRegistry {
     pub(super) workspace: std::path::PathBuf,
     pub(super) db: Arc<WorkspaceDb>,

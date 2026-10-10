@@ -1,13 +1,10 @@
-//! Handles the five "request" `Action` variants that originate from an
-//! HTTP handler expressing intent (plan/stop a run, start/stop/delete one
-//! node) — see `action::Action`'s module doc for the request/report split.
-//! This is where the in-flight dedup that used to live in
-//! `RunRegistry::pending`/`PendingGuard` (`src/runs.rs:711-736`) now lives:
-//! a plain `container.pending_action.is_some()` field read, since a pure
-//! reducer never needs a `Mutex<HashMap>` to answer "is something already
-//! happening to this node."
-
-use std::collections::BTreeMap;
+//! Handles the "request" `Action` variants that originate from an HTTP
+//! handler expressing intent (plan the environment, start/stop/delete/debug
+//! one node) — see `action::Action`'s doc for the request/report split.
+//! In-flight dedup lives here too, as a plain read of
+//! `container.pending_action` and `run.pending_create`: a pure reducer
+//! never needs a lock to answer "is something already happening to this
+//! node."
 
 use crate::action::{Action, ActionRejected};
 use crate::state::{
@@ -38,44 +35,12 @@ pub(super) fn reduce(
             let mut next = state.clone();
             let run = next.runs.entry(run_id.clone()).or_insert_with(|| RunState {
                 run_id,
-                network: String::new(),
-                containers: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                sidecar_container_name: String::new(),
-                sidecar_ip: None,
-                pending_create: None,
-                pending_teardown: false,
+                ..Default::default()
             });
             if run.pending_create.is_some() {
                 return Err(ActionRejected::AlreadyInFlight);
             }
             run.pending_create = Some(plan);
-            Ok(next)
-        }
-
-        Action::RunStopRequested { run_id } => {
-            let mut next = state.clone();
-            let run = next
-                .runs
-                .get_mut(&run_id)
-                .ok_or(ActionRejected::RunNotFound)?;
-            // The run-level intent is what `effects::docker::converge`
-            // acts on: tearing down the network, the sidecar and (for a
-            // named run) the volumes has no per-container representation,
-            // so marking containers alone would orphan all three.
-            run.pending_teardown = true;
-            // Containers are still marked so the UI shows them stopping
-            // rather than sitting at "running" until the whole teardown
-            // lands. Best-effort per container, not atomic across the run:
-            // a node someone is already acting on is left alone rather than
-            // failing the request, since making this all-or-nothing would
-            // let one in-flight node block tearing the run down at all.
-            for container in run.containers.values_mut() {
-                if container.pending_action.is_none() {
-                    container.desired.running = false;
-                    container.pending_action = Some(PendingAction::Stopping);
-                }
-            }
             Ok(next)
         }
 
@@ -272,48 +237,14 @@ fn set_pending(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ContainerDesired, ContainerObserved};
 
+    use crate::state::testing::workspace;
+
+    /// Requests act on containers that aren't running yet.
     fn container(node_id: &str) -> ContainerInfo {
-        ContainerInfo {
-            node_id: node_id.into(),
-            desired: ContainerDesired {
-                running: false,
-                container_name: format!("fghj-{node_id}-1"),
-                domain: format!("{node_id}.fghj.internal"),
-                raw_domain: format!("{node_id}.fghj.raw.internal"),
-                routes: vec![],
-                additional_hosts: vec![],
-                status_port: None,
-                config_hash: "hash".into(),
-                source: None,
-                terminating: false,
-                debug_wait: false,
-            },
-            observed: ContainerObserved::default(),
-            pending_action: None,
-        }
-    }
-
-    fn state_with_run(run_id: &str, containers: Vec<ContainerInfo>) -> WorkspaceState {
-        let mut state = WorkspaceState::default();
-        state.runs.insert(
-            run_id.into(),
-            RunState {
-                run_id: run_id.into(),
-                network: "fghj-net".into(),
-                containers: containers
-                    .into_iter()
-                    .map(|c| (c.node_id.clone(), c))
-                    .collect(),
-                volumes: BTreeMap::new(),
-                sidecar_container_name: "fghj-sidecar".into(),
-                sidecar_ip: None,
-                pending_create: None,
-                pending_teardown: false,
-            },
-        );
-        state
+        let mut c = crate::state::testing::container(node_id);
+        c.desired.running = false;
+        c
     }
 
     /// The switch is a value in `desired`, applied by the ordinary
@@ -321,7 +252,7 @@ mod tests {
     /// behind for `converge::perform` to read back out.
     #[test]
     fn debug_wait_requested_sets_the_desire_and_queues_the_recreate() {
-        let state = state_with_run("default", vec![container("api")]);
+        let state = workspace(vec![container("api")]);
 
         let next = reduce(
             &state,
@@ -343,7 +274,7 @@ mod tests {
 
     #[test]
     fn debug_wait_can_be_turned_back_off() {
-        let mut state = state_with_run("default", vec![container("api")]);
+        let mut state = workspace(vec![container("api")]);
         state
             .runs
             .get_mut("default")
@@ -376,7 +307,7 @@ mod tests {
     /// intents ("start this" and "halt it before line 0") into one switch.
     #[test]
     fn debug_wait_is_rejected_for_a_node_with_no_container() {
-        let state = state_with_run("default", vec![container("api")]);
+        let state = workspace(vec![container("api")]);
 
         let err = reduce(
             &state,
@@ -393,7 +324,7 @@ mod tests {
 
     #[test]
     fn debug_wait_is_rejected_while_another_action_is_in_flight() {
-        let mut state = state_with_run("default", vec![container("api")]);
+        let mut state = workspace(vec![container("api")]);
         state
             .runs
             .get_mut("default")
@@ -435,7 +366,7 @@ mod tests {
 
     #[test]
     fn run_planned_preserves_an_existing_runs_containers() {
-        let state = state_with_run("default", vec![container("web")]);
+        let state = workspace(vec![container("web")]);
         let next = reduce(
             &state,
             Action::RunPlanned {
@@ -451,7 +382,7 @@ mod tests {
 
     #[test]
     fn run_planned_rejects_when_a_creation_is_already_in_flight() {
-        let state = state_with_run("default", vec![container("web")]);
+        let state = workspace(vec![container("web")]);
         let first = reduce(
             &state,
             Action::RunPlanned {
@@ -473,7 +404,7 @@ mod tests {
 
     #[test]
     fn node_start_requested_sets_pending_and_desired_running() {
-        let state = state_with_run("default", vec![container("web")]);
+        let state = workspace(vec![container("web")]);
         let next = reduce(
             &state,
             Action::RunNodeStartRequested {
@@ -491,7 +422,7 @@ mod tests {
     fn node_start_requested_rejects_when_already_in_flight() {
         let mut web = container("web");
         web.pending_action = Some(PendingAction::Starting);
-        let state = state_with_run("default", vec![web]);
+        let state = workspace(vec![web]);
         let err = reduce(
             &state,
             Action::RunNodeStartRequested {
@@ -520,7 +451,7 @@ mod tests {
 
     #[test]
     fn node_start_waits_for_an_environment_still_being_created() {
-        let mut state = state_with_run("default", vec![]);
+        let mut state = workspace(vec![]);
         state.runs.get_mut("default").unwrap().pending_create =
             Some(RunSpec::Flow("app/main".into()));
         let err = reduce(
@@ -543,7 +474,7 @@ mod tests {
         // "Start"/"Recreate" button is the documented way to bring a
         // deleted node back, and `restart_container` recreates from the
         // resolved `.fghj.yaml` graph regardless of what's in state.
-        let state = state_with_run("default", vec![container("web")]);
+        let state = workspace(vec![container("web")]);
         let next = reduce(
             &state,
             Action::RunNodeStartRequested {
@@ -561,7 +492,7 @@ mod tests {
     fn node_stop_requested_sets_pending_and_clears_desired_running() {
         let mut web = container("web");
         web.desired.running = true;
-        let state = state_with_run("default", vec![web]);
+        let state = workspace(vec![web]);
         let next = reduce(
             &state,
             Action::RunNodeStopRequested {
@@ -577,7 +508,7 @@ mod tests {
 
     #[test]
     fn node_stop_requested_waits_for_an_in_flight_create() {
-        let mut state = state_with_run("default", vec![container("web")]);
+        let mut state = workspace(vec![container("web")]);
         state.runs.get_mut("default").unwrap().pending_create =
             Some(RunSpec::Flow("app/main".into()));
         let err = reduce(
@@ -595,7 +526,7 @@ mod tests {
     fn node_delete_requested_sets_removing_without_touching_desired() {
         let mut web = container("web");
         web.desired.running = true;
-        let state = state_with_run("default", vec![web]);
+        let state = workspace(vec![web]);
         let next = reduce(
             &state,
             Action::RunNodeDeleteRequested {
@@ -607,49 +538,5 @@ mod tests {
         let c = &next.runs["default"].containers["web"];
         assert_eq!(c.pending_action, Some(PendingAction::Removing));
         assert!(c.desired.running);
-    }
-
-    #[test]
-    fn run_stop_requested_stops_idle_containers_but_skips_in_flight_ones() {
-        let mut web = container("web");
-        web.desired.running = true;
-        let mut api = container("api");
-        api.desired.running = true;
-        api.pending_action = Some(PendingAction::Starting);
-        let state = state_with_run("default", vec![web, api]);
-
-        let next = reduce(
-            &state,
-            Action::RunStopRequested {
-                run_id: "default".into(),
-            },
-        )
-        .unwrap();
-
-        let run = &next.runs["default"];
-        assert_eq!(
-            run.containers["web"].pending_action,
-            Some(PendingAction::Stopping)
-        );
-        assert!(!run.containers["web"].desired.running);
-        // Untouched: it was already in flight.
-        assert_eq!(
-            run.containers["api"].pending_action,
-            Some(PendingAction::Starting)
-        );
-        assert!(run.containers["api"].desired.running);
-    }
-
-    #[test]
-    fn run_stop_requested_rejects_unknown_run() {
-        let state = WorkspaceState::default();
-        let err = reduce(
-            &state,
-            Action::RunStopRequested {
-                run_id: "missing".into(),
-            },
-        )
-        .unwrap_err();
-        assert_eq!(err, ActionRejected::RunNotFound);
     }
 }

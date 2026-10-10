@@ -10,14 +10,13 @@ use crate::persistence::WorkspaceOwner;
 /// everything every effect converges reality toward, and the only thing a
 /// reducer is ever allowed to produce (see `reducer::reduce`). One of
 /// these lives behind an `actor::ActorHandle` per registered workspace
-/// (see `actor.rs`, `registry.rs`), replacing today's `server::WorkspaceState`
-/// (path + `WorkspaceDb` + `RunRegistry` + `DownloadRegistry` bundle) —
-/// that type keeps its name and shape unchanged for now (this phase must
-/// not touch it); the two are expected to converge once migration phase 4+
-/// re-points HTTP handlers at this one instead.
+/// (see `actor.rs`, `registry.rs`). Not to be confused with
+/// `server::WorkspaceState`, the bundle of Docker-facing machinery
+/// (`WorkspaceDb`, `RunRegistry`, `DownloadRegistry`) that carries out
+/// what this one says.
 ///
 /// Does not derive `PartialEq`: `WorkspaceOwner` (`persistence::workspace_owner`) doesn't
-/// either, and nothing in this phase needs whole-struct equality on
+/// either, and nothing needs whole-struct equality on
 /// `WorkspaceState` itself — every effect's `Snapshot` type (see
 /// `effects::Effect`) is expected to be a small, independently-`PartialEq`
 /// projection of this struct, never this struct wholesale.

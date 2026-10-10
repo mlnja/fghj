@@ -1,6 +1,5 @@
 //! The canonical, reducer-owned shape of a workspace's in-memory state —
-//! see `workspace::WorkspaceState` for the root type and the architecture
-//! plan (rosy-soaring-teapot.md) for why this exists. Every type here is
+//! see `workspace::WorkspaceState` for the root type. Every type here is
 //! data-only: no I/O, no async, nothing that can fail. Wired into the
 //! running daemon via `action.rs`/`reducer/`/`actor.rs`/`registry.rs`/
 //! `effects/`, and serialized straight to the frontend by
@@ -11,6 +10,8 @@ pub mod container;
 pub mod query;
 pub mod run;
 pub mod sync_status;
+#[cfg(test)]
+pub mod testing;
 pub mod volume;
 pub mod workspace;
 

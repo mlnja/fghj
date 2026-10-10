@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 
 use super::health::RunBudget;
-use super::naming::DEFAULT_RUN_ID;
+use super::naming::{DEFAULT_RUN_ID, container_name, network_name};
 use super::order::{StartOutcomes, requirements_of, topological_start_order, waited_on};
 use super::progress::{NodeDone, ProgressSink, RunProgress, report};
 use super::spec::spec_hash;
@@ -14,7 +14,6 @@ use crate::daemon_log;
 use crate::docker;
 use crate::resolver::{Graph, Node};
 use crate::state::{ContainerInfo, PendingAction, RunCreateError, RunSpec, RunState};
-use crate::util::label::sanitize_label;
 
 use super::registry::RunRegistry;
 
@@ -177,7 +176,7 @@ impl RunRegistry {
             }
         };
         log_start_advisories(graph, &target_ids);
-        let network = format!("fghj-{}-{}", sanitize_label(&graph.workspace_name), run_id);
+        let network = network_name(&graph.workspace_name, &run_id);
         docker::ensure_network(&self.docker, &network, &network).await?;
         let (sidecar_container_name, sidecar_ip) = self
             .ensure_sidecar(&graph.workspace_name, &run_id, &network)
@@ -210,12 +209,7 @@ impl RunRegistry {
 
         for node_id in &ordered_ids {
             let node = node_map[node_id.as_str()];
-            let container_name = format!(
-                "fghj-{}-{}-{}",
-                sanitize_label(&graph.workspace_name),
-                run_id,
-                sanitize_label(&node.id)
-            );
+            let container_name = container_name(&graph.workspace_name, &run_id, &node.id);
             // A terminating node is never "running" once it has done its
             // job, so the liveness check below says nothing useful about
             // whether it needs to run again — `run` does. `on_start` (the

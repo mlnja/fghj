@@ -5,6 +5,27 @@ use crate::util::label::sanitize_label;
 /// the database, and in its network and container names.
 pub const DEFAULT_RUN_ID: &str = "default";
 
+/// The environment's Docker network. Every name below embeds `run_id`, and
+/// existing containers are found by these exact names, so their shape is
+/// a compatibility contract — see `names_keep_their_shape`.
+pub(crate) fn network_name(workspace_name: &str, run_id: &str) -> String {
+    format!("fghj-{}-{run_id}", sanitize_label(workspace_name))
+}
+
+/// The container a node runs in.
+pub(crate) fn container_name(workspace_name: &str, run_id: &str, node_id: &str) -> String {
+    format!(
+        "fghj-{}-{run_id}-{}",
+        sanitize_label(workspace_name),
+        sanitize_label(node_id)
+    )
+}
+
+/// The environment's in-network TLS proxy sidecar.
+pub(crate) fn sidecar_name(workspace_name: &str, run_id: &str) -> String {
+    format!("fghj-{}-{run_id}-sidecar", sanitize_label(workspace_name))
+}
+
 /// Derives the real Docker volume name for a `VolumeMount::Named` entry —
 /// the same shape as a node's domain, so the two read alike.
 ///
@@ -39,6 +60,16 @@ pub(crate) fn derive_volume_name(name: &str, owner: Option<&str>, workspace_name
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_keep_their_shape() {
+        assert_eq!(network_name("Shop", "default"), "fghj-shop-default");
+        assert_eq!(
+            container_name("Shop", "default", "api.orders"),
+            "fghj-shop-default-api-orders"
+        );
+        assert_eq!(sidecar_name("Shop", "default"), "fghj-shop-default-sidecar");
+    }
 
     /// B3: the same label declared by two unrelated nodes used to be one
     /// Docker volume — two engines, one data directory, no warning.

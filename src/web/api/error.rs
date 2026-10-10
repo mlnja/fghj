@@ -25,14 +25,9 @@ pub(crate) fn bad_request(e: impl std::fmt::Display) -> Response {
         .into_response()
 }
 
-/// Maps an `ActionRejected` from a dispatched node-lifecycle request to its
-/// HTTP response — the migration-phase-4 counterpart of `err_response` for
-/// handlers on the new `actor::ActorHandle::dispatch` path.
-/// `AlreadyInFlight` -> 409, matching today's `RunRegistry::begin_action`
-/// rejection exactly (see the architecture plan's "HTTP handler contract").
-/// `RunNotFound`/`NodeNotFound` -> 404: an improvement over the old path's
-/// blanket 500 (`bail!("no such run: ..")` via `err_response`), now that
-/// the reducer distinguishes the two cases explicitly.
+/// Maps an `ActionRejected` from a dispatched request to its HTTP response
+/// — the `actor::ActorHandle::dispatch` counterpart of `err_response`.
+/// `AlreadyInFlight` -> 409; `RunNotFound`/`NodeNotFound` -> 404.
 pub(crate) fn action_rejected_response(err: crate::action::ActionRejected) -> Response {
     use crate::action::ActionRejected;
     let status = match err {

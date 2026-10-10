@@ -1,28 +1,27 @@
 //! Volume *discovery*, not full desired/observed diffing: reports what
-//! `docker::list_run_volumes` actually finds for a run into the new system
+//! `docker::list_run_volumes` actually finds for a run into actor state
 //! via `Action::VolumeObserved`, letting `reducer::observation`'s existing
 //! bootstrap-on-first-observation logic (`VolumeInfo::desired` seeded from
 //! the first `VolumeObserved` for a name never seen before) populate
 //! `state::RunState::volumes`.
 //!
-//! Deliberately scoped down from the plan's literal "volume desired/
-//! observed diff+actuation": real desired-state volume tracking would need
+//! Deliberately not a full desired/observed diff with actuation: real
+//! desired-state volume tracking would need
 //! a volume's identity threaded through `RunSpec`/`Action::RunPlanned` from
 //! the resolved `.fghj.yaml` graph, which `RunSpec` doesn't carry (see
 //! `state::run::RunSpec`'s doc — it's deliberately thin)
 //! and `runs::orchestrate` doesn't populate either (it builds every
 //! `RunState` with `volumes: BTreeMap::new()`). Plumbing real volume specs
 //! through would mean
-//! reaching into `RunRegistry::start`'s graph-resolution internals, which
-//! is out of scope for this phase and risky to touch given how sidecar-
-//! routing-sensitive that code path is. What this module gives instead:
+//! reaching into `RunRegistry::ensure_running`'s graph-resolution
+//! internals. What this module gives instead:
 //! every volume that actually exists in Docker for a run becomes visible
 //! (`observed.exists == true`), with its `desired` bootstrapped to match —
 //! so a volume that gets deleted out from under `fghj` by hand would *not*
 //! currently show as "missing" (nothing re-reports `exists: false` for a
 //! name that's simply absent from `list_run_volumes`'s result), only a
-//! volume unexpectedly present becomes visible. That asymmetry is a known,
-//! documented limit of this phase, not an oversight.
+//! volume unexpectedly present becomes visible. That asymmetry is a known
+//! limit, not an oversight.
 
 use crate::action::Action;
 use crate::actor::ActorHandle;
@@ -67,7 +66,6 @@ mod tests {
                 sidecar_container_name: "fghj-sidecar".into(),
                 sidecar_ip: None,
                 pending_create: None,
-                pending_teardown: false,
             },
         );
         let handle = crate::actor::spawn(state);

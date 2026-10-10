@@ -62,18 +62,6 @@ pub struct RunState {
     /// UI says why ("switching to flow …") instead of leaving the user to
     /// guess.
     pub pending_create: Option<RunSpec>,
-    /// Set by `RunStopRequested` to record an unfulfilled intent to tear
-    /// this whole run down — containers, network, sidecar, and (for a named
-    /// run) its volumes. `effects::docker::converge` picks it up and clears
-    /// it by way of `Action::RunTeardownSettled`, whose success arm drops
-    /// the run from state entirely.
-    ///
-    /// Whole-run teardown needs its own flag because it is not expressible
-    /// as per-container `pending_action`s: the network, the sidecar and the
-    /// volumes belong to the run, not to any node, and marking every
-    /// container `Stopping` would leave all three orphaned.
-    #[serde(skip)]
-    pub pending_teardown: bool,
 }
 
 /// Why a whole-run create/top-up failed, and what came up anyway.
@@ -131,7 +119,6 @@ mod tests {
             sidecar_container_name: "fghj-sidecar-default".into(),
             sidecar_ip: None,
             pending_create: None,
-            pending_teardown: false,
         };
         assert!(state.containers.is_empty());
         assert!(state.volumes.is_empty());
@@ -147,7 +134,6 @@ mod tests {
             sidecar_container_name: "fghj-sidecar-default".into(),
             sidecar_ip: None,
             pending_create: Some(RunSpec::Node("web".into())),
-            pending_teardown: false,
         };
         let json = serde_json::to_value(&state).unwrap();
         assert_eq!(json["pending_create"], serde_json::json!({ "node": "web" }));

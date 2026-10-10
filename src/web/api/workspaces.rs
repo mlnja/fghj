@@ -63,10 +63,8 @@ pub(crate) async fn post_workspaces_stop(
 }
 
 pub(crate) async fn get_universe(WorkspaceExtractor(state): WorkspaceExtractor) -> Response {
-    let path = state.path.clone();
-    match tokio::task::spawn_blocking(move || resolver::resolve_universe(&path)).await {
-        Ok(Ok(g)) => Json(serde_json::json!(g)).into_response(),
-        Ok(Err(e)) => err_response(e),
-        Err(e) => err_response(anyhow::anyhow!("resolve_universe task panicked: {e}")),
+    match resolver::resolve_universe_async(state.path.clone()).await {
+        Ok(g) => Json(serde_json::json!(g)).into_response(),
+        Err(e) => err_response(e),
     }
 }

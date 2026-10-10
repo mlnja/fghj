@@ -1,10 +1,7 @@
-//! Every way a workspace's `state::WorkspaceState` can legally change —
-//! see the architecture plan (rosy-soaring-teapot.md) for the full
-//! rationale. `reducer::reduce` is the only code allowed to turn an
-//! `Action` into a new `WorkspaceState`; every mutating HTTP handler in
-//! later migration phases is expected to do nothing but build one of
-//! these and dispatch it (`actor::ActorHandle::dispatch`) rather than
-//! mutate anything directly.
+//! Every way a workspace's `state::WorkspaceState` can legally change.
+//! `reducer::reduce` is the only code allowed to turn an `Action` into a
+//! new `WorkspaceState`; a mutating HTTP handler does nothing but build one
+//! of these and dispatch it (`actor::ActorHandle::dispatch`).
 
 use std::collections::BTreeMap;
 
@@ -25,17 +22,12 @@ use crate::state::{ContainerInfo, PendingAction, RunCreateError, RunSpec, RunSta
 /// `Action` values.
 #[derive(Debug, Clone)]
 pub enum Action {
-    /// `plan` is `state::RunSpec`, not the architecture plan's literal
-    /// `RunPlan` sketch — see `state::run::RunSpec`'s doc for why. The
-    /// `.fghj.yaml` graph is still resolved by the caller *before*
-    /// dispatch (real I/O has no place in a pure reducer); this action
-    /// only ever expresses the already-resolved intent.
+    /// Records the intent only; the `.fghj.yaml` graph is resolved later
+    /// by `effects::docker::converge`, since real I/O has no place in a
+    /// pure reducer.
     RunPlanned {
         run_id: String,
         plan: RunSpec,
-    },
-    RunStopRequested {
-        run_id: String,
     },
     RunNodeStartRequested {
         run_id: String,
@@ -81,9 +73,8 @@ pub enum Action {
     /// it triggered actually finishes. Carries the freshly re-observed
     /// `ContainerInfo` on success (`Ok(Some(..))` for start/stop, `Ok(None)`
     /// for a delete that removed the container outright) rather than just
-    /// `Ok(())`, since there's no longer a continuously-polling bridge to
-    /// pick up the real post-action status/ports/routes afterwards — this
-    /// is now the only place that ever happens.
+    /// `Ok(())`: this is the only place the real post-action
+    /// status/ports/routes reach state.
     ContainerActionSettled {
         run_id: String,
         node_id: String,
@@ -139,30 +130,14 @@ pub enum Action {
         node_id: String,
         action: Option<PendingAction>,
     },
-    /// Reported by `effects::docker::converge` once a `RunStopRequested`
-    /// intent (`RunState::pending_teardown`) has actually torn the run down
-    /// against real Docker. `Ok` drops the run from state outright — which
-    /// is what makes `effects::persist` delete its database row and
-    /// `effects::routes` remove its sidecar route table, rather than either
-    /// being done by hand mid-teardown.
-    RunTeardownSettled {
-        run_id: String,
-        result: Result<(), String>,
-    },
     VolumeObserved {
         run_id: String,
         volume_name: String,
         exists: bool,
     },
-    /// Addressed by `run_id`/`node_id`, unlike the architecture plan's
-    /// literal `ConfigDriftObserved { drift: SyncStatus }` sketch —
-    /// `RunRegistry::config_drift` (which computes the verdicts this
-    /// action reports)
-    /// computes drift per-container, never once for a whole workspace, so
-    /// this needs the same addressing `ContainerObserved` has, to know
-    /// which container's `ContainerObserved::sync` to update. This is a
-    /// deliberate gap-fill over the plan's literal snippet — see the
-    /// phase-1 report for this judgment call.
+    /// Addressed per container, like `ContainerObserved`:
+    /// `RunRegistry::config_drift` computes drift per container, and this
+    /// updates that container's `ContainerObserved::sync`.
     ConfigDriftObserved {
         run_id: String,
         node_id: String,
@@ -178,9 +153,8 @@ pub enum Action {
 /// for a report (`*Observed`/`ContainerActionSettled`; see `Action`'s doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionRejected {
-    /// `container.pending_action.is_some()` already — the reducer-level
-    /// replacement for today's `RunRegistry::pending`/`PendingGuard`
-    /// (`src/runs.rs:711-736`); see `reducer::run`'s module doc.
+    /// `container.pending_action.is_some()` already, or a whole-environment
+    /// create is still running; see `reducer::run`'s module doc.
     AlreadyInFlight,
     /// The action named a `run_id` this workspace doesn't currently have a
     /// `RunState` for.

@@ -12,6 +12,14 @@ use super::visit::ResolveCtx;
 use super::workspace_scan::scan_workspace;
 use anyhow::Result;
 
+/// [`resolve_universe`] for async callers: it walks the filesystem and
+/// shells out to git, so it runs on the blocking pool.
+pub async fn resolve_universe_async(workspace: std::path::PathBuf) -> Result<Graph> {
+    tokio::task::spawn_blocking(move || resolve_universe(&workspace))
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve_universe task panicked: {e}"))?
+}
+
 /// Resolves every repo currently on disk in the workspace into one shared
 /// graph — the "static full universe" the UI lays out once. Any repo can
 /// declare `flows`; there is no distinguished "root" repo. An included repo

@@ -17,11 +17,8 @@ impl RunRegistry {
     /// expects to find.
     ///
     /// Takes the run rather than looking it up: the reducer owns the only
-    /// copy, and the caller (`effects::docker::converge`) already has it.
-    /// Removing it from state is that caller's job too, by way of
-    /// `Action::RunTeardownSettled`, which is in turn what makes
-    /// `effects::persist` drop the database row and `effects::routes`
-    /// delete the sidecar route table.
+    /// copy, and the caller (`daemon::WorkspaceRegistry::stop`, as the
+    /// workspace's actor goes away) already has it.
     pub async fn stop(&self, run_id: &str, state: &RunState) -> Result<()> {
         for c in state.containers.values() {
             self.begin_event_cycle(run_id, &c.node_id, "stop").await;

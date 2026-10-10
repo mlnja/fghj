@@ -53,7 +53,7 @@ pub use name::Name;
 pub use port::{BackingPorts, PortConfig};
 pub use repo_url::{normalize_repo_url, repo_name_from_url};
 pub use service::ServiceConfig;
-pub use universe::resolve_universe;
+pub use universe::{resolve_universe, resolve_universe_async};
 pub use version::{SCHEMA_VERSION, Version};
 pub use visit::ResolveCtx;
 pub use volume::{HostAliasConfig, VolumeMount};

@@ -104,21 +104,16 @@ pub struct WorkspaceRegistry {
     by_id: Mutex<HashMap<String, Arc<WorkspaceState>>>,
     index_path: PathBuf,
     docker: Arc<bollard::Docker>,
-    /// New-system actor for every workspace this registry knows about — the
-    /// redux-style migration's (rosy-soaring-teapot.md) canonical
-    /// `state::WorkspaceState`, authored entirely by the reducer and
-    /// converged to real Docker/DNS/hosts/raw-net state by the effects in
-    /// `docker_converge_tasks` and `effects::spawn_all`. Kept alongside
-    /// `by_id` rather than merged into it: `by_id`'s `server::WorkspaceState`
-    /// still owns the Docker-facing machinery (`RunRegistry`, the Docker
-    /// client, the database handle) that carries these actions out. It no
-    /// longer owns any *state* — that all lives behind these handles now —
-    /// so the two are expected to merge.
+    /// The actor for every workspace this registry knows about — the
+    /// canonical `state::WorkspaceState`, authored entirely by the reducer
+    /// and converged to real Docker/DNS/hosts/raw-net state by the effects
+    /// in `docker_converge_tasks` and `effects::spawn_all`. `by_id` holds
+    /// the Docker-facing machinery that carries those actions out, and no
+    /// state of its own.
     actors: registry::ActorRegistry,
     /// Per-workspace `effects::docker::DockerConvergeEffect` driver tasks —
-    /// the only thing that ever mutates a workspace's real containers now
-    /// that `effects::bridge` (a purely-mirroring, never-mutating stand-in)
-    /// is gone. Torn down in `stop`.
+    /// the only thing that ever mutates a workspace's real containers.
+    /// Torn down in `stop`.
     docker_converge_tasks: Mutex<HashMap<String, tokio::task::AbortHandle>>,
 }
 
@@ -201,10 +196,7 @@ impl WorkspaceRegistry {
     /// constructed — so a freshly-wired workspace with pre-existing runs
     /// doesn't start out looking empty, then starts the
     /// `DockerConvergeEffect` task that's the only thing driving real
-    /// Docker calls from here on. `effects::bridge`, which used to keep
-    /// this state live by re-polling a second copy of it in
-    /// `RunRegistry`, is gone as of migration phase 5, and so is that
-    /// second copy: from here the actor is the only store.
+    /// Docker calls from here on. From here the actor is the only store.
     ///
     /// Called from both
     /// `load_from` (startup) and `resolve` (a fresh `fghj ui`/wire) — every
@@ -253,7 +245,7 @@ impl WorkspaceRegistry {
             .insert(id.to_string(), docker_converge_task);
     }
 
-    /// The daemon-wide directory of new-system actors this registry has
+    /// The daemon-wide directory of actors this registry has
     /// wired — used by `DaemonControl::activate` to subscribe the raw-net
     /// fanned-in effect.
     pub fn actors(&self) -> &registry::ActorRegistry {

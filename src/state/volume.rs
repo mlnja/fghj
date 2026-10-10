@@ -1,12 +1,7 @@
 use serde::Serialize;
 
 /// Everything about a Docker volume fghj *wants* to exist — currently just
-/// its derived name (see `runs::derive_volume_name`, `src/runs.rs`). No
-/// prior struct existed for this: today's code only ever computes the name
-/// inline right before passing it to `docker::run`, and never keeps it as
-/// state of its own — this is the first place a volume becomes a
-/// first-class, independently observable thing rather than an inline
-/// string.
+/// its derived name (see `runs::naming::derive_volume_name`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VolumeDesired {
     pub name: String,

@@ -63,26 +63,8 @@ pub(crate) async fn post_switch(ActorExtractor(actor): ActorExtractor, body: Byt
     }
 }
 
-/// Tears the whole environment down — containers, network and sidecar.
-/// Volumes are kept. Same dispatch-and-return contract as every other
-/// mutating handler: the reducer records the intent
-/// (`RunState::pending_teardown`) and `effects::docker::converge` performs
-/// it, dropping the run from state via `Action::RunTeardownSettled`.
-pub(crate) async fn post_stop(ActorExtractor(actor): ActorExtractor) -> Response {
-    match actor
-        .dispatch(action::Action::RunStopRequested {
-            run_id: runs::DEFAULT_RUN_ID.to_string(),
-        })
-        .await
-    {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => action_rejected_response(e),
-    }
-}
-
 /// Dispatches `action` against `actor` for `run_id`/`node_id` and replies
-/// per the architecture plan's "HTTP handler contract" — migration phase 4:
-/// this returns as soon as the (pure, in-memory) reducer has recorded the
+/// as soon as the (pure, in-memory) reducer has recorded the
 /// intent, not once Docker has actually finished; `effects::docker::converge`
 /// (wired per-workspace in `daemon::WorkspaceRegistry::wire_actor`) is what
 /// actually performs the Docker call afterwards, asynchronously.

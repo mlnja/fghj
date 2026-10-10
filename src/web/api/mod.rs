@@ -36,7 +36,7 @@ use logs::{
 };
 use runs::{
     get_environment, post_run_node_debug_wait, post_run_node_delete, post_run_node_start,
-    post_run_node_stop, post_stop, post_switch,
+    post_run_node_stop, post_switch,
 };
 use workspaces::{get_universe, get_workspaces, post_workspaces, post_workspaces_stop};
 
@@ -54,7 +54,6 @@ pub(crate) fn build_router(registry: Arc<WorkspaceRegistry>, daemon: Arc<DaemonC
         .route("/pull-jobs", get(get_pull_jobs))
         .route("/environment", get(get_environment))
         .route("/switch", post(post_switch))
-        .route("/stop", post(post_stop))
         .route("/nodes/{node_id}/start", post(post_run_node_start))
         .route("/nodes/{node_id}/stop", post(post_run_node_stop))
         .route("/nodes/{node_id}/delete", post(post_run_node_delete))

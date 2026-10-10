@@ -13,8 +13,8 @@
 
 use crate::action::{Action, ActionRejected};
 use crate::state::{
-    ContainerInfo, PendingAction, RunCreateError, RunState, VolumeDesired, VolumeInfo,
-    VolumeObserved, WorkspaceState,
+    ContainerInfo, RunCreateError, RunState, VolumeDesired, VolumeInfo, VolumeObserved,
+    WorkspaceState,
 };
 
 pub(super) fn reduce(
@@ -55,9 +55,8 @@ pub(super) fn reduce(
             if let Some(run) = next.runs.get_mut(&run_id) {
                 match result {
                     // A freshly re-observed container replaces whatever was
-                    // there wholesale — this is the only place left (now
-                    // that `effects::bridge` is gone) that ever learns the
-                    // real post-action status/ports/routes, so a partial
+                    // there wholesale — this is the only place that ever
+                    // learns the real post-action status/ports/routes, so a partial
                     // merge would leave stale fields no future report will
                     // ever correct.
                     Ok(Some(mut info)) => {
@@ -94,14 +93,10 @@ pub(super) fn reduce(
 
         Action::RunCreateSettled { run_id, result } => {
             let mut next = state.clone();
-            // Every branch writes through the existing entry rather than
-            // inserting, for the same reason `RunCreateProgress` below
-            // does: `RunPlanned` already created it, and a run torn down
-            // while its create was still in flight (`RunStopRequested` ->
-            // `RunTeardownSettled`, which removes it) must stay gone. An
-            // unconditional insert here would resurrect a run whose
-            // containers have just been deleted, leaving `GET /runs` and
-            // the route table advertising containers that no longer exist.
+            // Every branch writes through the entry `RunPlanned` created
+            // rather than inserting: a report describes work on an
+            // environment the reducer already knows about, and never brings
+            // one into existence on its own.
             let present = next.runs.contains_key(&run_id);
             match result {
                 Ok(mut run) => {
@@ -142,7 +137,7 @@ pub(super) fn reduce(
             action,
         } => {
             let mut next = state.clone();
-            // Same no-resurrection rule as `RunCreateProgress` below.
+            // Same write-through rule as `RunCreateSettled` above.
             if let Some(run) = next.runs.get_mut(&run_id) {
                 match (action, run.containers.get_mut(&node_id)) {
                     (Some(action), Some(container)) => container.pending_action = Some(action),
@@ -168,9 +163,8 @@ pub(super) fn reduce(
             mut info,
         } => {
             let mut next = state.clone();
-            // `RunPlanned` already created the entry, but a progress report
-            // for a run that has since been dropped (torn down mid-create)
-            // must not resurrect it — hence `get_mut` rather than `entry`.
+            // Same write-through rule as `RunCreateSettled` above — hence
+            // `get_mut` rather than `entry`.
             if let Some(run) = next.runs.get_mut(&run_id) {
                 run.network = network;
                 run.sidecar_container_name = sidecar_container_name;
@@ -179,34 +173,6 @@ pub(super) fn reduce(
                 // comes off with it.
                 info.pending_action = None;
                 run.containers.insert(info.node_id.clone(), info);
-            }
-            Ok(next)
-        }
-
-        Action::RunTeardownSettled { run_id, result } => {
-            let mut next = state.clone();
-            match result {
-                // Dropping the run is the whole point: `effects::persist`
-                // and `effects::routes` both key off its absence to clean
-                // up the database row and the sidecar route table.
-                Ok(()) => {
-                    next.runs.remove(&run_id);
-                }
-                // Teardown failed, so the run is still there in some form.
-                // Clearing the flag lets a later attempt re-request it
-                // instead of the effect respawning against a stale intent;
-                // the containers' own `Stopping` marks are cleared too, or
-                // they would sit mid-action forever.
-                Err(_) => {
-                    if let Some(run) = next.runs.get_mut(&run_id) {
-                        run.pending_teardown = false;
-                        for container in run.containers.values_mut() {
-                            if container.pending_action == Some(PendingAction::Stopping) {
-                                container.pending_action = None;
-                            }
-                        }
-                    }
-                }
             }
             Ok(next)
         }
@@ -272,56 +238,14 @@ fn clear_create_marks(run: &mut RunState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{
-        ContainerDesired, ContainerInfo, ContainerObserved, PendingAction, RunState, SyncStatus,
-    };
+    use crate::state::{PendingAction, RunState, SyncStatus};
     use std::collections::BTreeMap;
 
-    fn container(node_id: &str) -> ContainerInfo {
-        ContainerInfo {
-            node_id: node_id.into(),
-            desired: ContainerDesired {
-                running: true,
-                container_name: format!("fghj-{node_id}-1"),
-                domain: format!("{node_id}.fghj.internal"),
-                raw_domain: format!("{node_id}.fghj.raw.internal"),
-                routes: vec![],
-                additional_hosts: vec![],
-                status_port: None,
-                config_hash: "hash".into(),
-                source: None,
-                terminating: false,
-                debug_wait: false,
-            },
-            observed: ContainerObserved::default(),
-            pending_action: None,
-        }
-    }
-
-    fn state_with_run(run_id: &str, containers: Vec<ContainerInfo>) -> WorkspaceState {
-        let mut state = WorkspaceState::default();
-        state.runs.insert(
-            run_id.into(),
-            RunState {
-                run_id: run_id.into(),
-                network: "fghj-net".into(),
-                containers: containers
-                    .into_iter()
-                    .map(|c| (c.node_id.clone(), c))
-                    .collect(),
-                volumes: BTreeMap::new(),
-                sidecar_container_name: "fghj-sidecar".into(),
-                sidecar_ip: None,
-                pending_create: None,
-                pending_teardown: false,
-            },
-        );
-        state
-    }
+    use crate::state::testing::{container, workspace};
 
     #[test]
     fn container_observed_updates_status_and_port_and_ip_and_ports() {
-        let state = state_with_run("default", vec![container("web")]);
+        let state = workspace(vec![container("web")]);
         let next = reduce(
             &state,
             Action::ContainerObserved {
@@ -345,7 +269,7 @@ mod tests {
 
     #[test]
     fn container_observed_for_unknown_node_is_a_silent_no_op() {
-        let state = state_with_run("default", vec![]);
+        let state = workspace(vec![]);
         let next = reduce(
             &state,
             Action::ContainerObserved {
@@ -385,7 +309,7 @@ mod tests {
     fn container_action_settled_replaces_the_container_with_the_settled_observation() {
         let mut web = container("web");
         web.pending_action = Some(PendingAction::Starting);
-        let state = state_with_run("default", vec![web]);
+        let state = workspace(vec![web]);
         let mut fresh = container("web");
         fresh.observed.status = "running".into();
         fresh.observed.published_port = Some(54321);
@@ -414,7 +338,7 @@ mod tests {
     fn container_action_settled_clears_a_pending_action_the_effect_echoed_back() {
         let mut web = container("web");
         web.pending_action = Some(PendingAction::Stopping);
-        let state = state_with_run("default", vec![web.clone()]);
+        let state = workspace(vec![web.clone()]);
         let mut settled = web;
         settled.desired.running = false;
         settled.observed.status = "exited".into();
@@ -437,7 +361,7 @@ mod tests {
     fn container_action_settled_clears_pending_action_on_failure() {
         let mut web = container("web");
         web.pending_action = Some(PendingAction::Stopping);
-        let state = state_with_run("default", vec![web]);
+        let state = workspace(vec![web]);
         let next = reduce(
             &state,
             Action::ContainerActionSettled {
@@ -458,7 +382,7 @@ mod tests {
     fn container_action_settled_removes_the_container_when_a_removal_succeeds() {
         let mut web = container("web");
         web.pending_action = Some(PendingAction::Removing);
-        let state = state_with_run("default", vec![web]);
+        let state = workspace(vec![web]);
         let next = reduce(
             &state,
             Action::ContainerActionSettled {
@@ -475,7 +399,7 @@ mod tests {
     fn container_action_settled_keeps_the_container_when_a_removal_fails() {
         let mut web = container("web");
         web.pending_action = Some(PendingAction::Removing);
-        let state = state_with_run("default", vec![web]);
+        let state = workspace(vec![web]);
         let next = reduce(
             &state,
             Action::ContainerActionSettled {
@@ -492,10 +416,10 @@ mod tests {
     /// The success path replaces the placeholder `RunPlanned` left behind
     /// with the real, fully-built run. It writes *through* that entry
     /// rather than inserting unconditionally — see
-    /// `a_create_that_settles_after_its_run_was_torn_down_does_not_resurrect_it`.
+    /// `create_reports_never_bring_an_environment_into_existence`.
     #[test]
     fn run_create_settled_replaces_the_planned_entry_on_success() {
-        let state = state_with_run("default", vec![]);
+        let state = workspace(vec![]);
         let created = RunState {
             run_id: "default".into(),
             network: "fghj-net-default".into(),
@@ -504,7 +428,6 @@ mod tests {
             sidecar_container_name: "fghj-sidecar".into(),
             sidecar_ip: Some("172.20.0.2".into()),
             pending_create: None,
-            pending_teardown: false,
         };
         let next = reduce(
             &state,
@@ -519,7 +442,7 @@ mod tests {
 
     #[test]
     fn run_create_settled_clears_pending_create_without_touching_containers_on_failure() {
-        let mut existing = state_with_run("default", vec![container("web")]);
+        let mut existing = workspace(vec![container("web")]);
         existing.runs.get_mut("default").unwrap().pending_create =
             Some(crate::state::RunSpec::Flow("app/main".into()));
         let next = reduce(
@@ -541,7 +464,7 @@ mod tests {
     /// `state::query::resolve_route` both read.
     #[test]
     fn run_create_settled_adopts_the_partial_state_of_a_failed_top_up() {
-        let mut existing = state_with_run("default", vec![container("web")]);
+        let mut existing = workspace(vec![container("web")]);
         existing.runs.get_mut("default").unwrap().pending_create =
             Some(crate::state::RunSpec::Flow("app/main".into()));
 
@@ -560,7 +483,6 @@ mod tests {
             // A working copy, not a freshly-built run — the reducer must
             // clear this itself rather than assume it arrives clear.
             pending_create: Some(crate::state::RunSpec::Flow("app/main".into())),
-            pending_teardown: false,
         };
 
         let next = reduce(
@@ -586,7 +508,7 @@ mod tests {
 
     #[test]
     fn volume_observed_creates_a_new_entry_when_none_existed() {
-        let state = state_with_run("default", vec![]);
+        let state = workspace(vec![]);
         let next = reduce(
             &state,
             Action::VolumeObserved {
@@ -603,7 +525,7 @@ mod tests {
 
     #[test]
     fn volume_observed_updates_an_existing_entry_in_place() {
-        let state = state_with_run("default", vec![]);
+        let state = workspace(vec![]);
         let created = reduce(
             &state,
             Action::VolumeObserved {
@@ -632,7 +554,7 @@ mod tests {
 
     #[test]
     fn config_drift_observed_updates_the_containers_sync_status() {
-        let state = state_with_run("default", vec![container("web")]);
+        let state = workspace(vec![container("web")]);
         let next = reduce(
             &state,
             Action::ConfigDriftObserved {
@@ -648,51 +570,6 @@ mod tests {
         );
     }
 
-    /// A successful teardown is the one action that *removes* a run:
-    /// `effects::persist` and `effects::routes` both key off its absence to
-    /// clean up the database row and the sidecar's route directory, so
-    /// leaving an emptied-out husk behind would keep both alive.
-    #[test]
-    fn run_teardown_settled_ok_drops_the_run_entirely() {
-        let mut state = state_with_run("default", vec![container("web")]);
-        state.runs.get_mut("default").unwrap().pending_teardown = true;
-        let next = reduce(
-            &state,
-            Action::RunTeardownSettled {
-                run_id: "default".into(),
-                result: Ok(()),
-            },
-        )
-        .unwrap();
-        assert!(next.runs.is_empty());
-    }
-
-    /// A teardown that failed left the containers where they were. Clearing
-    /// both the run-level flag and the per-container `Stopping` marks is
-    /// what lets the user press Stop again — without it the reducer's own
-    /// dedup would reject the retry as already in flight, and the run would
-    /// be permanently stuck mid-teardown.
-    #[test]
-    fn run_teardown_settled_err_unsticks_the_run_for_a_retry() {
-        let mut state = state_with_run("default", vec![container("web")]);
-        {
-            let run = state.runs.get_mut("default").unwrap();
-            run.pending_teardown = true;
-            run.containers.get_mut("web").unwrap().pending_action = Some(PendingAction::Stopping);
-        }
-        let next = reduce(
-            &state,
-            Action::RunTeardownSettled {
-                run_id: "default".into(),
-                result: Err("docker refused".into()),
-            },
-        )
-        .unwrap();
-        let run = &next.runs["default"];
-        assert!(!run.pending_teardown);
-        assert_eq!(run.containers["web"].pending_action, None);
-    }
-
     /// Per-node crash safety: a create reports each container the moment it
     /// comes up, so a daemon that dies halfway still has every
     /// already-running container written down. Without it those containers
@@ -700,7 +577,7 @@ mod tests {
     /// `Orphaned` state its observer exists to surface.
     #[test]
     fn run_create_progress_records_a_node_as_soon_as_it_comes_up() {
-        let state = state_with_run("default", vec![]);
+        let state = workspace(vec![]);
         let next = reduce(
             &state,
             Action::RunCreateProgress {
@@ -718,13 +595,11 @@ mod tests {
         assert!(run.containers.contains_key("web"));
     }
 
-    /// The race the presence checks in both `RunCreateProgress` and
-    /// `RunCreateSettled` exist for: a run torn down while its create was
-    /// still in flight. The teardown already removed its containers, so
-    /// re-inserting the run would leave `GET /runs` and the route table
-    /// advertising things that no longer exist.
+    /// `RunCreateProgress` and `RunCreateSettled` only ever update the
+    /// environment `RunPlanned` created; a report with nothing to update
+    /// is dropped rather than inventing one.
     #[test]
-    fn a_create_that_settles_after_its_run_was_torn_down_does_not_resurrect_it() {
+    fn create_reports_never_bring_an_environment_into_existence() {
         let state = WorkspaceState::default();
 
         let after_progress = reduce(
@@ -783,7 +658,7 @@ mod tests {
     /// no container yet.
     #[test]
     fn run_create_working_marks_the_node_being_worked_on() {
-        let state = state_with_run("default", vec![container("web")]);
+        let state = workspace(vec![container("web")]);
         let next = reduce(&state, working("web", Some(PendingAction::Stopping))).unwrap();
         let next = reduce(&next, working("db", Some(PendingAction::Starting))).unwrap();
         let run = &next.runs["default"];
@@ -801,7 +676,7 @@ mod tests {
     /// became a container goes with it rather than lingering as a ghost.
     #[test]
     fn run_create_working_none_unmarks_and_drops_a_placeholder() {
-        let state = state_with_run("default", vec![container("web")]);
+        let state = workspace(vec![container("web")]);
         let next = reduce(&state, working("web", Some(PendingAction::Starting))).unwrap();
         let next = reduce(&next, working("db", Some(PendingAction::Starting))).unwrap();
         let next = reduce(&next, working("web", None)).unwrap();
@@ -813,7 +688,7 @@ mod tests {
 
     #[test]
     fn run_create_progress_takes_the_working_mark_off() {
-        let state = state_with_run("default", vec![]);
+        let state = workspace(vec![]);
         let next = reduce(&state, working("web", Some(PendingAction::Starting))).unwrap();
         let mut info = container("web");
         info.pending_action = Some(PendingAction::Starting);
@@ -835,7 +710,7 @@ mod tests {
     /// node action on a marked node is refused as already in flight.
     #[test]
     fn run_create_settled_err_clears_every_working_mark() {
-        let mut state = state_with_run("default", vec![container("web")]);
+        let mut state = workspace(vec![container("web")]);
         state.runs.get_mut("default").unwrap().pending_create =
             Some(crate::state::RunSpec::Flow("app/main".into()));
         let next = reduce(&state, working("web", Some(PendingAction::Stopping))).unwrap();

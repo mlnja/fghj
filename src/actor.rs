@@ -1,11 +1,8 @@
 //! The per-workspace actor: owns one `state::WorkspaceState` for its whole
 //! life, applies the pure `reducer::reduce` to every dispatched `Action`
-//! serially, and publishes the result for effects to observe. See the
-//! architecture plan (rosy-soaring-teapot.md)'s "Per-workspace canonical
-//! state + actor" section — this is the concrete implementation of that
-//! design, and as of migration phase 5 the only store of run state in the
-//! daemon: everything that used to keep its own copy (`runs::RunRegistry`,
-//! `effects::bridge`) now reads this one and reports back to it.
+//! serially, and publishes the result for effects to observe. It is the
+//! only store of environment state in the daemon: everything else
+//! (`runs::RunRegistry`, the effects) reads it and reports back to it.
 
 use std::sync::Arc;
 
@@ -30,9 +27,9 @@ pub struct ActorHandle {
 impl ActorHandle {
     /// Dispatches `action` and waits for the reducer to apply it. Returns
     /// as soon as the (pure, in-memory) reducer has run — not once any
-    /// effect has converged reality to match — see the plan's "HTTP
-    /// handler contract" section for why that's the deliberate, fast
-    /// contract every mutating endpoint is meant to rely on.
+    /// effect has converged reality to match. That is the deliberate, fast
+    /// contract every mutating endpoint relies on; the UI follows the rest
+    /// through `pending_action`/`pending_create`.
     pub async fn dispatch(&self, action: Action) -> Result<(), ActionRejected> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self.actions.send((action, reply_tx)).is_err() {
@@ -67,8 +64,7 @@ impl ActorHandle {
 /// and the task, exit.
 ///
 /// The action channel is unbounded: the reducer is pure and in-memory, so
-/// it's never the slow part of the system — see the plan's "Action
-/// channel backpressure" open item. A sender that ever needed backpressure
+/// it's never the slow part of the system. A sender that ever needed backpressure
 /// here would itself indicate a misbehaving observer, better caught by
 /// logging an unexpectedly large channel than by blocking on `send`.
 pub fn spawn(initial: WorkspaceState) -> ActorHandle {

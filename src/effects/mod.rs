@@ -1,11 +1,9 @@
-//! The `Effect` trait and its two generic drivers — see the architecture
-//! plan (rosy-soaring-teapot.md)'s "Effects — two shapes" section. `dns`,
-//! `hosts`, and `raw_net` are the daemon-wide fanned-in effects migrated so
-//! far (`spawn_all` below spawns all three together). `docker::converge` is
-//! the first per-workspace `Effect` (migration phase 4) — wired directly
-//! into `daemon::WorkspaceRegistry::wire_actor` rather than `spawn_all`,
-//! since it's driven off one workspace's own state, not every workspace's
-//! combined.
+//! The `Effect` trait and its two generic drivers. `dns`, `hosts`, and
+//! `raw_net` are daemon-wide fanned-in effects (`spawn_all` below spawns
+//! them together). The per-workspace effects (`docker::converge`,
+//! `persist`, `routes`, ...) are wired in
+//! `daemon::WorkspaceRegistry::wire_actor` instead, since each is driven
+//! off one workspace's own state, not every workspace's combined.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -106,9 +104,8 @@ pub trait FannedInEffect: Send {
 /// and since the actor publishes a new state on every successfully-applied
 /// action regardless of which fields it touched, "the next actual state
 /// change" in practice means "the next action dispatched to this
-/// workspace," not a fixed timer. This matches today's `raw_net`/`dns`
-/// behavior of "log and continue," per the plan's open item on effect
-/// crash/restart semantics, resolved here rather than left open.
+/// workspace," not a fixed timer — the same "log and continue" the
+/// fanned-in `raw_net`/`dns` effects use.
 pub async fn run_effect<E: Effect>(
     mut effect: E,
     mut rx: watch::Receiver<Arc<WorkspaceState>>,
@@ -204,12 +201,10 @@ pub async fn run_fanned_in_effect<E: FannedInEffect>(
     }
 }
 
-/// Every daemon-wide fanned-in effect currently migrated off `daemon/`'s
-/// old `spawn_reconciler` — see `spawn_all`. Bundled into one struct (rather
-/// than three loose `JoinHandle`s in `daemon::ActiveResources`) so
-/// `abort_all` can guarantee all three ever stop together, the same
-/// atomically-together shutdown `DaemonControl::deactivate` already relied
-/// on for the single `raw_net_task` before this phase.
+/// Every daemon-wide fanned-in effect — see `spawn_all`. Bundled into one
+/// struct (rather than three loose `JoinHandle`s in
+/// `daemon::ActiveResources`) so `abort_all` can guarantee all three stop
+/// together.
 pub struct EffectTasks {
     raw_net: tokio::task::AbortHandle,
     dns: tokio::task::AbortHandle,

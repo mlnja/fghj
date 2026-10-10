@@ -4,9 +4,8 @@ use serde::Serialize;
 /// would produce right now — the reducer-state counterpart of
 /// `runs::RunRegistry::config_drift`'s verdict. Purely informational:
 /// nothing feeds a `Drifted` or `Orphaned` reading back into a reducer
-/// decision (see the architecture plan's "Container drift policy:
-/// observer-only by default" section, and
-/// `effects::docker::converge`'s module doc) — these exist so the UI can
+/// decision (see `effects::docker::converge`'s module doc) — these exist
+/// so the UI can
 /// tell the user what happened and let *them* decide. That split is the
 /// whole point: the observation must be representable before any policy
 /// about it can exist.

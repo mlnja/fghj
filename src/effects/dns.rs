@@ -1,12 +1,8 @@
 //! Fans every registered workspace's running containers' `wildcard_hosts`
-//! suffixes into `dns::install_os_resolver_config` — the DNS half of the
-//! architecture plan's (rosy-soaring-teapot.md) "dns + hosts_file effects"
-//! migration step, following the same `FannedInEffect` idiom
-//! `effects::raw_net::RawNetEffect` already established for the raw-net
-//! slice. `daemon::spawn_reconciler` must never also call
-//! `dns::install_os_resolver_config` directly once this effect is spawned —
-//! two writers of the same `/etc/resolver` directory would just race each
-//! other to reach the same end state.
+//! suffixes into `dns::install_os_resolver_config`, using the same
+//! `FannedInEffect` idiom as `effects::raw_net::RawNetEffect`. Nothing else
+//! may call `dns::install_os_resolver_config` while this effect runs — two
+//! writers of the same `/etc/resolver` directory would just race each other.
 //!
 //! This is only the *write* side of DNS: which zones the OS routes to fghj's
 //! server. Actually *answering* a query is a live read path, not a converge

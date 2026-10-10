@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 
 use super::route_table::{refresh_sidecar_ca_copy, sidecar_routes_dir, sidecar_routes_path};
 use crate::docker;
-use crate::util::label::sanitize_label;
 
+use super::naming::sidecar_name;
 use super::registry::RunRegistry;
 
 impl RunRegistry {
@@ -28,7 +28,7 @@ impl RunRegistry {
         run_id: &str,
         network: &str,
     ) -> Result<(String, String)> {
-        let name = format!("fghj-{}-{}-sidecar", sanitize_label(workspace_name), run_id);
+        let name = sidecar_name(workspace_name, run_id);
 
         let alive = matches!(
             docker::inspect_status(&self.docker, &name, "").await,

@@ -31,18 +31,12 @@ pub(crate) const SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(15);
 /// on its own, without a `fghjd` restart. It never recreates or restarts a
 /// container itself — no self-healing there.
 ///
-/// This used to also own re-syncing `/etc/hosts`, macOS's `/etc/resolver`,
-/// and raw-zone virtual-IP NAT routes directly off `daemon.registry`. All
-/// three have since moved to the daemon-wide fanned-in effects
-/// `effects::spawn_all` spawns from `DaemonControl::activate`
+/// `/etc/hosts`, macOS's `/etc/resolver` and raw-zone NAT routes are not
+/// this loop's job: the effects `effects::spawn_all` starts own them
 /// (`effects::hosts::HostsEffect`, `effects::dns::DnsEffect`,
-/// `effects::raw_net::RawNetEffect`), driven off the new redux-style actor
-/// state instead — see the architecture plan (rosy-soaring-teapot.md)'s
-/// "dns + hosts_file effects" step. This loop and those effects must never
-/// both write the same OS resource concurrently: two schedules touching the
-/// same `pf`/`/etc/hosts`/`/etc/resolver` state is the exact bug class
-/// documented in `raw_net::macos`'s module doc — that's why none of that
-/// sync happens here any more.
+/// `effects::raw_net::RawNetEffect`). Two schedules writing the same
+/// `pf`/`/etc/hosts`/`/etc/resolver` state is the bug class documented in
+/// `raw_net::macos`'s module doc, so nothing here touches them.
 pub(crate) fn spawn_reconciler(daemon: Arc<DaemonControl>) {
     supervisor::supervise_forever("docker reconciler", reconcile_loop(daemon));
 }
@@ -96,11 +90,8 @@ async fn sync_reconcile_loop(daemon: Arc<DaemonControl>) {
             let Some(state) = daemon.registry.get(&id) else {
                 continue;
             };
-            let graph = match tokio::task::spawn_blocking(move || resolver::resolve_universe(&path))
-                .await
-            {
-                Ok(Ok(graph)) => graph,
-                _ => continue,
+            let Ok(graph) = resolver::resolve_universe_async(path).await else {
+                continue;
             };
             let Some(handle) = daemon.registry.actors().get(&id) else {
                 continue;
