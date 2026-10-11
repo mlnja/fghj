@@ -25,23 +25,22 @@ questions with two different answers:
    reconciled against real Docker state on every daemon startup (see
    [[run-lifecycle-and-registry]]).
 
-## Schema and migrations
+## Schema: reset, not migrated
 
-Three tables: `meta` (one row per workspace — id, entry URL, creation time,
-plus the owner columns below), `runs` (one row, run id `default`, and the network name — plus a
-leftover `overrides_json` column from the now-removed branch-override
-feature, still written as `'{}'` to satisfy its `NOT NULL` constraint on
-pre-existing databases but no longer read), `containers` (one row per
-container in the environment, including a `routes_json` column holding the
-serialized `PortRoute` list).
+Five tables: `owner` and `env` (one row each), `containers` (one row per
+node, with JSON columns for routes, ports and aliases), `logs` and `events`.
 
-New columns (`owner_uid`/`owner_gid`/`owner_home`/`owner_ssh_auth_sock` on
-`meta`, `routes_json` on `containers`) were added after the tables already
-existed in deployed databases, and SQLite's `CREATE TABLE IF NOT EXISTS`
-is a no-op against an existing table — it won't retroactively add a column.
-`WorkspaceDb::open` runs a best-effort `ALTER TABLE ... ADD COLUMN` for each
-such column on every open and just ignores the error when it's already
-present, since SQLite has no `ADD COLUMN IF NOT EXISTS`.
+There are no migrations. `PRAGMA user_version` carries a schema version, and
+a database at any other version is dropped and recreated on open. That is
+safe because nothing in it is irreplaceable: the environment is rebuilt from
+Docker by the next start, and the owner is re-sent by the next `fghj wire`.
+Keeping it that way is the price of the shortcut — anything that can't be
+rebuilt doesn't belong in this database.
+
+The previous design added columns with best-effort `ALTER TABLE` on every
+open and read every column as optional, guessing what a missing one meant.
+That cost ~100 lines and a test per column for compatibility with
+pre-release databases.
 
 ## `WorkspaceOwner`: why `fghjd` needs to borrow a real user's identity
 
@@ -92,7 +91,7 @@ owner, as a second line of defense.
 
 ## Status
 
-Implemented: `src/persistence/` (`WorkspaceDb` in `persistence/sqlite/` with migrations, the workspace
+Implemented: `src/persistence/` (`WorkspaceDb` in `persistence/sqlite/`, the workspace
 index, `WorkspaceOwner` capture/apply, `live_ssh_auth_sock` recovery,
 `harden_git_ssh`). The owner-capture/privilege-drop path is macOS-aware
 (the launchd socket recovery); Linux/Windows would need different

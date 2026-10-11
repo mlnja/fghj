@@ -11,11 +11,11 @@ impl Orchestrator {
     /// stop" requirement. Best-effort: a failure here only means a later
     /// `record_event` call might append onto a stale cycle instead of a
     /// fresh one, which isn't worth failing the actual start/stop over.
-    pub(super) async fn begin_event_cycle(&self, run_id: &str, node_id: &str, action: &str) {
+    pub(super) async fn begin_event_cycle(&self, node_id: &str, action: &str) {
         if let Err(e) = self
             .db
             .clone()
-            .begin_event_cycle(run_id.to_string(), node_id.to_string(), action.to_string())
+            .begin_event_cycle(node_id.to_string(), action.to_string())
             .await
         {
             eprintln!("fghjd: failed to begin {action} event cycle for node {node_id}: {e:#}");
@@ -31,7 +31,6 @@ impl Orchestrator {
     /// start/stop.
     pub(super) async fn record_event(
         &self,
-        run_id: &str,
         node_id: &str,
         action: &str,
         step: &str,
@@ -42,7 +41,6 @@ impl Orchestrator {
             .db
             .clone()
             .append_event(
-                run_id.to_string(),
                 node_id.to_string(),
                 action.to_string(),
                 step.to_string(),
@@ -71,7 +69,6 @@ impl Orchestrator {
     /// problem than a failure nothing narrates at all.
     pub(super) async fn record_error_unless_reported(
         &self,
-        run_id: &str,
         node_id: &str,
         action: &str,
         step: &str,
@@ -80,13 +77,13 @@ impl Orchestrator {
         let already = self
             .db
             .clone()
-            .cycle_has_error(run_id.to_string(), node_id.to_string(), action.to_string())
+            .cycle_has_error(node_id.to_string(), action.to_string())
             .await
             .unwrap_or(false);
         if already {
             return;
         }
-        self.record_event(run_id, node_id, action, step, "error", Some(detail))
+        self.record_event(node_id, action, step, "error", Some(detail))
             .await;
     }
 }

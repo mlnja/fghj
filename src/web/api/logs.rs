@@ -82,8 +82,7 @@ pub(crate) async fn get_run_node_log_generations(
     AxumPath(node_id): AxumPath<String>,
     WorkspaceExtractor(state): WorkspaceExtractor,
 ) -> Response {
-    let run_id = orchestrator::DEFAULT_RUN_ID.to_string();
-    match state.db.clone().list_log_generations(run_id, node_id).await {
+    match state.db.clone().list_log_generations(node_id).await {
         Ok(generations) => Json(serde_json::json!({ "generations": generations })).into_response(),
         Err(e) => err_response(e),
     }
@@ -110,11 +109,10 @@ pub(crate) async fn get_run_node_log_history(
     Query(q): Query<LogHistoryQuery>,
     WorkspaceExtractor(state): WorkspaceExtractor,
 ) -> Response {
-    let run_id = orchestrator::DEFAULT_RUN_ID.to_string();
     match state
         .db
         .clone()
-        .load_log_history(run_id, node_id, q.generation, q.before_seq, q.limit)
+        .load_log_history(node_id, q.generation, q.before_seq, q.limit)
         .await
     {
         Ok(lines) => Json(serde_json::json!({ "lines": lines })).into_response(),
@@ -136,13 +134,7 @@ pub(crate) async fn get_node_events(
     Query(q): Query<EventsQuery>,
     WorkspaceExtractor(state): WorkspaceExtractor,
 ) -> Response {
-    let run_id = orchestrator::DEFAULT_RUN_ID.to_string();
-    match state
-        .db
-        .clone()
-        .list_events(run_id, node_id, q.action)
-        .await
-    {
+    match state.db.clone().list_events(node_id, q.action).await {
         Ok(events) => Json(serde_json::json!({ "events": events })).into_response(),
         Err(e) => err_response(e),
     }

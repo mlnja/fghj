@@ -25,10 +25,9 @@ impl Orchestrator {
     pub(super) async fn ensure_sidecar(
         &self,
         workspace_name: &str,
-        run_id: &str,
         network: &str,
     ) -> Result<(String, String)> {
-        let name = sidecar_name(workspace_name, run_id);
+        let name = sidecar_name(workspace_name);
 
         let alive = matches!(
             docker::inspect_status(&self.docker, &name, "").await,

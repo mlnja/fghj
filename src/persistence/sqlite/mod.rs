@@ -1,6 +1,6 @@
+mod env;
 mod events;
 mod logs;
-mod runs;
 mod schema;
 
 use std::path::Path;
@@ -27,9 +27,9 @@ impl WorkspaceDb {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create {}", dir.display()))?;
         let db_path = dir.join("fghj.db");
-        let conn = Connection::open(&db_path)
+        let mut conn = Connection::open(&db_path)
             .with_context(|| format!("failed to open {}", db_path.display()))?;
-        schema::init(&conn)?;
+        schema::init(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })

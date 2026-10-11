@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 
 use super::health::RunBudget;
-use super::naming::{DEFAULT_RUN_ID, container_name, network_name};
+use super::naming::{container_name, network_name};
 use super::order::{
     StartOutcomes, dependents_of, requirements_of, topological_start_order, waited_on,
 };
@@ -162,10 +162,9 @@ struct BroughtUp {
 impl Orchestrator {
     /// Narrates a node a start skipped because something it can't start
     /// without failed.
-    pub(super) async fn record_blocked(&self, run_id: &str, node_id: &str, by: &str) {
-        self.begin_event_cycle(run_id, node_id, "start").await;
+    pub(super) async fn record_blocked(&self, node_id: &str, by: &str) {
+        self.begin_event_cycle(node_id, "start").await;
         self.record_event(
-            run_id,
             node_id,
             "start",
             "blocked",
@@ -279,7 +278,6 @@ impl Orchestrator {
         progress: Option<&ProgressSink>,
         restart: Option<&str>,
     ) -> Result<BroughtUp, EnvCreateError> {
-        let run_id = DEFAULT_RUN_ID.to_string();
         let target_ids = match spec {
             EnvSpec::Flow(flow) => graph.start_ids(Some(flow))?,
             EnvSpec::Node(id) => {
@@ -297,11 +295,10 @@ impl Orchestrator {
             }
         };
         log_start_advisories(graph, &target_ids);
-        let network = network_name(&graph.workspace_name, &run_id);
+        let network = network_name(&graph.workspace_name);
         docker::ensure_network(&self.docker, &network, &network).await?;
-        let (sidecar_container_name, sidecar_ip) = self
-            .ensure_sidecar(&graph.workspace_name, &run_id, &network)
-            .await?;
+        let (sidecar_container_name, sidecar_ip) =
+            self.ensure_sidecar(&graph.workspace_name, &network).await?;
 
         let mut state = prior.cloned().unwrap_or_else(|| EnvState {
             network: network.clone(),
@@ -331,7 +328,7 @@ impl Orchestrator {
         for node_id in &ordered_ids {
             let node = node_map[node_id.as_str()];
             let forced = restart == Some(node_id.as_str());
-            let container_name = container_name(&graph.workspace_name, &run_id, &node.id);
+            let container_name = container_name(&graph.workspace_name, &node.id);
             // A terminating node is never "running" once it has done its
             // job, so the liveness check below says nothing useful about
             // whether it needs to run again — `run` does. `on_start` (the
@@ -378,7 +375,7 @@ impl Orchestrator {
                 (true, Some(_)) if restart.is_none() => {
                     // A failed re-resolve is inconclusive: it can't say the
                     // running container is wrong.
-                    self.resolve_node_spec(graph, node, &run_id, false)
+                    self.resolve_node_spec(graph, node, false)
                         .await
                         .ok()
                         .map(|spec| spec_hash(node, &spec))
@@ -397,7 +394,7 @@ impl Orchestrator {
                 // nothing helps no one. Only a node this top-up would have
                 // started is reported as blocked.
                 if !alive {
-                    self.record_blocked(&run_id, node_id, &by).await;
+                    self.record_blocked(node_id, &by).await;
                     outcomes.block(node_id, &by);
                 }
                 continue;
@@ -412,7 +409,7 @@ impl Orchestrator {
                     ),
                     None => "recreating container: config changed since it was started".into(),
                 };
-                self.record_event(&run_id, &node.id, "create", &why, "ok", None)
+                self.record_event(&node.id, "create", &why, "ok", None)
                     .await;
             }
             working(progress, node_id, Some(PendingAction::Starting));
@@ -426,7 +423,6 @@ impl Orchestrator {
                     graph,
                     node,
                     StartContext {
-                        run_id: &run_id,
                         network: &network,
                         sidecar_ip: state.sidecar_ip.as_deref(),
                         budget: &budget,

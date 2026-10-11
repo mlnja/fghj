@@ -1,29 +1,27 @@
 use super::domain::{DomainZone, derive_domain};
 use crate::util::label::sanitize_label;
 
-/// The key the workspace's one environment is filed under — in state, in
-/// the database, and in its network and container names.
-pub const DEFAULT_RUN_ID: &str = "default";
+// The `-default-` in these names is left over from named runs. Existing
+// containers are found by these exact names, so their shape is a
+// compatibility contract — see `names_keep_their_shape`.
 
-/// The environment's Docker network. Every name below embeds `run_id`, and
-/// existing containers are found by these exact names, so their shape is
-/// a compatibility contract — see `names_keep_their_shape`.
-pub(crate) fn network_name(workspace_name: &str, run_id: &str) -> String {
-    format!("fghj-{}-{run_id}", sanitize_label(workspace_name))
+/// The environment's Docker network.
+pub(crate) fn network_name(workspace_name: &str) -> String {
+    format!("fghj-{}-default", sanitize_label(workspace_name))
 }
 
 /// The container a node runs in.
-pub(crate) fn container_name(workspace_name: &str, run_id: &str, node_id: &str) -> String {
+pub(crate) fn container_name(workspace_name: &str, node_id: &str) -> String {
     format!(
-        "fghj-{}-{run_id}-{}",
+        "fghj-{}-default-{}",
         sanitize_label(workspace_name),
         sanitize_label(node_id)
     )
 }
 
 /// The environment's in-network TLS proxy sidecar.
-pub(crate) fn sidecar_name(workspace_name: &str, run_id: &str) -> String {
-    format!("fghj-{}-{run_id}-sidecar", sanitize_label(workspace_name))
+pub(crate) fn sidecar_name(workspace_name: &str) -> String {
+    format!("fghj-{}-default-sidecar", sanitize_label(workspace_name))
 }
 
 /// Derives the real Docker volume name for a `VolumeMount::Named` entry —
@@ -63,12 +61,12 @@ mod tests {
 
     #[test]
     fn names_keep_their_shape() {
-        assert_eq!(network_name("Shop", "default"), "fghj-shop-default");
+        assert_eq!(network_name("Shop"), "fghj-shop-default");
         assert_eq!(
-            container_name("Shop", "default", "api.orders"),
+            container_name("Shop", "api.orders"),
             "fghj-shop-default-api-orders"
         );
-        assert_eq!(sidecar_name("Shop", "default"), "fghj-shop-default-sidecar");
+        assert_eq!(sidecar_name("Shop"), "fghj-shop-default-sidecar");
     }
 
     /// B3: the same label declared by two unrelated nodes used to be one

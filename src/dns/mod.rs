@@ -11,8 +11,8 @@ use crate::daemon_log;
 mod macos;
 
 /// The zone this server is authoritative for. Every node's domain
-/// (`orchestrator::start_node`) is derived into this zone from its id, workspace,
-/// and run id — never author-declared, so nothing outside this zone needs
+/// (`orchestrator::start_node`) is derived into this zone from its id and
+/// workspace — never author-declared, so nothing outside this zone needs
 /// answering.
 pub(crate) const ZONE: &str = "fghj.internal";
 const ZONE_SUFFIX: &str = ".fghj.internal";

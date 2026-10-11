@@ -1,42 +1,54 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-pub const CREATE_TABLES: &str = "CREATE TABLE IF NOT EXISTS meta (
-        id TEXT PRIMARY KEY,
-        entry TEXT,
-        created_at TEXT NOT NULL,
-        owner_uid INTEGER,
-        owner_gid INTEGER,
-        owner_home TEXT,
-        owner_ssh_auth_sock TEXT
+/// Bumped on any incompatible change. A database at another version is
+/// dropped and recreated rather than migrated: everything in it is either
+/// rebuilt from Docker on the next start or re-sent on the next `wire`.
+const VERSION: i64 = 2;
+
+const CREATE_TABLES: &str = "
+    CREATE TABLE owner (
+        id INTEGER PRIMARY KEY CHECK (id = 0),
+        uid INTEGER NOT NULL,
+        gid INTEGER NOT NULL,
+        home TEXT NOT NULL,
+        ssh_auth_sock TEXT
     );
-    CREATE TABLE IF NOT EXISTS runs (
-        run_id TEXT PRIMARY KEY,
-        overrides_json TEXT NOT NULL,
-        network TEXT NOT NULL
+    CREATE TABLE env (
+        id INTEGER PRIMARY KEY CHECK (id = 0),
+        network TEXT NOT NULL,
+        sidecar_container_name TEXT NOT NULL,
+        sidecar_ip TEXT
     );
-    CREATE TABLE IF NOT EXISTS containers (
-        run_id TEXT NOT NULL,
-        node_id TEXT NOT NULL,
+    CREATE TABLE containers (
+        node_id TEXT PRIMARY KEY,
         container_name TEXT NOT NULL,
         status TEXT NOT NULL,
         published_port INTEGER,
         domain TEXT NOT NULL,
-        PRIMARY KEY (run_id, node_id)
+        raw_domain TEXT NOT NULL,
+        routes_json TEXT NOT NULL,
+        additional_hosts_json TEXT NOT NULL,
+        ports_json TEXT NOT NULL,
+        status_port TEXT,
+        config_hash TEXT NOT NULL,
+        synced INTEGER,
+        desired_running INTEGER NOT NULL,
+        terminating INTEGER NOT NULL,
+        exit_code INTEGER,
+        debug_wait INTEGER NOT NULL,
+        source_json TEXT NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS logs (
-        run_id TEXT NOT NULL,
+    CREATE TABLE logs (
         node_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
         seq INTEGER NOT NULL,
         stream TEXT NOT NULL,
         ts TEXT NOT NULL,
         line TEXT NOT NULL,
-        PRIMARY KEY (run_id, node_id, generation, seq)
+        PRIMARY KEY (node_id, generation, seq)
     );
-    CREATE INDEX IF NOT EXISTS idx_logs_run_node_gen ON logs (run_id, node_id, generation);
-    CREATE TABLE IF NOT EXISTS events (
-        run_id TEXT NOT NULL,
+    CREATE TABLE events (
         node_id TEXT NOT NULL,
         action TEXT NOT NULL,
         seq INTEGER NOT NULL,
@@ -44,56 +56,60 @@ pub const CREATE_TABLES: &str = "CREATE TABLE IF NOT EXISTS meta (
         step TEXT NOT NULL,
         status TEXT NOT NULL,
         detail TEXT,
-        PRIMARY KEY (run_id, node_id, action, seq)
-    );
-    CREATE INDEX IF NOT EXISTS idx_events_run_node_action ON events (run_id, node_id, action);";
+        PRIMARY KEY (node_id, action, seq)
+    );";
 
-/// Best-effort migration for `meta`/`containers` databases created before
-/// these columns existed — SQLite's `CREATE TABLE IF NOT EXISTS` is a no-op
-/// against an already-existing table, so an older db needs these added
-/// explicitly. Ignore the error when they're already present (no `IF NOT
-/// EXISTS` for `ADD COLUMN` in SQLite).
-pub const ADD_COLUMN_MIGRATIONS: &[&str] = &[
-    "ALTER TABLE meta ADD COLUMN owner_uid INTEGER",
-    "ALTER TABLE meta ADD COLUMN owner_gid INTEGER",
-    "ALTER TABLE meta ADD COLUMN owner_home TEXT",
-    "ALTER TABLE meta ADD COLUMN owner_ssh_auth_sock TEXT",
-    "ALTER TABLE containers ADD COLUMN routes_json TEXT",
-    "ALTER TABLE containers ADD COLUMN additional_hosts_json TEXT",
-    "ALTER TABLE containers ADD COLUMN ports_json TEXT",
-    "ALTER TABLE containers ADD COLUMN status_port TEXT",
-    "ALTER TABLE containers ADD COLUMN config_hash TEXT",
-    "ALTER TABLE containers ADD COLUMN synced INTEGER",
-    "ALTER TABLE runs ADD COLUMN sidecar_container_name TEXT",
-    "ALTER TABLE runs ADD COLUMN sidecar_ip TEXT",
-    "ALTER TABLE containers ADD COLUMN raw_domain TEXT",
-    // Whether fghj wants this container up, as opposed to whether it
-    // happened to be up when the row was written. Before it existed the two
-    // were the same column (`status`), so a restored container's desired
-    // state had to be guessed from its last observed one.
-    "ALTER TABLE containers ADD COLUMN desired_running INTEGER",
-    // The per-container debug switch (`FGHJ_DEBUG_WAIT`). Persisted so a
-    // `fghjd` restart doesn't silently drop someone out of a halted debug
-    // session; absent in an older row means off, which is the default.
-    "ALTER TABLE containers ADD COLUMN debug_wait INTEGER",
-    // Whether this container's desired terminal state is "exited 0" rather
-    // than "running", and the code it exited with. Without them a restored
-    // task would read back as a service that had crashed — see
-    // `state::ContainerDesired::terminating`.
-    "ALTER TABLE containers ADD COLUMN terminating INTEGER",
-    "ALTER TABLE containers ADD COLUMN exit_code INTEGER",
-    // The branch/commit the container was built from, as JSON. A row written
-    // before this column existed read back as `None`, which is correct
-    // rather than a guess: that container really was started by an `fghjd`
-    // that never recorded one, so its source is genuinely unknown and the UI
-    // says so instead of claiming the checkout's current commit.
-    "ALTER TABLE containers ADD COLUMN source_json TEXT",
-];
-
-pub fn init(conn: &Connection) -> Result<()> {
-    conn.execute_batch(CREATE_TABLES)?;
-    for stmt in ADD_COLUMN_MIGRATIONS {
-        let _ = conn.execute(stmt, []);
+pub fn init(conn: &mut Connection) -> Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version == VERSION {
+        return Ok(());
     }
+    let tx = conn.transaction()?;
+    let tables: Vec<String> = tx
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for table in tables {
+        tx.execute_batch(&format!("DROP TABLE \"{table}\""))?;
+    }
+    tx.execute_batch(CREATE_TABLES)?;
+    tx.execute_batch(&format!("PRAGMA user_version = {VERSION}"))?;
+    tx.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_database_at_another_version_is_recreated() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE runs (run_id TEXT PRIMARY KEY); INSERT INTO runs VALUES ('default');",
+        )
+        .unwrap();
+
+        init(&mut conn).unwrap();
+
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'runs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0);
+        conn.execute(
+            "INSERT INTO env (id, network, sidecar_container_name) VALUES (0, 'n', 's')",
+            [],
+        )
+        .unwrap();
+        // A second open at the current version keeps what's there.
+        init(&mut conn).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM env", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
 }

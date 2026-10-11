@@ -15,18 +15,9 @@ use crate::state::{
 
 use super::registry::Orchestrator;
 
-/// Everything about *this* start that isn't the node's own declared config:
-/// which run and network the container joins, where the run's sidecar is,
-/// how much time the start may spend waiting, and whether the per-container
-/// debug switch is on.
-///
-/// A struct rather than five more positional parameters because `run_id` and
-/// `network` are both `&str` and adjacent — a caller that swapped them would
-/// compile and then produce a container on the wrong network under the right
-/// name.
+/// Everything about *this* start that isn't the node's own declared config.
 #[derive(Clone, Copy)]
 pub(super) struct StartContext<'a> {
-    pub(super) run_id: &'a str,
     pub(super) network: &'a str,
     pub(super) sidecar_ip: Option<&'a str>,
     pub(super) budget: &'a RunBudget,
@@ -58,24 +49,16 @@ impl Orchestrator {
         start: StartContext<'_>,
     ) -> Result<ContainerInfo> {
         let StartContext {
-            run_id,
             network,
             sidecar_ip,
             budget,
             debug_wait,
             wait_ready,
         } = start;
-        self.begin_event_cycle(run_id, &node.id, "start").await;
-        self.record_event(
-            run_id,
-            &node.id,
-            "start",
-            "resolving config",
-            "running",
-            None,
-        )
-        .await;
-        let spec = match self.resolve_node_spec(graph, node, run_id, true).await {
+        self.begin_event_cycle(&node.id, "start").await;
+        self.record_event(&node.id, "start", "resolving config", "running", None)
+            .await;
+        let spec = match self.resolve_node_spec(graph, node, true).await {
             Ok(spec) => spec,
             Err(e) => {
                 // The backstop. Most failures in here are a build, a secret
@@ -84,7 +67,6 @@ impl Orchestrator {
                 // the same text in the events pane a second time under
                 // `resolving config`, which is not what failed.
                 self.record_error_unless_reported(
-                    run_id,
                     &node.id,
                     "start",
                     "resolving config",
@@ -94,7 +76,7 @@ impl Orchestrator {
                 return Err(e);
             }
         };
-        self.record_event(run_id, &node.id, "start", "resolving config", "ok", None)
+        self.record_event(&node.id, "start", "resolving config", "ok", None)
             .await;
         let config_hash = spec_hash(node, &spec);
         let mut labels = node.labels.clone();
@@ -133,15 +115,8 @@ impl Orchestrator {
             .map(|ip| vec![ip.to_string(), "127.0.0.11".to_string()])
             .unwrap_or_default();
 
-        self.record_event(
-            run_id,
-            &node.id,
-            "start",
-            "creating container",
-            "running",
-            None,
-        )
-        .await;
+        self.record_event(&node.id, "start", "creating container", "running", None)
+            .await;
         if let Err(e) = docker::run_container(
             &self.docker,
             &docker::RunOpts {
@@ -173,7 +148,6 @@ impl Orchestrator {
         .await
         {
             self.record_event(
-                run_id,
                 &node.id,
                 "start",
                 "creating container",
@@ -183,10 +157,10 @@ impl Orchestrator {
             .await;
             return Err(e);
         }
-        self.record_event(run_id, &node.id, "start", "creating container", "ok", None)
+        self.record_event(&node.id, "start", "creating container", "ok", None)
             .await;
 
-        self.spawn_log_capture(run_id, &node.id, &spec.container_name);
+        self.spawn_log_capture(&node.id, &spec.container_name);
 
         // Prefer the port explicitly marked `primary` — the one actually
         // meant to be "the" entrypoint — over an arbitrary map-iteration
@@ -326,15 +300,8 @@ impl Orchestrator {
         // `healthcheck` field at all, because a container that has exited
         // can never report Docker-healthy.
         if node.kind == "task" {
-            self.record_event(
-                run_id,
-                &node.id,
-                "start",
-                "waiting for exit",
-                "running",
-                None,
-            )
-            .await;
+            self.record_event(&node.id, "start", "waiting for exit", "running", None)
+                .await;
             let allowance = budget.tasks.allowance();
             // Read *before* the wait, not after: waiting until the deadline
             // exhausts the budget by definition, so asking afterwards would
@@ -378,7 +345,6 @@ impl Orchestrator {
             };
             if let Some(failure) = failure {
                 self.record_event(
-                    run_id,
                     &node.id,
                     "start",
                     "waiting for exit",
@@ -388,11 +354,10 @@ impl Orchestrator {
                 .await;
                 bail!("task {} failed: {failure}", node.id);
             }
-            self.record_event(run_id, &node.id, "start", "waiting for exit", "ok", None)
+            self.record_event(&node.id, "start", "waiting for exit", "ok", None)
                 .await;
         } else if node.healthcheck.is_some() && wait_ready {
             self.record_event(
-                run_id,
                 &node.id,
                 "start",
                 "waiting for healthcheck",
@@ -441,17 +406,10 @@ impl Orchestrator {
                     )),
                 ),
             };
-            self.record_event(
-                run_id,
-                &node.id,
-                "start",
-                "waiting for healthcheck",
-                status,
-                detail,
-            )
-            .await;
+            self.record_event(&node.id, "start", "waiting for healthcheck", status, detail)
+                .await;
         }
-        self.record_event(run_id, &node.id, "start", "ready", "ok", None)
+        self.record_event(&node.id, "start", "ready", "ok", None)
             .await;
 
         Ok(ContainerInfo {
@@ -626,7 +584,7 @@ mod tests {
     struct TaskFixture {
         registry: Orchestrator,
         network: String,
-        run_id: String,
+        workspace: String,
         _tmp: tempfile::TempDir,
     }
 
@@ -647,9 +605,9 @@ mod tests {
             TaskFixture {
                 registry,
                 network,
-                // Not "default": a run id folded into the domain keeps two
-                // concurrently running test binaries off each other's names.
-                run_id: format!("t{nonce}"),
+                // A workspace name of its own keeps two concurrently running
+                // test binaries off each other's container names.
+                workspace: format!("t{nonce}"),
                 _tmp: tmp,
             }
         }
@@ -666,13 +624,12 @@ mod tests {
         }
 
         async fn start(&self, node: &crate::resolver::Node) -> Result<crate::state::ContainerInfo> {
-            let graph = test_graph(vec![node.clone()], Vec::new());
+            let graph = self.graph(node);
             self.registry
                 .start_node(
                     &graph,
                     node,
                     StartContext {
-                        run_id: &self.run_id,
                         network: &self.network,
                         sidecar_ip: None,
                         budget: &super::RunBudget::default(),
@@ -683,12 +640,14 @@ mod tests {
                 .await
         }
 
+        fn graph(&self, node: &crate::resolver::Node) -> crate::resolver::Graph {
+            let mut graph = test_graph(vec![node.clone()], Vec::new());
+            graph.workspace_name = self.workspace.clone();
+            graph
+        }
+
         async fn cleanup(&self, node_id: &str) {
-            let name = format!(
-                "fghj-shop-{}-{}",
-                self.run_id,
-                crate::util::label::sanitize_label(node_id)
-            );
+            let name = crate::orchestrator::naming::container_name(&self.workspace, node_id);
             docker::stop_and_remove(&self.registry.docker, &name).await;
             docker::remove_network(&self.registry.docker, &self.network).await;
         }
@@ -748,7 +707,7 @@ mod tests {
     async fn a_task_that_never_exits_fails_once_its_budget_runs_out() {
         let fixture = TaskFixture::new().await;
         let node = fixture.task("hangs.api", &["sleep", "60"]);
-        let graph = test_graph(vec![node.clone()], Vec::new());
+        let graph = fixture.graph(&node);
         // Generous on purpose: the budget's clock starts here, not at the
         // wait, so pulling/creating the container spends some of it before
         // `wait_for_exit` is ever reached. Too tight and this would assert
@@ -763,7 +722,6 @@ mod tests {
                 &graph,
                 &node,
                 StartContext {
-                    run_id: &fixture.run_id,
                     network: &fixture.network,
                     sidecar_ip: None,
                     budget: &budget,

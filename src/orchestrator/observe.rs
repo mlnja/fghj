@@ -9,7 +9,6 @@ use crate::resolver::Graph;
 use crate::resolver::universe::workspace_name;
 use crate::state::{ContainerObserved, EnvState, SyncStatus};
 
-use super::naming::DEFAULT_RUN_ID;
 use super::registry::Orchestrator;
 
 impl Orchestrator {
@@ -118,10 +117,7 @@ impl Orchestrator {
         let mut reports = Vec::new();
         for c in env.containers.values() {
             let sync = match graph.nodes.iter().find(|n| n.id == c.node_id) {
-                Some(node) => match self
-                    .resolve_node_spec(graph, node, DEFAULT_RUN_ID, false)
-                    .await
-                {
+                Some(node) => match self.resolve_node_spec(graph, node, false).await {
                     Ok(spec) => {
                         if spec_hash(node, &spec) == c.desired.config_hash {
                             SyncStatus::Synced

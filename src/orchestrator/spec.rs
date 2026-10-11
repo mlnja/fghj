@@ -25,7 +25,7 @@ pub(crate) struct NodeSpec {
 /// container runs, for `ContainerInfo::config_hash` /
 /// `Orchestrator::config_drift` to compare against. Deliberately
 /// excludes anything that's either pure identity (`container_name`, `domain`,
-/// `aliases` all derive one-to-one from `node.id` + run id — never drift
+/// `aliases` all derive one-to-one from `node.id` + workspace — never drift
 /// independently of the rest of the spec) or genuinely ephemeral (an
 /// unpinned port's actual host-side binding is chosen fresh by Docker on
 /// every start; hashing it would flag every single restart as "drifted").

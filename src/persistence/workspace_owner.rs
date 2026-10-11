@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// `fghjd` — running as root — can later drop privileges back to this user
 /// before shelling out to `git clone` against a remote the daemon itself has
 /// no credentials for.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceOwner {
     pub uid: u32,
     pub gid: u32,

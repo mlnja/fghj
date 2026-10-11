@@ -6,7 +6,7 @@
 //!
 //! Pure helpers, free of `Orchestrator` and of I/O:
 //!
-//! - [`naming`] — run ids and derived Docker volume names.
+//! - [`naming`] — Docker network, container and volume names.
 //! - [`domain`] — which `*.fghj.internal` zone a node answers on.
 //! - [`fqdn_template`] — the `${FGHJ_SERVICE_FQDN}` expansion language.
 //! - [`order`] — dependency-first start ordering.
@@ -59,6 +59,5 @@ pub mod testing;
 
 pub use domain::{DomainZone, derive_domain};
 pub use logs::{container_name_for, logs_for_tail};
-pub use naming::DEFAULT_RUN_ID;
 pub use order::topological_start_order;
 pub use registry::Orchestrator;

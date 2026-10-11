@@ -41,7 +41,7 @@ pub struct Orchestrator {
     /// keep its own parallel `pending` map for that, a second gate on the
     /// same fact that could disagree with the first.
     pub(super) node_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Background per-`(run_id, node_id)` tasks streaming that node's
+    /// Background per-node tasks streaming that node's
     /// *current* container's logs into `db` as they're produced — see
     /// `spawn_log_capture`. Keyed so that starting a node again aborts its
     /// previous capture task before replacing it, guaranteeing at most one
@@ -65,7 +65,7 @@ impl Orchestrator {
     }
 
     /// Starts (or restarts) background capture of `container_name`'s logs
-    /// into `db`, opening a fresh generation for `(run_id, node_id)`. Called
+    /// into `db`, opening a fresh generation for `node_id`. Called
     /// from `start_node` — the single choke point every container-creating
     /// path (`ensure_running`, `restart_node`) already funnels
     /// through — so every container gets its own capture task without each
@@ -76,19 +76,22 @@ impl Orchestrator {
     /// container's log stream ends when Docker removes it, which
     /// `start_node`'s callers always do before recreating), but aborting
     /// explicitly avoids ever leaving two tasks writing under the same key.
-    pub(super) fn spawn_log_capture(&self, run_id: &str, node_id: &str, container_name: &str) {
-        let key = format!("{run_id}:{node_id}");
+    pub(super) fn spawn_log_capture(&self, node_id: &str, container_name: &str) {
         let handle = supervisor::supervise(
-            format!("log capture[{key}]"),
+            format!("log capture[{node_id}]"),
             capture_container_logs(
                 self.db.clone(),
                 self.docker.clone(),
-                run_id.to_string(),
                 node_id.to_string(),
                 container_name.to_string(),
             ),
         );
-        if let Some(old) = self.log_captures.lock().unwrap().insert(key, handle) {
+        if let Some(old) = self
+            .log_captures
+            .lock()
+            .unwrap()
+            .insert(node_id.to_string(), handle)
+        {
             old.abort();
         }
     }

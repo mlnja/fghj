@@ -303,7 +303,6 @@ impl WorkspaceRegistry {
             }
         }
 
-        let entry_for_meta = entry.clone();
         let owner_for_clone = owner.clone();
         let path = tokio::task::spawn_blocking(move || {
             crate::resolve_workspace(entry, workspace, owner_for_clone.as_ref())
@@ -347,11 +346,6 @@ impl WorkspaceRegistry {
             None => {
                 let state =
                     Arc::new(WorkspaceState::new(canonical.clone(), self.docker.clone()).await?);
-                state
-                    .db
-                    .clone()
-                    .record_meta(id.clone(), entry_for_meta)
-                    .await?;
                 self.by_id.lock().unwrap().insert(id.clone(), state.clone());
                 self.wire_actor(&id, &state);
 
@@ -366,7 +360,7 @@ impl WorkspaceRegistry {
         // socket captured here is only valid for the CLI's current login
         // session, so a later `wire` from a fresh session should replace it.
         if let Some(owner) = owner {
-            state.db.clone().set_owner(id.clone(), owner).await?;
+            state.db.clone().set_owner(owner).await?;
         }
 
         Ok((id, canonical))

@@ -56,7 +56,6 @@ impl Orchestrator {
     /// identical tag — see that arm for why.
     async fn build_node_image(
         &self,
-        run_id: &str,
         node_id: &str,
         repo_root: &Path,
         build: &crate::resolver::NodeBuild,
@@ -76,7 +75,6 @@ impl Orchestrator {
                     source.path
                 );
                 self.record_event(
-                    run_id,
                     node_id,
                     "start",
                     "building image",
@@ -132,20 +130,12 @@ impl Orchestrator {
             Some(b) => format!("  ·  buildkit: {}", b.builder),
             None => String::from("  ·  buildkit: dockerd"),
         });
-        self.record_event(
-            run_id,
-            node_id,
-            "start",
-            "building image",
-            "running",
-            Some(what),
-        )
-        .await;
+        self.record_event(node_id, "start", "building image", "running", Some(what))
+            .await;
         let secrets = match resolve_build_secrets(repo_root, &build.secrets) {
             Ok(secrets) => secrets,
             Err(e) => {
                 self.record_event(
-                    run_id,
                     node_id,
                     "start",
                     "building image",
@@ -170,7 +160,6 @@ impl Orchestrator {
                          run `fghj wire` from a shell with a running agent"
                     );
                     self.record_event(
-                        run_id,
                         node_id,
                         "start",
                         "building image",
@@ -202,7 +191,6 @@ impl Orchestrator {
             Ok(report) => report,
             Err(e) => {
                 self.record_event(
-                    run_id,
                     node_id,
                     "start",
                     "building image",
@@ -220,7 +208,6 @@ impl Orchestrator {
         // that should have been in `.dockerignore` shows up here as a cost
         // paid on every single start, and nowhere else.
         self.record_event(
-            run_id,
             node_id,
             "start",
             "building image",
@@ -246,10 +233,9 @@ impl Orchestrator {
         &self,
         graph: &Graph,
         node: &Node,
-        run_id: &str,
         side_effects: bool,
     ) -> Result<NodeSpec> {
-        let container_name = container_name(&graph.workspace_name, run_id, &node.id);
+        let container_name = container_name(&graph.workspace_name, &node.id);
         // Every node's domain is derived the same way, unconditionally —
         // there's no CUE-declared override for any node kind (services
         // included) that could bypass this, so two nodes can never collide
@@ -313,7 +299,6 @@ impl Orchestrator {
                 );
                 if side_effects {
                     self.build_node_image(
-                        run_id,
                         &node.id,
                         repo_root,
                         build,
@@ -636,7 +621,7 @@ mod tests {
         let (registry, _tmp) = registry();
         let graph = test_graph(vec![node.clone()], Vec::new());
         registry
-            .resolve_node_spec(&graph, node, "default", false)
+            .resolve_node_spec(&graph, node, false)
             .await
             .expect("resolving an image-backed node is pure")
     }

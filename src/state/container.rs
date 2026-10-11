@@ -20,15 +20,10 @@ pub struct PortRoute {
     /// When set, `domain` is a suffix from `Node.wildcard_hosts` rather
     /// than an exact name — `state::query::resolve_route` matches it
     /// against the suffix itself *and* any subdomain of it.
-    #[serde(default)]
     pub wildcard: bool,
     /// The container-side port (a key into `ContainerObserved::ports`) this
     /// route was derived from — what lets `host_port` be re-joined against
     /// a fresh observation without needing the original `Node` config back.
-    /// `#[serde(default)]` so a route persisted before this field existed
-    /// deserializes as `""`, which simply never matches and leaves the
-    /// stored `host_port` in play until the container is next started.
-    #[serde(default)]
     pub container_port: String,
     /// Whether `domain` is eligible for a cert from fghj's local CA — the
     /// same `dns::cert_eligible` rule `web::ca::DynamicCertResolver::resolve_for`
@@ -40,15 +35,7 @@ pub struct PortRoute {
     /// third-party OAuth callback host) fghj's CA will never certify — the
     /// UI links such a route as `http://` rather than an `https://` link
     /// that would always fail with a TLS error.
-    #[serde(default = "cert_eligible_by_default")]
     pub https: bool,
-}
-
-/// A route persisted before `https` existed predates `additional_hosts`
-/// too, so it can only be a convention-derived `*.fghj.internal` name —
-/// always cert-eligible.
-fn cert_eligible_by_default() -> bool {
-    true
 }
 
 /// Which start/stop/delete action is currently in flight for a container —
@@ -179,7 +166,6 @@ pub struct ContainerDesired {
     /// The checkout this container was built from — see [`ContainerSource`].
     /// `config_hash` above decides *whether* this node drifted; this is what
     /// lets the answer name a commit instead of only a verdict.
-    #[serde(default)]
     pub source: Option<ContainerSource>,
     /// Whether this container's desired terminal state is "exited 0" rather
     /// than "running" — true for exactly the nodes resolved with
@@ -195,7 +181,6 @@ pub struct ContainerDesired {
     /// Note `running` stays `false` for a task even while its container is
     /// alive: `running` records what fghj wants to be true *at rest*, and
     /// what fghj wants for a task at rest is for it to be finished.
-    #[serde(default)]
     pub terminating: bool,
     /// Whether this container was started with `FGHJ_DEBUG_WAIT=1` — the
     /// per-container switch that asks the image to halt at startup until a
@@ -221,7 +206,6 @@ pub struct ContainerDesired {
     /// why this is recorded here, on the container, rather than held
     /// separately: the switch shown in the UI is then always what the
     /// running container actually has.
-    #[serde(default)]
     pub debug_wait: bool,
 }
 
@@ -254,7 +238,6 @@ pub struct ContainerObserved {
     /// `Some(0)` versus `Some(n)` is the whole difference between a
     /// migration that ran and one that has to block everything downstream
     /// of it.
-    #[serde(default)]
     pub exit_code: Option<i64>,
 }
 

@@ -32,15 +32,10 @@ pub fn container_name_for<'a>(state: &'a EnvState, node_id: &str) -> Result<&'a 
 pub(crate) async fn capture_container_logs(
     db: Arc<WorkspaceDb>,
     docker: Arc<bollard::Docker>,
-    run_id: String,
     node_id: String,
     container_name: String,
 ) {
-    let generation = match db
-        .clone()
-        .begin_log_generation(run_id.clone(), node_id.clone())
-        .await
-    {
+    let generation = match db.clone().begin_log_generation(node_id.clone()).await {
         Ok(g) => g,
         Err(e) => {
             eprintln!("fghjd: failed to begin log generation for node {node_id}: {e:#}");
@@ -85,7 +80,7 @@ pub(crate) async fn capture_container_logs(
             let batch = std::mem::take(&mut buffer);
             let _ = db
                 .clone()
-                .insert_log_lines(run_id.clone(), node_id.clone(), generation, batch)
+                .insert_log_lines(node_id.clone(), generation, batch)
                 .await;
             last_flush = std::time::Instant::now();
         }
@@ -106,9 +101,7 @@ pub(crate) async fn capture_container_logs(
     }
 
     if !buffer.is_empty() {
-        let _ = db
-            .insert_log_lines(run_id, node_id, generation, buffer)
-            .await;
+        let _ = db.insert_log_lines(node_id, generation, buffer).await;
     }
 }
 
