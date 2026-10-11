@@ -1,48 +1,10 @@
 //! macOS `pf`/`ifconfig` implementation of [`super::RawNetBackend`].
 //!
-//! Two earlier designs were tried and abandoned this cycle:
-//!
-//! 1. **Nested anchor under `com.apple/*`** (`pfctl -a com.apple/fghjd -f -`),
-//!    piggybacking on stock macOS's `rdr-anchor "com.apple/*"` wildcard hook.
-//!    Proved unreliable in practice: `rdr` rules loaded two levels under that
-//!    wildcard simply never fired — confirmed even on a completely fresh boot
-//!    (empty state table, pf enabled under 5 minutes). Neither re-issuing the
-//!    anchor's rules nor a full `pfctl -d && pfctl -e` cycle nor a real reboot
-//!    fixed it.
-//! 2. **Owning the top-level ruleset directly**: every tick, read
-//!    `/etc/pf.conf` fresh off disk, splice in our own `rdr` lines, and
-//!    `pfctl -f -` the result. This "fixed" (1) but caused a much worse
-//!    regression: on a real machine, Docker Desktop injects its own NAT/rdr
-//!    rules directly into the *live* kernel ruleset without ever writing them
-//!    to `/etc/pf.conf` (the same "invisible on disk, present live" pattern
-//!    already observed with `com.apple.internet-sharing`). Since our reload
-//!    only knew about what's on disk, every tick silently erased Docker's
-//!    live-only rules within a second of `fghjd` starting, breaking *all*
-//!    `127.0.0.1:<published-port>` connectivity — a direct violation of the
-//!    one hard rule for this feature: fghjd must never be the one who breaks
-//!    someone else's networking, even if someone else reloading pf is
-//!    allowed to transiently break *us*.
-//!
-//! This backend instead owns a **dedicated top-level named anchor**
-//! (`fghjd`, not nested under `com.apple`): a single idempotent one-time edit
-//! adds a bare `rdr-anchor "fghjd"` hook line to `/etc/pf.conf` (see
-//! `install_anchor_hook`) — the same, ordinary way most third-party pf-based
-//! tools (Little Snitch and friends) hook in. After that, every reconcile
-//! tick only ever runs `pfctl -a fghjd -f -`, which replaces *our own
-//! anchor's* content and nothing else — it cannot see or touch whatever
-//! Docker, `com.apple.internet-sharing`, or anything else has injected into
-//! the top-level ruleset or its own anchors, live or on disk. The one-time
-//! hook line is removed again on a clean `clear()` (see
-//! `remove_anchor_hook`), but is otherwise harmless to leave behind if fghjd
-//! is killed — an anchor hook with nothing loaded into it is a no-op, exactly
-//! like the dangling `com.apple/*` hooks already present by default.
-//!
-//! Every command-running function here is a thin wrapper around pure,
-//! independently-testable logic (`diff_ips`, `render_ruleset`,
-//! `parse_pool_aliases`, `in_pool`, `strip_managed_block`,
-//! `insert_after_translation_hooks`, `install_anchor_hook`) — the actual
-//! `Command`/filesystem calls are the only part that needs macOS and root to
-//! exercise for real.
+//! Owns a dedicated top-level anchor `fghjd`, hooked once into `/etc/pf.conf`.
+//! Each tick only reloads that anchor. Not nested under `com.apple/*`: `rdr`
+//! rules two levels down never fired. Not a rewrite of the top-level ruleset
+//! either: Docker Desktop injects live-only rules that a reload from disk
+//! erases, breaking every published port.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -56,21 +18,14 @@ use super::{RawNetBackend, RouteSpec};
 
 const PF_CONF_PATH: &str = "/etc/pf.conf";
 const ANCHOR_NAME: &str = "fghjd";
-/// Bracket the one-time anchor-hook line spliced into `/etc/pf.conf` so it
-/// can be found and stripped again — same "own a managed block" pattern
-/// `hosts_file::sync` uses for `/etc/hosts`.
 const HOOK_MARKER_BEGIN: &str =
     "# --- fghjd raw-net anchor hook (managed; do not edit — see raw_net::macos) ---";
 const HOOK_MARKER_END: &str = "# --- end fghjd raw-net anchor hook ---";
 const ANCHOR_HOOK_LINE: &str = "rdr-anchor \"fghjd\"";
 
 pub struct MacosPfBackend {
-    /// Last-applied route set — used for `status()` and to diff which `lo0`
-    /// aliases actually need adding/removing.
     applied: Mutex<Vec<RouteSpec>>,
-    /// Whether *this* process was the one that enabled pf (`pfctl -e`) —
-    /// only ever `pfctl -d` on `clear()` if so, never force-disabling pf
-    /// that the user or some other tool already had on.
+    /// Only `pfctl -d` on `clear()` if we enabled it.
     enabled_pf: Mutex<bool>,
 }
 
@@ -84,11 +39,8 @@ impl MacosPfBackend {
         backend
     }
 
-    /// Removes any pool-range `lo0` alias left behind by a previous, e.g.
-    /// crashed, `fghjd` process. This process has no in-memory record of
-    /// what a prior instance applied, so pool membership — the same
-    /// ownership predicate `apply`'s own diffing uses — is the only signal
-    /// available.
+    /// Removes pool aliases a crashed predecessor left; pool membership is the only
+    /// ownership signal.
     fn self_heal_stray_aliases(&self) {
         for ip in current_pool_aliases() {
             let _ = remove_lo0_alias(ip);
@@ -168,9 +120,6 @@ impl RawNetBackend for MacosPfBackend {
     }
 }
 
-/// Pure add/remove diff between the currently-aliased and desired virtual-IP
-/// sets — isolated from `current_pool_aliases`/`add_lo0_alias`/
-/// `remove_lo0_alias` so it's unit-testable without shelling out.
 fn diff_ips(
     current: &BTreeSet<Ipv4Addr>,
     desired: &BTreeSet<Ipv4Addr>,
@@ -181,17 +130,11 @@ fn diff_ips(
     )
 }
 
-/// Whether `ip` falls inside fghjd's exclusively-owned `10.222.0.0/16` pool
-/// — the ownership predicate used both to prune stray aliases and to avoid
-/// ever touching an `lo0` alias fghjd doesn't own.
 fn in_pool(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
     octets[0] == 10 && octets[1] == 222
 }
 
-/// Parses `ifconfig lo0` output for `inet <ip> ...` lines whose address
-/// falls inside fghjd's pool — isolated from the actual `ifconfig` call so
-/// this parsing logic is unit-testable without shelling out.
 fn parse_pool_aliases(ifconfig_output: &str) -> Vec<Ipv4Addr> {
     ifconfig_output
         .lines()
@@ -210,39 +153,12 @@ fn current_pool_aliases() -> Vec<Ipv4Addr> {
     parse_pool_aliases(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// Must lead every non-empty ruleset below. Without it, a `rdr ... ->
-/// 127.0.0.1 port <host_port>` rule makes that host port unreachable over
-/// plain loopback: a direct `127.0.0.1:<host_port>` connection hangs in
-/// `SYN_RCVD` because pf treats the reply — which *is* sourced from the
-/// redirect target — as a packet needing reverse translation, and rewrites
-/// it to come from the virtual IP instead. The client never dialled that
-/// address, so it drops the SYN-ACK and the handshake never finishes.
-///
-/// That is not a corner case: `web::proxy` dials exactly those published
-/// `127.0.0.1:<host_port>` backends, so any container with *both* a raw
-/// port and an HTTP domain would serve fine on `*.fghj.raw.internal` and
-/// fail with an empty reply on `*.fghj.internal` — the two zones breaking
-/// each other for the same container.
-///
-/// Excluding loopback-to-loopback traffic from translation entirely fixes
-/// it, and can never shadow a real rule: every `rdr` below matches a
-/// `POOL_BASE/16` destination, which is not in `127.0.0.0/8`. Written as
-/// the whole `/8` rather than bare `127.0.0.1` so it also covers
-/// `web::proxy::PROXY_IP`.
-///
-/// Verified against live pf, not reasoned about: with this line both a
-/// direct `127.0.0.1:<host_port>` connection and the redirected virtual-IP
-/// path answer; without it only the latter does. Dropping `pass` from the
-/// `rdr` rules does *not* help, so this is the translation rule itself
-/// matching, not state it created.
+/// Must lead every non-empty ruleset. Without it pf reverse-translates replies
+/// from the redirect target, so a direct `127.0.0.1:<host_port>` connection (as
+/// `web::proxy` makes) hangs in `SYN_RCVD`. Covers all of `127/8`, including
+/// `PROXY_IP`; can't shadow a real rule, since every `rdr` targets the pool.
 const LOOPBACK_EXEMPTION: &str = "no rdr on lo0 inet proto tcp from 127.0.0.0/8 to 127.0.0.0/8\n";
 
-/// Renders our anchor's full content from scratch — a declarative
-/// full-rewrite of *just our own anchor*, same as `hosts_file::sync`'s "own
-/// the whole managed block" approach, rather than incremental per-rule
-/// add/remove. Safe to fully rewrite every tick because `fghjd` is this
-/// anchor's sole owner by construction (nothing else loads into an anchor
-/// named `fghjd`).
 fn render_ruleset(routes: &[RouteSpec]) -> String {
     if routes.is_empty() {
         return String::new();
@@ -277,7 +193,6 @@ pub(super) fn remove_lo0_alias(ip: Ipv4Addr) -> Result<()> {
     run(Command::new("ifconfig").args(["lo0", "-alias", &ip.to_string()]))
 }
 
-/// Reads `ifconfig lo0` live and reports whether `ip` is on it.
 pub(super) fn has_lo0_alias(ip: Ipv4Addr) -> Result<bool> {
     let output = Command::new("ifconfig")
         .arg("lo0")
@@ -292,9 +207,6 @@ pub(super) fn has_lo0_alias(ip: Ipv4Addr) -> Result<bool> {
     Ok(lo0_has_alias(&String::from_utf8_lossy(&output.stdout), ip))
 }
 
-/// Whether `ifconfig lo0` output carries `ip` as an `inet` address.
-/// Separated from the `ifconfig` call so the parse is testable without a
-/// loopback interface to point it at.
 fn lo0_has_alias(ifconfig_output: &str, ip: Ipv4Addr) -> bool {
     let needle = ip.to_string();
     ifconfig_output.lines().any(|line| {
@@ -303,9 +215,6 @@ fn lo0_has_alias(ifconfig_output: &str, ip: Ipv4Addr) -> bool {
     })
 }
 
-/// Removes a previously-spliced managed block (if any) from `pf.conf`
-/// content — used both to clear the way for a fresh splice and, on its own,
-/// to produce the "restore pf.conf to its unmodified state" content.
 fn strip_managed_block(conf: &str) -> String {
     let mut out = Vec::new();
     let mut in_block = false;
@@ -325,12 +234,8 @@ fn strip_managed_block(conf: &str) -> String {
     out.join("\n") + "\n"
 }
 
-/// Inserts `insert_lines` right after the last existing `nat-anchor`/
-/// `rdr-anchor` line: pf requires `translation` rules (nat/rdr) to precede
-/// `filtering` rules (plain `anchor`, `block`, `pass`) in the ruleset text,
-/// so anywhere in the translation section works; falls back to just before
-/// the first filter-type `anchor` line, or the end of the file, if a
-/// customized `pf.conf` doesn't have the expected hooks.
+/// pf requires translation rules before filtering rules. Falls back to before
+/// the first filter `anchor`, or the end, for a customized `pf.conf`.
 fn insert_after_translation_hooks(conf: &str, insert_lines: &[&str]) -> String {
     let lines: Vec<&str> = conf.lines().collect();
     let insert_at = lines
@@ -354,10 +259,7 @@ fn insert_after_translation_hooks(conf: &str, insert_lines: &[&str]) -> String {
     out.join("\n") + "\n"
 }
 
-/// Splices fghjd's one-time anchor hook line into a copy of `pf.conf`'s
-/// content — idempotent: stripping then reinserting an already-installed
-/// hook reproduces the same content, so callers can compare before/after and
-/// skip writing the file back when nothing changed.
+/// Idempotent, so callers can skip writing when nothing changed.
 fn install_anchor_hook(conf: &str) -> String {
     let cleaned = strip_managed_block(conf);
     insert_after_translation_hooks(
@@ -366,10 +268,6 @@ fn install_anchor_hook(conf: &str) -> String {
     )
 }
 
-/// Ensures the `rdr-anchor "fghjd"` hook exists in `/etc/pf.conf`, writing
-/// the file only the first time (or if something else stripped it since) —
-/// after that, every tick's `install_anchor_hook` output is byte-identical
-/// to what's already on disk, so no write happens.
 fn ensure_anchor_hook_installed() -> Result<()> {
     let conf = std::fs::read_to_string(PF_CONF_PATH)
         .with_context(|| format!("failed to read {PF_CONF_PATH}"))?;
@@ -382,9 +280,7 @@ fn ensure_anchor_hook_installed() -> Result<()> {
     Ok(())
 }
 
-/// Removes fghjd's anchor hook from `/etc/pf.conf`, restoring it to its
-/// pristine state — called on a clean `clear()` only; if fghjd is killed
-/// instead, the leftover hook is a harmless no-op anchor point.
+/// Clean `clear()` only; a leftover hook with an empty anchor is harmless.
 fn remove_anchor_hook() -> Result<()> {
     let conf = std::fs::read_to_string(PF_CONF_PATH)
         .with_context(|| format!("failed to read {PF_CONF_PATH}"))?;
@@ -397,21 +293,12 @@ fn remove_anchor_hook() -> Result<()> {
     Ok(())
 }
 
-/// Reloads the top-level ruleset straight from `/etc/pf.conf` on disk — used
-/// only right after *we* just edited that file (installing/removing our own
-/// hook line), so pf picks up the new hook point. This is the one place this
-/// backend still touches the top-level ruleset, and only ever mirrors
-/// whatever is already on disk (including our own just-written edit), never
-/// a synthesized/spliced-in-memory version — so it can't clobber any
-/// live-only state another tool injected, since it doesn't touch anything
-/// beyond what's already persisted.
+/// Only after editing `/etc/pf.conf` ourselves, and only from disk, so it can't
+/// clobber anything beyond what's already persisted.
 fn reload_top_level_ruleset_from_disk() -> Result<()> {
     run(Command::new("pfctl").args(["-f", PF_CONF_PATH]))
 }
 
-/// Replaces fghjd's own named anchor's content — never touches the
-/// top-level ruleset or any other anchor, so it cannot clobber anything else
-/// on the system, live or on disk.
 fn load_named_anchor_ruleset(routes: &[RouteSpec]) -> Result<()> {
     let ruleset = render_ruleset(routes);
     let mut child = Command::new("pfctl")
@@ -467,8 +354,6 @@ mod tests {
         assert!(!lo0_has_alias(output, Ipv4Addr::new(127, 222, 0, 2)));
     }
 
-    /// `127.222.0.1` is a prefix of `127.222.0.10`, so a naive `contains`
-    /// on the whole output would report an alias that isn't there.
     #[test]
     fn a_longer_address_sharing_our_prefix_is_not_a_match() {
         let output = "\tinet 127.222.0.10 netmask 0xff000000\n";
@@ -509,12 +394,7 @@ mod tests {
         );
     }
 
-    /// The regression this guards is not "a line is missing" but "the HTTP
-    /// zone breaks whenever the raw zone is in use": without the exemption
-    /// first, pf reverse-translates replies out of the redirect target, and
-    /// `web::proxy`'s `127.0.0.1:<host_port>` backend dial hangs. Order
-    /// matters — pf takes the first matching translation rule — so this
-    /// asserts position, not just presence.
+    /// pf takes the first matching translation rule, so position matters.
     #[test]
     fn every_ruleset_exempts_loopback_to_loopback_before_any_redirect() {
         let routes = vec![

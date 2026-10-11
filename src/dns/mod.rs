@@ -10,86 +10,36 @@ use crate::daemon_log;
 
 mod macos;
 
-/// The zone this server is authoritative for. Every node's domain
-/// (`orchestrator::start_node`) is derived into this zone from its id and
-/// workspace — never author-declared, so nothing outside this zone needs
-/// answering.
 pub(crate) const ZONE: &str = "fghj.internal";
 const ZONE_SUFFIX: &str = ".fghj.internal";
 
-/// The raw/direct zone: reachable in-network via Docker's own embedded DNS
-/// already (a node's `raw_domain` is a real Docker network alias — see
-/// `orchestrator/`), and — once a `raw_net` virtual IP is answered for it here —
-/// reachable from the host too, NAT'd straight to the container's real
-/// published port. Never TLS-terminated, never certified (`cert_eligible`
-/// only matches `ZONE`), and never answered with the shared `ANSWER`
-/// constant: every name under this zone gets its own distinct
-/// `raw_net::resolve` address instead.
+/// Answered per name with a `raw_net::resolve` virtual IP, never TLS.
 pub(crate) const ZONE_RAW: &str = "fghj.raw.internal";
 
-/// Every workspace runs on one machine, so every `*.fghj.internal` name
-/// resolves to the same place regardless of which service it names — the
-/// TLS reverse proxy (`web::proxy`, SPEC.md Subsystem C) is what routes by name
-/// once it terminates on this address. The host server always answers with
-/// this for `ZONE`; the in-network sidecar (`fghj-sidecar.rs`) answers with
-/// its own discovered IP instead; a `ZONE_RAW` name gets its own distinct
-/// virtual IP instead of this constant at all — see `ZoneSource::answer_for`.
-///
-/// This is the proxy's own dedicated loopback alias, not `127.0.0.1` — see
-/// [`crate::web::proxy::PROXY_IP`] for why. Only ever handed to clients on
-/// *this* host: `/etc/resolver/fghj.internal` points macOS's resolver at
-/// this server, and containers use the sidecar's resolver instead, so the
-/// address never has to be meaningful anywhere but here.
+/// The host server's answer for `ZONE`; the proxy routes by name from there.
+/// Only ever handed to clients on this host.
 pub const ANSWER: Ipv4Addr = crate::web::proxy::PROXY_IP;
 
-/// Short TTL: this is a dev-loop tool, not a public zone, so answers should
-/// never be cached long enough to survive a `fghjd` restart onto a different
-/// answer.
 const ANSWER_TTL: u32 = 5;
 
 const TYPE_A: u16 = 1;
 const CLASS_IN: u16 = 1;
 
-/// Whether `qname` (already lowercased) is the zone apex or a subdomain of
-/// it. `pub(crate)` so `web::ca::DynamicCertResolver` can reuse the exact same
-/// "is this name ours" rule rather than re-deriving it.
 pub(crate) fn in_zone(qname: &str) -> bool {
     qname == ZONE || qname.ends_with(ZONE_SUFFIX)
 }
 
-/// Whether `qname` (already lowercased) is `zone` itself or a subdomain of
-/// it — the same apex-or-subdomain rule `in_zone` hardcodes for the one
-/// fixed `ZONE`, generalized so it can also be applied to a user-declared
-/// `#Service.wildcard_hosts` suffix at query time.
 pub(crate) fn matches_zone(qname: &str, zone: &str) -> bool {
     qname == zone || qname.ends_with(&format!(".{zone}"))
 }
 
-/// Whether a DNS server (`serve`) should claim authority for a query name,
-/// and if so, which IP to answer with — the general "is this mine, and what
-/// do I say" hook. Implemented by `WorkspaceRegistry` in `daemon/` (the
-/// host server: `ANSWER` for `in_zone(qname)`/an active `wildcard_hosts`
-/// suffix, a per-node `raw_net::resolve` address under `ZONE_RAW`,
-/// or `None`) and by `FileRoutes` in `fghj-sidecar.rs` (the in-network
-/// sidecar: its own discovered IP for anything already in its polled route
-/// table, `None` otherwise) — one server, two entirely different notions of
-/// "recognized" and "what to answer", both expressed the same way.
+/// Implemented by the registry on the host and by `FileRoutes` in the sidecar.
 pub trait ZoneSource: Send + Sync {
     fn answer_for(&self, qname: &str) -> Option<Ipv4Addr>;
 }
 
-/// IANA reserved special-use TLDs (RFC 2606 / 6762) — never delegated on the
-/// real internet, so a hostname under one of these can't collide with a real
-/// production domain. This is the eligibility gate for an `#AdditionalHost`
-/// to get a certificate from fghj's local CA at all (see
-/// `web::ca::DynamicCertResolver::resolve_for`); anything else is treated as
-/// potentially real and only ever gets proxied over plain HTTP, never
-/// certified.
-/// `pub(crate)` so `web::ca` can build the signing CA's X.509
-/// `nameConstraints` from this exact list rather than restating it. The
-/// constraint set and `cert_eligible` have to agree: a name fghj is willing
-/// to issue for but the certificate forbids would fail verification at the
-/// client with an error naming neither.
+/// IANA special-use TLDs (RFC 2606/6762), which can't collide with a real
+/// domain. `web::ca` builds its `nameConstraints` from this list.
 pub(crate) const RESERVED_ALIAS_TLDS: &[&str] = &["local", "test", "internal", "localhost"];
 
 pub fn is_reserved_alias(host: &str) -> bool {
@@ -98,17 +48,8 @@ pub fn is_reserved_alias(host: &str) -> bool {
         .any(|tld| host == *tld || host.ends_with(&format!(".{tld}")))
 }
 
-/// The one rule for whether `name` can ever get a certificate from fghj's
-/// local CA: an in-zone `*.fghj.internal` name always can (that's the zone
-/// this whole tool exists to serve), and anything else only can if it's
-/// under a reserved-and-never-real TLD *and* actually routed to something —
-/// never a blanket "any `.local`-shaped SNI gets a cert," which would let a
-/// browser mint trust for a name nothing in this workspace declared. A real,
-/// non-reserved-TLD hostname (e.g. a third-party OAuth callback host) is
-/// never eligible, `routed` or not — see `web::ca::DynamicCertResolver::resolve_for`,
-/// the one caller that actually mints certs off this, and `orchestrator::start_node`,
-/// which uses it to tell the UI whether a route can ever be linked as
-/// `https://` at all.
+/// In-zone names always; others only under a reserved TLD *and* routed, so a
+/// browser never gets trust for a name nothing declared.
 pub(crate) fn cert_eligible(name: &str, routed: bool) -> bool {
     in_zone(name) || (is_reserved_alias(name) && routed)
 }
@@ -120,17 +61,11 @@ struct Query {
     qname: String,
     qtype: u16,
     qclass: u16,
-    /// The raw QNAME+QTYPE+QCLASS bytes as received, echoed back verbatim in
-    /// the response's question section (RFC 1035 preserves the original
-    /// case/encoding of the question).
+    /// Echoed verbatim: RFC 1035 preserves the question's case.
     question_bytes: Vec<u8>,
 }
 
-/// Parses a single-question DNS query. Returns `None` for anything this
-/// minimal server doesn't understand (multi-question messages, compressed
-/// names in the question, truncated packets) — the caller drops those on the
-/// floor rather than replying, same as a real server would for a malformed
-/// request.
+/// `None` for anything this minimal server doesn't handle; the caller drops it.
 fn parse_query(buf: &[u8]) -> Option<Query> {
     if buf.len() < 12 {
         return None;
@@ -177,18 +112,10 @@ fn parse_query(buf: &[u8]) -> Option<Query> {
     })
 }
 
-/// Builds a response for `query`, given the `ZoneSource::answer_for` result
-/// for its qname — `Some(ip)` always gets an authoritative NOERROR, with an
-/// A answer of `ip` if the question was actually an `A`/`IN` lookup, or a
-/// bare NOERROR with zero answers otherwise (the standard way to say "this
-/// name exists, just not with a record of that type"). `None` gets
-/// NXDOMAIN, non-authoritatively — this server was never asked to speak for
-/// it.
 fn build_response(query: &Query, answer: Option<Ipv4Addr>) -> Vec<u8> {
     let zone_hit = answer.is_some();
     let answer_hit = zone_hit && query.qtype == TYPE_A && query.qclass == CLASS_IN;
 
-    // Opcode 0 is a standard query, the only kind this server answers.
     let rcode: u8 = if query.opcode != 0 {
         4 // NOTIMP
     } else if zone_hit {
@@ -225,13 +152,7 @@ fn build_response(query: &Query, answer: Option<Ipv4Addr>) -> Vec<u8> {
     resp
 }
 
-/// Forwards a query this server doesn't recognize verbatim to `upstream`
-/// (Docker's own embedded resolver, in the sidecar's case) over a fresh UDP
-/// socket, and relays whatever comes back to `src` byte-for-byte — pure
-/// passthrough, no re-parsing needed since the reply's transaction ID and
-/// question section already match what the original client sent. Silently
-/// drops the query if `upstream` doesn't answer within `FORWARD_TIMEOUT`,
-/// same as any other DNS server would leave the client to retry or give up.
+/// Pure passthrough: the reply's id and question already match the client's.
 async fn forward_to_upstream(
     query_bytes: &[u8],
     upstream: SocketAddr,
@@ -259,32 +180,16 @@ async fn forward_to_upstream(
     let _ = socket.send_to(&buf[..len], src).await;
 }
 
-/// Binds the DNS listening socket on an OS-assigned ephemeral port, rather
-/// than a fixed one (SPEC.md §5 suggests `5353`, mDNS's conventional port —
-/// but that's exactly why it's a bad pick: `lsof -iUDP:5353` on a real dev
-/// Mac routinely turns up Chrome/Brave/Bonjour already squatting on it for
-/// device discovery). Nothing outside this process needs to know the port in
-/// advance: `install_os_resolver_config` writes whatever port we actually got
-/// into the OS resolver config itself, so there's nothing to collide with.
+/// Ephemeral, not 5353: Chrome and Bonjour routinely hold that. The resolver
+/// config is written with whatever port we got.
 pub async fn bind() -> Result<UdpSocket> {
     UdpSocket::bind(("127.0.0.1", 0))
         .await
         .context("failed to bind DNS server on 127.0.0.1")
 }
 
-/// Serves DNS queries on `socket` forever. Malformed packets (see
-/// `parse_query`) are silently dropped rather than answered — UDP callers
-/// already have to handle no response as "try again or give up". `zones` is
-/// re-consulted fresh on every query (cheap at this server's query volume)
-/// so a name starts/stops answering (or starts answering a different IP)
-/// within one query of whatever backs `zones.answer_for` changing, with no
-/// restart needed. A recognized name is always answered directly with
-/// whatever IP `answer_for` returned for it; an unrecognized one is
-/// forwarded verbatim to `upstream` if set (the sidecar's use case — Docker's
-/// embedded resolver at `127.0.0.11:53`), or answered NXDOMAIN directly if
-/// `upstream` is `None` (the host's use case — the OS never sends this
-/// server an out-of-zone query to begin with, thanks to
-/// `install_os_resolver_config`'s per-domain `/etc/resolver` scoping).
+/// `zones` is consulted per query, so changes apply immediately. Unrecognized
+/// names go to `upstream` (the sidecar) or get NXDOMAIN (the host).
 pub async fn serve(socket: UdpSocket, zones: Arc<dyn ZoneSource>, upstream: Option<SocketAddr>) {
     let port = socket.local_addr().map(|a| a.port()).unwrap_or(0);
     daemon_log::info(format!("fghjd: DNS server listening on 127.0.0.1:{port}"));
@@ -315,17 +220,7 @@ pub async fn serve(socket: UdpSocket, zones: Arc<dyn ZoneSource>, upstream: Opti
     }
 }
 
-/// Routes the OS's resolution of both fixed zones (`*.fghj.internal` and
-/// `*.fghj.raw.internal`), plus any currently-active `wildcard_zones` (a
-/// running container's declared `wildcard_hosts`), to this server, per
-/// SPEC.md §5 Subsystem B ("Native OS Integration"). Only
-/// macOS is wired up today (`/etc/resolver`, the mechanism macOS's system
-/// resolver reads); Linux (`systemd-resolved`) and Windows (NRPT) are called
-/// out in SPEC.md but not implemented, so lookups there need a manual
-/// `/etc/hosts`-style workaround until someone picks that up. Called both at
-/// `activate` time and on every reconcile tick (see `daemon::reconcile`),
-/// since unlike the two fixed zones, wildcard zones come and go with
-/// whichever containers are currently running.
+/// Only macOS is implemented. Rerun as wildcard zones come and go.
 pub fn install_os_resolver_config(port: u16, wildcard_zones: &[String]) -> Result<()> {
     if cfg!(target_os = "macos") {
         let mut zones: Vec<&str> = vec![ZONE, ZONE_RAW];
@@ -340,33 +235,21 @@ pub fn install_os_resolver_config(port: u16, wildcard_zones: &[String]) -> Resul
     }
 }
 
-/// Reverses `install_os_resolver_config`: removes every fghjd-authored
-/// resolver file (the fixed `ZONE` plus any wildcard zone) on a clean
-/// shutdown. Without this, a stopped `fghjd` leaves those names routed at a
-/// now-dead port instead of failing over to normal DNS, until the next
-/// `fghjd` start rewrites them.
+/// Otherwise a stopped fghjd leaves the names pointed at a dead port.
 pub fn clear_os_resolver_config() {
     if cfg!(target_os = "macos") {
         macos::clear_resolver(Path::new(macos::RESOLVER_DIR));
     }
 }
 
-/// What `install_os_resolver_config` has actually installed, read back from
-/// the OS's own configuration rather than from desired state, so drift
-/// between the two shows up. Backs `doctor`'s resolver check and the
-/// telemetry drawer's network-status tab (`daemon/`'s `/daemon/net-status`).
+/// Read back from the OS, so drift from the desired state shows up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OsRouting {
-    /// Where the OS reads this routing from, for messages and hints —
-    /// `/etc/resolver` on macOS.
     pub location: &'static str,
-    /// Every zone currently routed to this server, and the port it points
-    /// at, sorted by zone.
     pub zones: Vec<(String, u16)>,
 }
 
-/// `None` on a platform where `install_os_resolver_config` configures
-/// nothing, so a caller can tell "not routed" from "not supported here".
+/// `None` where unsupported, so callers can tell it from "not routed".
 pub fn os_routing_status() -> Option<OsRouting> {
     if cfg!(target_os = "macos") {
         Some(OsRouting {
@@ -382,9 +265,6 @@ pub fn os_routing_status() -> Option<OsRouting> {
 mod tests {
     use super::*;
 
-    /// Hand-encodes a single-question DNS query, mirroring what a real
-    /// resolver sends, so `parse_query`/`build_response` can be tested
-    /// end-to-end without a socket.
     fn encode_query(id: u16, name: &str, qtype: u16) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend(id.to_be_bytes());
@@ -512,9 +392,6 @@ mod tests {
 
     #[tokio::test]
     async fn bind_uses_an_ephemeral_port_and_never_collides() {
-        // Simulates something else already squatting on a fixed port (e.g.
-        // mDNSResponder/Chrome/Brave routinely do on 5353) — `bind` must
-        // never fail here, since it doesn't ask for any specific port.
         let _busy = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
 
         let a = bind().await.unwrap();
@@ -525,11 +402,6 @@ mod tests {
         );
     }
 
-    /// End-to-end check over a real loopback socket, exercising `serve`
-    /// itself rather than just the pure `parse_query`/`build_response`
-    /// functions it wraps. Carries its own `answer_ip` (rather than always
-    /// `ANSWER`) so the same helper can stand in for either the host server
-    /// or a sidecar-style server answering its own discovered IP.
     struct StaticZones {
         answer_ip: Ipv4Addr,
         wildcard_zones: Vec<String>,
@@ -578,9 +450,6 @@ mod tests {
         assert_eq!(&resp[resp.len() - 4..], &ANSWER.octets());
     }
 
-    /// A sidecar-style server answers with its own discovered IP, not always
-    /// `127.0.0.1` — whatever `ZoneSource::answer_for` returns must actually
-    /// be threaded through, not hardcoded.
     #[tokio::test]
     async fn serve_answers_with_the_configured_answer_ip_not_always_localhost() {
         let sidecar_ip = Ipv4Addr::new(172, 20, 0, 5);
@@ -608,9 +477,6 @@ mod tests {
         assert_eq!(&resp[resp.len() - 4..], &sidecar_ip.octets());
     }
 
-    /// The sidecar's forwarding behavior: a query outside `zones` gets
-    /// relayed byte-for-byte to `upstream`, and whatever `upstream` answers
-    /// gets relayed back to the original client verbatim.
     #[tokio::test]
     async fn serve_forwards_unrecognized_queries_to_upstream_verbatim() {
         let fake_upstream = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
@@ -618,9 +484,6 @@ mod tests {
         tokio::spawn(async move {
             let mut buf = [0u8; 512];
             let (len, src) = fake_upstream.recv_from(&mut buf).await.unwrap();
-            // A canned "reply" — the point is only that these exact bytes
-            // come back to the original client unmodified, not that this is
-            // a well-formed DNS message.
             let canned_reply = [buf[..len].to_vec(), vec![0xDE, 0xAD, 0xBE, 0xEF]].concat();
             fake_upstream.send_to(&canned_reply, src).await.unwrap();
         });
@@ -662,14 +525,11 @@ mod tests {
         let ancount = u16::from_be_bytes([resp[6], resp[7]]);
         assert_eq!(ancount, 1);
 
-        // A name under a zone that isn't currently active must still be
-        // NXDOMAIN — the set is consulted fresh per query, not cached.
         let resp = build_response(&query, None);
         let (_, flags1) = header_flags(&resp);
         assert_eq!(flags1 & 0x0F, 3, "RCODE must be NXDOMAIN once inactive");
     }
 
-    /// Read-only: inspects the real resolver directory without writing it.
     #[test]
     fn os_routing_status_reports_the_platform_mechanism_or_none() {
         let status = os_routing_status();

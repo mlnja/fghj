@@ -1,30 +1,11 @@
-//! Host-reachable raw ports for `fghj.raw.internal` nodes, via a per-node
-//! virtual IP NAT'd (natively, by the OS — `pf` on macOS; `iptables`/
-//! `nftables` on Linux, not yet implemented) to the node's already-published
-//! `127.0.0.1:<host_port>` (every declared container port is already
-//! published there — see `docker.rs`). `raw_domain`/`ports` already exist on
-//! `state::ContainerInfo`; this module is purely additive on top of them.
+//! Host-reachable raw ports for `fghj.raw.internal` nodes: a per-node virtual
+//! IP NAT'd by the OS (`pf` on macOS) to the node's published
+//! `127.0.0.1:<host_port>`.
 //!
-//! Structure: this file holds the platform-agnostic core (virtual IP
-//! allocation, the desired-state shape, the `RawNetBackend` trait, and the
-//! reconcile entrypoint); `macos` holds the macOS-specific `pf`/`ifconfig`
-//! implementation. A future `linux` module would be a pure addition
-//! alongside it — nothing here is macOS-specific.
-//!
-//! `virtual_ip_for` is a pure hash and can collide (negligible odds at
-//! dev-workspace scale, but non-zero — see its doc comment). A collision is
-//! only a real problem when it lands two *active* names on the same
-//! `(virtual_ip, container_port)` pair, since that's what a `pf` rule keys
-//! on. `assign`/`resolve` add a thin, sticky, in-memory layer on top of the
-//! naive hash to fix that: `reconcile` keeps each active name's existing
-//! assignment as long as it doesn't conflict with another active name's
-//! claim, and only (re)computes a name's slot when it's newly active or its
-//! prior slot now genuinely conflicts. This is deliberately *not* persisted
-//! to disk — a restart simply recomputes it from whatever's active at that
-//! moment, which is fine, since nothing about correctness depends on
-//! matching a previous run's specific addresses, only on the DNS answer
-//! path (`resolve`) and the NAT reconciler (`reconcile`) agreeing with each
-//! other while the daemon is up.
+//! `virtual_ip_for` can collide; that only matters for two active names on the
+//! same `(virtual_ip, port)`. `assign` keeps a sticky in-memory table that
+//! moves a name only on a live conflict. Not persisted: the DNS answer and the
+//! NAT rules only have to agree while the daemon is up.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::Ipv4Addr;
@@ -38,62 +19,29 @@ use crate::daemon_log;
 
 mod macos;
 
-/// Base of the address pool fghjd owns exclusively for raw-zone virtual
-/// IPs. See `virtual_ip_for` for why this range.
+/// Owned exclusively by fghjd, so alias pruning can claim the whole range.
 const POOL_BASE: u32 = u32::from_be_bytes([10, 222, 0, 0]);
-/// A `/16`: 65,536 addresses.
 const POOL_SIZE: u32 = 1 << 16;
 
-/// Deterministically maps a raw-zone domain name to a virtual IP inside
-/// `10.222.0.0/16` — a pure function, no persisted state, so the DNS answer
-/// path (`daemon::WorkspaceRegistry::answer_for`) and the NAT reconciler
-/// (`reconcile`, below) always agree on the same address for the same name
-/// without coordinating with each other, and the mapping survives a `fghjd`
-/// restart unchanged.
-///
-/// `10.222.0.0/16` (plain RFC 1918 private space) rather than the
-/// originally-considered `240.0.0.0/8` (Class E — has a real history of
-/// being treated as martian/invalid and silently dropped by BSD-derived
-/// network stacks, macOS's included, even when locally aliased): ordinary,
-/// universally-routable private space, safe to alias onto `lo0`. A
-/// dedicated `/16` gives `MacosPfBackend` a clean "this whole range belongs
-/// to fghjd" invariant for alias pruning, without claiming anywhere near
-/// the full `/8`.
-///
-/// Collisions (two names hashing to the same address) are possible in
-/// principle but negligible in practice at this pool size for the handful
-/// of nodes a dev workspace runs — not worth detecting or handling.
+/// Pure, so DNS and NAT agree without coordinating. `10.222/16` rather than
+/// Class E, which BSD stacks (macOS included) drop even when aliased.
 pub fn virtual_ip_for(name: &str) -> Ipv4Addr {
     let digest = Sha256::digest(name.as_bytes());
     let hash = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
-    // Offset 0 (the pool's own network address) is skipped purely for
-    // tidiness — nothing actually depends on it being unused.
     let offset = 1 + hash % (POOL_SIZE - 2);
     Ipv4Addr::from(POOL_BASE + offset)
 }
 
-/// Inverse of `virtual_ip_for`'s offset step — recovers the `0..POOL_SIZE-2`
-/// slot number an address occupies, so `pick_ip` can probe forward from it.
 fn slot_of(ip: Ipv4Addr) -> u32 {
     u32::from(ip) - POOL_BASE - 1
 }
 
-/// One node's raw-zone identity and its currently-published raw ports —
-/// projected out of `state::ContainerInfo`'s `desired.raw_domain` and
-/// `observed.ports` by `state::query::raw_endpoints`. Comparable and
-/// cloneable so `effects::raw_net` can use it directly as its
-/// `FannedInEffect::Snapshot` (the "did anything actually change" check)
-/// rather than keeping a parallel struct of the same three fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawEndpoint {
     pub raw_domain: String,
-    /// container port -> published host port (`127.0.0.1:<host_port>`).
     pub ports: BTreeMap<String, u16>,
 }
 
-/// One desired NAT rule: traffic to `virtual_ip:container_port` should reach
-/// `127.0.0.1:host_port`. `Serialize`d as-is for the telemetry drawer's
-/// network-status tab (`daemon/`'s `/daemon/net-status`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct RouteSpec {
     pub virtual_ip: Ipv4Addr,
@@ -101,25 +49,14 @@ pub struct RouteSpec {
     pub host_port: u16,
 }
 
-/// The platform-specific half of this feature — one implementation per OS.
-/// `apply` always receives the *complete* desired state (like
-/// `hosts_file::sync`), not a diff, so each backend can implement whatever
-/// internal idempotency strategy suits its own mechanism.
+/// `apply` gets the complete desired state, not a diff.
 pub trait RawNetBackend: Send + Sync {
     fn apply(&self, routes: &[RouteSpec]) -> Result<()>;
     fn clear(&self) -> Result<()>;
-    /// The route set currently installed, per the backend's own last-applied
-    /// record — not recomputed from `RawEndpoint`s, so it reflects reality
-    /// even if a route was applied by an earlier `fghjd` process (or
-    /// couldn't be, on a backend that doesn't support this platform).
+    /// The backend's own last-applied record, not recomputed.
     fn status(&self) -> Vec<RouteSpec>;
 }
 
-/// Backend selection: macOS gets the real `pf`/`ifconfig` implementation,
-/// everything else gets a `NoopBackend` that logs once and does nothing —
-/// the same runtime-`cfg!` pattern `dns::install_os_resolver_config` and
-/// `web::trust::install` already use, so the crate keeps compiling
-/// unconditionally on every platform.
 fn backend() -> &'static dyn RawNetBackend {
     static BACKEND: OnceLock<Box<dyn RawNetBackend>> = OnceLock::new();
     BACKEND
@@ -169,10 +106,6 @@ impl RawNetBackend for NoopBackend {
     }
 }
 
-/// Computes the desired `RouteSpec` set from `endpoints`, using `assigned`
-/// (an up-to-date sticky table from `assign`) in preference to the naive
-/// hash — pure, so it's unit-testable without going through the
-/// process-global `backend()`.
 fn routes_for(endpoints: &[RawEndpoint], assigned: &HashMap<String, Ipv4Addr>) -> Vec<RouteSpec> {
     let mut routes = Vec::new();
     for endpoint in endpoints {
@@ -194,13 +127,8 @@ fn routes_for(endpoints: &[RawEndpoint], assigned: &HashMap<String, Ipv4Addr>) -
     routes
 }
 
-/// Picks a virtual IP for a name given its declared ports and the
-/// `(virtual_ip, port)` pairs already claimed by other active names this
-/// round: keeps `preferred` (its existing sticky assignment, if any) as long
-/// as none of `ports` collide with `claimed`, otherwise starts from the
-/// plain hash and probes forward (wrapping within the pool) until every
-/// port is free. Pure, so it's testable without real hash collisions —
-/// callers can hand it synthetic `claimed` sets directly.
+/// Keeps `preferred` unless a port collides with `claimed`, else probes
+/// forward from the hash.
 fn pick_ip(
     preferred: Option<Ipv4Addr>,
     naive: Ipv4Addr,
@@ -220,20 +148,11 @@ fn pick_ip(
     (0..span)
         .map(|step| Ipv4Addr::from(POOL_BASE + 1 + (start + step) % span))
         .find(|ip| free_at(*ip))
-        // Pool exhausted — never happens at dev-workspace scale — fall back
-        // to the naive address rather than panicking.
         .unwrap_or(naive)
 }
 
-/// Recomputes the sticky name -> virtual-IP table from the currently-active
-/// `endpoints` and whatever was assigned last round (`previous`). A name
-/// keeps its previous slot as long as it doesn't conflict with another
-/// active name's claim on the same `(virtual_ip, container_port)` pair;
-/// only names that are newly active, or whose prior slot now genuinely
-/// conflicts, get (re)computed. A name absent from `endpoints` is simply
-/// dropped — its slot isn't reserved and doesn't affect anyone else's.
-/// Pure (no process-global state), so it's unit-testable directly; see
-/// `reconcile` for the stateful wrapper that feeds it from/to `assignments`.
+/// A name keeps its slot unless it conflicts; names no longer active are
+/// dropped.
 fn assign(
     endpoints: &[RawEndpoint],
     previous: &HashMap<String, Ipv4Addr>,
@@ -241,11 +160,8 @@ fn assign(
     let mut claimed: HashSet<(Ipv4Addr, u16)> = HashSet::new();
     let mut next: HashMap<String, Ipv4Addr> = HashMap::new();
 
-    // Incumbents (already assigned) go first, in a fixed order, so a name
-    // only ever moves because of a live conflict — never merely because a
-    // "better" slot happened to free up elsewhere. Newcomers are resolved
-    // afterwards, also in a fixed order, so simultaneous new arrivals that
-    // collide with each other still resolve deterministically.
+    // Incumbents first, so a name moves only on a live conflict; both groups in
+    // a fixed order, so results are deterministic.
     let mut incumbents: Vec<&RawEndpoint> = Vec::new();
     let mut newcomers: Vec<&RawEndpoint> = Vec::new();
     for endpoint in endpoints {
@@ -277,18 +193,13 @@ fn assign(
     next
 }
 
-/// The sticky assignment table `assign` maintains across `reconcile` ticks —
-/// in-memory only, deliberately not persisted (see the module doc comment).
 fn assignments() -> &'static Mutex<HashMap<String, Ipv4Addr>> {
     static ASSIGNMENTS: OnceLock<Mutex<HashMap<String, Ipv4Addr>>> = OnceLock::new();
     ASSIGNMENTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Resolves a raw-zone name to its virtual IP: the sticky assignment if the
-/// name is (or was, as of the last reconcile tick) active, else the plain
-/// hash — used by `daemon::WorkspaceRegistry::answer_for` so that a name
-/// with no running backing container still gets an answer (consistent with
-/// today's "always answer in-zone" behavior), just one nothing NATs to.
+/// Falls back to the hash, so a name with no running container still gets an
+/// answer.
 pub fn resolve(name: &str) -> Ipv4Addr {
     assignments()
         .lock()
@@ -298,12 +209,6 @@ pub fn resolve(name: &str) -> Ipv4Addr {
         .unwrap_or_else(|| virtual_ip_for(name))
 }
 
-/// Recomputes the sticky assignment table and the desired NAT route set from
-/// `endpoints`, then hands the routes to the platform backend. Called once
-/// per `spawn_reconciler` tick in `daemon/`, mirroring `hosts_file::sync`'s
-/// "recompute the whole desired state from scratch every tick" approach —
-/// except for the assignment table itself, which is intentionally sticky
-/// (see `assign`).
 pub fn reconcile(endpoints: &[RawEndpoint]) -> Result<()> {
     let next = {
         let mut table = assignments().lock().unwrap();
@@ -314,27 +219,13 @@ pub fn reconcile(endpoints: &[RawEndpoint]) -> Result<()> {
     backend().apply(&routes_for(endpoints, &next))
 }
 
-/// Tears down every route this module manages and forgets every sticky
-/// assignment — called from `DaemonControl::deactivate`.
 pub fn clear() -> Result<()> {
     assignments().lock().unwrap().clear();
     backend().clear()
 }
 
-/// Aliases `ip` onto the loopback interface, so a socket can bind it.
-///
-/// Distinct from everything else in this module: `ip` here is *not* a
-/// raw-zone virtual IP and has no `RouteSpec` behind it. It exists for
-/// `web::proxy::PROXY_IP`, the single address the HTTP/HTTPS proxy binds,
-/// which is why `DaemonControl::activate` calls this directly rather than
-/// going through `reconcile`. Keeping it outside `POOL_BASE/16` is what
-/// stops `MacosPfBackend`'s alias pruning — which deletes any pool address
-/// with no live route — from tearing the proxy's own address out from
-/// under it on the next tick.
-///
-/// A no-op off macOS: every other platform this could run on already
-/// routes the whole of `127.0.0.0/8` to loopback, so there is nothing to
-/// alias. macOS only pre-assigns `127.0.0.1` itself, hence the `ifconfig`.
+/// For `web::proxy::PROXY_IP`, not a raw-zone IP. Outside the pool so alias
+/// pruning never removes it. A no-op off macOS, which only assigns `127.0.0.1`.
 pub fn add_loopback_alias(ip: Ipv4Addr) -> Result<()> {
     if cfg!(target_os = "macos") {
         macos::add_lo0_alias(ip)
@@ -343,9 +234,7 @@ pub fn add_loopback_alias(ip: Ipv4Addr) -> Result<()> {
     }
 }
 
-/// Reverses [`add_loopback_alias`]. Safe to call for an address that was
-/// never aliased — `ifconfig -alias` on an unknown address is already the
-/// state we want, so the error is swallowed rather than reported.
+/// An address that was never aliased is fine.
 pub fn remove_loopback_alias(ip: Ipv4Addr) -> Result<()> {
     if cfg!(target_os = "macos") {
         macos::remove_lo0_alias(ip).or(Ok(()))
@@ -354,10 +243,7 @@ pub fn remove_loopback_alias(ip: Ipv4Addr) -> Result<()> {
     }
 }
 
-/// Whether `ip` is currently assigned to loopback, read live rather than
-/// from what was last applied — backs `doctor`'s alias check. `None` on a
-/// platform where [`add_loopback_alias`] has nothing to do; `Err` when the
-/// interface couldn't be read at all.
+/// `None` where unsupported; `Err` when the interface can't be read.
 pub fn loopback_alias_present(ip: Ipv4Addr) -> Option<Result<bool>> {
     if cfg!(target_os = "macos") {
         Some(macos::has_lo0_alias(ip))
@@ -366,8 +252,6 @@ pub fn loopback_alias_present(ip: Ipv4Addr) -> Option<Result<bool>> {
     }
 }
 
-/// The route set currently installed — backs the telemetry drawer's
-/// network-status tab (`daemon/`'s `/daemon/net-status`).
 pub fn current_routes() -> Vec<RouteSpec> {
     backend().status()
 }
@@ -376,7 +260,6 @@ pub fn current_routes() -> Vec<RouteSpec> {
 mod tests {
     use super::*;
 
-    /// Read-only: probes the real loopback interface without changing it.
     /// `192.0.2.1` is TEST-NET-1, which nothing assigns to loopback.
     #[test]
     fn loopback_alias_present_reads_the_live_interface_or_is_none() {
@@ -495,9 +378,6 @@ mod tests {
         }
     }
 
-    /// Brute-forces a pair of distinct names that collide under
-    /// `virtual_ip_for` — expected within a few hundred draws given the pool
-    /// size, so this stays fast and needs no hardcoded magic strings.
     fn find_colliding_pair() -> (String, String) {
         let mut seen: HashMap<Ipv4Addr, String> = HashMap::new();
         for i in 0.. {
@@ -569,16 +449,13 @@ mod tests {
             assigned[&a], assigned[&b],
             "colliding names sharing a port must end up on different virtual IPs"
         );
-        // At least one of the two had to move off the shared naive slot.
         let naive = virtual_ip_for(&a);
         assert!(assigned[&a] != naive || assigned[&b] != naive);
     }
 
     #[test]
     fn assign_does_not_collide_two_names_on_different_ports() {
-        // Same collision pair, but declared on different ports — a real pf
-        // rule is keyed on (ip, port), so sharing an IP here is harmless and
-        // shouldn't trigger a reassignment.
+        // pf rules key on (ip, port), so sharing an IP on different ports is fine.
         let (a, b) = find_colliding_pair();
         let endpoints = vec![endpoint(&a, 80), endpoint(&b, 81)];
         let assigned = assign(&endpoints, &HashMap::new());
@@ -592,8 +469,6 @@ mod tests {
         let endpoints = vec![endpoint(&a, 80), endpoint(&b, 80)];
         let first_round = assign(&endpoints, &HashMap::new());
 
-        // `a` stops; only `b` remains, carrying its `first_round` slot in as
-        // `previous`. Removing its collision partner should not move it.
         let remaining = vec![endpoint(&b, 80)];
         let second_round = assign(&remaining, &first_round);
 
