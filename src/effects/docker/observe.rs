@@ -47,7 +47,6 @@ fn container_observed(node_id: &str, observed: &ContainerObserved) -> Action {
         node_id: node_id.to_string(),
         status: observed.status.clone(),
         published_port: observed.published_port,
-        ip: None,
         ports: observed.ports.clone(),
         exit_code: observed.exit_code,
     }
@@ -77,14 +76,12 @@ mod tests {
                 node_id,
                 status,
                 published_port,
-                ip,
                 ports,
                 exit_code: _,
             } => {
                 assert_eq!(node_id, "web");
                 assert_eq!(status, "running");
                 assert_eq!(published_port, Some(8080));
-                assert_eq!(ip, None);
                 assert_eq!(ports.get("http"), Some(&Some(8080)));
             }
             other => panic!("expected ContainerObserved, got {other:?}"),

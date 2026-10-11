@@ -32,7 +32,6 @@ pub enum Action {
         node_id: String,
         status: String,
         published_port: Option<u16>,
-        ip: Option<String>,
         /// Every declared port, so a plain TCP service's port is visible too.
         ports: BTreeMap<String, Option<u16>>,
         exit_code: Option<i64>,

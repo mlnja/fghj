@@ -28,7 +28,7 @@ questions with two different answers:
 ## Schema: reset, not migrated
 
 Five tables: `owner` and `env` (one row each), `containers` (one row per
-node, with JSON columns for routes, ports and aliases), `logs` and `events`.
+node: its `desired` and `observed` as JSON), `logs` and `events`.
 
 There are no migrations. `PRAGMA user_version` carries a schema version, and
 a database at any other version is dropped and recreated on open. That is

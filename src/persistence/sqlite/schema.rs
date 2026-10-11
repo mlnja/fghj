@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const VERSION: i64 = 2;
+const VERSION: i64 = 3;
 
 const CREATE_TABLES: &str = "
     CREATE TABLE owner (
@@ -19,22 +19,8 @@ const CREATE_TABLES: &str = "
     );
     CREATE TABLE containers (
         node_id TEXT PRIMARY KEY,
-        container_name TEXT NOT NULL,
-        status TEXT NOT NULL,
-        published_port INTEGER,
-        domain TEXT NOT NULL,
-        raw_domain TEXT NOT NULL,
-        routes_json TEXT NOT NULL,
-        additional_hosts_json TEXT NOT NULL,
-        ports_json TEXT NOT NULL,
-        status_port TEXT,
-        config_hash TEXT NOT NULL,
-        synced INTEGER,
-        desired_running INTEGER NOT NULL,
-        terminating INTEGER NOT NULL,
-        exit_code INTEGER,
-        debug_wait INTEGER NOT NULL,
-        source_json TEXT NOT NULL
+        desired TEXT NOT NULL,
+        observed TEXT NOT NULL
     );
     CREATE TABLE logs (
         node_id TEXT NOT NULL,

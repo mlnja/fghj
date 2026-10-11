@@ -286,7 +286,6 @@ impl Orchestrator {
             observed: ContainerObserved {
                 status,
                 published_port,
-                ip: None,
                 ports: port_host_ports,
                 sync: SyncStatus::Synced,
                 exit_code,

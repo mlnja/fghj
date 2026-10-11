@@ -53,7 +53,7 @@ pub struct ContainerSource {
 
 /// What fghj wants. Computed from a `NodeSpec`, never read off a live
 /// container, so `observed != desired` means something.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ContainerDesired {
     /// Set from the intent of the call, never from Docker's status.
     pub running: bool,
@@ -78,11 +78,10 @@ pub struct ContainerDesired {
 }
 
 /// What Docker last reported. Only written from a real inspection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ContainerObserved {
     pub status: String,
     pub published_port: Option<u16>,
-    pub ip: Option<String>,
     /// Every declared port's host binding; `None` if not published.
     pub ports: BTreeMap<String, Option<u16>>,
     pub sync: SyncStatus,

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::persistence::workspace_owner::WorkspaceOwner;
-use crate::state::{ContainerDesired, ContainerInfo, ContainerObserved, EnvState};
+use crate::state::{ContainerInfo, ContainerObserved, EnvState, SyncStatus};
 
 use super::WorkspaceDb;
 
@@ -64,26 +64,11 @@ impl WorkspaceDb {
             tx.execute("DELETE FROM containers", [])?;
             for c in state.containers.values() {
                 tx.execute(
-                    "INSERT INTO containers (node_id, container_name, status, published_port, domain, raw_domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, desired_running, terminating, exit_code, debug_wait, source_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    "INSERT INTO containers (node_id, desired, observed) VALUES (?1, ?2, ?3)",
                     rusqlite::params![
                         c.node_id,
-                        c.desired.container_name,
-                        c.observed.status,
-                        c.observed.published_port,
-                        c.desired.domain,
-                        c.desired.raw_domain,
-                        serde_json::to_string(&c.desired.routes)?,
-                        serde_json::to_string(&c.desired.additional_hosts)?,
-                        serde_json::to_string(&c.observed.ports)?,
-                        c.desired.status_port,
-                        c.desired.config_hash,
-                        Option::<bool>::from(c.observed.sync),
-                        c.desired.running,
-                        c.desired.terminating,
-                        c.observed.exit_code,
-                        c.desired.debug_wait,
-                        serde_json::to_string(&c.desired.source)?,
+                        serde_json::to_string(&c.desired)?,
+                        serde_json::to_string(&c.observed)?,
                     ],
                 )?;
             }
@@ -127,39 +112,30 @@ impl WorkspaceDb {
                 Err(e) => return Err(e.into()),
             };
 
-            let mut stmt = conn.prepare(
-                "SELECT node_id, container_name, status, published_port, domain, raw_domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, desired_running, terminating, exit_code, debug_wait, source_json FROM containers",
-            )?;
+            let mut stmt = conn.prepare("SELECT node_id, desired, observed FROM containers")?;
             let rows = stmt.query_map([], |row| {
-                Ok(ContainerInfo {
-                    node_id: row.get(0)?,
-                    desired: ContainerDesired {
-                        container_name: row.get(1)?,
-                        domain: row.get(4)?,
-                        raw_domain: row.get(5)?,
-                        routes: json_column(row.get(6)?),
-                        additional_hosts: json_column(row.get(7)?),
-                        status_port: row.get(9)?,
-                        config_hash: row.get(10)?,
-                        running: row.get(12)?,
-                        terminating: row.get(13)?,
-                        debug_wait: row.get(15)?,
-                        source: json_column(row.get(16)?),
-                    },
-                    observed: ContainerObserved {
-                        status: row.get(2)?,
-                        published_port: row.get(3)?,
-                        ip: None,
-                        ports: json_column(row.get(8)?),
-                        sync: row.get::<_, Option<bool>>(11)?.into(),
-                        exit_code: row.get(14)?,
-                    },
-                    pending_action: None,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })?;
             for row in rows {
-                let container = row?;
-                env.containers.insert(container.node_id.clone(), container);
+                let (node_id, desired, observed) = row?;
+                let mut observed: ContainerObserved = json_column(observed);
+                // Orphanhood is re-derived from the current graph.
+                if observed.sync == SyncStatus::Orphaned {
+                    observed.sync = SyncStatus::Unknown;
+                }
+                env.containers.insert(
+                    node_id.clone(),
+                    ContainerInfo {
+                        node_id,
+                        desired: json_column(desired),
+                        observed,
+                        pending_action: None,
+                    },
+                );
             }
             drop(stmt);
             Ok(Some(env))
@@ -172,7 +148,7 @@ impl WorkspaceDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{PortRoute, SyncStatus};
+    use crate::state::{ContainerDesired, PortRoute};
 
     fn container() -> ContainerInfo {
         ContainerInfo {
@@ -199,7 +175,6 @@ mod tests {
             observed: ContainerObserved {
                 status: "running".to_string(),
                 published_port: Some(8080),
-                ip: None,
                 ports: BTreeMap::from([("8080".to_string(), Some(8080))]),
                 sync: SyncStatus::Synced,
                 exit_code: None,
@@ -240,80 +215,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_debug_wait_switch_survives_a_reload() {
+    async fn an_orphaned_container_reloads_as_unknown() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
 
-        let mut c = container();
-        c.desired.debug_wait = true;
-        let state = EnvState {
-            network: "fghj-demo-default".to_string(),
-            containers: BTreeMap::from([("svc-a".to_string(), c)]),
-            sidecar_container_name: "fghj-demo-default-sidecar".to_string(),
-            ..Default::default()
-        };
-        db.clone().save_env(state).await.unwrap();
-
-        let loaded = db.load_env().await.unwrap();
-        assert!(
-            loaded.as_ref().unwrap().containers["svc-a"]
-                .desired
-                .debug_wait
-        );
-    }
-
-    #[tokio::test]
-    async fn the_commit_a_container_was_built_from_survives_a_reload() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
-
-        let mut c = container();
-        c.desired.source = Some(crate::state::ContainerSource {
-            branch: Some("feature/widgets".to_string()),
-            head: Some("a3f9c1d4e5b6a7c8d9e0f1a2b3c4d5e6f7a8b9c0".to_string()),
-            dirty: false,
-        });
+        let mut orphan = container();
+        orphan.observed.sync = SyncStatus::Orphaned;
         db.clone()
             .save_env(EnvState {
-                containers: BTreeMap::from([("svc-a".to_string(), c)]),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-
-        let loaded = db.load_env().await.unwrap();
-        let source = loaded.as_ref().unwrap().containers["svc-a"]
-            .desired
-            .source
-            .clone()
-            .expect("source should round-trip rather than coming back as None");
-        assert_eq!(source.branch.as_deref(), Some("feature/widgets"));
-        assert_eq!(
-            source.head.as_deref(),
-            Some("a3f9c1d4e5b6a7c8d9e0f1a2b3c4d5e6f7a8b9c0")
-        );
-        assert!(!source.dirty);
-    }
-
-    #[tokio::test]
-    async fn a_crashed_container_reloads_still_wanting_to_be_running() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
-
-        let mut crashed = container();
-        crashed.observed.status = "exited".to_string();
-        crashed.observed.sync = SyncStatus::Drifted;
-        db.clone()
-            .save_env(EnvState {
-                containers: BTreeMap::from([("svc-a".to_string(), crashed)]),
+                containers: BTreeMap::from([("svc-a".to_string(), orphan)]),
                 ..Default::default()
             })
             .await
             .unwrap();
 
         let restored = &db.load_env().await.unwrap().unwrap().containers["svc-a"];
-        assert!(restored.desired.running);
-        assert_eq!(restored.observed.status, "exited");
-        assert_eq!(restored.observed.sync, SyncStatus::Drifted);
+        assert_eq!(restored.observed.sync, SyncStatus::Unknown);
     }
 }

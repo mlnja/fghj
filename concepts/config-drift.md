@@ -178,12 +178,9 @@ container record — and the two could, and did, disagree. It is the same
 duplication [[state-and-effects]] removed everywhere else; drift was one of
 its last instances.
 
-Persistence is lossy in one specific way, and the lossiness is a decision.
-SQLite stores `synced` as a nullable bool, so `Orphaned` and `Unknown` both
-store as `NULL` and both restore as `Unknown`. The column shape is
-deliberately left alone so an older `fghjd` can still read the database, and
-re-deriving orphanhood on the next sync tick is both cheap and *more correct*
-than trusting a persisted answer: whether a node still exists is a property
+Persistence is lossy in one specific way, and the lossiness is a decision:
+`Orphaned` restores as `Unknown`. Re-deriving orphanhood on the next sync tick
+is both cheap and *more correct* than trusting a persisted answer: whether a node still exists is a property
 of the graph currently on disk, and a verdict from a previous `fghjd`
 lifetime is a guess about a file that has since been re-read.
 

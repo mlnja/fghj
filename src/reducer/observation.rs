@@ -16,7 +16,6 @@ pub(super) fn reduce(
             node_id,
             status,
             published_port,
-            ip,
             ports,
             exit_code,
         } => {
@@ -28,7 +27,6 @@ pub(super) fn reduce(
             {
                 container.observed.status = status;
                 container.observed.published_port = published_port;
-                container.observed.ip = ip;
                 container.observed.ports = ports;
                 container.observed.exit_code = exit_code;
             }
@@ -185,7 +183,7 @@ mod tests {
     use crate::state::testing::{container, workspace};
 
     #[test]
-    fn container_observed_updates_status_and_port_and_ip_and_ports() {
+    fn container_observed_updates_status_and_port_and_ports() {
         let state = workspace(vec![container("web")]);
         let next = reduce(
             &state,
@@ -193,7 +191,6 @@ mod tests {
                 node_id: "web".into(),
                 status: "running".into(),
                 published_port: Some(54321),
-                ip: Some("172.20.0.5".into()),
                 ports: BTreeMap::from([("http".into(), Some(54321)), ("db".into(), None)]),
                 exit_code: None,
             },
@@ -202,7 +199,6 @@ mod tests {
         let c = &next.env.as_ref().unwrap().containers["web"];
         assert_eq!(c.observed.status, "running");
         assert_eq!(c.observed.published_port, Some(54321));
-        assert_eq!(c.observed.ip.as_deref(), Some("172.20.0.5"));
         assert_eq!(c.observed.ports.get("http"), Some(&Some(54321)));
         assert_eq!(c.observed.ports.get("db"), Some(&None));
     }
@@ -216,7 +212,6 @@ mod tests {
                 node_id: "ghost".into(),
                 status: "running".into(),
                 published_port: None,
-                ip: None,
                 ports: BTreeMap::new(),
                 exit_code: None,
             },
@@ -234,7 +229,6 @@ mod tests {
                 node_id: "web".into(),
                 status: "running".into(),
                 published_port: None,
-                ip: None,
                 ports: BTreeMap::new(),
                 exit_code: None,
             },
