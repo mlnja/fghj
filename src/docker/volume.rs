@@ -32,17 +32,17 @@ pub async fn ensure_volume(docker: &Docker, name: &str, project: &str) -> Result
     Ok(())
 }
 
-/// Lists the name of every Docker volume `ensure_volume` has ever labeled
-/// for `run_id`, regardless of `scope` — the read-only counterpart to
-/// `remove_run_scoped_volumes` (which deliberately restricts itself to
-/// `scope: "run"` only). Used by `effects::docker::observe` to discover
-/// what volumes actually exist for a run, since `state::EnvState::volumes`
-/// starts out empty for every run (`effects::docker::converge::mirror_run`
-/// never had anything to populate it from) and there is no other source of
-/// truth for volume identity yet.
-pub async fn list_run_volumes(docker: &Docker, run_id: &str) -> Result<Vec<String>> {
+/// Lists the name of every Docker volume `ensure_volume` has labeled for
+/// `project` (the workspace name). Used by `effects::docker::observe` to
+/// discover what volumes actually exist, since `state::EnvState::volumes`
+/// starts out empty and there is no other source of truth for volume
+/// identity yet.
+pub async fn list_volumes(docker: &Docker, project: &str) -> Result<Vec<String>> {
     let mut filters: HashMap<&str, Vec<String>> = HashMap::new();
-    filters.insert("label", vec![format!("fghj.run={run_id}")]);
+    filters.insert(
+        "label",
+        vec![format!("com.docker.compose.project={project}")],
+    );
     let listed = docker
         .list_volumes(Some(
             ListVolumesOptionsBuilder::new().filters(&filters).build(),

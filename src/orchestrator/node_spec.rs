@@ -374,7 +374,7 @@ impl Orchestrator {
         // A named volume's Docker-side existence is otherwise implicit (the
         // daemon auto-creates one, unlabeled, the first time a bind
         // references it) — `ensure_volume` here labels it so
-        // `docker::remove_run_scoped_volumes` can find it in `stop()`.
+        // `docker::list_volumes` can find it again.
         // `Iterator::map` can't `.await`, hence the explicit loop.
         // Every container gets fghj's trust files, read-only, before its own
         // volumes. The zone's CA is useless to a service that cannot verify

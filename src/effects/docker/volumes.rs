@@ -1,5 +1,5 @@
 //! Volume *discovery*, not full desired/observed diffing: reports what
-//! `docker::list_run_volumes` actually finds for a run into actor state
+//! `docker::list_volumes` actually finds for the workspace into actor state
 //! via `Action::VolumeObserved`, letting `reducer::observation`'s existing
 //! bootstrap-on-first-observation logic (`VolumeInfo::desired` seeded from
 //! the first `VolumeObserved` for a name never seen before) populate
@@ -19,7 +19,7 @@
 //! (`observed.exists == true`), with its `desired` bootstrapped to match —
 //! so a volume that gets deleted out from under `fghj` by hand would *not*
 //! currently show as "missing" (nothing re-reports `exists: false` for a
-//! name that's simply absent from `list_run_volumes`'s result), only a
+//! name that's simply absent from `list_volumes`'s result), only a
 //! volume unexpectedly present becomes visible. That asymmetry is a known
 //! limit, not an oversight.
 

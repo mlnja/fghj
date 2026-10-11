@@ -64,13 +64,7 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     ctx.check_source_paths();
     let flows = ctx.resolve_flows();
 
-    let workspace_name = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf())
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("workspace")
-        .to_string();
+    let workspace_name = workspace_name(workspace);
 
     // Sorted by id so node order — and therefore the frontend's computed
     // layout — is stable across polls. `ctx.nodes` is a HashMap, so without
@@ -114,3 +108,16 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
 // `downloads::DownloadRegistry`, which runs clones in a background thread and
 // streams their output to the UI instead of blocking the request. See
 // `src/downloads.rs`.
+
+/// The name every Docker object of `workspace` is derived from — the
+/// checkout directory's own name. Shared so that the code finding those
+/// objects again agrees with the code that named them.
+pub(crate) fn workspace_name(workspace: &Path) -> String {
+    workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf())
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace")
+        .to_string()
+}

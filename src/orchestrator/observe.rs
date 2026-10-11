@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use super::spec::spec_hash;
 use crate::docker;
 use crate::resolver::Graph;
+use crate::resolver::universe::workspace_name;
 use crate::state::{ContainerObserved, EnvState, SyncStatus};
 
 use super::naming::DEFAULT_RUN_ID;
@@ -83,7 +84,7 @@ impl Orchestrator {
     }
 
     /// The read-only Docker-volume counterpart to `refresh` — lists what
-    /// `docker::list_run_volumes` actually finds for the environment right now.
+    /// `docker::list_volumes` actually finds for the environment right now.
     /// Keeps `self.docker` private to this module (nothing outside
     /// `orchestrator/` touches the Docker client directly) while still letting
     /// `effects::docker::observe` discover volume identity without its own
@@ -91,7 +92,7 @@ impl Orchestrator {
     /// Docker call itself fails — same "purely observational, never worth
     /// surfacing as a hard failure" stance as `refresh`.
     pub async fn volume_names(&self) -> Vec<String> {
-        docker::list_run_volumes(&self.docker, DEFAULT_RUN_ID)
+        docker::list_volumes(&self.docker, &workspace_name(&self.workspace))
             .await
             .unwrap_or_default()
     }
