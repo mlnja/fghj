@@ -1,24 +1,7 @@
-//! Everything that reads or writes durable state outside process memory:
-//! per-workspace SQLite (`sqlite`), the two plain-JSON side files
-//! (`index`, `daemon_state`), and the captured workspace-owner identity
-//! (`workspace_owner`). SQLite/JSON are write-through and
-//! read-once-at-boot — nothing reads them live during normal operation,
-//! except `logs`/`events` (`sqlite::logs`/`sqlite::events`), a deliberate,
-//! narrow exception: unbounded append-only telemetry nothing ever branches
-//! a decision on, so they stay direct-write/direct-read.
-//!
-//! Environment state has exactly one writer and one reader.
-//! `effects::persist` writes whatever the workspace actor publishes, so
-//! the database can never hold a view the reducer didn't produce.
-//! `rehydrate::rehydrate` reads it once, when `server::WorkspaceState` is
-//! built, reconciling each container against live Docker and pruning dead
-//! ones; the result seeds the actor
-//! (`daemon::WorkspaceRegistry::wire_actor`).
-//!
-//! `index.json` (`index`) and `daemon-state.json` (`daemon_state`) are
-//! daemon-level infrastructure rather than reducer state, written through
-//! at the point of the relevant mutation (workspace
-//! registration/deregistration; `daemon start`/`stop`).
+//! Durable state: per-workspace SQLite, the JSON index and daemon state, and
+//! the workspace owner. Environment state is written only by `effects::persist`
+//! and read once, at boot, by `rehydrate`. Logs and events are read and written
+//! directly.
 
 pub mod daemon_state;
 pub mod index;

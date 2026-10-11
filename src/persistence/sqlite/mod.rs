@@ -12,11 +12,7 @@ use rusqlite::Connection;
 pub use events::EventEntry;
 pub use logs::{LogGeneration, LogLine};
 
-/// Per-workspace SQLite store at `<workspace>/.fghj/fghj.db` — the durable
-/// twin of `Orchestrator`'s in-memory state, colocated with the workspace
-/// (like `.git`) so it travels with the checkout rather than living only in
-/// `fghjd`'s process memory. Reopened and reconciled against real docker
-/// state on every daemon startup by `Orchestrator::new`.
+/// `<workspace>/.fghj/fghj.db`, so state travels with the checkout.
 pub struct WorkspaceDb {
     conn: Mutex<Connection>,
 }

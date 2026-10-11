@@ -7,20 +7,9 @@ use crate::state::EnvState;
 
 use super::sqlite::WorkspaceDb;
 
-/// The one place SQLite gets read to reconstruct a workspace's boot-time
-/// environment — loads whatever was persisted from a previous `fghjd`
-/// lifetime and reconciles it against real docker state: containers still
-/// alive are restored with freshly-inspected statuses, dead ones (removed
-/// out-of-band, or lost across a reboot with no restart policy) are
-/// dropped, and an environment left with none is deleted rather than
-/// presented as running.
-///
-/// Deliberately more than a plain SQLite read: the reconciliation step is
-/// itself part of "what does a truthful initial `WorkspaceState` look like
-/// right now" — splitting it into a separate, naive "just read the rows"
-/// function would leave two different (and divergent) notions of a
-/// workspace's boot state depending on which one a caller reached for.
-/// `server::WorkspaceState::new` is this function's sole caller.
+/// Reads the persisted environment and reconciles it against Docker: live
+/// containers get fresh statuses, gone ones are dropped, and an environment
+/// left empty is deleted.
 pub async fn rehydrate(
     db: Arc<WorkspaceDb>,
     docker: Arc<bollard::Docker>,
@@ -28,21 +17,14 @@ pub async fn rehydrate(
     let Some(mut state) = db.clone().load_env().await? else {
         return Ok(None);
     };
-    // Per-container, not all-or-nothing: one container having disappeared
-    // (stopped, renamed, mid-recreate at exactly the moment `fghjd`
-    // restarted) doesn't mean the rest did too. Dropping the whole tracked
-    // list on a single miss silently orphaned every other still-running
-    // container from `fghjd`'s bookkeeping — including from the sidecar
-    // route table, since that's built from exactly this list.
+    // Per container: one missing container doesn't mean the rest are gone.
     let mut alive = BTreeMap::new();
     for (node_id, mut c) in state.containers {
         if let Ok(Some(status)) =
             crate::docker::inspect_status(&docker, &c.desired.container_name, "").await
         {
-            // Only `observed` moves — what the persisted row said fghj
-            // *wants* this container to be doing survives the restart
-            // untouched, which is what lets a container that died while
-            // `fghjd` was down come back up still reading as drifted.
+            // Only `observed` moves, so a container that died while fghjd was down still
+            // reads as drifted.
             c.observed.status = status.status;
             alive.insert(node_id, c);
         }
@@ -60,12 +42,6 @@ mod tests {
     use super::*;
     use crate::state::{ContainerDesired, ContainerInfo, ContainerObserved, EnvState};
 
-    /// A container that no longer exists in Docker (inspect returns a 404,
-    /// which `docker::inspect_status` maps to `Ok(None)`) must be dropped
-    /// from the reconciled state, and a run left with no surviving
-    /// containers must be pruned from the db entirely — otherwise a boot
-    /// after every one of its containers was removed out-of-band would
-    /// keep presenting it to the UI as a run with zero containers forever.
     #[tokio::test]
     #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
     async fn drops_dead_containers_and_prunes_a_now_empty_environment() {

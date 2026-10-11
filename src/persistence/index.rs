@@ -3,14 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-// `fghjd` owns many workspaces, each of which owns its own durable state
-// under `<workspace>/.fghj/` (see `sqlite::WorkspaceDb`). This file is just
-// the id -> workspace-root pointer list `fghjd` reads on startup to find
-// them all again — restarting the daemon (crash, reboot, upgrade) shouldn't
-// forget which workspaces were wired.
-
-/// A missing or corrupt index just means "no workspaces known yet", not a
-/// startup failure — every entry is independently re-verified against disk
+/// A missing or corrupt index means no workspaces; each entry is re-verified
 /// by `WorkspaceRegistry::load` anyway.
 pub fn load_index(path: &Path) -> HashMap<String, PathBuf> {
     std::fs::read_to_string(path)

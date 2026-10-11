@@ -1,9 +1,6 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-/// Bumped on any incompatible change. A database at another version is
-/// dropped and recreated rather than migrated: everything in it is either
-/// rebuilt from Docker on the next start or re-sent on the next `wire`.
 const VERSION: i64 = 2;
 
 const CREATE_TABLES: &str = "
@@ -105,7 +102,6 @@ mod tests {
             [],
         )
         .unwrap();
-        // A second open at the current version keeps what's there.
         init(&mut conn).unwrap();
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM env", [], |r| r.get(0))

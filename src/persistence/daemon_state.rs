@@ -3,24 +3,15 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// A small, single-writer bag of daemon-level settings that need to survive
-/// `fghjd` restarting on its own (crash, reboot) — today just whether the
-/// operator last asked for `daemon stop`, but expected to grow more fields
-/// over time (see `DaemonControl` in `daemon/`). Plain JSON with
-/// `#[serde(default)]` fields, same as `load_index`/`save_index`: there's
-/// only ever one writer and no relational structure here, so a new field is
-/// just a new struct field, no migration machinery needed.
+/// Daemon-level settings that survive a restart. Plain JSON: one writer, so a
+/// new field needs no migration.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct DaemonState {
-    /// Set by `fghj daemon stop`, cleared by `fghj daemon start`. Checked at
-    /// `fghjd` startup so a crash/reboot restart comes back idle instead of
-    /// silently reactivating behind the operator's back.
     #[serde(default)]
     pub idle_requested: bool,
 }
 
-/// A missing or corrupt file just means "defaults" — there's nothing to
-/// reconcile against, unlike the workspace index.
+/// A missing or corrupt file means defaults.
 pub fn load_daemon_state(path: &Path) -> DaemonState {
     std::fs::read_to_string(path)
         .ok()

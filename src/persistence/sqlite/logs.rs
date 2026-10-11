@@ -5,9 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use super::WorkspaceDb;
 
-/// One captured line of container output, tagged with the generation and
-/// per-generation sequence number it belongs to (see [`WorkspaceDb`]'s
-/// `logs` table and [`WorkspaceDb::begin_log_generation`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogLine {
     pub seq: i64,
@@ -16,7 +13,6 @@ pub struct LogLine {
     pub line: String,
 }
 
-/// Summary of one retained log generation, for the UI's generation picker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogGeneration {
     pub generation: i64,
@@ -26,17 +22,7 @@ pub struct LogGeneration {
 }
 
 impl WorkspaceDb {
-    /// Starts a new log generation for `(node_id)`, returning the
-    /// generation number the caller should tag every line it captures from
-    /// here on. Generations are derived live from the table itself (rather
-    /// than tracked in a separate counter) so they stay monotonically
-    /// increasing even as old ones are pruned below.
-    ///
-    /// Retention: only the new generation and the one immediately before it
-    /// are kept — anything older is deleted here, at the moment a new
-    /// generation begins, per the explicit "discard logs more than one
-    /// container old" requirement. This bounds growth without needing a
-    /// separate cleanup pass.
+    /// Returns the new generation number. Keeps only it and the one before.
     pub async fn begin_log_generation(self: Arc<Self>, node_id: String) -> Result<i64> {
         tokio::task::spawn_blocking(move || {
             let conn = self.conn.lock().unwrap();
@@ -56,10 +42,6 @@ impl WorkspaceDb {
         .context("begin_log_generation task panicked")?
     }
 
-    /// Appends captured lines for a generation already opened by
-    /// [`Self::begin_log_generation`]. Batched into one transaction per call
-    /// by the caller (which buffers lines before flushing) rather than one
-    /// transaction per line.
     pub async fn insert_log_lines(
         self: Arc<Self>,
         node_id: String,
@@ -93,9 +75,6 @@ impl WorkspaceDb {
         .context("insert_log_lines task panicked")?
     }
 
-    /// Lists the generations retained for `(node_id)`, most recent
-    /// first, so the UI can offer a "current" vs. "previous (crashed?)"
-    /// picker.
     pub async fn list_log_generations(
         self: Arc<Self>,
         node_id: String,
@@ -122,10 +101,7 @@ impl WorkspaceDb {
         .context("list_log_generations task panicked")?
     }
 
-    /// Loads up to `limit` lines from `generation`, older than `before_seq`
-    /// (or the most recent `limit` lines, if `before_seq` is `None`) —
-    /// backing both the initial load and "scroll up for more history" in the
-    /// UI. Always returned oldest-first, regardless of scan direction.
+    /// Lines older than `before_seq` (or the latest), returned oldest-first.
     pub async fn load_log_history(
         self: Arc<Self>,
         node_id: String,
@@ -178,7 +154,6 @@ mod tests {
             line: text.to_string(),
         };
 
-        // Generation 0.
         let gen0 = db
             .clone()
             .begin_log_generation(node_id.clone())
@@ -190,7 +165,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Generation 1 — still within the retention window, gen0 survives.
         let gen1 = db
             .clone()
             .begin_log_generation(node_id.clone())
@@ -212,8 +186,6 @@ mod tests {
             vec![1, 0]
         );
 
-        // Generation 2 pushes gen0 out of the two-generation retention
-        // window — only 1 and 2 should remain.
         let gen2 = db
             .clone()
             .begin_log_generation(node_id.clone())
@@ -235,7 +207,6 @@ mod tests {
             vec![2, 1]
         );
 
-        // Pagination: the crash generation's lines are still fully readable.
         db.clone()
             .insert_log_lines(node_id.clone(), gen1, vec![line(1, "stack trace")])
             .await

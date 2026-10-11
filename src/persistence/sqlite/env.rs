@@ -9,16 +9,13 @@ use crate::state::{ContainerDesired, ContainerInfo, ContainerObserved, EnvState}
 
 use super::WorkspaceDb;
 
-/// A JSON column that no longer parses into the current shape reads as
-/// empty: the next start rebuilds it, and failing the load would lose every
-/// other container too.
+/// A JSON column that no longer parses reads as empty: the next start rebuilds
+/// it, and failing the load would lose every other container too.
 fn json_column<T: serde::de::DeserializeOwned + Default>(raw: String) -> T {
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
 impl WorkspaceDb {
-    /// Refreshed on every `wire`: the captured `ssh_auth_sock` is only valid
-    /// for the login session that sent it.
     pub async fn set_owner(self: Arc<Self>, owner: WorkspaceOwner) -> Result<()> {
         tokio::task::spawn_blocking(move || {
             self.conn.lock().unwrap().execute(
@@ -152,14 +149,11 @@ impl WorkspaceDb {
                     observed: ContainerObserved {
                         status: row.get(2)?,
                         published_port: row.get(3)?,
-                        // An address only means something on the network the
-                        // container is attached to right now.
                         ip: None,
                         ports: json_column(row.get(8)?),
                         sync: row.get::<_, Option<bool>>(11)?.into(),
                         exit_code: row.get(14)?,
                     },
-                    // An action in flight can't survive the process running it.
                     pending_action: None,
                 })
             })?;
@@ -245,9 +239,6 @@ mod tests {
         assert!(db.load_env().await.unwrap().is_none());
     }
 
-    /// Persisted so an `fghjd` restart doesn't silently drop someone out of
-    /// a halted debug session — the container is still sitting there waiting
-    /// for an attach, so the switch the UI shows has to survive too.
     #[tokio::test]
     async fn the_debug_wait_switch_survives_a_reload() {
         let tmp = tempfile::tempdir().unwrap();
@@ -271,12 +262,6 @@ mod tests {
         );
     }
 
-    /// The commit a container was built from has to survive a restart, or the
-    /// drift report degrades to the verdict without the evidence: `fghjd`
-    /// comes back, recomputes a hash that still differs, and can say
-    /// `Drifted` but no longer what it drifted *from*. It is also the one
-    /// field here that cannot be re-derived afterwards — the checkout has
-    /// since moved, which is the whole point.
     #[tokio::test]
     async fn the_commit_a_container_was_built_from_survives_a_reload() {
         let tmp = tempfile::tempdir().unwrap();
@@ -310,12 +295,6 @@ mod tests {
         assert!(!source.dirty);
     }
 
-    /// The whole reason `desired` and `observed` are stored in separate
-    /// columns: a container fghj wants running but Docker reports as
-    /// `exited` has to come back out of the db still saying both of those
-    /// things. Round-tripping it through the flat shape this replaced would
-    /// have restored it as `desired.running: false` — silently agreeing
-    /// with the crash instead of reporting it as drift.
     #[tokio::test]
     async fn a_crashed_container_reloads_still_wanting_to_be_running() {
         let tmp = tempfile::tempdir().unwrap();
