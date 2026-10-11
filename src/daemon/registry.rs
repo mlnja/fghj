@@ -6,10 +6,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
+use tokio::sync::watch;
 
+use crate::actor::ActorHandle;
 use crate::daemon::workspace_id::workspace_id;
 use crate::server::WorkspaceState;
-use crate::{actor, daemon_log, effects, persistence, registry, state, supervisor};
+use crate::{actor, daemon_log, effects, persistence, state, supervisor};
 
 /// The segment a workspace at `path` contributes to every domain its nodes
 /// derive — `resolve_universe` takes the canonical path's `file_name` as the
@@ -104,13 +106,18 @@ pub struct WorkspaceRegistry {
     by_id: Mutex<HashMap<String, Arc<WorkspaceState>>>,
     index_path: PathBuf,
     docker: Arc<bollard::Docker>,
-    /// The actor for every workspace this registry knows about — the
-    /// canonical `state::WorkspaceState`, authored entirely by the reducer
-    /// and converged to real Docker/DNS/hosts/raw-net state by the effects
-    /// in `docker_converge_tasks` and `effects::spawn_all`. `by_id` holds
-    /// the Docker-facing machinery that carries those actions out, and no
-    /// state of its own.
-    actors: registry::ActorRegistry,
+    /// The actor for every workspace in `by_id` — the canonical
+    /// `state::WorkspaceState`, authored entirely by the reducer and
+    /// converged to real Docker/DNS/hosts/raw-net state by the effects in
+    /// `docker_converge_tasks` and `effects::spawn_all`. `by_id` holds the
+    /// Docker-facing machinery that carries those actions out, and no state
+    /// of its own.
+    ///
+    /// A `watch` rather than a plain map so the daemon-wide fanned-in
+    /// effects (see `subscribe_actors`) can notice a workspace being wired
+    /// or stopped. Only ever changed alongside `by_id`, in `wire_actor` and
+    /// `stop`.
+    actors: watch::Sender<effects::ActorMap>,
     /// Per-workspace `effects::docker::DockerConvergeEffect` driver tasks —
     /// the only thing that ever mutates a workspace's real containers.
     /// Torn down in `stop`.
@@ -174,7 +181,7 @@ impl WorkspaceRegistry {
             by_id: Mutex::new(by_id),
             index_path,
             docker,
-            actors: registry::ActorRegistry::new(),
+            actors: watch::Sender::new(Arc::new(BTreeMap::new())),
             docker_converge_tasks: Mutex::new(HashMap::new()),
         };
         let loaded: Vec<(String, Arc<WorkspaceState>)> = registry
@@ -237,19 +244,25 @@ impl WorkspaceRegistry {
                 "route_table",
             ),
         );
-        self.actors
-            .insert(id.to_string(), registry::WorkspaceHandle { actor: handle });
+        self.actors.send_modify(|actors| {
+            Arc::make_mut(actors).insert(id.to_string(), handle);
+        });
         self.docker_converge_tasks
             .lock()
             .unwrap()
             .insert(id.to_string(), docker_converge_task);
     }
 
-    /// The daemon-wide directory of actors this registry has
-    /// wired — used by `DaemonControl::activate` to subscribe the raw-net
-    /// fanned-in effect.
-    pub fn actors(&self) -> &registry::ActorRegistry {
-        &self.actors
+    /// The actor for workspace `id`, if it is wired.
+    pub fn actor(&self, id: &str) -> Option<ActorHandle> {
+        self.actors.borrow().get(id).cloned()
+    }
+
+    /// A fresh receiver over the set of wired workspaces' actors — what
+    /// `DaemonControl::activate` hands `effects::spawn_all`. Fresh per
+    /// caller for the same reason as `ActorHandle::subscribe`.
+    pub fn subscribe_actors(&self) -> watch::Receiver<effects::ActorMap> {
+        self.actors.subscribe()
     }
 
     /// Resolves (cloning `entry` if needed) and registers a workspace,
@@ -370,7 +383,11 @@ impl WorkspaceRegistry {
     /// same actor state the converge effects do, so what the proxy routes
     /// and what `pf`/`/etc/resolver` were configured for can't disagree.
     pub fn states(&self) -> BTreeMap<String, Arc<state::WorkspaceState>> {
-        self.actors.states()
+        self.actors
+            .borrow()
+            .iter()
+            .map(|(id, actor)| (id.clone(), actor.current()))
+            .collect()
     }
 
     /// The shared Docker client every workspace in this registry runs
@@ -402,11 +419,10 @@ impl WorkspaceRegistry {
                 // published `WorkspaceState` is the only record of what is
                 // running, so dropping the handle first would leave nothing
                 // to tear down and strand the containers.
-                let env = self
-                    .actors
-                    .get(id)
-                    .and_then(|handle| handle.actor.current().env.clone());
-                self.actors.remove(id);
+                let env = self.actor(id).and_then(|actor| actor.current().env.clone());
+                self.actors.send_modify(|actors| {
+                    Arc::make_mut(actors).remove(id);
+                });
                 if let Some(task) = self.docker_converge_tasks.lock().unwrap().remove(id) {
                     task.abort();
                 }

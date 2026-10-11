@@ -136,7 +136,7 @@ impl DaemonControl {
             ),
         );
 
-        let effect_tasks = effects::spawn_all(dns_port, self.registry.actors().subscribe());
+        let effect_tasks = effects::spawn_all(dns_port, self.registry.subscribe_actors());
 
         *self.active.lock().unwrap() = Some(ActiveResources {
             dns_task,

@@ -10,7 +10,7 @@
 //!
 //! Everything here is a pure function of a `BTreeMap<workspace id,
 //! WorkspaceState>` — the same shape `FannedInEffect::extract` receives, and
-//! the shape `registry::ActorRegistry::states` hands out.
+//! the shape `daemon::WorkspaceRegistry::states` hands out.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

@@ -51,8 +51,8 @@ impl FromRequestParts<Arc<WorkspaceRegistry>> for ActorExtractor {
         state: &Arc<WorkspaceRegistry>,
     ) -> Result<Self, Self::Rejection> {
         let query = parts.uri.query().unwrap_or("");
-        match query_param(query, "workspace").and_then(|id| state.actors().get(id)) {
-            Some(handle) => Ok(ActorExtractor(handle.actor)),
+        match query_param(query, "workspace").and_then(|id| state.actor(id)) {
+            Some(actor) => Ok(ActorExtractor(actor)),
             None => Err((
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": "unknown or missing ?workspace=<id>; POST /workspaces first" })),

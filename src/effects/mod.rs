@@ -10,9 +10,14 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-use crate::registry::WorkspaceHandle;
+use crate::actor::ActorHandle;
 use crate::state::WorkspaceState;
 use crate::supervisor;
+
+/// Every currently-wired workspace's actor, by workspace id — what
+/// `daemon::WorkspaceRegistry` publishes so a fanned-in effect can notice a
+/// workspace being wired or stopped and add/drop its forwarder for it.
+pub type ActorMap = Arc<BTreeMap<String, ActorHandle>>;
 
 pub mod dns;
 pub mod docker;
@@ -139,7 +144,7 @@ pub async fn run_effect<E: Effect>(
 /// did, since `extract` needs the full set every time regardless.
 pub async fn run_fanned_in_effect<E: FannedInEffect>(
     mut effect: E,
-    mut registry_rx: watch::Receiver<Arc<BTreeMap<String, WorkspaceHandle>>>,
+    mut registry_rx: watch::Receiver<ActorMap>,
     name: &str,
 ) {
     let changed = Arc::new(tokio::sync::Notify::new());
@@ -164,7 +169,7 @@ pub async fn run_fanned_in_effect<E: FannedInEffect>(
         });
         for (id, handle) in workspaces.iter() {
             forwarders.entry(id.clone()).or_insert_with(|| {
-                let mut rx = handle.actor.subscribe();
+                let mut rx = handle.subscribe();
                 let changed = changed.clone();
                 supervisor::supervise("actor change forwarder", async move {
                     while rx.changed().await.is_ok() {
@@ -176,7 +181,7 @@ pub async fn run_fanned_in_effect<E: FannedInEffect>(
 
         let states: BTreeMap<String, Arc<WorkspaceState>> = workspaces
             .iter()
-            .map(|(id, handle)| (id.clone(), handle.actor.current()))
+            .map(|(id, handle)| (id.clone(), handle.current()))
             .collect();
         let snapshot = effect.extract(&states);
         if last.as_ref() != Some(&snapshot) {
@@ -225,10 +230,7 @@ impl EffectTasks {
 /// `hosts_file::sync`/`dns::install_os_resolver_config` calls and the one
 /// `raw_net` task spawn it used to do individually. `dns_port` is the port
 /// `dns::bind` already bound the DNS server to by the time this is called.
-pub fn spawn_all(
-    dns_port: u16,
-    registry_rx: watch::Receiver<Arc<BTreeMap<String, WorkspaceHandle>>>,
-) -> EffectTasks {
+pub fn spawn_all(dns_port: u16, registry_rx: watch::Receiver<ActorMap>) -> EffectTasks {
     EffectTasks {
         raw_net: supervisor::supervise_forever(
             "raw_net effect",
@@ -254,7 +256,6 @@ mod tests {
     use super::*;
     use crate::action::Action;
     use crate::actor;
-    use crate::registry::{ActorRegistry, WorkspaceHandle};
     use crate::state::WorkspaceState;
     use std::time::Duration;
 
@@ -362,11 +363,12 @@ mod tests {
 
     #[tokio::test]
     async fn fanned_in_effect_aggregates_across_every_registered_workspace() {
-        let registry = ActorRegistry::new();
         let a = actor::spawn(WorkspaceState::default());
         let b = actor::spawn(WorkspaceState::default());
-        registry.insert("a".into(), WorkspaceHandle { actor: a.clone() });
-        registry.insert("b".into(), WorkspaceHandle { actor: b.clone() });
+        let (registry, _rx) = watch::channel(Arc::new(BTreeMap::from([
+            ("a".to_string(), a.clone()),
+            ("b".to_string(), b.clone()),
+        ])));
 
         let converged = Arc::new(std::sync::Mutex::new(Vec::new()));
         let effect = FannedInSum {
@@ -389,9 +391,9 @@ mod tests {
 
     #[tokio::test]
     async fn fanned_in_effect_stops_watching_a_deregistered_workspace() {
-        let registry = ActorRegistry::new();
         let a = actor::spawn(WorkspaceState::default());
-        registry.insert("a".into(), WorkspaceHandle { actor: a.clone() });
+        let (registry, _rx) =
+            watch::channel(Arc::new(BTreeMap::from([("a".to_string(), a.clone())])));
 
         let converged = Arc::new(std::sync::Mutex::new(Vec::new()));
         let effect = FannedInSum {
@@ -400,7 +402,9 @@ mod tests {
         tokio::spawn(run_fanned_in_effect(effect, registry.subscribe(), "test"));
         wait_until(|| !converged.lock().unwrap().is_empty()).await;
 
-        registry.remove("a");
+        registry.send_modify(|actors| {
+            Arc::make_mut(actors).remove("a");
+        });
         // The removal is itself a registry-set change, which the driver
         // reacts to by rebuilding its forwarder set (aborting "a"'s) and
         // reconverging once against the now-empty workspace set.

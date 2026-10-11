@@ -54,8 +54,8 @@ async fn reconcile_loop(daemon: Arc<DaemonControl>) {
                 // Docker actually says into the actor — see
                 // `effects::docker::observe`'s module doc for why this
                 // is the loop's only Docker read.
-                if let Some(handle) = daemon.registry.actors().get(&id) {
-                    effects::docker::observe::report(&state.runs, &handle.actor).await;
+                if let Some(actor) = daemon.registry.actor(&id) {
+                    effects::docker::observe::report(&state.runs, &actor).await;
                 }
             }
         }
@@ -93,10 +93,10 @@ async fn sync_reconcile_loop(daemon: Arc<DaemonControl>) {
             let Ok(graph) = resolver::resolve_universe_async(path).await else {
                 continue;
             };
-            let Some(handle) = daemon.registry.actors().get(&id) else {
+            let Some(actor) = daemon.registry.actor(&id) else {
                 continue;
             };
-            effects::docker::observe::report_config_drift(&state.runs, &handle.actor, &graph).await;
+            effects::docker::observe::report_config_drift(&state.runs, &actor, &graph).await;
         }
     }
 }

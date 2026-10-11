@@ -19,7 +19,6 @@ pub mod hosts_file;
 pub mod persistence;
 pub mod raw_net;
 pub mod reducer;
-pub mod registry;
 pub mod resolver;
 pub mod runs;
 pub mod server;
