@@ -42,13 +42,6 @@ pub struct Report {
     pub checks: Vec<Check>,
 }
 
-impl Report {
-    /// `Warn` doesn't count: that's a feature unavailable, not fghj broken.
-    pub fn has_failures(&self) -> bool {
-        self.checks.iter().any(|c| c.verdict == Verdict::Fail)
-    }
-}
-
 impl Check {
     fn pass(name: &str, title: &str, detail: String) -> Self {
         Self {
@@ -513,22 +506,6 @@ mod tests {
         let untrusted = ca_trust_check(&cert, |_| Some(false));
         assert_eq!(untrusted.verdict, Verdict::Fail);
         assert!(untrusted.hint.unwrap().contains("restart fghjd"));
-    }
-
-    #[test]
-    fn only_a_fail_sets_the_exit_code() {
-        let report = Report {
-            checks: vec![
-                Check::pass("a", "a", "fine".to_string()),
-                Check::warn("b", "b", "meh".to_string(), "do something"),
-            ],
-        };
-        assert!(!report.has_failures());
-
-        let report = Report {
-            checks: vec![Check::fail("c", "c", "broken".to_string(), "fix it")],
-        };
-        assert!(report.has_failures());
     }
 
     #[tokio::test]

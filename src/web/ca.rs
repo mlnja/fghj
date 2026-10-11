@@ -14,6 +14,7 @@ use rcgen::{
     GeneralSubtree, IsCa, Issuer, KeyPair, KeyUsagePurpose, NameConstraints,
 };
 use rustls::crypto::CryptoProvider;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
@@ -69,10 +70,6 @@ pub fn ensure_ca(dir: &Path) -> Result<LoadedCa> {
 
 pub fn ca_cert_path(dir: &Path) -> PathBuf {
     dir.join(CA_CERT_FILE)
-}
-
-pub fn ca_key_path(dir: &Path) -> PathBuf {
-    dir.join(CA_KEY_FILE)
 }
 
 const TRUST_CERT_FILE: &str = "cert.pem";
@@ -274,11 +271,7 @@ fn generate_ca() -> Result<LoadedCa> {
 }
 
 fn pem_to_der(pem: &str) -> Result<CertificateDer<'static>> {
-    let mut reader = std::io::BufReader::new(pem.as_bytes());
-    rustls_pemfile::certs(&mut reader)
-        .next()
-        .context("PEM contains no certificate")?
-        .context("failed to parse PEM certificate")
+    CertificateDer::from_pem_slice(pem.as_bytes()).context("failed to parse PEM certificate")
 }
 
 /// Mints a leaf per SNI on first use: wildcards only match one label. A

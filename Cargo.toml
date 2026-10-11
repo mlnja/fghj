@@ -28,7 +28,6 @@ libc = "0.2"
 rcgen = { version = "0.14.9", features = ["x509-parser"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-rustls-pemfile = "2.2.0"
 rustls-pki-types = "1.15.1"
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.10.9"

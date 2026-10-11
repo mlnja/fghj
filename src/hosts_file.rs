@@ -65,11 +65,7 @@ pub fn managed_hosts(path: &Path) -> Vec<String> {
             _ if line.trim() == BEGIN_MARKER => in_block = true,
             _ if line.trim() == END_MARKER => in_block = false,
             trimmed if in_block => {
-                // `127.0.0.1` too, as older versions wrote, until the next `sync`.
-                if let Some(host) = trimmed
-                    .strip_prefix(&format!("{PROXY_IP} "))
-                    .or_else(|| trimmed.strip_prefix("127.0.0.1 "))
-                {
+                if let Some(host) = trimmed.strip_prefix(&format!("{PROXY_IP} ")) {
                     hosts.push(host.to_string());
                 }
             }
@@ -167,19 +163,6 @@ mod tests {
             !contents.contains("127.0.0.1 shop.local"),
             "managed entries must not claim plain loopback: {contents}"
         );
-    }
-
-    #[test]
-    fn managed_hosts_still_reads_a_block_written_by_an_older_version() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("hosts");
-        fs::write(
-            &path,
-            format!("{BEGIN_MARKER}\n127.0.0.1 legacy.local\n{END_MARKER}\n"),
-        )
-        .unwrap();
-
-        assert_eq!(managed_hosts(&path), vec!["legacy.local".to_string()]);
     }
 
     #[test]

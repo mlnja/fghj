@@ -6,20 +6,11 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer};
 
-/// Kept as a string for the drift test; [`is_valid`] is the actual check.
+/// Kept as a string for the drift test; `why_invalid` is the actual check.
 pub const NAME_PATTERN: &str = "^[a-z0-9][a-z0-9-]*$";
 
 /// The intersection of DNS label, network alias and container name, so nothing
 /// downstream has to escape.
-pub fn is_valid(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
-
 fn why_invalid(s: &str) -> Option<String> {
     if s.is_empty() {
         return Some("a name cannot be empty".into());
@@ -108,7 +99,7 @@ mod tests {
     fn ordinary_names_parse() {
         for ok in ["api", "shop-web", "s3", "a", "0", "x-1-y"] {
             assert!(Name::parse(ok).is_ok(), "{ok} should be valid");
-            assert!(is_valid(ok), "{ok} should be valid");
+            assert!(why_invalid(ok).is_none(), "{ok} should be valid");
         }
     }
 
@@ -131,7 +122,7 @@ mod tests {
         ] {
             let err = Name::parse(bad).unwrap_err();
             assert!(err.contains(expected), "{bad:?} -> {err}");
-            assert!(!is_valid(bad), "{bad:?} should be invalid");
+            assert!(why_invalid(bad).is_some(), "{bad:?} should be invalid");
         }
     }
 
