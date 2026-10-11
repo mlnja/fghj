@@ -1,6 +1,3 @@
-//! Process bootstrap: connecting to Docker and bringing the whole control
-//! API — listeners, CA, proxy, DNS, reconcilers — up and down.
-
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -14,13 +11,8 @@ use crate::web::api::build_router;
 use crate::web::{ca, trust};
 use crate::{daemon_log, dns, persistence, supervisor};
 
-/// Connects to the Docker Engine API, preferring the plain `DOCKER_HOST`/
-/// default-socket convention bollard understands natively, but falling back
-/// to whatever socket the `docker` CLI's *active context* actually points
-/// at. Docker Desktop, OrbStack, colima, etc. all route the `docker` command
-/// through a context rather than the classic `/var/run/docker.sock` — a
-/// concept bollard has no notion of — so without this fallback `fghjd` would
-/// fail to connect on exactly the setups where `docker <cmd>` works fine.
+/// Falls back to the socket of the `docker` CLI's active context: Docker
+/// Desktop, OrbStack and colima don't use the default socket.
 pub fn connect_docker() -> Result<bollard::Docker> {
     match bollard::Docker::connect_with_local_defaults() {
         Ok(docker) => Ok(docker),
@@ -50,22 +42,8 @@ pub fn connect_docker() -> Result<bollard::Docker> {
     }
 }
 
-/// Connects to the Docker Engine API over its local socket, stands up DNS
-/// (Subsystem B) and the TLS reverse proxy (Subsystem C) in front of the
-/// control API, and serves the control API/UI forever. Fails fast if Docker
-/// isn't reachable or any of the fixed/privileged ports (80, 443) or the
-/// system trust store can't be bound/installed, rather than letting that
-/// surface confusingly on the first request.
-///
-/// `fghjd` itself never exits on its own after this point except via a
-/// terminating signal (SIGTERM/SIGINT) — the intent is that it's started at
-/// boot and supervised (launchd/systemd), restarting on crash, for the life
-/// of the machine. `fghj daemon stop`/`start` (see `DaemonControl`) toggle
-/// whether it's actively occupying ports/DNS/`/etc/hosts` without touching
-/// this process's lifecycle at all; a real signal is reserved for an actual
-/// shutdown (service uninstall/restart, system shutdown), at which point we
-/// still deactivate first so we don't leave stale ports/hosts entries behind
-/// for whatever comes next.
+/// Runs until SIGTERM/SIGINT, deactivating first. `fghj daemon stop`/`start`
+/// toggle the active state without ending the process.
 pub async fn run_control_api() -> Result<()> {
     let docker = connect_docker()?;
     docker
@@ -74,12 +52,8 @@ pub async fn run_control_api() -> Result<()> {
         .context("failed to reach the Docker daemon over its socket — is Docker running?")?;
     let docker = Arc::new(docker);
 
-    // The control API's OS-assigned TCP port is what the HTTPS proxy relays
-    // `https://fghj.internal` to internally (see `proxy::serve_https`'s
-    // `control_port` param) — never dialed directly by anything else, so it
-    // doesn't need to be fixed or discoverable. Bound before anything else so
-    // there's something for the proxy to relay to even if activation below
-    // fails partway.
+    // Only the HTTPS proxy dials this, for the zone apex. Bound first so the
+    // proxy has something to relay to even if activation fails.
     let control_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .context("failed to bind control API")?;
@@ -88,12 +62,7 @@ pub async fn run_control_api() -> Result<()> {
         .context("control API socket has no local address")?
         .port();
 
-    // The `fghj` CLI talks to the same control API over a Unix socket
-    // instead — dockerd-style: no port to pick or discover, and access is a
-    // filesystem permission rather than "anything that can reach
-    // 127.0.0.1". `fghjd` runs as root while `fghj` runs as the invoking
-    // user, so the socket needs opening up beyond its default root-only
-    // permissions for the CLI to reach it at all.
+    // The CLI's channel. Opened up beyond root-only, since `fghj` runs as the user.
     let socket_path = socket_path();
     let _ = std::fs::remove_file(&socket_path);
     let cli_listener = tokio::net::UnixListener::bind(&socket_path)
@@ -111,30 +80,16 @@ pub async fn run_control_api() -> Result<()> {
             .await
             .context("CA setup task panicked")??
     };
-    // `cert.pem`/`bundle.pem` under the same dir: the whole mechanism by
-    // which a container trusts fghj's zone, via a plain `volumes:` mount in
-    // its own `.fghj.yaml` — see `ca::refresh_trust_files`. The CA itself
-    // never rotates at runtime, so this only needs to run once here, not on
-    // a periodic reconciler.
     ca::refresh_trust_files(&ca_dir(), &ca).context("failed to refresh CA trust files")?;
 
-    // The same two files once more, into a directory that holds *only* them,
-    // so it can be bind-mounted read-only into every container without
-    // `ca-key.pem` riding along beside it — see `daemon::certs_dir` for why
-    // the key's own directory can't be the one that gets mounted, and
-    // `node_spec`'s `CERTS_MOUNT` bind for where it lands. Created here, up
-    // front, rather than lazily at container-start time: a bind mount whose
-    // host path doesn't exist yet doesn't fail, it makes Docker invent an
-    // empty directory, which looks like fghj shipping an empty trust store.
+    // A directory holding only the trust files, so it can be mounted without
+    // `ca-key.pem` beside it. Created up front: a missing bind source makes Docker
+    // invent an empty directory.
     let certs = certs_dir();
     std::fs::create_dir_all(&certs)
         .with_context(|| format!("failed to create {}", certs.display()))?;
     ca::refresh_trust_files(&certs, &ca).context("failed to refresh container trust files")?;
 
-    // The subordinate CA that actually signs every leaf. The root loaded
-    // above signs only this, and its own key never leaves `ca_dir()` — see
-    // `ca::ensure_signing_ca` for why the key that does leave has to be the
-    // name-constrained one.
     let signing_ca = {
         let dir = ca_dir();
         tokio::task::spawn_blocking(move || ca::ensure_signing_ca(&dir, &ca))
@@ -142,17 +97,8 @@ pub async fn run_control_api() -> Result<()> {
             .context("signing CA setup task panicked")??
     };
 
-    // Overwrite the sidecar's world-readable CA copy now, rather than leaving
-    // it to the next `ensure_sidecar`. Before the signing CA existed, the key
-    // that got copied here was the **root's**, at `0644` — so on every
-    // install that predates this, a trusted root's private key is sitting on
-    // disk readable by any local process, and would stay there until some run
-    // happened to start a sidecar. Doing it at startup makes the upgrade
-    // itself the fix, with no run required.
-    //
-    // Best-effort: this is a cleanup, and failing it should not stop `fghjd`
-    // from coming up — `ensure_sidecar` calls the same function and will
-    // surface a real error if the copy is actually needed.
+    // Rewritten at startup so an install that once copied the root key here is
+    // scrubbed without waiting for a run. Best-effort: `ensure_sidecar` repeats it.
     if let Err(e) =
         tokio::task::spawn_blocking(crate::orchestrator::route_table::refresh_sidecar_ca_copy)
             .await
@@ -163,25 +109,14 @@ pub async fn run_control_api() -> Result<()> {
         ));
     }
 
-    // Trust install last of the CA steps, deliberately. It is the only one
-    // that can fail for a reason outside fghj's control — it needs an
-    // Authorization Services prompt, which a launchd system daemon has no
-    // session to show — and everything above either removes a world-readable
-    // private key or writes files containers depend on. Running it first, as
-    // this used to, meant a machine that could not prompt never reached the
-    // `sidecar-ca` scrub above and kept the old root key on disk.
+    // Last: it is the one step that can fail outside fghj's control (no session
+    // to prompt in), and the steps above must not depend on it.
     tokio::task::spawn_blocking(move || trust::install(&cert_path))
         .await
         .context("CA trust install task panicked")??;
 
-    // Best-effort and non-blocking: not every workspace ends up starting a
-    // run before `fghjd` itself might need to restart, so a slow or failed
-    // fetch here shouldn't hold up `fghjd` starting or fail it outright — a
-    // run that actually needs its sidecar will surface a real error from
-    // `Orchestrator::ensure_sidecar`'s own call to this same function. Doing it
-    // here at all is what usually keeps the cost off the first run: a pull is
-    // fast but not instant, and the fallback path compiles the whole crate
-    // inside a container.
+    // Best-effort prefetch, so the first run doesn't pay for the pull or build;
+    // `ensure_sidecar` surfaces a real error if it's needed.
     {
         let docker = docker.clone();
         supervisor::supervise("sidecar image prefetch", async move {
@@ -195,11 +130,7 @@ pub async fn run_control_api() -> Result<()> {
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());
 
-    // Loaded before the cert resolver: the cert resolver needs it too, to
-    // gate certificate issuance for a reserved-TLD `#AdditionalHost` alias on
-    // "is some running container actually claiming this name as a route"
-    // (see `ca::DynamicCertResolver::resolve_for`), not just "is this in our
-    // own zone".
+    // Before the cert resolver, which gates reserved-TLD alias certs on routes.
     let registry = Arc::new(WorkspaceRegistry::load(docker).await);
 
     let cert_resolver = Arc::new(ca::DynamicCertResolver::new(
@@ -223,16 +154,8 @@ pub async fn run_control_api() -> Result<()> {
     spawn_reconciler(Arc::clone(&daemon));
     spawn_sync_reconciler(Arc::clone(&daemon));
 
-    // `fghjd` starts active by default: it's meant to occupy 80/443 and
-    // *.fghj.internal DNS from the moment the system boots. The one
-    // exception is `daemon.is_idle_requested()` — if the operator's last
-    // explicit `fghj daemon` call was `stop`, a crash or reboot in between
-    // must not silently override that by reactivating anyway; staying idle
-    // here is what makes `fghj daemon stop` a durable instruction rather
-    // than a one-shot action that a flaky Docker daemon or a reboot can undo
-    // behind the operator's back. A bind failure during activation (e.g.
-    // "something else is already listening on 80/443") still fails startup
-    // fast, before the control API ever serves a request.
+    // Stays idle if the last `fghj daemon` call was `stop`, so a crash or reboot
+    // doesn't undo it.
     if daemon.is_idle_requested() {
         daemon_log::info(
             "fghjd: starting idle — last `fghj daemon` action was `stop`; run `fghj daemon start` to reconcile"
@@ -249,9 +172,6 @@ pub async fn run_control_api() -> Result<()> {
         dns::ZONE
     ));
 
-    // Same router, two listeners: the Unix socket is the CLI's channel, the
-    // TCP one is only ever dialed internally by the HTTPS proxy's apex-name
-    // relay (see above) — `Router` is cheap to clone (an `Arc` internally).
     let cli_app = app.clone();
     supervisor::supervise_forever("control socket server", async move {
         if let Err(e) = axum::serve(cli_listener, cli_app).await {

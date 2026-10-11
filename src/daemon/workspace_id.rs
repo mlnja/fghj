@@ -1,11 +1,7 @@
-//! Deriving the stable per-workspace id from its canonical path.
-
 use std::path::Path;
 
-/// Deterministic, URL-safe id for a canonicalized workspace path (FNV-1a of
-/// the path, prefixed with a readable slug of its directory name), so
-/// repeated `fghj ui` calls against the same directory land on the same
-/// workspace instead of registering a duplicate.
+/// FNV-1a of the path with a slug of its name, so re-wiring a directory lands
+/// on the same workspace.
 pub fn workspace_id(path: &Path) -> String {
     let s = path.to_string_lossy();
     let mut hash: u64 = 0xcbf29ce484222325;

@@ -1,6 +1,3 @@
-//! [`DaemonControl`] — the daemon's own lifecycle: the resources that
-//! exist only while it is active, and the durable idle flag.
-
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -10,60 +7,27 @@ use crate::daemon::registry::WorkspaceRegistry;
 use crate::web::{ca, proxy};
 use crate::{daemon_log, dns, effects, hosts_file, persistence, raw_net, supervisor};
 
-/// The pieces of `fghjd` that only exist while it's in the "active" state:
-/// the DNS server, and the HTTP/HTTPS reverse proxy occupying 80/443.
-/// Dropping (aborting) these tasks frees the ports/socket they held.
+/// Aborting these frees the ports they hold.
 pub(crate) struct ActiveResources {
     dns_task: tokio::task::AbortHandle,
     http_task: tokio::task::AbortHandle,
     https_task: tokio::task::AbortHandle,
-    /// Drives `effects::raw_net::RawNetEffect`, `effects::dns::DnsEffect`,
-    /// and `effects::hosts::HostsEffect` for as long as `fghjd` is active —
-    /// the sole remaining callers of `raw_net::reconcile`,
-    /// `dns::install_os_resolver_config`, and `hosts_file::sync` (see
-    /// `spawn_reconciler`'s doc for why that function no longer calls any of
-    /// them directly). Aborted on `deactivate`, so an idle `fghjd` never
-    /// keeps converging pf routes, `/etc/resolver`, or `/etc/hosts`.
     effect_tasks: effects::EffectTasks,
 }
 
-/// `fghjd` itself is meant to run forever — started at boot and restarted on
-/// crash by the OS service manager (launchd/systemd) — but the user still
-/// needs a way to tell it to get out of the way without stopping the whole
-/// process: release ports 80/443, stop answering `*.fghj.internal` DNS
-/// queries, and drop every `#AdditionalHost` entry from `/etc/hosts`, while
-/// staying alive and reachable so a later `fghj daemon start` can reconcile
-/// everything back. `DaemonControl` is that on/off switch: the control API
-/// (always up) holds one of these and toggles `active` in response to
-/// `/daemon/start` and `/daemon/stop`.
+/// The on/off switch behind `fghj daemon start`/`stop`: releases 80/443, DNS
+/// and `/etc/hosts` while the process stays up.
 pub struct DaemonControl {
     pub(crate) registry: Arc<WorkspaceRegistry>,
     pub(crate) cert_resolver: Arc<ca::DynamicCertResolver>,
     pub(crate) provider: Arc<rustls::crypto::CryptoProvider>,
     pub(crate) control_port: u16,
     pub(crate) active: Mutex<Option<ActiveResources>>,
-    /// Epoch-millis timestamp of `spawn_reconciler`'s last completed
-    /// container-status refresh tick while active — surfaced by
-    /// `/daemon/net-status` so the telemetry drawer can show how fresh that
-    /// data is. `/etc/hosts`/`/etc/resolver`/raw-net routes are no longer
-    /// synced on this tick (see `spawn_reconciler`'s doc) — they converge
-    /// continuously via `effects::spawn_all`'s fanned-in effects instead, so
-    /// this field no longer reflects their freshness. `None` until the
-    /// first tick after `fghjd` starts (or while idle).
+    /// Freshness of container status for `/daemon/net-status`. `None` until the
+    /// first tick or while idle.
     pub(crate) last_reconcile_ms: Mutex<Option<u64>>,
-    /// Tracks that the operator's last explicit `fghj daemon` call was
-    /// `stop`, not just that `fghjd` currently happens to be idle in memory.
-    /// Read once at construction from `persistence::DaemonState` at
-    /// `persistence::default_state_path()` — next to the CA (durable,
-    /// survives a reboot) rather than under `/var/run` — then kept in memory
-    /// and written through on every change via `set_idle_requested`; nothing
-    /// else reads or writes `daemon-state.json` directly. "I told it to
-    /// stop" is a standing instruction that should hold until countermanded
-    /// by `fghj daemon start`, not something a crash or a reboot should
-    /// silently discard by reactivating anyway. The path itself is a field
-    /// (defaulting to `persistence::default_state_path()` in production)
-    /// rather than hardcoded in `set_idle_requested`, so tests can point it
-    /// at a temp file instead of the real, root-owned, production path.
+    /// Durable: `daemon stop` should survive a crash or reboot until countermanded.
+    /// Read once at construction, written through by `set_idle_requested`.
     pub(crate) idle_requested: Mutex<bool>,
     pub(crate) daemon_state_path: PathBuf,
 }
@@ -86,11 +50,7 @@ impl DaemonControl {
         Ok(())
     }
 
-    /// Binds the DNS server and the HTTP/HTTPS proxy, installs the OS
-    /// resolver config, and syncs `/etc/hosts` — i.e. makes `fghjd` actually
-    /// reachable at `*.fghj.internal` (and any declared additional hosts).
-    /// A no-op if already active, so it's safe to call from `fghj daemon
-    /// start` unconditionally without checking status first.
+    /// A no-op if already active.
     pub async fn activate(&self) -> Result<()> {
         if self.is_active() {
             return Ok(());
@@ -106,12 +66,8 @@ impl DaemonControl {
             dns::serve(dns_socket, self.registry.clone(), None),
         );
 
-        // Must precede the binds: on macOS only `127.0.0.1` is assigned to
-        // `lo0` out of the box, so binding `PROXY_IP` fails with
-        // `EADDRNOTAVAIL` until the alias exists. Deliberately *not* part of
-        // `raw_net::reconcile`'s route-driven alias set — `PROXY_IP` has no
-        // `RouteSpec`, and has to exist for as long as the daemon is active
-        // even with no workspace wired at all.
+        // Before the binds: macOS only assigns `127.0.0.1` to `lo0`. Not part of
+        // `raw_net::reconcile`, since it must exist with no workspace wired at all.
         raw_net::add_loopback_alias(proxy::PROXY_IP).with_context(|| {
             format!(
                 "failed to alias {} onto lo0 — fghjd needs it to bind its proxy",
@@ -147,19 +103,12 @@ impl DaemonControl {
         Ok(())
     }
 
-    /// Epoch-millis of `spawn_reconciler`'s last completed tick, or
-    /// `None` if it hasn't run yet. See the field doc for what this does and
-    /// doesn't cover.
     pub fn last_reconcile_ms(&self) -> Option<u64> {
         *self.last_reconcile_ms.lock().unwrap()
     }
 
-    /// Reverses `activate`: aborts the DNS/HTTP/HTTPS tasks (freeing the
-    /// ports/socket they held) and clears fghj's managed entries from the OS
-    /// resolver config and `/etc/hosts`. Docker containers already running
-    /// are untouched — they keep running under Docker's own supervision and
-    /// are simply unreachable until the next `activate`. A no-op if already
-    /// idle.
+    /// Running containers are untouched, just unreachable until `activate`. A no-op
+    /// if already idle.
     pub fn deactivate(&self) {
         if let Some(resources) = self.active.lock().unwrap().take() {
             resources.dns_task.abort();
@@ -178,9 +127,7 @@ impl DaemonControl {
                 "fghjd: failed to clear raw-net routes on deactivate: {e}"
             ));
         }
-        // Hands the address back, so an idle fghjd leaves no trace on `lo0`.
-        // `raw_net::clear` above won't do it: `PROXY_IP` sits outside the
-        // raw-zone pool precisely so that pruning can't touch it.
+        // `raw_net::clear` won't: `PROXY_IP` is outside the raw-zone pool on purpose.
         if let Err(e) = raw_net::remove_loopback_alias(proxy::PROXY_IP) {
             daemon_log::warn(format!(
                 "fghjd: failed to remove the {} lo0 alias on deactivate: {e}",
@@ -225,8 +172,6 @@ mod tests {
         let state_path = tmp.path().join("daemon-state.json");
         let daemon = test_daemon_control(state_path.clone()).await;
 
-        // Read once at construction: a freshly-started daemon with no prior
-        // `daemon stop` comes back active, matching the on-disk default.
         assert!(!daemon.is_idle_requested());
 
         daemon.set_idle_requested(true).unwrap();
@@ -239,9 +184,7 @@ mod tests {
             "the change must be written through to disk, not just cached in memory"
         );
 
-        // Mutating the file directly (simulating some other process) must
-        // NOT be observed without going through `set_idle_requested` —
-        // `idle_requested` is read once at boot, not re-read live.
+        // `idle_requested` is read once at boot, not live.
         persistence::save_daemon_state(
             &state_path,
             &persistence::DaemonState {

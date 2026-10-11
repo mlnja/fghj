@@ -1,11 +1,6 @@
-//! Wiring the registry into the TLS proxy and the DNS server as their
-//! source of live routes and zones.
-//!
-//! Both are live *read* paths — a request or query is already in flight and
-//! needs an answer now — so neither is an `effects::Effect`. They still read
-//! the same reducer-owned state the effects converge from, via
-//! `WorkspaceRegistry::states` and the `state::query` projections, so a name
-//! the proxy will route is exactly a name DNS will answer for.
+//! Wires the registry into the TLS proxy and the DNS server. Live read paths,
+//! so not `effects`; they read the same `state::query` projections, so a name
+//! the proxy routes is a name DNS answers for.
 
 use std::net::Ipv4Addr;
 

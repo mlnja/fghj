@@ -1,6 +1,3 @@
-//! [`WorkspaceRegistry`] — the set of wired workspaces, the actor handle
-//! for each, and the route/zone projections the proxy and DNS read.
-
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -13,12 +10,8 @@ use crate::daemon::workspace_id::workspace_id;
 use crate::server::WorkspaceState;
 use crate::{actor, daemon_log, effects, persistence, state, supervisor};
 
-/// The segment a workspace at `path` contributes to every domain its nodes
-/// derive — `resolve_universe` takes the canonical path's `file_name` as the
-/// workspace name and `orchestrator::derive_domain` runs it through `sanitize_label`.
-/// Duplicated here as one small function rather than by calling into the
-/// resolver, because this needs the answer for a workspace that has not been
-/// resolved yet (and must not be, if it is about to be rejected).
+/// Mirrors what `resolve_universe` and `derive_domain` produce, for a workspace
+/// that hasn't been (and may never be) resolved.
 fn domain_label(path: &std::path::Path) -> String {
     crate::util::label::sanitize_label(
         path.file_name()
@@ -27,19 +20,9 @@ fn domain_label(path: &std::path::Path) -> String {
     )
 }
 
-/// Canonicalizes `path` as far as it actually exists, re-appending the
-/// components that don't.
-///
-/// Needed because the nesting check has to run *before*
-/// `resolve_workspace` creates the directory and clones into it — a
-/// rejected wire must not leave a stray clone behind — but a path that
-/// doesn't exist yet cannot be canonicalized at all. Resolving the deepest
-/// existing ancestor is enough: symlinks live in the part that exists, and
-/// the part that doesn't contributes only literal components.
-///
-/// Falls back to `path` unchanged when nothing along it exists, which keeps
-/// this total. The result is only ever fed to a comparison, never used to
-/// open anything.
+/// Canonicalizes the deepest existing ancestor and re-appends the rest, so a
+/// wire can be checked before `resolve_workspace` creates anything. Only used
+/// for comparison.
 fn canonicalize_lossy(path: &std::path::Path) -> PathBuf {
     for ancestor in path.ancestors() {
         if let Ok(real) = std::fs::canonicalize(ancestor) {
@@ -52,27 +35,10 @@ fn canonicalize_lossy(path: &std::path::Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Rejects a `candidate` workspace that would nest with one already wired,
-/// **in either direction** — whether it sits inside an existing workspace or
-/// contains one.
-///
-/// Nesting has to be prevented rather than merely tolerated because a
-/// workspace is the unit `resolve_universe` scans: every sibling directory
-/// under it is a candidate repo. Two overlapping workspaces therefore claim
-/// the same repos, derive duplicate node ids and domains from them, and run
-/// two independent reconcilers over one set of containers. There is no
-/// sensible resolution after the fact, so the only place to catch it is
-/// here, before the second one exists — the same reasoning as the
-/// `domain_label` collision check below.
-///
-/// Checking only the "inside" direction, as this did originally, leaves the
-/// hole wide open: wire `~/work/shop` first and then `~/work`, and the
-/// descendant test is false, so the nesting gets built bottom-up instead.
-///
-/// `Path::starts_with` is component-wise, so `~/work/shop` does not conflict
-/// with `~/work/shop-legacy` the way a string-prefix test would. `candidate`
-/// and `existing` must both already be canonical; re-wiring the exact same
-/// path is not a conflict (that is the idempotent case `resolve` relies on).
+/// Both directions: overlapping workspaces claim the same repos and run two
+/// reconcilers over one set of containers. `Path::starts_with` is
+/// component-wise, so `shop` and `shop-legacy` don't conflict. Both paths must
+/// be canonical.
 fn nesting_conflict(candidate: &std::path::Path, existing: &std::path::Path) -> Option<String> {
     if candidate == existing {
         return None;
@@ -98,36 +64,18 @@ fn nesting_conflict(candidate: &std::path::Path, existing: &std::path::Path) -> 
     None
 }
 
-/// In-memory registry of workspaces the daemon knows about, keyed by id.
-/// Holds only data (path + per-workspace registries) — there is no thread or
-/// listener tied to a workspace; all of them are served off the single axum
-/// router, shared via `Router::with_state`.
 pub struct WorkspaceRegistry {
     by_id: Mutex<HashMap<String, Arc<WorkspaceState>>>,
     index_path: PathBuf,
     docker: Arc<bollard::Docker>,
-    /// The actor for every workspace in `by_id` — the canonical
-    /// `state::WorkspaceState`, authored entirely by the reducer and
-    /// converged to real Docker/DNS/hosts/raw-net state by the effects in
-    /// `docker_converge_tasks` and `effects::spawn_all`. `by_id` holds the
-    /// Docker-facing machinery that carries those actions out, and no state
-    /// of its own.
-    ///
-    /// A `watch` rather than a plain map so the daemon-wide fanned-in
-    /// effects (see `subscribe_actors`) can notice a workspace being wired
-    /// or stopped. Only ever changed alongside `by_id`, in `wire_actor` and
-    /// `stop`.
+    /// A `watch` so the daemon-wide effects notice workspaces being wired or
+    /// stopped. Only changed alongside `by_id`.
     actors: watch::Sender<effects::ActorMap>,
-    /// Per-workspace `effects::docker::DockerConvergeEffect` driver tasks —
-    /// the only thing that ever mutates a workspace's real containers.
-    /// Torn down in `stop`.
+    /// The only thing that mutates a workspace's real containers.
     docker_converge_tasks: Mutex<HashMap<String, tokio::task::AbortHandle>>,
 }
 
 impl WorkspaceRegistry {
-    /// Rebuilds the registry from the central workspace index at the real,
-    /// root-owned path. `load_from` does the actual work — split out so
-    /// tests can point the index at a tempdir instead.
     pub async fn load(docker: Arc<bollard::Docker>) -> Self {
         Self::load_from(persistence::default_index_path(), docker).await
     }
@@ -152,13 +100,8 @@ impl WorkspaceRegistry {
                 )),
             }
         }
-        // `resolve` makes a nesting pair impossible to create, but an index
-        // written by an older fghjd — whose check only looked in the
-        // "inside" direction — can still hold one. Warned about rather than
-        // dropped: the operator may have live runs in both, and silently
-        // de-wiring a workspace is worse than a loud warning. The CLI's
-        // `enclosing_workspace` resolves the ambiguity deterministically
-        // (innermost wins) until one of them is stopped.
+        // An old index can still hold a nested pair. Warned, not dropped: de-wiring a
+        // workspace with live runs is worse. The CLI picks the innermost.
         let loaded_paths: Vec<(String, PathBuf)> = by_id
             .iter()
             .map(|(id, state)| (id.clone(), state.path.clone()))
@@ -197,18 +140,8 @@ impl WorkspaceRegistry {
         registry
     }
 
-    /// Spawns the actor for `id`, seeded with a one-shot snapshot of
-    /// `old.rehydrated` — what a previous `fghjd` lifetime left running,
-    /// reconciled against real Docker once when the workspace was
-    /// constructed — so a freshly-wired workspace with a pre-existing environment
-    /// doesn't start out looking empty, then starts the
-    /// `DockerConvergeEffect` task that's the only thing driving real
-    /// Docker calls from here on. From here the actor is the only store.
-    ///
-    /// Called from both
-    /// `load_from` (startup) and `resolve` (a fresh `fghj ui`/wire) — every
-    /// workspace this registry ever registers also gets a wired actor,
-    /// right at the exact place its `Arc<WorkspaceState>` is born.
+    /// Seeds the actor from `old.rehydrated`, so a workspace with a running
+    /// environment doesn't start out empty.
     fn wire_actor(&self, id: &str, old: &Arc<WorkspaceState>) {
         let seed = state::WorkspaceState {
             env: old.rehydrated.clone(),
@@ -223,11 +156,6 @@ impl WorkspaceRegistry {
                 "docker_converge",
             ),
         );
-        // Persistence and the sidecar route table are both pure functions
-        // of published state, so they are derived here rather than written
-        // by hand at the end of every lifecycle call in `orchestrator/`. See
-        // `effects::persist` and `effects::routes` for why that move fixes
-        // a real class of stale write, not just tidiness.
         supervisor::supervise(
             format!("persist[{id}]"),
             effects::run_async_effect(
@@ -253,44 +181,23 @@ impl WorkspaceRegistry {
             .insert(id.to_string(), docker_converge_task);
     }
 
-    /// The actor for workspace `id`, if it is wired.
     pub fn actor(&self, id: &str) -> Option<ActorHandle> {
         self.actors.borrow().get(id).cloned()
     }
 
-    /// A fresh receiver over the set of wired workspaces' actors — what
-    /// `DaemonControl::activate` hands `effects::spawn_all`. Fresh per
-    /// caller for the same reason as `ActorHandle::subscribe`.
+    /// Fresh per caller, like `ActorHandle::subscribe`.
     pub fn subscribe_actors(&self) -> watch::Receiver<effects::ActorMap> {
         self.actors.subscribe()
     }
 
-    /// Resolves (cloning `entry` if needed) and registers a workspace,
-    /// reusing the existing entry if this path is already known. Errors if
-    /// the path would nest with an already-wired workspace in either
-    /// direction (see [`nesting_conflict`]), or if its folder name collides
-    /// with another workspace's in the domain namespace (see
-    /// [`domain_label`]).
-    ///
-    /// The nesting check runs twice, deliberately. The authoritative pass is
-    /// after `resolve_workspace`, which is the only thing that can produce a
-    /// truly canonical path. But `resolve_workspace` also creates the
-    /// directory and `git clone`s `entry` into it, so checking only there
-    /// means a *rejected* wire still litters the filesystem with a clone.
-    /// The first pass catches that for any path the caller actually named,
-    /// existing or not (see [`canonicalize_lossy`]); only a `None`
-    /// workspace, meaning "the daemon's cwd", falls through to the second.
+    /// The nesting check runs twice: before `resolve_workspace` so a rejected wire
+    /// leaves no clone behind, and after it on the truly canonical path.
     pub async fn resolve(
         &self,
         entry: Option<String>,
         workspace: Option<PathBuf>,
         owner: Option<persistence::WorkspaceOwner>,
     ) -> Result<(String, PathBuf)> {
-        // Best-effort pre-check, before `resolve_workspace` creates
-        // anything. Only possible when the caller named a path we can
-        // resolve now; `None` (meaning "the daemon's cwd") and a
-        // not-yet-existing directory fall through to the authoritative
-        // check below.
         if let Some(canonical) = workspace.as_deref().map(canonicalize_lossy) {
             let conflict = {
                 let by_id = self.by_id.lock().unwrap();
@@ -317,14 +224,8 @@ impl WorkspaceRegistry {
                 if let Some(conflict) = nesting_conflict(&canonical, &state.path) {
                     bail!(conflict);
                 }
-                // Workspaces are keyed by *id* here but by *name* in every
-                // derived domain, and `resolve_route` scans all of them. Two
-                // workspaces whose folder names sanitize alike — `~/work/shop`
-                // and `~/scratch/shop`, which review runs make a normal thing
-                // to want — produce byte-identical domains for their nodes,
-                // and traffic goes to whichever the `BTreeMap` yields first.
-                // There is no way to disambiguate after the fact, so the only
-                // place to catch it is here, before the second one exists.
+                // Workspaces whose folder names sanitize alike derive identical domains, and
+                // `resolve_route` would pick one arbitrarily.
                 if canonical != state.path && domain_label(&canonical) == domain_label(&state.path)
                 {
                     bail!(
@@ -356,9 +257,7 @@ impl WorkspaceRegistry {
             }
         };
 
-        // Refreshed on every `wire`, not just the first — the ssh-agent
-        // socket captured here is only valid for the CLI's current login
-        // session, so a later `wire` from a fresh session should replace it.
+        // On every wire: the ssh-agent socket is only valid for the CLI's session.
         if let Some(owner) = owner {
             state.db.clone().set_owner(owner).await?;
         }
@@ -370,12 +269,8 @@ impl WorkspaceRegistry {
         self.by_id.lock().unwrap().get(id).cloned()
     }
 
-    /// Every wired workspace's reducer-owned state, as of right now — the
-    /// input to the `state::query` projections that back live HTTPS routing
-    /// (`daemon::routing`), DNS answering (ditto), and the network
-    /// telemetry endpoint. A live read path deliberately goes through the
-    /// same actor state the converge effects do, so what the proxy routes
-    /// and what `pf`/`/etc/resolver` were configured for can't disagree.
+    /// Live reads go through the same actor state the effects converge from, so the
+    /// proxy and `pf`/`/etc/resolver` can't disagree.
     pub fn states(&self) -> BTreeMap<String, Arc<state::WorkspaceState>> {
         self.actors
             .borrow()
@@ -384,11 +279,8 @@ impl WorkspaceRegistry {
             .collect()
     }
 
-    /// The shared Docker client every workspace in this registry runs
-    /// through. Exposed for `/daemon/doctor`, which has `DaemonControl` but
-    /// no client of its own and must not make a second one: a fresh
-    /// connection would test whatever `connect_docker` resolves *now*, not
-    /// the daemon the running workspaces are actually using.
+    /// For `/daemon/doctor`: a fresh client would test whatever `connect_docker`
+    /// finds now, not what the workspaces use.
     pub(crate) fn docker(&self) -> Arc<bollard::Docker> {
         Arc::clone(&self.docker)
     }
@@ -402,17 +294,11 @@ impl WorkspaceRegistry {
             .collect()
     }
 
-    /// Stops every live run in the workspace, forgets it in memory, and
-    /// drops it from the central index so a future `fghjd` restart doesn't
-    /// bring it back.
     pub async fn stop(&self, id: &str) -> bool {
         let removed = self.by_id.lock().unwrap().remove(id);
         match removed {
             Some(state) => {
-                // Read the environment *before* deregistering: the actor's
-                // published `WorkspaceState` is the only record of what is
-                // running, so dropping the handle first would leave nothing
-                // to tear down and strand the containers.
+                // Before deregistering: the actor's state is the only record of what runs.
                 let env = self.actor(id).and_then(|actor| actor.current().env.clone());
                 self.actors.send_modify(|actors| {
                     Arc::make_mut(actors).remove(id);
@@ -439,31 +325,23 @@ pub(crate) mod tests {
 
     use super::*;
 
-    /// Shared by `daemon::control`'s tests too. Never dialled — these tests
-    /// are about the workspace index and the resolve rules; the converge
-    /// effect a resolve spawns will fail its first request and go quiet,
-    /// which is the same thing it does when Docker isn't running.
+    /// Never dialled; the converge effect fails its first request and goes quiet.
     pub(crate) fn test_docker() -> Arc<bollard::Docker> {
         Arc::new(crate::docker::undialled_client())
     }
 
     #[test]
     fn domain_label_matches_what_derive_domain_would_produce() {
-        // Same folder name, two parents — the whole point is that the parent
-        // contributes nothing, which is exactly why these collide.
         assert_eq!(
             domain_label(std::path::Path::new("/home/me/work/shop")),
             domain_label(std::path::Path::new("/home/me/scratch/shop"))
         );
-        // And that it really is `sanitize_label`'s output, not the raw name.
         assert_eq!(
             domain_label(std::path::Path::new("/tmp/My Shop")),
             "my-shop"
         );
     }
 
-    /// B4: workspaces are keyed by id but named by folder in every derived
-    /// domain, and `resolve_route` scans all of them.
     #[tokio::test]
     async fn resolve_rejects_a_workspace_whose_name_collides_with_a_wired_one() {
         let tmp = tempfile::tempdir().unwrap();
@@ -483,17 +361,12 @@ pub(crate) mod tests {
             "unexpected error message: {err}"
         );
 
-        // A differently-named sibling is still fine — the check must not have
-        // turned into "one workspace at a time".
         registry
             .resolve(None, Some(tmp.path().join("scratch/other")), None)
             .await
             .unwrap();
     }
 
-    /// A rejected wire must not have created anything: the nesting check
-    /// runs before `resolve_workspace` would `mkdir` the path and clone into
-    /// it.
     #[tokio::test]
     async fn rejecting_a_nested_workspace_does_not_create_its_directory() {
         let tmp = tempfile::tempdir().unwrap();
@@ -541,8 +414,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// The direction the original check missed: wire the child first, then
-    /// the parent, and the nesting gets built bottom-up.
     #[test]
     fn nesting_conflict_rejects_a_candidate_containing_an_existing_workspace() {
         let conflict = nesting_conflict(Path::new("/w"), Path::new("/w/shop"));
@@ -554,13 +425,11 @@ pub(crate) mod tests {
         );
     }
 
-    /// Re-wiring the same path is the idempotent case, not a conflict.
     #[test]
     fn nesting_conflict_allows_rewiring_the_identical_path() {
         assert!(nesting_conflict(Path::new("/w/shop"), Path::new("/w/shop")).is_none());
     }
 
-    /// Component-wise, not string-prefix: these are siblings.
     #[test]
     fn nesting_conflict_allows_a_sibling_sharing_a_name_prefix() {
         assert!(nesting_conflict(Path::new("/w/shop-legacy"), Path::new("/w/shop")).is_none());
@@ -584,7 +453,6 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // re-wiring the same path returns the same id, not a duplicate
         let (id2, _) = registry
             .resolve(None, Some(root.clone()), None)
             .await
@@ -592,11 +460,9 @@ pub(crate) mod tests {
         assert_eq!(id1, id2);
         assert_eq!(registry.list().len(), 1);
 
-        // the index on disk should reflect the single registered workspace
         let persisted = persistence::load_index(&tmp.path().join("workspaces.json"));
         assert_eq!(persisted.get(&id1), Some(&canonical));
 
-        // registering a path inside an already-wired workspace must error
         let nested = root.join("nested-service");
         let err = registry
             .resolve(None, Some(nested), None)
@@ -608,8 +474,6 @@ pub(crate) mod tests {
             "unexpected error message: {err}"
         );
 
-        // ...and so must registering a path that *contains* one, which the
-        // original one-directional check let through.
         let err = registry
             .resolve(None, Some(tmp.path().to_path_buf()), None)
             .await
@@ -620,7 +484,6 @@ pub(crate) mod tests {
             "unexpected error message: {err}"
         );
 
-        // Neither rejection may have registered anything.
         assert_eq!(registry.list().len(), 1);
     }
 
@@ -637,7 +500,6 @@ pub(crate) mod tests {
         assert!(registry.stop(&id).await);
         assert!(registry.get(&id).is_none());
         assert!(!persistence::load_index(&tmp.path().join("workspaces.json")).contains_key(&id));
-        // stopping an unknown id is reported, not a panic
         assert!(!registry.stop(&id).await);
     }
 }
