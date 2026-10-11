@@ -122,7 +122,7 @@ still be there.
 ## Stopping a container is not the same as deleting it
 
 Every teardown path in `fghj` goes through `docker::stop_and_remove`: the
-whole-run `Orchestrator::stop`, the per-node `restart_container`, `start`'s
+whole-run `Orchestrator::stop`, the per-node `restart_node`, `start`'s
 own rollback when a later node fails, and the sidecar. For a long time that
 function was a single call — `remove_container` with `force: true`.
 

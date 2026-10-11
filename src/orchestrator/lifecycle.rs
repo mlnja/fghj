@@ -1,16 +1,14 @@
-//! Per-node lifecycle commands: get, stop, restart, remove.
+//! Environment teardown and per-node stop/remove. Starting goes through
+//! `orchestrate`.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use crate::docker;
-use crate::resolver::Graph;
 use crate::state::{ContainerInfo, EnvState};
 
-use super::health::RunBudget;
 use super::naming::DEFAULT_RUN_ID;
 use super::registry::Orchestrator;
 use super::route_table::sidecar_routes_dir;
-use super::start_node::StartContext;
 
 impl Orchestrator {
     /// Tears the environment down: every container, the sidecar and the
@@ -43,48 +41,6 @@ impl Orchestrator {
         let _ = std::fs::remove_dir_all(sidecar_routes_dir(&state.network));
         docker::remove_network(&self.docker, &state.network).await;
         Ok(())
-    }
-
-    /// (Re)starts a single node's container within an already-running run —
-    /// the per-node counterpart to `ensure_running`'s whole-run
-    /// granularity, backing the Drawer's "Start" button. Always recreates
-    /// from scratch (mirrors `ensure_running`'s stop-then-start dance) so a
-    /// `.fghj.yaml` change since the container last started is actually
-    /// picked up, rather than silently no-op'ing on an already-running one.
-    pub async fn restart_container(
-        &self,
-        graph: &Graph,
-        node_id: &str,
-        network: &str,
-        sidecar_ip: Option<&str>,
-        debug_wait: bool,
-    ) -> Result<ContainerInfo> {
-        let run_id = DEFAULT_RUN_ID;
-        let lock = self.node_lock(node_id);
-        let _guard = lock.lock().await;
-        let Some(node) = graph.nodes.iter().find(|n| n.id == node_id) else {
-            bail!("no such node: {node_id}");
-        };
-        // Restarting one node is not sharing a budget with anything, so it
-        // gets a full per-node health allowance.
-        self.start_node(
-            graph,
-            node,
-            StartContext {
-                run_id,
-                network,
-                sidecar_ip,
-                budget: &RunBudget::single_node(),
-                debug_wait,
-                // Whether anything could be waiting on it: the caller
-                // restarts its dependents after this returns.
-                wait_ready: graph
-                    .edges
-                    .iter()
-                    .any(|e| e.needed_to_start() && e.to == node.id),
-            },
-        )
-        .await
     }
 
     /// Stops a single node's container without removing it or touching the

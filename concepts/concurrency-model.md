@@ -23,10 +23,10 @@ sidecars, separate databases, separate route-table directories. Nothing in
 
 ## Per-node locks, not a workspace lock
 
-`restart_container`, `stop_container`, and `remove_container` each take the
-lock for **their node only** — `Orchestrator::node_lock(run_id, node_id)`,
-which hands out a `tokio::sync::Mutex` created on first use and keyed by the
-pair.
+Every container start (`bring_up`, behind both `ensure_running` and
+`restart_node`), `stop_container`, and `remove_container` each take the lock
+for **their node only** — `Orchestrator::node_lock(node_id)`, which hands out
+a `tokio::sync::Mutex` created on first use and keyed by node id.
 
 Two calls for the *same* node genuinely cannot interleave: each does
 `docker::stop_and_remove` and then recreates a container with the same fixed
@@ -84,9 +84,9 @@ The unit that is bounded is therefore the whole run. `HealthBudget` carries a
 deadline shared by every node in one `start` / `ensure_running` call. Each
 node's allowance is *whatever is left, capped at the per-node limit* — the
 cap so that one slow node cannot consume the entire run's allowance, the
-remainder so that the run as a whole terminates. A single-node
-`restart_container` shares its budget with nothing and gets the full per-node
-limit.
+remainder so that the run as a whole terminates. A node Start
+(`restart_node`) goes through the same path, so it gets the same budget,
+shared with whatever requirements and dependents it brings up alongside.
 
 Running out truncates the **wait**, not the run. This is the same
 best-effort call `wait_for_healthy` already made at its own limit: containers

@@ -233,7 +233,7 @@ The switch is a value in `desired`, and `PendingAction::Starting` is already
 the convergence that makes a container match its desired state. So
 `Action::RunNodeDebugWaitRequested` records the new desire, sets
 `desired.running = true`, and queues `Starting`; `effects::docker::converge`
-reads `desired.debug_wait` back out when it calls `restart_container`. There
+reads `desired.debug_wait` back out when it calls `restart_node`. There
 is no dedicated pending action and no new effect plumbing
 ([[state-and-effects]]).
 
@@ -262,7 +262,7 @@ rest of the threat model this sits inside.
   acts on a drift verdict.
 - [[state-and-effects]] — why the switch is a desired value plus an existing
   convergence rather than a new effect.
-- [[run-lifecycle-and-registry]] — `start_node`, `restart_container`, and
+- [[run-lifecycle-and-registry]] — `start_node`, `restart_node`, and
   the top-up that preserves the flag.
 - [[config-language]] — `#RunOptions.debug` as an authoring aid, with the
   Rust types as the enforcing boundary.

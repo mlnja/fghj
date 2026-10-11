@@ -17,7 +17,7 @@ pub struct Orchestrator {
     pub(super) db: Arc<WorkspaceDb>,
     pub(super) docker: Arc<bollard::Docker>,
     /// One lock per node, serializing that node's lifecycle
-    /// calls — `restart_container` / `stop_container` / `remove_container`.
+    /// calls — `start_node` (via `bring_up`) / `stop_container` / `remove_container`.
     ///
     /// Per node, not per workspace. Two concurrent calls for the *same* node
     /// both `docker::stop_and_remove` then recreate the same container name,
@@ -67,7 +67,7 @@ impl Orchestrator {
     /// Starts (or restarts) background capture of `container_name`'s logs
     /// into `db`, opening a fresh generation for `(run_id, node_id)`. Called
     /// from `start_node` — the single choke point every container-creating
-    /// path (`start`, `ensure_running`, `restart_container`) already funnels
+    /// path (`ensure_running`, `restart_node`) already funnels
     /// through — so every container gets its own capture task without each
     /// caller needing to remember to set one up.
     ///

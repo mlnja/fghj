@@ -88,7 +88,7 @@ fn lookup_mut<'a>(
 /// is a value in `desired`, and `PendingAction::Starting` is already the
 /// convergence that makes a container match its desired state. So this
 /// records the new desire and reuses that path — `converge::perform` reads
-/// `desired.debug_wait` back out when it calls `restart_container`.
+/// `desired.debug_wait` back out when it calls `restart_node`.
 ///
 /// Unlike `start_node`, this requires the container to already exist. A node
 /// with no container has nothing to halt, and inserting a placeholder would
@@ -117,13 +117,13 @@ fn set_debug_wait(
 /// `NodeStartRequested` is the one per-node action that must succeed even
 /// when `node_id` has no live entry in `run.containers` — the Drawer's
 /// "Start"/"Recreate" button is the documented way to bring a *deleted*
-/// node's container back (`orchestrator::Orchestrator::restart_container` looks the
+/// node's container back (`orchestrator::Orchestrator::restart_node` looks the
 /// node up in the resolved `.fghj.yaml` graph, not in any live container
 /// list, so a prior `NodeDeleteRequested` removing the entry outright
 /// must not make this node permanently unstartable). A fresh placeholder is
 /// inserted here with just enough shape to carry `pending_action`;
 /// `effects::docker::converge`'s `Starting` handling re-resolves the graph
-/// and calls `restart_container` regardless of what's in `desired`, and
+/// and calls `restart_node` regardless of what's in `desired`, and
 /// `Action::ContainerActionSettled` replaces this placeholder wholesale once
 /// that call reports back — so nothing here needs to be a real value, only
 /// present.
@@ -433,7 +433,7 @@ mod tests {
         // (`reducer::observation`), so this is the only remaining evidence
         // the node ever existed. It must still be startable — the Drawer's
         // "Start"/"Recreate" button is the documented way to bring a
-        // deleted node back, and `restart_container` recreates from the
+        // deleted node back, and `restart_node` recreates from the
         // resolved `.fghj.yaml` graph regardless of what's in state.
         let state = workspace(vec![container("web")]);
         let next = reduce(

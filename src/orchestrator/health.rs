@@ -42,12 +42,6 @@ impl HealthBudget {
         }
     }
 
-    /// A budget for a single-node operation: nothing else is sharing it, so
-    /// the per-node limit is the whole of it.
-    pub(crate) fn single_node() -> Self {
-        HealthBudget::new(PER_NODE_LIMIT)
-    }
-
     /// What this node may spend: whatever is left, capped at the per-node
     /// limit so one slow node cannot consume the entire run's allowance.
     pub(crate) fn allowance(&self) -> Duration {
@@ -86,17 +80,6 @@ impl Default for HealthBudget {
 pub(crate) struct RunBudget {
     pub(crate) health: HealthBudget,
     pub(crate) tasks: HealthBudget,
-}
-
-impl RunBudget {
-    /// A budget for a single-node operation: nothing else is sharing either
-    /// half of it.
-    pub(crate) fn single_node() -> Self {
-        RunBudget {
-            health: HealthBudget::single_node(),
-            tasks: HealthBudget::single_node(),
-        }
-    }
 }
 
 /// Why a health wait stopped — recorded into the node's event stream so a
@@ -242,15 +225,6 @@ mod tests {
         let allowance = budget.allowance();
         assert!(allowance <= Duration::from_secs(5), "{allowance:?}");
         assert!(!allowance.is_zero());
-    }
-
-    /// A single-node operation shares its budget with nothing, so it gets
-    /// the full per-node limit regardless of what any run is doing.
-    #[test]
-    fn a_single_node_operation_gets_the_full_per_node_limit() {
-        let budget = HealthBudget::single_node();
-        assert!(budget.allowance() <= PER_NODE_LIMIT);
-        assert!(about(budget.allowance(), PER_NODE_LIMIT), "{budget:?}");
     }
 
     /// The bound that matters: a whole run can't exceed the run limit no

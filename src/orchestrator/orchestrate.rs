@@ -1,4 +1,5 @@
-//! Whole-run orchestration: starting a run and bringing it up to date.
+//! Whole-environment orchestration: bringing the environment up to date,
+//! and the per-node Start that goes through the same path.
 
 use std::collections::{HashMap, HashSet};
 
@@ -6,7 +7,9 @@ use anyhow::Result;
 
 use super::health::RunBudget;
 use super::naming::{DEFAULT_RUN_ID, container_name, network_name};
-use super::order::{StartOutcomes, requirements_of, topological_start_order, waited_on};
+use super::order::{
+    StartOutcomes, dependents_of, requirements_of, topological_start_order, waited_on,
+};
 use super::progress::{NodeDone, ProgressSink, RunProgress, report};
 use super::spec::spec_hash;
 use super::start_node::StartContext;
@@ -113,6 +116,49 @@ fn recreated_requirement<'a>(
         .find(|to| recreated.contains(*to))
 }
 
+/// The nodes a Start of `node_id` brings up: what it can't start without,
+/// itself, and the running services that can't start without it — which
+/// `bring_up` restarts once `node_id` is recreated, since they may be
+/// holding connections to the container that went away.
+///
+/// A dependent someone else is acting on, a task, or one that isn't running
+/// is left out: a Start restarts what was up, it doesn't start new things
+/// downstream.
+fn restart_targets(node_id: &str, graph: &Graph, prior: &EnvState) -> Vec<String> {
+    let mut ids = requirements_of(node_id, &graph.edges);
+    ids.push(node_id.to_string());
+    ids.extend(
+        dependents_of(node_id, &graph.edges)
+            .into_iter()
+            .filter(|id| {
+                prior.containers.get(id).is_some_and(|c| {
+                    c.pending_action.is_none()
+                        && !c.desired.terminating
+                        && c.observed.status == "running"
+                })
+            }),
+    );
+    ids
+}
+
+/// What a Start of one node did — see `Orchestrator::restart_node`.
+pub struct Restarted {
+    /// The node itself, or why it didn't come up: its own failure, or a
+    /// requirement's that blocked it.
+    pub node: Result<ContainerInfo, String>,
+    /// Every other container the Start (re)created: requirements that
+    /// weren't up, and dependents restarted behind it.
+    pub others: Vec<ContainerInfo>,
+}
+
+/// What one pass of `bring_up` left behind.
+struct BroughtUp {
+    state: EnvState,
+    outcomes: StartOutcomes,
+    /// The nodes it (re)started successfully, in start order.
+    started: Vec<String>,
+}
+
 impl Orchestrator {
     /// Narrates a node a start skipped because something it can't start
     /// without failed.
@@ -163,6 +209,76 @@ impl Orchestrator {
         prior: Option<&EnvState>,
         progress: Option<&ProgressSink>,
     ) -> Result<EnvState, EnvCreateError> {
+        let up = self.bring_up(graph, spec, prior, progress, None).await?;
+        match up.outcomes.error() {
+            None => Ok(up.state),
+            Some(message) => Err(EnvCreateError {
+                message,
+                partial: Some(Box::new(up.state)),
+            }),
+        }
+    }
+
+    /// Starts `node_id` within the existing environment — the Drawer's
+    /// "Start"/"Recreate" button, and what applies a debug-switch flip.
+    ///
+    /// The same path as `ensure_running` for `EnvSpec::Node`, with three
+    /// differences that make it a *start* rather than a top-up:
+    ///
+    /// - `node_id` is always recreated, alive or not, current or not, so a
+    ///   `.fghj.yaml` change is picked up and a `run: once` task re-runs.
+    /// - Its requirements are only started if they aren't up (a task: if it
+    ///   hasn't exited 0). A drifted but running requirement is left alone —
+    ///   the user asked to start one node, not to apply every pending edit
+    ///   behind it.
+    /// - The running services that can't start without it are restarted
+    ///   after it, via `restart_targets`. Their failures are logged and
+    ///   reported as their own state, but don't fail the Start.
+    pub async fn restart_node(
+        &self,
+        graph: &Graph,
+        node_id: &str,
+        prior: &EnvState,
+    ) -> Result<Restarted> {
+        let spec = EnvSpec::Node(node_id.to_string());
+        let up = self
+            .bring_up(graph, &spec, Some(prior), None, Some(node_id))
+            .await
+            .map_err(|e| anyhow::anyhow!(e.message))?;
+        let others = up
+            .started
+            .iter()
+            .filter(|id| *id != node_id)
+            .map(|id| up.state.containers[id].clone())
+            .collect();
+        let node = if up.started.iter().any(|id| id == node_id) {
+            if let Some(message) = up.outcomes.error() {
+                daemon_log::warn(format!(
+                    "fghjd: {node_id} started, but restarting what depends on it failed: {message}"
+                ));
+            }
+            Ok(up.state.containers[node_id].clone())
+        } else {
+            Err(up
+                .outcomes
+                .error()
+                .unwrap_or_else(|| format!("{node_id} was not started")))
+        };
+        Ok(Restarted { node, others })
+    }
+
+    /// The one start path behind `ensure_running` and `restart_node`.
+    /// `restart` is the node a `restart_node` call is for; `None` is a
+    /// create/top-up. Returns the outcomes rather than an error for a node
+    /// failing, since the two callers judge those differently.
+    async fn bring_up(
+        &self,
+        graph: &Graph,
+        spec: &EnvSpec,
+        prior: Option<&EnvState>,
+        progress: Option<&ProgressSink>,
+        restart: Option<&str>,
+    ) -> Result<BroughtUp, EnvCreateError> {
         let run_id = DEFAULT_RUN_ID.to_string();
         let target_ids = match spec {
             EnvSpec::Flow(flow) => graph.start_ids(Some(flow))?,
@@ -170,9 +286,14 @@ impl Orchestrator {
                 if !graph.nodes.iter().any(|n| &n.id == id) {
                     return Err(anyhow::anyhow!("no such node: {id}").into());
                 }
-                let mut ids = requirements_of(id, &graph.edges);
-                ids.push(id.clone());
-                ids
+                match (restart, prior) {
+                    (Some(_), Some(prior)) => restart_targets(id, graph, prior),
+                    _ => {
+                        let mut ids = requirements_of(id, &graph.edges);
+                        ids.push(id.clone());
+                        ids
+                    }
+                }
             }
         };
         log_start_advisories(graph, &target_ids);
@@ -204,10 +325,12 @@ impl Orchestrator {
         let mut outcomes = StartOutcomes::new(&target_ids, &graph.edges);
         // Services (not tasks) this top-up (re)started.
         let mut recreated: HashSet<String> = HashSet::new();
+        let mut started = Vec::new();
         let budget = RunBudget::default();
 
         for node_id in &ordered_ids {
             let node = node_map[node_id.as_str()];
+            let forced = restart == Some(node_id.as_str());
             let container_name = container_name(&graph.workspace_name, &run_id, &node.id);
             // A terminating node is never "running" once it has done its
             // job, so the liveness check below says nothing useful about
@@ -223,8 +346,22 @@ impl Orchestrator {
             // Deliberately not keyed on `config_hash` — see
             // `task_already_done` for why, now that the hash can in fact see
             // a new commit.
-            if task_already_done(node, state.containers.get(&node.id)) {
-                continue;
+            let existing = state.containers.get(&node.id);
+            if !forced {
+                if restart.is_some() {
+                    // A Start leaves alone what someone else is acting on,
+                    // and a task that has already done its job whatever its
+                    // `run` policy — it is starting one node, not re-running
+                    // the setup behind it.
+                    if existing.is_some_and(|c| {
+                        c.pending_action.is_some()
+                            || (node.kind == "task" && c.observed.exit_code == Some(0))
+                    }) {
+                        continue;
+                    }
+                } else if task_already_done(node, existing) {
+                    continue;
+                }
             }
             let alive = matches!(
                 docker::inspect_status(&self.docker, &container_name, "").await,
@@ -232,12 +369,13 @@ impl Orchestrator {
             );
             // Alive alone isn't enough to skip — see `top_up_may_skip` for
             // the three conditions and why drift is one of them here but not
-            // in the reconciler.
-            let existing = state.containers.get(&node.id);
+            // in the reconciler. Nor in a Start (see `restart_node`), which
+            // is why it doesn't resolve a hash at all.
+            //
             // Only resolved when it could change the answer — this is a
             // whole graph walk per node otherwise.
             let fresh_hash = match (alive, existing) {
-                (true, Some(_)) => {
+                (true, Some(_)) if restart.is_none() => {
                     match self.resolve_node_spec(graph, node, &run_id, false).await {
                         Ok(Some(spec)) => Some(spec_hash(node, &spec)),
                         // Inconclusive. Re-resolving failed, so nothing here can
@@ -248,7 +386,10 @@ impl Orchestrator {
                 _ => None,
             };
             let restart_for = recreated_requirement(graph, node, &recreated);
-            if restart_for.is_none() && top_up_may_skip(alive, existing, fresh_hash.as_deref()) {
+            if !forced
+                && restart_for.is_none()
+                && top_up_may_skip(alive, existing, fresh_hash.as_deref())
+            {
                 continue;
             }
             if let Some(by) = outcomes.blocked_by(node_id).map(str::to_string) {
@@ -261,7 +402,7 @@ impl Orchestrator {
                 }
                 continue;
             }
-            if alive {
+            if alive && !forced {
                 // Narrated, because from the outside a top-up bouncing
                 // something that was running fine looks like a bug.
                 let why = match restart_for {
@@ -276,7 +417,11 @@ impl Orchestrator {
             }
             working(progress, node_id, Some(PendingAction::Starting));
 
-            let info = match self
+            // Two starts of one node would both stop-and-recreate the same
+            // container name — see `Orchestrator::node_locks`.
+            let lock = self.node_lock(node_id);
+            let guard = lock.lock().await;
+            let started_node = self
                 .start_node(
                     graph,
                     node,
@@ -293,8 +438,9 @@ impl Orchestrator {
                         wait_ready: waited.contains(node_id),
                     },
                 )
-                .await
-            {
+                .await;
+            drop(guard);
+            let info = match started_node {
                 Ok(info) => info,
                 Err(e) => {
                     working(progress, node_id, None);
@@ -310,15 +456,14 @@ impl Orchestrator {
             // of containers that did start successfully.
             report_done(progress, &state, info.clone());
             state.containers.insert(info.node_id.clone(), info);
+            started.push(node_id.clone());
         }
 
-        match outcomes.error() {
-            None => Ok(state),
-            Some(message) => Err(EnvCreateError {
-                message,
-                partial: Some(Box::new(state)),
-            }),
-        }
+        Ok(BroughtUp {
+            state,
+            outcomes,
+            started,
+        })
     }
 
     /// The other half of switching to a flow: stops every running container
@@ -386,7 +531,7 @@ fn report_done(progress: Option<&ProgressSink>, state: &EnvState, info: Containe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestrator::testing::test_node;
+    use crate::orchestrator::testing::{edge, runtime_edge, test_graph, test_node};
     use crate::state::{ContainerDesired, ContainerObserved};
 
     fn task(id: &str, run: &str) -> Node {
@@ -501,5 +646,63 @@ mod tests {
         let mut service = test_node("api.shop", "api", "service");
         service.run_policy = Some("once".to_string());
         assert!(!task_already_done(&service, Some(&finished(Some(0)))));
+    }
+
+    /// `db <- api <- web`, plus `cache` which `api` only uses at runtime.
+    fn chain() -> Graph {
+        test_graph(
+            vec![
+                test_node("db", "db", "service"),
+                test_node("api", "api", "service"),
+                test_node("web", "web", "service"),
+                test_node("cache", "cache", "service"),
+            ],
+            vec![
+                edge("api", "db", "depends-on"),
+                edge("web", "api", "depends-on"),
+                runtime_edge("api", "cache"),
+            ],
+        )
+    }
+
+    fn env_with(containers: Vec<ContainerInfo>) -> EnvState {
+        crate::state::testing::run_state(containers)
+    }
+
+    fn up(node_id: &str) -> ContainerInfo {
+        let mut c = crate::state::testing::container(node_id);
+        c.observed.status = "running".into();
+        c
+    }
+
+    #[test]
+    fn a_start_brings_requirements_and_restarts_running_dependents() {
+        let targets = restart_targets("api", &chain(), &env_with(vec![up("web")]));
+        assert_eq!(targets, vec!["db", "api", "web"]);
+    }
+
+    /// A Start restarts what was up behind the node; it doesn't start
+    /// anything new downstream of it.
+    #[test]
+    fn a_dependent_that_is_not_running_is_left_out() {
+        let mut web = up("web");
+        web.observed.status = "exited".into();
+        let targets = restart_targets("api", &chain(), &env_with(vec![web]));
+        assert_eq!(targets, vec!["db", "api"]);
+    }
+
+    #[test]
+    fn a_dependent_someone_else_is_acting_on_is_left_out() {
+        let mut web = up("web");
+        web.pending_action = Some(PendingAction::Stopping);
+        let targets = restart_targets("api", &chain(), &env_with(vec![web]));
+        assert_eq!(targets, vec!["db", "api"]);
+    }
+
+    /// A runtime-only edge isn't a reason to start or restart anything.
+    #[test]
+    fn a_runtime_edge_pulls_nothing_in() {
+        let targets = restart_targets("cache", &chain(), &env_with(vec![up("api")]));
+        assert_eq!(targets, vec!["cache"]);
     }
 }

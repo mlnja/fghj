@@ -2,7 +2,7 @@
 //! convergence fields — `ContainerInfo::pending_action` (per-node
 //! start/stop/delete) and `EnvState::pending_create` (whole-environment
 //! create/top-up/switch). Reuses `orchestrator::Orchestrator`'s orchestration
-//! methods wholesale (`restart_container`/`stop_container`/
+//! methods wholesale (`restart_node`/`stop_container`/
 //! `remove_container`/`ensure_running`, see `perform`/
 //! `perform_create`) rather than reimplementing container lifecycle here;
 //! this effect's only responsibility is *triggering* those calls from
@@ -30,7 +30,7 @@ use crate::action::Action;
 use crate::actor::ActorHandle;
 use crate::daemon_log;
 use crate::effects::Effect;
-use crate::orchestrator::order::{dependents_of, requirements_of};
+use crate::orchestrator::order::dependents_of;
 use crate::orchestrator::progress::{NodeDone, ProgressSink, RunProgress};
 use crate::resolver;
 use crate::server;
@@ -124,11 +124,12 @@ fn plan_create(in_flight: bool, snapshot: Option<&EnvSpec>) -> (Option<EnvSpec>,
 /// success/failure.
 ///
 /// Starting and stopping follow required edges (`concepts/dependency-kinds.md`):
-/// a start first starts what the node can't start without, if it isn't up,
-/// and afterwards restarts the running nodes that can't start without it; a
-/// stop first stops those. Every other container this touches is pushed
-/// onto `cascaded`, so its real state is reported too — including when the
-/// node itself then fails.
+/// a start goes through `Orchestrator::restart_node`, the same path a
+/// create/top-up takes, which also starts what the node can't start without
+/// and restarts what can't start without it; a stop first stops the latter
+/// itself. Every other container this touches is pushed onto `cascaded`, so
+/// its real state is reported too — including when the node itself then
+/// fails.
 async fn perform(
     old: &server::WorkspaceState,
     entry: &PendingEntry,
@@ -143,63 +144,16 @@ async fn perform(
             // learns what to link to), so a blocking problem anywhere in
             // the workspace is a blocking problem here too.
             graph.refuse_if_blocked()?;
-            let restart = |node_id: String, debug_wait: bool| {
-                let graph = &graph;
-                async move {
-                    old.orchestrator
-                        .restart_container(
-                            graph,
-                            &node_id,
-                            &run.network,
-                            run.sidecar_ip.as_deref(),
-                            debug_wait,
-                        )
-                        .await
-                }
-            };
-            for dep in requirements_of(&entry.node_id, &graph.edges) {
-                if !needs_start(run.containers.get(&dep)) {
-                    continue;
-                }
-                match restart(dep.clone(), false).await {
-                    Ok(info) => cascaded.push(info),
-                    Err(e) => anyhow::bail!("blocked by {dep}, which failed to start: {e:#}"),
-                }
-            }
             // The reducer has already written the desired value
             // (`NodeDebugWaitRequested`), so the ordinary `Starting`
             // convergence is what applies a flip of the debug switch —
-            // there is no separate action for it. Absent container: a node
-            // being started for the first time, which never halts.
-            let info = restart(
-                entry.node_id.clone(),
-                container.is_some_and(|c| c.desired.debug_wait),
-            )
-            .await?;
-            // A re-run task restarts nothing, as in a top-up.
-            if info.desired.terminating {
-                return Ok(Some(info));
-            }
-            for dependent in dependents_of(&entry.node_id, &graph.edges) {
-                let Some(c) = run.containers.get(&dependent) else {
-                    continue;
-                };
-                if c.pending_action.is_some()
-                    || c.desired.terminating
-                    || c.observed.status != "running"
-                {
-                    continue;
-                }
-                match restart(dependent.clone(), c.desired.debug_wait).await {
-                    Ok(info) => cascaded.push(info),
-                    // Its own event stream says why; this node is fine.
-                    Err(e) => daemon_log::warn(format!(
-                        "fghjd: restarting {dependent} after {} failed: {e:#}",
-                        entry.node_id
-                    )),
-                }
-            }
-            Ok(Some(info))
+            // `restart_node` reads it back off `run`.
+            let restarted = old
+                .orchestrator
+                .restart_node(&graph, &entry.node_id, run)
+                .await?;
+            cascaded.extend(restarted.others);
+            restarted.node.map(Some).map_err(anyhow::Error::msg)
         }
         PendingAction::Stopping => {
             let container =
@@ -248,23 +202,6 @@ async fn perform(
 /// A fresh graph, read off the blocking pool.
 async fn resolve(old: &server::WorkspaceState) -> anyhow::Result<resolver::Graph> {
     resolver::resolve_universe_async(old.path.clone()).await
-}
-
-/// Whether a requirement of a node being started has to be started first:
-/// it has no container, a service that isn't running, or a task that
-/// hasn't exited 0. One someone is already acting on is left to them.
-fn needs_start(container: Option<&ContainerInfo>) -> bool {
-    let Some(c) = container else {
-        return true;
-    };
-    if c.pending_action.is_some() {
-        return false;
-    }
-    if c.desired.terminating {
-        c.observed.exit_code != Some(0)
-    } else {
-        c.observed.status != "running"
-    }
 }
 
 /// `perform`'s counterpart for bringing the environment up to date: resolves
