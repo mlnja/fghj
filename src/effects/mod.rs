@@ -1,5 +1,5 @@
-//! //! The `Effect` traits and their drivers. `dns`, `hosts` and `raw_net` are
-//! //! daemon-wide; the rest are wired per workspace in `wire_actor`.
+//! The `Effect` traits and their drivers. `dns`, `hosts` and `raw_net` are
+//! daemon-wide; the rest are wired per workspace in `wire_actor`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

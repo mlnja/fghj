@@ -1,7 +1,7 @@
-//! //! Drives Docker start/stop/delete off `ContainerInfo::pending_action`, and
-//! //! creates off `EnvState::pending_create`, through `Orchestrator`, and reports
-//! //! each result back as an action. Changes nobody asked for are picked up by
-//! //! `observe`.
+//! Drives Docker start/stop/delete off `ContainerInfo::pending_action`, and
+//! creates off `EnvState::pending_create`, through `Orchestrator`, and reports
+//! each result back as an action. Changes nobody asked for are picked up by
+//! `observe`.
 
 use std::collections::HashSet;
 use std::sync::Arc;

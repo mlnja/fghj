@@ -1,4 +1,4 @@
-//! //! Thin wrappers over bollard, one file per kind of Docker object.
+//! Thin wrappers over bollard, one file per kind of Docker object.
 
 mod container;
 mod image;

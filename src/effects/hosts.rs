@@ -1,5 +1,5 @@
-//! //! Writes every workspace's `#AdditionalHost` aliases into the managed
-//! //! `/etc/hosts` block. The only writer of that block.
+//! Writes every workspace's `#AdditionalHost` aliases into the managed
+//! `/etc/hosts` block. The only writer of that block.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

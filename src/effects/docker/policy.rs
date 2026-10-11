@@ -1,4 +1,4 @@
-//! //! Container drift policy. Only `ObserverOnly` is ever constructed.
+//! Container drift policy. Only `ObserverOnly` is ever constructed.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DockerHealPolicy {

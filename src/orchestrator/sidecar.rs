@@ -1,4 +1,4 @@
-//! //! The environment's sidecar container that fronts its HTTP routes.
+//! The environment's sidecar container that fronts its HTTP routes.
 
 use std::collections::BTreeMap;
 

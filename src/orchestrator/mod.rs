@@ -1,5 +1,5 @@
-//! //! Environment lifecycle: turns a resolved `Graph` into Docker containers.
-//! //! See `concepts/run-lifecycle-and-registry.md`.
+//! Environment lifecycle: turns a resolved `Graph` into Docker containers.
+//! See `concepts/run-lifecycle-and-registry.md`.
 
 pub mod domain;
 pub mod events;

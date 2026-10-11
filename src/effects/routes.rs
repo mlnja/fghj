@@ -1,5 +1,5 @@
-//! //! Renders the sidecar's `routes.json` from published state, so it's never
-//! //! written from a stale snapshot.
+//! Renders the sidecar's `routes.json` from published state, so it's never
+//! written from a stale snapshot.
 
 use crate::orchestrator::route_table::{sidecar_routes_dir, write_route_table};
 use crate::state::{EnvState, WorkspaceState};

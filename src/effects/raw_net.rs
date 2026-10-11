@@ -1,5 +1,5 @@
-//! //! Feeds every workspace's raw-zone endpoints into `raw_net::reconcile`. The
-//! //! only caller of it: two writers of the same `pf` state race.
+//! Feeds every workspace's raw-zone endpoints into `raw_net::reconcile`. The
+//! only caller of it: two writers of the same `pf` state race.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

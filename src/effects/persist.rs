@@ -1,4 +1,4 @@
-//! //! Mirrors workspace state into the workspace's SQLite store.
+//! Mirrors workspace state into the workspace's SQLite store.
 
 use std::sync::Arc;
 

@@ -1,7 +1,7 @@
-//! //! Reports containers that changed for reasons fghj didn't cause, as
-//! //! `Action::ContainerObserved`. Runs on the reconciler's tick rather than its
-//! //! own timer. Drift is only reported: `converge` reads `desired`, never
-//! //! `observed`.
+//! Reports containers that changed for reasons fghj didn't cause, as
+//! `Action::ContainerObserved`. Runs on the reconciler's tick rather than its
+//! own timer. Drift is only reported: `converge` reads `desired`, never
+//! `observed`.
 
 use crate::action::Action;
 use crate::actor::ActorHandle;

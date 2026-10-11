@@ -1,7 +1,7 @@
-//! //! Per-node progress out of a create/top-up, so a crash mid-create doesn't
-//! //! leave running containers nothing recorded, and the UI fills in as nodes
-//! //! come up. A channel, not an `ActorHandle`: `orchestrator/` doesn't know
-//! //! about actors.
+//! Per-node progress out of a create/top-up, so a crash mid-create doesn't
+//! leave running containers nothing recorded, and the UI fills in as nodes
+//! come up. A channel, not an `ActorHandle`: `orchestrator/` doesn't know
+//! about actors.
 
 use tokio::sync::mpsc;
 

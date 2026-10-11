@@ -1,5 +1,5 @@
-//! //! Operator-facing narration of an action, per (node, action) cycle, for the
-//! //! UI's events pane. Best-effort: a failure to record is printed, never fatal.
+//! Operator-facing narration of an action, per (node, action) cycle, for the
+//! UI's events pane. Best-effort: a failure to record is printed, never fatal.
 
 use std::fmt::Display;
 

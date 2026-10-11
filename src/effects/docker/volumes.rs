@@ -1,5 +1,5 @@
-//! //! Volume discovery: reports what Docker has for the workspace. A volume
-//! //! deleted by hand doesn't show as missing — only presence is reported.
+//! Volume discovery: reports what Docker has for the workspace. A volume
+//! deleted by hand doesn't show as missing — only presence is reported.
 
 use crate::action::Action;
 use crate::actor::ActorHandle;
