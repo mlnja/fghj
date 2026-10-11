@@ -1,16 +1,4 @@
 //! Read-only projections over every registered workspace's state.
-//!
-//! Four consumers each used to walk their own copy of the same "every
-//! running container in every workspace" loop: `WorkspaceRegistry`'s
-//! `resolve_route` (SNI -> backend port), `active_wildcard_suffixes` (DNS
-//! zones) and `active_raw_endpoints` (raw-net telemetry) walked the *old*
-//! `orchestrator::Orchestrator`, while `effects::dns` and `effects::raw_net` walked
-//! the new `state::WorkspaceState` for the same facts. This is that walk,
-//! written once, over the new state only.
-//!
-//! Everything here is a pure function of a `BTreeMap<workspace id,
-//! WorkspaceState>` — the same shape `FannedInEffect::extract` receives, and
-//! the shape `daemon::WorkspaceRegistry::states` hands out.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -19,10 +7,8 @@ use crate::raw_net::RawEndpoint;
 
 use super::{ContainerInfo, PortRoute, WorkspaceState};
 
-/// Every container Docker last reported as `"running"`, across every
-/// workspace. The filter each projection below shares: a stopped — or
-/// stopped-but-not-yet-reconciled — container must never hand back a route,
-/// a DNS zone, or a NAT rule pointing at a port nothing is listening on.
+/// Every container Docker last reported as running, in every workspace. A
+/// stopped one must never get a route, zone or NAT rule.
 pub fn running_containers(
     states: &BTreeMap<String, Arc<WorkspaceState>>,
 ) -> impl Iterator<Item = &ContainerInfo> {
@@ -33,18 +19,8 @@ pub fn running_containers(
         .filter(|container| container.observed.status == "running")
 }
 
-/// Where `route` actually points right now: the host port Docker last
-/// reported for the container-side port this route was derived from, not
-/// the one recorded when the route was first computed. The two differ
-/// whenever Docker republishes a container on a fresh ephemeral port — a
-/// restart-policy-triggered restart, or `dockerd` itself restarting — which
-/// `desired.routes` has no way to learn about on its own, since nothing
-/// fghj did caused it.
-///
-/// Falls back to the route's own recorded port when the container port
-/// isn't in `observed.ports`: a route persisted before `container_port`
-/// existed has no key to look up, and a container nothing has re-observed
-/// yet has nothing better to offer.
+/// The host port Docker currently publishes the route's container port on,
+/// which changes when Docker republishes; falls back to the recorded one.
 fn live_host_port(container: &ContainerInfo, route: &PortRoute) -> u16 {
     container
         .observed
@@ -55,16 +31,7 @@ fn live_host_port(container: &ContainerInfo, route: &PortRoute) -> u16 {
         .unwrap_or(route.host_port)
 }
 
-/// The `127.0.0.1:<port>` a running container publishes `host` at, if any —
-/// the SNI -> container lookup backing per-service HTTPS routing (see
-/// `web::proxy::serve_https`).
-///
-/// Exact matches (a node's own derived domain, a named port, or a literal
-/// `#AdditionalHost`) always win over a wildcard match: a `wildcard_hosts`
-/// suffix only ever fills in for a name nothing more specific already
-/// claims. That's why this is two passes over every workspace rather than
-/// one pass preferring exact matches within each — a wildcard in the first
-/// workspace looked at must still lose to an exact match in the last.
+/// Exact matches beat wildcards across all workspaces, hence two passes.
 pub fn resolve_route(states: &BTreeMap<String, Arc<WorkspaceState>>, host: &str) -> Option<u16> {
     let exact = running_containers(states).find_map(|container| {
         container
@@ -87,18 +54,12 @@ pub fn resolve_route(states: &BTreeMap<String, Arc<WorkspaceState>>, host: &str)
     })
 }
 
-/// Whether `host` is covered by the wildcard route `suffix` — the suffix
-/// itself, or any name under it. Deliberately not a substring check:
-/// `notmyservice.local` must not match `myservice.local`.
+/// Not a substring check: `notmyservice.local` doesn't match `myservice.local`.
 fn matches_suffix(host: &str, suffix: &str) -> bool {
     host == suffix || host.ends_with(&format!(".{suffix}"))
 }
 
-/// Every `wildcard_hosts` suffix currently claimed by a running container,
-/// sorted and deduplicated — both the zones `dns::install_os_resolver_config`
-/// points at fghj's DNS server, and the zones that server answers for.
-/// Sorted so an unchanged set compares equal as a `FannedInEffect::Snapshot`
-/// regardless of which workspace contributed what.
+/// Sorted and deduped so the snapshot compares equal when unchanged.
 pub fn wildcard_suffixes(states: &BTreeMap<String, Arc<WorkspaceState>>) -> Vec<String> {
     let mut zones: Vec<String> = running_containers(states)
         .flat_map(|container| {
@@ -115,11 +76,7 @@ pub fn wildcard_suffixes(states: &BTreeMap<String, Arc<WorkspaceState>>) -> Vec<
     zones
 }
 
-/// Every running container's raw-zone identity and the host ports Docker
-/// currently publishes it on — the input to `raw_net::reconcile`'s
-/// virtual-IP NAT, and to the telemetry drawer's network tab. Unpublished
-/// ports (`None`) are dropped rather than carried as a hole: there's no
-/// address to NAT to.
+/// Unpublished ports are dropped: nothing to NAT to.
 pub fn raw_endpoints(states: &BTreeMap<String, Arc<WorkspaceState>>) -> Vec<RawEndpoint> {
     running_containers(states)
         .map(|container| RawEndpoint {
@@ -157,8 +114,6 @@ mod tests {
         c
     }
 
-    /// `id -> WorkspaceState` holding a single `default` run, built from
-    /// `(workspace id, containers)` pairs.
     fn states(
         workspaces: Vec<(&str, Vec<ContainerInfo>)>,
     ) -> BTreeMap<String, Arc<WorkspaceState>> {
@@ -215,19 +170,12 @@ mod tests {
                 ),
             ],
         )]);
-        // The exact route wins for the name it claims...
         assert_eq!(resolve_route(&states, "app.example.com"), Some(5001));
-        // ...and the wildcard covers the suffix itself and anything else
-        // under it.
         assert_eq!(resolve_route(&states, "example.com"), Some(5002));
         assert_eq!(resolve_route(&states, "other.example.com"), Some(5002));
-        // A name that merely ends with the same characters is not under it.
         assert_eq!(resolve_route(&states, "notexample.com"), None);
     }
 
-    /// The exact-beats-wildcard rule has to hold across workspaces, not
-    /// just within one — a wildcard in the workspace that happens to sort
-    /// first must still lose to an exact match in a later one.
     #[test]
     fn resolve_route_prefers_an_exact_match_in_a_later_workspace_over_an_earlier_wildcard() {
         let states = states(vec![
@@ -251,10 +199,6 @@ mod tests {
         assert_eq!(resolve_route(&states, "app.example.com"), Some(5001));
     }
 
-    /// The drift `refresh` used to correct by rewriting `desired.routes` in
-    /// place: Docker republished the container on a different host port, so
-    /// the route's own recorded port is stale and `observed.ports` is the
-    /// only current truth.
     #[test]
     fn resolve_route_prefers_the_freshly_observed_port_over_the_recorded_one() {
         let mut c = container(
@@ -327,9 +271,6 @@ mod tests {
         );
     }
 
-    /// A plain TCP dependency with nothing published yet still needs its
-    /// raw-zone identity to exist, so its virtual IP resolves rather than
-    /// NXDOMAIN-ing while it comes up.
     #[test]
     fn raw_endpoints_include_a_running_container_with_no_published_ports() {
         let states = states(vec![("ws", vec![container("web", "running", vec![])])]);

@@ -1,15 +1,5 @@
-//! Handles the five "report" `Action` variants dispatched by a polling or
-//! convergence effect describing what's already true, rather than
-//! requesting a change — see `action::Action`'s module doc for the
-//! request/report split.
-//!
-//! Unlike `reducer::env`, nothing here ever returns `Err`: a report about a
-//! run/node this workspace no longer tracks isn't a caller mistake to
-//! reject, it's an unremarkable race between an effect's own polling
-//! cadence and a node being deleted out from under it — by the time the
-//! report arrives, there may be nothing left to update, and that's fine.
-//! Treating it as a rejection would give a background poller something to
-//! retry or log loudly about for no reason.
+//! Report actions. Never rejected: a report about something already gone is
+//! a normal race with polling, not an error.
 
 use crate::action::{Action, ActionRejected};
 use crate::state::{
@@ -49,30 +39,13 @@ pub(super) fn reduce(
             let mut next = state.clone();
             if let Some(run) = next.env.as_mut() {
                 match result {
-                    // A freshly re-observed container replaces whatever was
-                    // there wholesale — this is the only place that ever
-                    // learns the real post-action status/ports/routes, so a partial
-                    // merge would leave stale fields no future report will
-                    // ever correct.
+                    // Replaced wholesale: this is the only place real post-action state arrives.
                     Ok(Some(mut info)) => {
-                        // The mark comes off here rather than being left to
-                        // whatever built `info` — settling *is* the action
-                        // being over. `Orchestrator::stop_container` returns
-                        // a clone of the container it was handed, which
-                        // still carries the `Stopping` that triggered it, so
-                        // inserting that verbatim left the node reading
-                        // "stopping" forever even though Docker had already
-                        // stopped it. Worse, every `*Requested` arm rejects
-                        // a container with a pending action as
-                        // `AlreadyInFlight`, so the node could then never be
-                        // started, stopped or deleted again for the life of
-                        // the daemon. `pending_action` is the reducer's own
-                        // field; no effect gets a say in it.
+                        // Cleared here: `stop_container` returns a clone still marked `Stopping`, and
+                        // a stuck mark makes every later request `AlreadyInFlight`.
                         info.pending_action = None;
                         run.containers.insert(node_id, info);
                     }
-                    // `None` only ever means a `Removing` action actually
-                    // removed the container.
                     Ok(None) => {
                         run.containers.remove(&node_id);
                     }
@@ -88,10 +61,7 @@ pub(super) fn reduce(
 
         Action::EnvCreateSettled { result } => {
             let mut next = state.clone();
-            // Every branch writes through the entry `EnvPlanned` created
-            // rather than inserting: a report describes work on an
-            // environment the reducer already knows about, and never brings
-            // one into existence on its own.
+            // Reports update the environment `EnvPlanned` created; they never create one.
             let present = next.env.is_some();
             match result {
                 Ok(mut run) => {
@@ -100,12 +70,7 @@ pub(super) fn reduce(
                         next.env = Some(run);
                     }
                 }
-                // A top-up that failed partway still left containers
-                // running; taking its partial state is the only way they
-                // become visible to `GET /environment` and routable from the host.
-                // `pending_create` is cleared explicitly rather than relying
-                // on the partial carrying `None`, since it is a snapshot of
-                // a working copy, not a freshly-built run.
+                // A partially failed top-up left containers running; adopt them.
                 Err(EnvCreateError {
                     partial: Some(mut run),
                     ..
@@ -128,7 +93,6 @@ pub(super) fn reduce(
 
         Action::EnvCreateWorking { node_id, action } => {
             let mut next = state.clone();
-            // Same write-through rule as `EnvCreateSettled` above.
             if let Some(run) = next.env.as_mut() {
                 match (action, run.containers.get_mut(&node_id)) {
                     (Some(action), Some(container)) => container.pending_action = Some(action),
@@ -153,14 +117,10 @@ pub(super) fn reduce(
             mut info,
         } => {
             let mut next = state.clone();
-            // Same write-through rule as `EnvCreateSettled` above — hence
-            // `as_mut` rather than `get_or_insert`.
             if let Some(run) = next.env.as_mut() {
                 run.network = network;
                 run.sidecar_container_name = sidecar_container_name;
                 run.sidecar_ip = sidecar_ip;
-                // The node's work is done, so its `EnvCreateWorking` mark
-                // comes off with it.
                 info.pending_action = None;
                 run.containers.insert(info.node_id.clone(), info);
             }
@@ -203,16 +163,12 @@ pub(super) fn reduce(
     }
 }
 
-/// A `starting_placeholder` that nothing has replaced: no container was
-/// ever created for it.
 fn is_placeholder(container: &ContainerInfo) -> bool {
     container.desired.container_name.is_empty()
 }
 
-/// Takes off every `EnvCreateWorking` mark once the create is over — the
-/// settled state is the truth now, and a mark left behind would keep its
-/// node reading "starting…" (and rejecting actions) forever. A placeholder
-/// for a node that never got a container goes with it.
+/// Clears every create mark once the create is over, and drops placeholders
+/// that never got a container.
 fn clear_create_marks(run: &mut EnvState) {
     run.containers.retain(|_, c| !is_placeholder(c));
     for container in run.containers.values_mut() {
@@ -309,12 +265,6 @@ mod tests {
         assert_eq!(c.observed.published_port, Some(54321));
     }
 
-    /// `Orchestrator::stop_container` builds its return value by cloning the
-    /// `ContainerInfo` it was handed, which is the one carrying the
-    /// `Stopping` that triggered the call in the first place. Settling must
-    /// clear it anyway: leaving it set stuck the node at "stopping" with the
-    /// container already exited, and every later start/stop/delete request
-    /// for it was then rejected as `AlreadyInFlight`.
     #[test]
     fn container_action_settled_clears_a_pending_action_the_effect_echoed_back() {
         let mut web = container("web");
@@ -390,10 +340,6 @@ mod tests {
         assert!(c.pending_action.is_none());
     }
 
-    /// The success path replaces the placeholder `EnvPlanned` left behind
-    /// with the real, fully-built run. It writes *through* that entry
-    /// rather than inserting unconditionally — see
-    /// `create_reports_never_bring_an_environment_into_existence`.
     #[test]
     fn run_create_settled_replaces_the_planned_entry_on_success() {
         let state = workspace(vec![]);
@@ -432,18 +378,12 @@ mod tests {
         assert!(run.containers.contains_key("web"));
     }
 
-    /// B7: a top-up that fails on node 3 leaves nodes 1-2 running. They are
-    /// already in Docker and in SQLite; without adopting the partial they
-    /// would be absent from reducer state, which is what `GET /environment` and
-    /// `state::query::resolve_route` both read.
     #[test]
     fn run_create_settled_adopts_the_partial_state_of_a_failed_top_up() {
         let mut existing = workspace(vec![container("web")]);
         existing.env.as_mut().unwrap().pending_create =
             Some(crate::state::EnvSpec::Flow("app/main".into()));
 
-        // `web` was already up; `api` came up during this top-up before
-        // `worker` failed.
         let partial = EnvState {
             network: "fghj-net-default".into(),
             containers: BTreeMap::from([
@@ -453,8 +393,6 @@ mod tests {
             volumes: BTreeMap::new(),
             sidecar_container_name: "fghj-sidecar".into(),
             sidecar_ip: Some("172.20.0.2".into()),
-            // A working copy, not a freshly-built run — the reducer must
-            // clear this itself rather than assume it arrives clear.
             pending_create: Some(crate::state::EnvSpec::Flow("app/main".into())),
         };
 
@@ -538,11 +476,6 @@ mod tests {
         );
     }
 
-    /// Per-node crash safety: a create reports each container the moment it
-    /// comes up, so a daemon that dies halfway still has every
-    /// already-running container written down. Without it those containers
-    /// would be running unrecorded — fghj manufacturing the very
-    /// `Orphaned` state its observer exists to surface.
     #[test]
     fn run_create_progress_records_a_node_as_soon_as_it_comes_up() {
         let state = workspace(vec![]);
@@ -562,9 +495,6 @@ mod tests {
         assert!(run.containers.contains_key("web"));
     }
 
-    /// `EnvCreateProgress` and `EnvCreateSettled` only ever update the
-    /// environment `EnvPlanned` created; a report with nothing to update
-    /// is dropped rather than inventing one.
     #[test]
     fn create_reports_never_bring_an_environment_into_existence() {
         let state = WorkspaceState::default();
@@ -614,9 +544,6 @@ mod tests {
         }
     }
 
-    /// A switch can take minutes and refuses every node action meanwhile;
-    /// the node it is on right now has to say so, including one that has
-    /// no container yet.
     #[test]
     fn run_create_working_marks_the_node_being_worked_on() {
         let state = workspace(vec![container("web")]);
@@ -633,8 +560,6 @@ mod tests {
         );
     }
 
-    /// Giving up on a node takes its mark off, and a placeholder that never
-    /// became a container goes with it rather than lingering as a ghost.
     #[test]
     fn run_create_working_none_unmarks_and_drops_a_placeholder() {
         let state = workspace(vec![container("web")]);
@@ -669,8 +594,6 @@ mod tests {
         );
     }
 
-    /// However the create ends, nothing it marked may stay marked: every
-    /// node action on a marked node is refused as already in flight.
     #[test]
     fn run_create_settled_err_clears_every_working_mark() {
         let mut state = workspace(vec![container("web")]);

@@ -1,15 +1,9 @@
-//! Turning an internal failure into the HTTP response shape the UI and CLI expect.
-
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 pub(crate) fn err_response(e: anyhow::Error) -> Response {
-    // `e.to_string()` (anyhow's `Display`) only prints the outermost
-    // `.context(...)` layer — e.g. just "docker run <name> failed" with the
-    // actual Docker Engine API error message it wraps discarded. `{e:?}`
-    // (anyhow's `Debug`) prints the full "Caused by:" chain instead, which is
-    // the only version that's actually diagnosable from the API response.
+    // `{e:?}` prints anyhow's whole cause chain; `Display` keeps only the outermost.
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(serde_json::json!({ "error": format!("{e:?}") })),
@@ -25,8 +19,6 @@ pub(crate) fn bad_request(e: impl std::fmt::Display) -> Response {
         .into_response()
 }
 
-/// Maps an `ActionRejected` from a dispatched request to its HTTP response
-/// — the `actor::ActorHandle::dispatch` counterpart of `err_response`.
 /// `AlreadyInFlight` -> 409; `NoEnvironment`/`NodeNotFound` -> 404.
 pub(crate) fn action_rejected_response(err: crate::action::ActionRejected) -> Response {
     use crate::action::ActionRejected;

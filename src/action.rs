@@ -1,30 +1,16 @@
-//! Every way a workspace's `state::WorkspaceState` can legally change.
-//! `reducer::reduce` is the only code allowed to turn an `Action` into a
-//! new `WorkspaceState`; a mutating HTTP handler does nothing but build one
-//! of these and dispatch it (`actor::ActorHandle::dispatch`).
+//! Every way a workspace's state can change. Only `reducer::reduce` turns an
+//! `Action` into a new state.
 
 use std::collections::BTreeMap;
 
 use crate::persistence::WorkspaceOwner;
 use crate::state::{ContainerInfo, EnvCreateError, EnvSpec, EnvState, PendingAction, SyncStatus};
 
-/// Split into two families by who originates them: `Run*`/`OwnerSet` are
-/// *requests* — dispatched by an HTTP handler (or, later, an internal
-/// scheduler) expressing what should become true; `*Observed`/
-/// `ContainerActionSettled` are *reports* — dispatched by a polling or
-/// convergence effect describing what already *is* true. A reducer never
-/// rejects a report for a reason a caller could act on (see
-/// `reducer::observation`'s module doc) — only a request can be rejected.
-///
-/// Does not derive `PartialEq`: `OwnerSet` carries a `WorkspaceOwner`
-/// (`persistence::workspace_owner`), which doesn't derive it either. Tests that need to assert
-/// on a specific variant destructure/match it instead of comparing whole
-/// `Action` values.
+/// Requests (`*Requested`, `EnvPlanned`, `OwnerSet`) can be rejected; reports
+/// (`*Observed`, `*Settled`, `EnvCreate*`) never are.
 #[derive(Debug, Clone)]
 pub enum Action {
-    /// Records the intent only; the `.fghj.yaml` graph is resolved later
-    /// by `effects::docker::converge`, since real I/O has no place in a
-    /// pure reducer.
+    /// Records the intent only; `effects::docker::converge` does the I/O.
     EnvPlanned {
         plan: EnvSpec,
     },
@@ -34,8 +20,6 @@ pub enum Action {
     NodeStopRequested {
         node_id: String,
     },
-    /// Flip the per-container debug switch and recreate the container to
-    /// apply it — see `state::ContainerDesired::debug_wait`.
     NodeDebugWaitRequested {
         node_id: String,
         wait: bool,
@@ -49,73 +33,29 @@ pub enum Action {
         status: String,
         published_port: Option<u16>,
         ip: Option<String>,
-        /// The host-published port for every one of the container's
-        /// declared ports, not just the routed/primary one — mirrors
-        /// `state::ContainerObserved::ports`, since a plain TCP dependency
-        /// (postgres, mysql) with no HTTP surface still needs its port
-        /// drift visible even though it has no `status_port` of its own.
+        /// Every declared port, so a plain TCP service's port is visible too.
         ports: BTreeMap<String, Option<u16>>,
-        /// What the container exited with, if it has. Only ever the
-        /// *outcome* for a terminating node (see
-        /// `state::ContainerDesired::terminating`) — for a service it is one
-        /// more detail of a crash — but it is observed the same way for
-        /// both, because nothing doing the observing holds the graph that
-        /// would say which kind this is.
         exit_code: Option<i64>,
     },
-    /// Reported by `effects::docker::converge` once a start/stop/delete call
-    /// it triggered actually finishes. Carries the freshly re-observed
-    /// `ContainerInfo` on success (`Ok(Some(..))` for start/stop, `Ok(None)`
-    /// for a delete that removed the container outright) rather than just
-    /// `Ok(())`: this is the only place the real post-action
-    /// status/ports/routes reach state.
+    /// `Ok(None)` is a delete. The only way post-action state reaches the reducer.
     ContainerActionSettled {
         node_id: String,
         result: Result<Option<ContainerInfo>, String>,
     },
-    /// Reported by `effects::docker::converge` once a `EnvPlanned` intent
-    /// (`EnvState::pending_create`) actually finishes being created/topped
-    /// up against real Docker. `Ok(run)` wholesale-replaces the environment
-    /// with the freshly re-observed state (mirroring how
-    /// `Orchestrator::ensure_running` returns the whole `EnvState` it produced).
-    /// `Err` clears `pending_create` and, when the failure left containers
-    /// actually running (`EnvCreateError::partial` — an `ensure_running`
-    /// top-up that got part way), replaces the environment with that partial
-    /// state rather than guessing. Without it, those containers are running
-    /// and persisted but invisible to `GET /environment` and to host routing. With
-    /// no partial (nothing started, or a path like `start` that rolled
-    /// itself back) the environment's last-known-good state is left untouched, which
-    /// is still the right answer.
+    /// `Ok` replaces the environment. `Err` clears `pending_create` and adopts the
+    /// partial state if containers did start, so they stay visible and routable.
     EnvCreateSettled {
         result: Result<EnvState, EnvCreateError>,
     },
-    /// Reported by `effects::docker::converge` for each node that comes up
-    /// during a still-in-flight create/top-up, so progress is recorded as it
-    /// happens rather than only when the whole run settles.
-    ///
-    /// Persistence is derived from published state
-    /// (`effects::persist`), so without this a daemon that died mid-create
-    /// would leave running containers nothing had recorded — fghj
-    /// manufacturing the very `Orphaned` state its observer exists to
-    /// surface. Carries the run-level facts (`network`, sidecar) alongside
-    /// the container because they are only known once the run's network and
-    /// sidecar exist, which is also when the first node can come up.
-    ///
-    /// Deliberately leaves `pending_create` set: the run is still in
-    /// flight, and only `EnvCreateSettled` ends that.
+    /// One node up during a create, so a crash mid-create still has it recorded.
+    /// Leaves `pending_create` set.
     EnvCreateProgress {
         network: String,
         sidecar_container_name: String,
         sidecar_ip: Option<String>,
         info: ContainerInfo,
     },
-    /// Reported by `effects::docker::converge` as a still-in-flight
-    /// create/top-up/switch is about to start or stop `node_id` (`Some`), or
-    /// has given up on it (`None`) — so the node carries the same
-    /// `pending_action` mark a single-node start or stop would, rather than
-    /// sitting unchanged while the environment rejects every node action as
-    /// already in flight. `EnvCreateProgress` and `EnvCreateSettled` take the
-    /// mark back off.
+    /// A create is about to work on `node_id` (`Some`), or gave up on it (`None`).
     EnvCreateWorking {
         node_id: String,
         action: Option<PendingAction>,
@@ -124,9 +64,6 @@ pub enum Action {
         volume_name: String,
         exists: bool,
     },
-    /// Addressed per container, like `ContainerObserved`:
-    /// `Orchestrator::config_drift` computes drift per container, and this
-    /// updates that container's `ContainerObserved::sync`.
     ConfigDriftObserved {
         node_id: String,
         drift: SyncStatus,
@@ -137,17 +74,11 @@ pub enum Action {
     },
 }
 
-/// Why the reducer refused to apply a requested `Action` — never returned
-/// for a report (`*Observed`/`ContainerActionSettled`; see `Action`'s doc).
+/// Why the reducer refused a request. Reports are never refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionRejected {
-    /// `container.pending_action.is_some()` already, or a whole-environment
-    /// create is still running; see `reducer::env`'s module doc.
     AlreadyInFlight,
-    /// The workspace has no environment yet, so there is no node to act on.
     NoEnvironment,
-    /// The action named a `node_id` that isn't a key of the environment's
-    /// `containers` map.
     NodeNotFound,
 }
 

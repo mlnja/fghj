@@ -1,25 +1,12 @@
-//! Serving the embedded Svelte UI bundle.
-//!
-//! The bundle is compiled into the binary (`include_dir!`) rather than read
-//! off disk at runtime, so `fghjd` has no "where did the UI go" failure mode
-//! and no install step beyond the binary itself.
+//! The embedded Svelte UI bundle.
 
 use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use include_dir::{Dir, include_dir};
 
-/// `pub(crate)` so `sidecar_image` can reuse this same embedded copy when
-/// materializing the sidecar's Docker build context, rather than embedding
-/// the UI a second time.
 pub(crate) static UI_DIST: Dir = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 
-/// Serves the embedded UI bundle, falling back to `index.html` for
-/// unmatched routes (SPA-style) — the frontend owns its own routing, so a
-/// deep link the server has never heard of is a client route, not a 404.
-///
-/// Split from [`static_handler`] only so it's testable without spinning up
-/// axum: it answers "what bytes and content type does this path get",
-/// nothing about HTTP.
+/// Unmatched routes get `index.html`: the frontend owns routing.
 fn static_response(route: &str) -> (Vec<u8>, &'static str, u16) {
     let trimmed = route.trim_start_matches('/');
     let file_path = if trimmed.is_empty() {
@@ -40,8 +27,6 @@ fn static_response(route: &str) -> (Vec<u8>, &'static str, u16) {
     }
 }
 
-/// The axum fallback route: anything the API router didn't claim is a UI
-/// path.
 pub(crate) async fn static_handler(uri: Uri) -> Response {
     let (body, content_type, status) = static_response(uri.path());
     (

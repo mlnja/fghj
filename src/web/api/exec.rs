@@ -1,5 +1,3 @@
-//! The interactive `exec` WebSocket relay between the CLI and a container.
-
 use std::sync::Arc;
 
 use axum::Json;
@@ -15,8 +13,6 @@ use crate::web::api::error::bad_request;
 use crate::web::api::extract::{ActorExtractor, WorkspaceExtractor};
 use crate::{docker, orchestrator};
 
-/// First message a client must send once the socket is upgraded — everything
-/// `docker::exec_start` needs. `cols`/`rows` are only meaningful when `tty`.
 #[derive(Deserialize)]
 pub(crate) struct ExecStart {
     cmd: Vec<String>,
@@ -32,27 +28,20 @@ pub(crate) struct ExecStart {
     rows: u16,
 }
 
-/// In-band control messages a client can send after the initial `ExecStart`
-/// — sent as `Message::Text` (JSON), distinct from `Message::Binary`, which
-/// is always raw stdin bytes for the exec'd process.
+/// Text messages are control (JSON); binary messages are stdin.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ExecControl {
     Resize { cols: u16, rows: u16 },
 }
 
-/// `GET /nodes/{node_id}/exec/ws?workspace={id}` — proxies a
-/// real `docker exec` full duplex: see `docker::ExecSession`'s doc comment.
-/// Resolves the node the same way `get_node_logs_stream` does, as a plain
-/// pre-upgrade HTTP response, so a bad node id gets a clean 404/400
-/// instead of failing mid-handshake.
+/// Resolves the node before the upgrade, so a bad id is a clean 404.
 pub(crate) async fn get_node_exec_ws(
     AxumPath(node_id): AxumPath<String>,
     WorkspaceExtractor(state): WorkspaceExtractor,
     ActorExtractor(actor): ActorExtractor,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // The environment comes from the reducer, the only place that keeps it.
     let run_state = match actor.current().env.clone() {
         Some(s) => s,
         None => {
@@ -72,12 +61,7 @@ pub(crate) async fn get_node_exec_ws(
     ws.on_upgrade(move |socket| handle_exec_socket(socket, docker, container_name))
 }
 
-/// Drives one exec session end to end: reads the initial `ExecStart`, starts
-/// the exec, then relays bytes both directions until the exec's output ends,
-/// finally reporting its exit code. Any failure along the way (bad start
-/// message, exec creation failure, a dropped socket) just ends the task —
-/// there's no client left to usefully report to once the duplex channel
-/// itself is the thing that broke.
+/// Any failure ends the task: once the socket is broken there's no one to tell.
 pub(crate) async fn handle_exec_socket(
     mut socket: WebSocket,
     docker: Arc<bollard::Docker>,
@@ -135,11 +119,8 @@ pub(crate) async fn handle_exec_socket(
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Binary(bytes))) if bytes.is_empty() => {
-                        // Local stdin hit EOF (e.g. Ctrl-D, or a piped
-                        // command's input ran out) — shut down the exec's
-                        // stdin without tearing down the whole socket, so a
-                        // command reading until EOF can finish and still
-                        // stream its remaining output back.
+                        // Close the exec's stdin but keep the socket, so a command reading to EOF can
+                        // finish and send its output.
                         let _ = session.input.shutdown().await;
                     }
                     Some(Ok(Message::Binary(bytes))) => {

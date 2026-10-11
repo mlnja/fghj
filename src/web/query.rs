@@ -1,5 +1,4 @@
-/// Looks up `key` in a `k=v&k=v` query string. No percent-decoding — the
-/// only values passed through this today (workspace ids) never need it.
+/// No percent-decoding; workspace ids never need it.
 pub fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     query.split('&').find_map(|kv| {
         let (k, v) = kv.split_once('=')?;

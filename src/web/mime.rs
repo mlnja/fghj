@@ -1,6 +1,3 @@
-/// The `Content-Type` to serve a file under, by extension. Covers exactly
-/// the file kinds the embedded UI bundle contains; anything else falls back
-/// to `application/octet-stream`.
 pub fn content_type_for(path: &str) -> &'static str {
     if path.ends_with(".html") {
         "text/html; charset=utf-8"

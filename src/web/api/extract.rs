@@ -1,5 +1,3 @@
-//! Axum extractors that resolve `?workspace=<id>` to a live workspace.
-
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -13,9 +11,6 @@ use crate::daemon::registry::WorkspaceRegistry;
 use crate::server::WorkspaceState;
 use crate::web::query::query_param;
 
-/// Extracts the workspace named by `?workspace=<id>` in the request's query
-/// string, or rejects with the same 400 the old handler used to return for a
-/// missing/unknown id.
 pub(crate) struct WorkspaceExtractor(pub(crate) Arc<WorkspaceState>);
 
 impl FromRequestParts<Arc<WorkspaceRegistry>> for WorkspaceExtractor {
@@ -37,10 +32,6 @@ impl FromRequestParts<Arc<WorkspaceRegistry>> for WorkspaceExtractor {
     }
 }
 
-/// Extracts the `actor::ActorHandle` for the workspace named by
-/// `?workspace=<id>` — the counterpart of `WorkspaceExtractor` for
-/// handlers that dispatch an `Action` instead of calling
-/// `orchestrator::Orchestrator` directly.
 pub(crate) struct ActorExtractor(pub(crate) actor::ActorHandle);
 
 impl FromRequestParts<Arc<WorkspaceRegistry>> for ActorExtractor {

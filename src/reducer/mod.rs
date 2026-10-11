@@ -1,11 +1,5 @@
-//! The pure core of the daemon's state machine: `reduce` is the only
-//! function allowed to turn
-//! an `Action` into a new `state::WorkspaceState`. It does no I/O, is
-//! never `async`, and never panics on a malformed `Action` — every lookup
-//! that might not find its target either returns `Err(ActionRejected)`
-//! (for a request; see `run`) or is treated as a stale no-op (for a
-//! report; see `observation`). This is what lets `actor::spawn` call it
-//! inline on a single-threaded per-workspace loop without ever blocking.
+//! The pure state machine. No I/O, never async, never panics on a bad action:
+//! a request can be rejected, a stale report is a no-op.
 
 mod env;
 mod observation;
@@ -13,9 +7,6 @@ mod observation;
 use crate::action::{Action, ActionRejected};
 use crate::state::WorkspaceState;
 
-/// Applies `action` to `state`, returning the new state on success. Never
-/// mutates `state` in place — callers (just `actor::spawn`, in this
-/// phase) are expected to publish the returned value themselves.
 pub fn reduce(state: &WorkspaceState, action: Action) -> Result<WorkspaceState, ActionRejected> {
     match action {
         Action::EnvPlanned { .. }

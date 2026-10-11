@@ -5,91 +5,40 @@ use serde::Serialize;
 use super::container::ContainerInfo;
 use super::volume::VolumeInfo;
 
-/// Why the environment is being brought up to date — the intent a
-/// `EnvPlanned` action records and `effects::docker::converge` fulfils.
-/// Serialized as `{"flow": ...}` / `{"node": ...}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnvSpec {
-    /// Switch to a flow: start its nodes and stop (not remove) every
-    /// running container outside it, so the environment ends up as that
-    /// flow and nothing else.
+    /// Start the flow's nodes and stop (not remove) everything outside it.
     Flow(String),
-    /// Start one node, and what it can't start without, when the
-    /// environment doesn't exist yet.
+    /// Start one node and its requirements when there's no environment yet.
     Node(String),
 }
 
-/// One run's canonical state: every container and volume fghj knows about
-/// for it. Keyed by `node_id` / volume name (`BTreeMap`) rather than a
-/// `Vec<ContainerInfo>` — a pure reducer dispatches almost every action by
-/// `node_id` (`NodeStartRequested`, `ContainerObserved`, ...) and needs
-/// point lookup on essentially every action, not a linear scan; a map also
-/// structurally rules out the two-containers-same-`node_id` state a `Vec`
-/// never prevented.
-///
-/// The single representation of the environment in fghj, held in a single
-/// place: the actor's `WorkspaceState`. `orchestrator::Orchestrator` keeps no copy;
-/// it takes whatever prior state a call needs as an argument and reports
-/// the result back as an `Action`. `persistence` stores it, derived from
-/// published state by `effects::persist`.
-///
-/// There is deliberately no second, flatter "wire" or "engine" shape to
-/// translate to and from either — two structs for one run is what let
-/// `desired` and `observed` silently disagree before they were unified.
+/// The environment: every container and volume fghj knows about. Lives only in
+/// the actor's `WorkspaceState`; `Orchestrator` keeps no copy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct EnvState {
     pub network: String,
     pub containers: BTreeMap<String, ContainerInfo>,
     pub volumes: BTreeMap<String, VolumeInfo>,
-    /// The deterministic name of this run's in-network TLS proxy sidecar
-    /// (see `Orchestrator::ensure_sidecar`) — one per run, never shared
-    /// across workspaces. Empty for a run persisted before this field
-    /// existed, until that run is next started/topped up.
     pub sidecar_container_name: String,
-    /// The sidecar's own address on `network` — `None` until
-    /// `docker::inspect_network_ip` has actually resolved it (or for a
-    /// pre-sidecar persisted run). Cached here rather than re-inspected on
-    /// every node start so `start_node` doesn't need a Docker round-trip
-    /// just to set every node's `--dns`.
+    /// Cached so a node start needs no inspect to set its `--dns`.
     pub sidecar_ip: Option<String>,
-    /// Set by `EnvPlanned` to record the caller's still-unfulfilled intent
-    /// to (re)create/top-up this run; `effects::docker::converge` picks it
-    /// up, does the real Docker work, and clears it via
-    /// `Action::EnvCreateSettled`. Serialized because it is observable: while
-    /// it is set every node start is rejected as already in flight, and the
-    /// UI says why ("switching to flow …") instead of leaving the user to
-    /// guess.
+    /// The create in flight. Serialized so the UI can say why node actions are
+    /// being refused.
     pub pending_create: Option<EnvSpec>,
 }
 
-/// Why a whole-run create/top-up failed, and what came up anyway.
-///
-/// The `partial` field exists because `ensure_running` brings nodes up one
-/// at a time, and containers 1 and 2 coming up is a real, wanted outcome
-/// that a failure on container 3 must not undo; it persists after every
-/// node precisely so that progress survives.
-///
-/// The reducer has to hear about that progress too: a bare `Err(String)`
-/// would leave those containers running, persisted to SQLite and the
-/// sidecar route table, yet absent from `GET /environment`, the UI and host
-/// routing (`state::query::resolve_route` reads reducer state only).
+/// Why a create failed, and what came up anyway: earlier nodes stay up, and
+/// the reducer must see them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvCreateError {
     pub message: String,
-    /// What is actually up now. `None` when nothing came up.
-    ///
-    /// Boxed because this is the `Err` half of a `Result` that the whole
-    /// create path returns: a `EnvState` inline makes every such `Result`
-    /// (including every success) at least 224 bytes wide, which is what
-    /// `clippy::result_large_err` objects to. A partial run is the rare case,
-    /// so one allocation on the failure path is the right trade.
+    /// Boxed to keep the `Result` small (`clippy::result_large_err`).
     pub partial: Option<Box<EnvState>>,
 }
 
 impl EnvCreateError {
-    /// The common case: something went wrong before any node started, or in
-    /// a path that cleans up after itself.
     pub fn bare(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),

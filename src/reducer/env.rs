@@ -1,10 +1,5 @@
-//! Handles the "request" `Action` variants that originate from an HTTP
-//! handler expressing intent (plan the environment, start/stop/delete/debug
-//! one node) — see `action::Action`'s doc for the request/report split.
-//! In-flight dedup lives here too, as a plain read of
-//! `container.pending_action` and `run.pending_create`: a pure reducer
-//! never needs a lock to answer "is something already happening to this
-//! node."
+//! Request actions. In-flight dedup is a plain read of `pending_action` and
+//! `pending_create` — no lock needed.
 
 use crate::action::{Action, ActionRejected};
 use crate::state::{
@@ -18,20 +13,8 @@ pub(super) fn reduce(
 ) -> Result<WorkspaceState, ActionRejected> {
     match action {
         Action::EnvPlanned { plan } => {
-            // Turning a `EnvSpec` into real `ContainerInfo`/`VolumeInfo`
-            // entries requires resolving the `.fghj.yaml` graph and calling
-            // Docker, which is real I/O a pure reducer can't do — this just
-            // records the still-unfulfilled intent (`pending_create`);
-            // `effects::docker::converge` picks it up and reports the
-            // result back via `Action::EnvCreateSettled`.
-            //
-            // An existing environment keeps its `containers`/`volumes`
-            // rather than being wiped back to empty:
-            // a switch is an idempotent top-up of whatever's already
-            // running, and clobbering it here
-            // would make already-live containers flicker to "gone" for as
-            // long as convergence takes, even though nothing is actually
-            // being torn down.
+            // Keeps the existing containers: a switch is a top-up, and wiping them would
+            // make live containers flicker to "gone".
             let mut next = state.clone();
             let run = next.env.get_or_insert_with(EnvState::default);
             if run.pending_create.is_some() {
@@ -47,11 +30,6 @@ pub(super) fn reduce(
             set_pending(state, &node_id, PendingAction::Stopping, false)
         }
         Action::NodeDeleteRequested { node_id } => {
-            // `desired.running` is left as-is: `Removing` is the signal an
-            // effect needs to actually stop-then-remove the container,
-            // and `reducer::observation::reduce` deletes it from
-            // `containers` outright once that settles successfully — no
-            // "desired to not exist" state is needed in between.
             let mut next = state.clone();
             let container = lookup_mut(&mut next, &node_id)?;
             if container.pending_action.is_some() {
@@ -70,9 +48,7 @@ fn lookup_mut<'a>(
     node_id: &str,
 ) -> Result<&'a mut ContainerInfo, ActionRejected> {
     let run = state.env.as_mut().ok_or(ActionRejected::NoEnvironment)?;
-    // A create/switch owns every container until it settles — the same rule
-    // `start_node` applies. A stop or delete slipped in mid-switch would race
-    // the switch's own Docker work on the same container.
+    // A create owns every container until it settles.
     if run.pending_create.is_some() {
         return Err(ActionRejected::AlreadyInFlight);
     }
@@ -81,19 +57,8 @@ fn lookup_mut<'a>(
         .ok_or(ActionRejected::NodeNotFound)
 }
 
-/// Flips the per-container debug switch (`FGHJ_DEBUG_WAIT`) and queues the
-/// recreate that applies it.
-///
-/// There is deliberately no dedicated `PendingAction` for this: the switch
-/// is a value in `desired`, and `PendingAction::Starting` is already the
-/// convergence that makes a container match its desired state. So this
-/// records the new desire and reuses that path — `converge::perform` reads
-/// `desired.debug_wait` back out when it calls `restart_node`.
-///
-/// Unlike `start_node`, this requires the container to already exist. A node
-/// with no container has nothing to halt, and inserting a placeholder would
-/// mean "start this node, and also halt it before line 0" — two intents for
-/// one switch. Start the node first.
+/// Flips `FGHJ_DEBUG_WAIT` and reuses `Starting` to apply it. Requires an
+/// existing container: a missing node has nothing to halt.
 fn set_debug_wait(
     state: &WorkspaceState,
     node_id: &str,
@@ -114,25 +79,11 @@ fn set_debug_wait(
     Ok(next)
 }
 
-/// `NodeStartRequested` is the one per-node action that must succeed even
-/// when `node_id` has no live entry in `run.containers` — the Drawer's
-/// "Start"/"Recreate" button is the documented way to bring a *deleted*
-/// node's container back (`orchestrator::Orchestrator::restart_node` looks the
-/// node up in the resolved `.fghj.yaml` graph, not in any live container
-/// list, so a prior `NodeDeleteRequested` removing the entry outright
-/// must not make this node permanently unstartable). A fresh placeholder is
-/// inserted here with just enough shape to carry `pending_action`;
-/// `effects::docker::converge`'s `Starting` handling re-resolves the graph
-/// and calls `restart_node` regardless of what's in `desired`, and
-/// `Action::ContainerActionSettled` replaces this placeholder wholesale once
-/// that call reports back — so nothing here needs to be a real value, only
-/// present.
+/// Must work without a container entry: Start is how a deleted node comes back.
+/// The placeholder is replaced wholesale when the start settles.
 fn start_node(state: &WorkspaceState, node_id: &str) -> Result<WorkspaceState, ActionRejected> {
     let mut next = state.clone();
-    // No environment yet: this start is what creates it. Its network and
-    // sidecar have to exist before any container can, so the start goes
-    // through the same create/top-up `EnvPlanned` does, scoped to this node
-    // and what it can't start without.
+    // No environment yet: go through a create scoped to this node.
     let Some(run) = next.env.as_mut() else {
         next.env = Some(EnvState {
             pending_create: Some(EnvSpec::Node(node_id.to_string())),
@@ -140,8 +91,6 @@ fn start_node(state: &WorkspaceState, node_id: &str) -> Result<WorkspaceState, A
         });
         return Ok(next);
     };
-    // Still being created or switched: the network may not be there yet,
-    // and the create may be about to start this very node.
     if run.pending_create.is_some() {
         return Err(ActionRejected::AlreadyInFlight);
     }
@@ -161,9 +110,6 @@ fn start_node(state: &WorkspaceState, node_id: &str) -> Result<WorkspaceState, A
     Ok(next)
 }
 
-/// What a node being started for the first time looks like until the start
-/// reports back: marked `Starting`, with nothing resolved yet. Whatever
-/// settles the start replaces it wholesale.
 pub(super) fn starting_placeholder(node_id: &str) -> ContainerInfo {
     ContainerInfo {
         node_id: node_id.to_string(),
@@ -176,16 +122,7 @@ pub(super) fn starting_placeholder(node_id: &str) -> ContainerInfo {
             additional_hosts: Vec::new(),
             status_port: None,
             config_hash: String::new(),
-            // Nothing has been built yet, so there is no
-            // checkout this container came from — and unlike the
-            // empty strings above, `None` is the value this
-            // field would legitimately hold forever for a
-            // non-built node, so it is not misread as resolved.
             source: None,
-            // A placeholder for a node nothing has resolved yet
-            // — `start_node` overwrites the whole `desired` from
-            // the real graph when it reports back, and that is
-            // the only place `terminating` is ever decided.
             terminating: false,
             debug_wait: false,
         },
@@ -216,16 +153,12 @@ mod tests {
 
     use crate::state::testing::workspace;
 
-    /// Requests act on containers that aren't running yet.
     fn container(node_id: &str) -> ContainerInfo {
         let mut c = crate::state::testing::container(node_id);
         c.desired.running = false;
         c
     }
 
-    /// The switch is a value in `desired`, applied by the ordinary
-    /// `Starting` convergence — so flipping it on must leave exactly that
-    /// behind for `converge::perform` to read back out.
     #[test]
     fn debug_wait_requested_sets_the_desire_and_queues_the_recreate() {
         let state = workspace(vec![container("api")]);
@@ -241,8 +174,6 @@ mod tests {
 
         let c = next.env.as_ref().unwrap().containers["api"].clone();
         assert!(c.desired.debug_wait);
-        // The container has to come back up for the flag to mean anything:
-        // a halted-at-startup container is still a *running* container.
         assert!(c.desired.running);
         assert_eq!(c.pending_action, Some(PendingAction::Starting));
     }
@@ -280,9 +211,6 @@ mod tests {
         );
     }
 
-    /// Unlike `start_node`, this does *not* insert a placeholder: a node with
-    /// no container has nothing to halt, and conjuring one would fold two
-    /// intents ("start this" and "halt it before line 0") into one switch.
     #[test]
     fn debug_wait_is_rejected_for_a_node_with_no_container() {
         let state = workspace(vec![container("api")]);
@@ -428,13 +356,6 @@ mod tests {
 
     #[test]
     fn node_start_requested_inserts_a_placeholder_for_a_node_with_no_live_entry() {
-        // Covers deleting a container then starting it again: `Removing`
-        // settling removes the node's `ContainerInfo` outright
-        // (`reducer::observation`), so this is the only remaining evidence
-        // the node ever existed. It must still be startable — the Drawer's
-        // "Start"/"Recreate" button is the documented way to bring a
-        // deleted node back, and `restart_node` recreates from the
-        // resolved `.fghj.yaml` graph regardless of what's in state.
         let state = workspace(vec![container("web")]);
         let next = reduce(
             &state,

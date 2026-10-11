@@ -1,16 +1,6 @@
-//! The local certificate authority behind every `https://*.fghj.internal`
-//! URL.
-//!
-//! Three jobs: generating/loading the CA itself (durable, under
-//! `daemon::ca_dir` — regenerating it would mean re-approving it in Keychain
-//! Access on every restart), minting leaf certs on demand as
-//! [`DynamicCertResolver`] answers `web::proxy`'s TLS handshakes, and
-//! publishing it as mountable PEM files for containers that need to trust
-//! the zone from the inside. Trusting it in the OS store, for the browser,
-//! is [`crate::web::trust`].
-//!
-//! Which names get a certificate is deliberately not "anything asked for":
-//! see [`DynamicCertResolver::resolve_for`] and `dns::cert_eligible`.
+//! The local CA behind every `https://*.fghj.internal` URL: loading it,
+//! minting leaf certs on demand, and publishing PEMs for containers. Which
+//! names get a cert: see `DynamicCertResolver::resolve_for`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -34,9 +24,6 @@ use crate::web::proxy;
 const CA_CERT_FILE: &str = "ca-cert.pem";
 const CA_KEY_FILE: &str = "ca-key.pem";
 
-/// A loaded (or freshly generated) local CA, kept in memory as both its
-/// signing material (for minting leaf certs on demand) and its PEM (for
-/// re-installing into the system trust store if ever needed again).
 pub struct LoadedCa {
     key_pair: KeyPair,
     cert_pem: String,
@@ -44,32 +31,19 @@ pub struct LoadedCa {
 }
 
 impl LoadedCa {
-    /// The CA's own certificate, DER-encoded — exposed only for tests
-    /// outside this module (`proxy::tests`) that need to build a client
-    /// `RootCertStore` trusting it.
     #[cfg(test)]
     pub fn cert_der_for_tests(&self) -> CertificateDer<'static> {
         self.cert_der.clone()
     }
 }
 
-/// Generates a fresh, unpersisted CA — exposed only for tests outside this
-/// module that need one without touching the filesystem or system trust
-/// store (see `ensure_ca` for the real, persisted/testable-separately path).
 #[cfg(test)]
 pub fn generate_ca_for_tests() -> LoadedCa {
     generate_ca().expect("CA generation must succeed in tests")
 }
 
-/// Loads the CA from `dir` (`ca-cert.pem` + `ca-key.pem`), generating and
-/// persisting a new one if this is the first run. `dir` should be a durable
-/// location (this project's convention is `/var/lib/fghjd/...`, *not*
-/// `/var/run`: unlike the pidfile/port file, this CA must survive a reboot).
-///
-/// Deliberately does not touch the system trust store — that's
-/// [`crate::web::trust::install`], kept as a separate step (mirroring
-/// `dns::bind`/`dns::install_os_resolver_config`) so this function stays a
-/// plain, testable filesystem operation with no privileged side effects.
+/// Loads the CA from `dir`, generating it on first run. `dir` must survive a
+/// reboot. Doesn't touch the system trust store (`web::trust::install`).
 pub fn ensure_ca(dir: &Path) -> Result<LoadedCa> {
     let cert_path = dir.join(CA_CERT_FILE);
     let key_path = dir.join(CA_KEY_FILE);
@@ -86,24 +60,17 @@ pub fn ensure_ca(dir: &Path) -> Result<LoadedCa> {
     let key_pem = ca.key_pair.serialize_pem();
     fs::write(&key_path, &key_pem)
         .with_context(|| format!("failed to write {}", key_path.display()))?;
-    // Root-only-readable: this key can mint a certificate for any hostname
-    // that a browser trusting our CA will accept without warning.
+    // Root-only: this key can mint a cert for any name a trusting browser accepts.
     fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))
         .with_context(|| format!("failed to set permissions on {}", key_path.display()))?;
 
     Ok(ca)
 }
 
-/// Path to the CA certificate PEM `ensure_ca` persists under `dir` — exposed
-/// so callers (e.g. `daemon::run_control_api`) can pass it to
-/// `web::trust::install` without hardcoding the filename twice.
 pub fn ca_cert_path(dir: &Path) -> PathBuf {
     dir.join(CA_CERT_FILE)
 }
 
-/// Path to the CA private key PEM `ensure_ca` persists under `dir` —
-/// exposed so callers (e.g. the sidecar container's bind-mount setup in
-/// `orchestrator/`) can name the key file without reaching into `ca.rs` internals.
 pub fn ca_key_path(dir: &Path) -> PathBuf {
     dir.join(CA_KEY_FILE)
 }
@@ -111,19 +78,9 @@ pub fn ca_key_path(dir: &Path) -> PathBuf {
 const TRUST_CERT_FILE: &str = "cert.pem";
 const TRUST_BUNDLE_FILE: &str = "bundle.pem";
 
-/// Writes two world-readable, key-free files into `dir`, alongside the CA's
-/// own (root-only-readable-key) material: `cert.pem` (just fghj's CA cert)
-/// and `bundle.pem` (that same cert merged with this host's real root CA
-/// store — a drop-in replacement for a container's own system trust file).
-/// This is the entire feature surface for trusting fghj's zone from a
-/// container: no `.fghj.yaml` schema of its own, just two stable paths a
-/// workspace mounts itself via the existing generic `volumes:` mechanism.
-///
-/// Deliberately a separate step from `ensure_ca`, not folded into it: the
-/// sidecar's own `ensure_ca` call (`fghj-sidecar.rs`) runs against a `:ro`
-/// bind mount of this same directory, and would fail if `ensure_ca` itself
-/// tried to write these back into it. Callers that own a writable `dir`
-/// (currently just `daemon::run_control_api`) call this explicitly instead.
+/// Writes `cert.pem` and `bundle.pem` (fghj's CA plus the host's roots) for
+/// containers to mount. Separate from `ensure_ca`: the sidecar calls that on a
+/// read-only mount.
 pub fn refresh_trust_files(dir: &Path, ca: &LoadedCa) -> Result<()> {
     write_world_readable(&dir.join(TRUST_CERT_FILE), ca.cert_pem.as_bytes())?;
     let bundle = merge_bundle(&native_root_certs(), ca);
@@ -132,18 +89,10 @@ pub fn refresh_trust_files(dir: &Path, ca: &LoadedCa) -> Result<()> {
     Ok(())
 }
 
-/// `roots` re-encoded as one PEM sequence with `ca`'s certificate appended.
-/// Split out from `refresh_trust_files` only so the de-duplication below can
-/// be tested without a host trust store that happens to contain fghj's CA.
 fn merge_bundle(roots: &[CertificateDer<'static>], ca: &LoadedCa) -> String {
     let mut bundle = String::new();
     for der in roots {
-        // Skip our own CA if the host store already has it — once
-        // `web::trust::install` has run, `load_native_certs` returns it as a
-        // trusted root like any other, and appending it again below would put
-        // it in `bundle.pem` twice. Harmless to a verifier, but it makes the
-        // file lie about how many roots it carries, and it is the kind of
-        // discrepancy that sends someone debugging the wrong thing.
+        // Already present once `web::trust::install` has run.
         if der == &ca.cert_der {
             continue;
         }
@@ -157,32 +106,9 @@ fn merge_bundle(roots: &[CertificateDer<'static>], ca: &LoadedCa) -> String {
     bundle
 }
 
-/// This host's real root CA store (macOS Keychain / Linux system bundle /
-/// ...). Best-effort by design: `rustls-native-certs` documents that a
-/// handful of unparsable OS entries is normal, and even a wholly empty
-/// result (e.g. a minimal container with no system store at all) should
-/// still leave `bundle.pem` usable — just equivalent to `cert.pem` alone —
-/// rather than failing the whole refresh.
-///
-/// Enumerated in-process, as root, which is worth stating because the
-/// obvious objection to it is wrong. macOS trust settings live in three
-/// domains — User, Admin, System — and `rustls-native-certs` reads all
-/// three, but "User" means *the calling process's* user; `fghjd` is root, so
-/// it reads root's own empty user domain. The apparent fix is to re-run the
-/// enumeration as the console user. Measured on macOS 26, that makes the
-/// bundle strictly worse: root's enumeration returned 163 roots, the console
-/// user's 131, and the 32 missing included two locally-trusted MITM proxy
-/// CAs — exactly the certificates whose absence breaks a container's
-/// ordinary outbound HTTPS. Neither enumeration returns a user-domain-only
-/// root at all (verified by fingerprint against a cert with
-/// `SSL: kSecTrustSettingsResultTrustRoot` in the login keychain), so
-/// dropping privileges buys nothing and costs the admin domain.
-///
-/// The user-domain gap is therefore real but not ours to close here: a CA
-/// that only exists in someone's login keychain never reaches `bundle.pem`,
-/// and the fix is to trust it in the admin/System domain — where everything
-/// that prompts for a password already puts it — or to concatenate it into a
-/// bundle of one's own.
+/// Best-effort: an empty or partly unparsable store still yields a usable bundle.
+/// Enumerated as root on purpose: as the console user, macOS drops admin-domain
+/// roots (including local MITM proxy CAs) and gains no user-domain ones.
 fn native_root_certs() -> Vec<CertificateDer<'static>> {
     rustls_native_certs::load_native_certs().certs
 }
@@ -213,20 +139,12 @@ const SIGNING_CERT_FILE: &str = "signing-cert.pem";
 const SIGNING_KEY_FILE: &str = "signing-key.pem";
 const SIGNING_GENERATION_FILE: &str = "signing-generation";
 
-/// The signing CA's Common Name. Never installed into any trust store — it
-/// is trusted transitively, through the root, so it deliberately does not
-/// share `COMMON_NAME` and cannot be caught by `uninstall`'s
-/// `security delete-certificate -c`.
+/// Never installed into a trust store, so it must not share `COMMON_NAME`:
+/// `uninstall` deletes by name.
 const SIGNING_COMMON_NAME: &str = "fghj signing CA";
 
-/// Every DNS suffix the signing CA is permitted to issue under — exactly the
-/// set `dns::cert_eligible` is willing to mint for, assembled from the same
-/// two constants it reads so the two cannot drift apart.
-///
-/// `dns::ZONE` is already covered by the `internal` entry, and is listed
-/// anyway: the cost is one redundant subtree, and the alternative is a
-/// silent, total outage of fghj's own zone if that TLD is ever dropped from
-/// the reserved list.
+/// Mirrors `dns::cert_eligible`. `dns::ZONE` is covered by `internal` but listed
+/// in case that TLD is ever dropped.
 fn permitted_dns_suffixes() -> Vec<&'static str> {
     let mut suffixes: Vec<&str> = std::iter::once(dns::ZONE)
         .chain(dns::RESERVED_ALIAS_TLDS.iter().copied())
@@ -236,19 +154,8 @@ fn permitted_dns_suffixes() -> Vec<&'static str> {
     suffixes
 }
 
-/// X.509 `nameConstraints` for the signing CA.
-///
-/// `permittedSubtrees` of a dNSName constrains by label boundary, not string
-/// prefix (RFC 5280 §4.2.1.10: a name satisfies the constraint if it can be
-/// built by adding zero or more labels to the left), so `internal` permits
-/// `internal` and `cart.fghj.internal` but not `notinternal`.
-///
-/// The excluded IP subtrees are not belt-and-braces. A `permittedSubtrees`
-/// containing only dNSName entries leaves **every other name type wholly
-/// unconstrained**, so without these a stolen signing key could still mint a
-/// cert for an iPAddress SAN. `0.0.0.0/0` and `::/0` close that: nothing fghj
-/// issues carries an IP SAN (`cert_eligible` only ever admits hostnames), so
-/// excluding the whole space costs nothing.
+/// The IP exclusions matter: dNSName-only permitted subtrees leave IP SANs
+/// unconstrained.
 fn signing_name_constraints() -> NameConstraints {
     NameConstraints {
         permitted_subtrees: permitted_dns_suffixes()
@@ -262,46 +169,16 @@ fn signing_name_constraints() -> NameConstraints {
     }
 }
 
-/// A marker for *which* constraint set the persisted signing CA was built
-/// with, derived from the set itself rather than hand-maintained alongside
-/// it. Edit `dns::RESERVED_ALIAS_TLDS` and every existing install regenerates
-/// its signing CA on the next start, with nothing to remember to bump.
+/// Derived from the constraint set, so changing it regenerates the signing CA.
 fn signing_generation() -> String {
     format!("v1 dns:{}", permitted_dns_suffixes().join(","))
 }
 
-/// Loads (or mints and persists) the **signing** CA: a subordinate CA under
-/// `root`, carrying the `nameConstraints` above, which is what actually signs
-/// every leaf certificate.
-///
-/// The root exists only to sign this. That split is the whole point, and it
-/// is about where the private keys end up rather than about PKI tidiness:
-///
-/// - The **root** key stays `0600` in `daemon::ca_dir()` and is never copied
-///   anywhere. It is the key the OS trust store vouches for, so a leak of it
-///   is a leak of trust for *every* hostname — `IsCa::Ca(Unconstrained)`
-///   means a browser would accept a cert it signed for any domain at all.
-/// - The **signing** key cannot stay that private. `orchestrator::route_table`'s
-///   `refresh_sidecar_ca_copy` has to hand it to every run's sidecar
-///   container as a world-readable `0644` file, because Docker's macOS
-///   bind-mount bridge performs its permission check host-side, as the
-///   logged-in user, before the request reaches the container's UID
-///   namespace — a `0600` root-owned file is simply unreadable through it.
-///
-/// So one of these two keys is, unavoidably, readable by any local process
-/// and present inside containers. `nameConstraints` is what decides how much
-/// that costs: with the root serving leaves directly, the answer was "every
-/// site on the internet"; with this split it is "fghj's own zone and the
-/// reserved TLDs".
-///
-/// Constraining a subordinate rather than the root is also what keeps the
-/// decision reversible. Trust settings attach to the root, and that root's
-/// bytes never change here — so widening the permitted set later (a real
-/// custom domain over HTTPS, say) means minting a fresh signing CA under the
-/// same root, which every client already trusts. Had the constraints gone on
-/// the root itself, the same change would mean a new root and a fresh
-/// Keychain Access approval on every machine, which is precisely the friction
-/// `ensure_ca`'s durability exists to avoid.
+/// The name-constrained subordinate CA that signs every leaf. Its key must be
+/// world-readable for the sidecar (Docker's macOS bind mount checks permissions
+/// host-side), so the constraints bound what a leak costs; the root key never
+/// leaves `ca_dir()`. Constraining this CA rather than the root keeps the root,
+/// and its trust approval, stable.
 pub fn ensure_signing_ca(dir: &Path, root: &LoadedCa) -> Result<LoadedCa> {
     let cert_path = dir.join(SIGNING_CERT_FILE);
     let key_path = dir.join(SIGNING_KEY_FILE);
@@ -320,29 +197,20 @@ pub fn ensure_signing_ca(dir: &Path, root: &LoadedCa) -> Result<LoadedCa> {
         .with_context(|| format!("failed to write {}", cert_path.display()))?;
     fs::write(&key_path, signing.key_pair.serialize_pem())
         .with_context(|| format!("failed to write {}", key_path.display()))?;
-    // `0600` for *this* copy. The sidecar's world-readable one is a separate
-    // file written by `refresh_sidecar_ca_copy`, so the permission it needs
-    // doesn't have to be the permission this one carries.
     fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))
         .with_context(|| format!("failed to set permissions on {}", key_path.display()))?;
-    // Written last: a crash between the cert and this marker leaves the
-    // generation stale, which regenerates — the safe direction. The reverse
-    // order could leave a fresh marker claiming constraints the persisted
-    // cert doesn't actually carry.
+    // Written last: a crash before this leaves the generation stale, which
+    // regenerates.
     fs::write(&generation_path, &wanted)
         .with_context(|| format!("failed to write {}", generation_path.display()))?;
 
     Ok(signing)
 }
 
-/// Path to the signing CA's certificate under `dir` — exposed so
-/// `orchestrator::route_table` can copy it into the sidecar's own directory.
 pub fn signing_cert_path(dir: &Path) -> PathBuf {
     dir.join(SIGNING_CERT_FILE)
 }
 
-/// Path to the signing CA's private key under `dir`. See `ensure_signing_ca`
-/// for why this one, and not `ca_key_path`, is the key that leaves `ca_dir()`.
 pub fn signing_key_path(dir: &Path) -> PathBuf {
     dir.join(SIGNING_KEY_FILE)
 }
@@ -357,16 +225,9 @@ fn generate_signing_ca(root: &LoadedCa) -> Result<LoadedCa> {
     params
         .distinguished_name
         .push(DnType::OrganizationName, "fghj");
-    // `Constrained(0)`, not `Unconstrained`: this CA may sign end-entity
-    // certificates and nothing else. Without the path length, a stolen
-    // signing key could mint further sub-CAs — still name-constrained, since
-    // constraints are inherited down the chain, but there is no reason to
-    // leave the depth open when fghj only ever issues leaves.
+    // Leaves only.
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    // Not self-signed, so RFC 5280 wants an AuthorityKeyIdentifier pointing
-    // back at the root — the same requirement, and the same strict-OpenSSL
-    // failure when it's missing, that `issue` documents for leaves.
     params.use_authority_key_identifier_extension = true;
     params.name_constraints = Some(signing_name_constraints());
 
@@ -383,10 +244,7 @@ fn generate_signing_ca(root: &LoadedCa) -> Result<LoadedCa> {
     })
 }
 
-/// The CA certificate's Common Name. Also the handle `uninstall` hands to
-/// `security delete-certificate`, which matches on exactly this string —
-/// so the generator and the remover cannot drift into naming different
-/// certificates.
+/// Also what `uninstall` deletes by (`security delete-certificate -c`).
 pub const COMMON_NAME: &str = "fghj local CA";
 
 fn generate_ca() -> Result<LoadedCa> {
@@ -423,20 +281,8 @@ fn pem_to_der(pem: &str) -> Result<CertificateDer<'static>> {
         .context("failed to parse PEM certificate")
 }
 
-/// Resolves a TLS certificate for any in-zone SNI on demand, minting and
-/// caching a fresh leaf certificate signed by the loaded CA the first time
-/// each hostname is seen. A single wildcard certificate can't cover this:
-/// X.509 wildcards only match one leftmost label (RFC 6125), so
-/// `*.fghj.internal` wouldn't match a multi-label name like
-/// `deep.sub.fghj.internal` — and the schema allows exactly those.
-///
-/// Also the eligibility gate for an `#AdditionalHost` alias: `routes` (the
-/// same `RouteResolver` `proxy::serve_https` dispatches through) is
-/// consulted so a reserved-TLD alias (`dns::is_reserved_alias`) only ever
-/// gets a certificate while some running container actually claims it as a
-/// route — never a blanket "any `.local`-shaped SNI gets a cert," which
-/// would let a browser mint trust for a name nothing in this workspace
-/// declared.
+/// Mints a leaf per SNI on first use: wildcards only match one label. A
+/// reserved-TLD alias only gets a cert while a running container routes it.
 pub struct DynamicCertResolver {
     ca_key_pair: KeyPair,
     ca_cert_der: CertificateDer<'static>,
@@ -476,18 +322,8 @@ impl DynamicCertResolver {
         let mut params = CertificateParams::new(vec![name.to_string()])
             .context("failed to construct leaf cert params")?;
         params.distinguished_name.push(DnType::CommonName, name);
-        // RFC 5280 requires any non-self-signed certificate to carry an
-        // AuthorityKeyIdentifier pointing back to its issuer's key.
-        // `use_authority_key_identifier_extension` defaults to `false` in
-        // rcgen, and it silently produced leaf certs with *no* AKI (and, via
-        // `is_ca` defaulting to `NoCa`, no SubjectKeyIdentifier or
-        // basicConstraints either — rcgen only writes those for certs whose
-        // `is_ca` isn't left at its default). Newer OpenSSL enforces the AKI
-        // requirement strictly and rejects the chain; looser stacks
-        // (`openssl s_client`, browsers) don't, which is how this went
-        // unnoticed. `ExplicitNoCa` marks this leaf as an explicit
-        // (non-CA) end-entity cert, which is what actually turns on the SKI
-        // and `basicConstraints: CA:FALSE` extensions.
+        // Strict OpenSSL rejects a leaf without AKI, SKI and `CA:FALSE`; rcgen only
+        // writes the latter two for `ExplicitNoCa`.
         params.is_ca = IsCa::ExplicitNoCa;
         params.use_authority_key_identifier_extension = true;
         params.key_usages = vec![
@@ -500,13 +336,7 @@ impl DynamicCertResolver {
             .signed_by(&leaf_key, &issuer)
             .context("failed to sign leaf certificate")?;
 
-        // Leaf *and* its issuer. The issuer here is the name-constrained
-        // signing CA (`ensure_signing_ca`), which no client has in its trust
-        // store — clients trust the root, so the chain has to carry the
-        // intermediate or verification fails with "unable to get local
-        // issuer certificate". Sending it is also correct in the tests that
-        // hand this resolver a self-signed root instead: a chain may include
-        // its own trust anchor, and verifiers ignore the extra cert.
+        // Clients trust the root, so the chain must carry the signing CA.
         let cert_chain = vec![cert.der().clone(), self.ca_cert_der.clone()];
         let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
         let certified = CertifiedKey::from_der(cert_chain, key_der, &self.provider)
@@ -514,10 +344,7 @@ impl DynamicCertResolver {
         Ok(Arc::new(certified))
     }
 
-    /// The actual resolution logic, factored out of the `ResolvesServerCert`
-    /// impl so it's callable directly from tests — rustls's `ClientHello` has
-    /// no public constructor, so exercising `resolve()` itself would require
-    /// driving a full handshake for what is otherwise a plain lookup.
+    /// Split out for tests: rustls's `ClientHello` has no public constructor.
     fn resolve_for(&self, name: &str) -> Option<Arc<CertifiedKey>> {
         let eligible = dns::cert_eligible(name, self.routes.resolve(name).is_some());
         if !eligible {
@@ -554,10 +381,6 @@ mod tests {
         Arc::new(rustls::crypto::ring::default_provider())
     }
 
-    /// A `RouteResolver` backed by a plain in-memory map — same role as
-    /// `proxy::tests::StaticRoutes`, duplicated here (rather than exposed
-    /// from `proxy`) since it's only ever needed to exercise the
-    /// reserved-alias eligibility gate in isolation.
     struct StaticRoutes(std::collections::HashMap<&'static str, u16>);
 
     impl proxy::RouteResolver for StaticRoutes {
@@ -582,7 +405,6 @@ mod tests {
         assert!(dir.join(CA_CERT_FILE).exists());
         assert!(dir.join(CA_KEY_FILE).exists());
 
-        // Second call must load the same CA rather than regenerating it.
         let second = ensure_ca(&dir).unwrap();
         assert_eq!(first.cert_pem, second.cert_pem);
     }
@@ -684,8 +506,6 @@ mod tests {
         let certified = resolver.resolve_for("cart.fghj.internal").unwrap();
         let leaf_der = certified.cert[0].clone();
 
-        // Cryptographically verify leaf_der was signed by the CA's key, not
-        // just "resolve_for() didn't panic".
         use x509_parser::prelude::*;
         let (_, leaf) = X509Certificate::from_der(&leaf_der).unwrap();
         let (_, ca_cert) = X509Certificate::from_der(&ca_cert_der).unwrap();
@@ -695,13 +515,6 @@ mod tests {
         );
     }
 
-    /// RFC 5280 requires a non-self-signed certificate to carry an
-    /// AuthorityKeyIdentifier pointing back to its issuer's key; strict
-    /// verifiers (newer OpenSSL, unlike `openssl s_client` or browsers)
-    /// reject a chain without one. Also checks for the SubjectKeyIdentifier
-    /// and `basicConstraints: CA:FALSE` extensions that come along with
-    /// marking the leaf `IsCa::ExplicitNoCa` rather than leaving it at
-    /// rcgen's default `NoCa`.
     #[test]
     fn issued_leaf_cert_carries_aki_ski_and_basic_constraints() {
         let ca = generate_ca().unwrap();
@@ -753,9 +566,6 @@ mod tests {
         let ca = generate_ca_for_tests();
         let other = generate_ca_for_tests();
 
-        // What `load_native_certs` returns on a machine where
-        // `web::trust::install` has already run: fghj's own CA, sitting in the
-        // host store as a trusted root like any other.
         let store = vec![other.cert_der.clone(), ca.cert_der.clone()];
         let bundle = merge_bundle(&store, &ca);
 
@@ -774,11 +584,8 @@ mod tests {
         );
     }
 
-    /// The constraint set has to be a superset of what `dns::cert_eligible`
-    /// will mint for. A name fghj is willing to issue for but the signing CA
-    /// forbids fails verification at the *client*, with an error naming
-    /// neither — so this is the test that catches someone adding a reserved
-    /// TLD and forgetting the certificate side.
+    /// The signing CA must permit everything `dns::cert_eligible` mints for; a
+    /// mismatch fails only at the client, with an error naming neither.
     #[test]
     fn the_permitted_suffixes_cover_every_name_the_resolver_will_issue_for() {
         let permitted = permitted_dns_suffixes();
@@ -811,7 +618,6 @@ mod tests {
             "the signing CA must be signed by the root, not self-signed"
         );
 
-        // May sign leaves, and nothing below them.
         let bc = cert
             .basic_constraints()
             .unwrap()
@@ -849,8 +655,6 @@ mod tests {
             "permittedSubtrees must be exactly the eligible DNS suffixes"
         );
 
-        // Without these, a permittedSubtrees of only dNSName entries leaves
-        // iPAddress wholly unconstrained — see `signing_name_constraints`.
         let excluded: Vec<usize> = constraints
             .excluded_subtrees
             .as_ref()
@@ -880,8 +684,6 @@ mod tests {
             "an unchanged constraint set must reload the persisted signing CA, not mint a new one"
         );
 
-        // Same thing `dns::RESERVED_ALIAS_TLDS` growing a TLD does to every
-        // existing install: the marker no longer describes the persisted cert.
         fs::write(
             tmp.path().join(SIGNING_GENERATION_FILE),
             "v1 dns:something-else",
@@ -916,9 +718,6 @@ mod tests {
         );
     }
 
-    /// Clients trust the root, not the signing CA, so a leaf served on its own
-    /// fails with "unable to get local issuer certificate". The chain has to
-    /// carry the intermediate.
     #[test]
     fn an_issued_leaf_is_served_with_its_issuer_and_chains_up_to_the_root() {
         let tmp = tempfile::tempdir().unwrap();
@@ -955,15 +754,8 @@ mod tests {
         );
     }
 
-    /// The constraints being *present* (above) is not the same as their being
-    /// *enforced*. This runs the served chain through the same webpki path a
-    /// rustls client uses, trusting only the root: an in-zone name must pass,
-    /// and a name outside the permitted subtrees must be rejected even though
-    /// the signature over it is perfectly valid.
-    ///
-    /// `issue` is called directly for the out-of-zone case on purpose —
-    /// `resolve_for` would refuse the name first (`dns::cert_eligible`), which
-    /// tests fghj's own gate rather than the certificate's.
+    /// Enforced, not just present. `issue` is called directly because `resolve_for`
+    /// would refuse the out-of-zone name first.
     #[test]
     fn the_signing_cas_constraints_are_enforced_by_a_real_verifier() {
         use rustls::client::danger::ServerCertVerifier;

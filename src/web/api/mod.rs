@@ -1,10 +1,5 @@
-//! The axum router: every route the daemon serves, in one table.
-//!
-//! Two sub-routers, split by what they carry as axum state — `/workspaces`,
-//! `/runs`, `/pull*` are per-workspace and hold the `WorkspaceRegistry`;
-//! `/daemon/*` is about the daemon process itself and holds `DaemonControl`.
-//! Anything neither claims falls through to the embedded UI
-//! (`web::ui::static_handler`).
+//! The axum router. `/daemon/*` holds `DaemonControl`; everything else holds
+//! the `WorkspaceRegistry`; the rest falls through to the embedded UI.
 
 use std::sync::Arc;
 

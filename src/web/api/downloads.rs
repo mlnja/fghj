@@ -1,5 +1,3 @@
-//! Kicking off and polling background clone/pull jobs.
-
 use axum::Json;
 use axum::extract::{Path as AxumPath, Query};
 use axum::http::StatusCode;
@@ -65,8 +63,6 @@ pub(crate) async fn get_pull_node_status(
     }
 }
 
-/// Lists every pull/download job the workspace has ever started, most-recent
-/// first — backs the UI's single "operations queue" drawer.
 pub(crate) async fn get_pull_jobs(WorkspaceExtractor(state): WorkspaceExtractor) -> Response {
     Json(serde_json::json!(state.downloads.list())).into_response()
 }

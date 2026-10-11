@@ -1,15 +1,5 @@
-//! The TLS reverse proxy on ports 80/443 (SPEC.md Subsystem C).
-//!
-//! Every `*.fghj.internal` name resolves to [`PROXY_IP`] (see `dns`), so this
-//! is what actually decides *which* container a request reaches: it reads
-//! the TLS SNI, asks a [`RouteResolver`] for a [`Backend`], and relays bytes
-//! to it. Port 80 exists only to redirect to 443.
-//!
-//! Runs in two places with the same code: on the host (resolver backed by
-//! `daemon::WorkspaceRegistry`, relaying to published `127.0.0.1` ports) and
-//! inside each run's sidecar container (resolver backed by the on-disk route
-//! table, relaying to sibling containers' docker-network addresses) — hence
-//! [`Backend`] carrying a full host rather than just a port.
+//! The TLS reverse proxy on 80/443: routes by SNI through a `RouteResolver`.
+//! Runs on the host and inside each sidecar.
 
 use std::io;
 use std::net::Ipv4Addr;
@@ -27,58 +17,24 @@ use crate::dns;
 use crate::supervisor;
 use crate::web::ca;
 
-/// Where a resolved hostname should actually be relayed to. Usually
-/// `127.0.0.1` (the host-published port of a running container, or the
-/// control API) — but a `RouteResolver` backing an in-network sidecar proxy
-/// resolves to a sibling container's own docker-network address instead, so
-/// this carries a full host, not just a port.
 pub struct Backend {
     pub host: String,
     pub port: u16,
 }
 
-/// Resolves an in-zone hostname that isn't the zone apex to the backend it
-/// should be proxied to, if any. Kept as a trait (implemented by
-/// `daemon::routing`'s impl for `WorkspaceRegistry`, over
-/// `state::query::resolve_route`, in production) rather than a
-/// concrete dependency so this module doesn't need to know anything about
-/// workspaces, runs, or Docker — and so tests can exercise dispatch with a
-/// plain in-memory map instead of real containers.
 pub trait RouteResolver: Send + Sync {
     fn resolve(&self, host: &str) -> Option<Backend>;
 }
 
-/// `fghj` occupies these unconditionally while `fghjd` runs — unlike the
-/// DNS/control-API ports, these can't be ephemeral: a bare
-/// `https://fghj.internal` URL with no `:port` only ever reaches port 443.
+/// Fixed, not ephemeral: a bare `https://fghj.internal` only reaches 443.
 pub const HTTP_PORT: u16 = 80;
 pub const HTTPS_PORT: u16 = 443;
 
-/// The address the proxy binds, and the address the host's DNS server hands
-/// out for every `ZONE` name (`dns::ANSWER` is this constant).
-///
-/// Deliberately **not** `127.0.0.1`. Binding the machine's usual loopback
-/// address at :80/:443 would mean a developer already running something
-/// there — `docker run -p 80:80`, a local nginx — either couldn't start
-/// fghjd or, worse, would find their own `curl http://127.0.0.1/` answered
-/// by fghjd instead of by their container. Taking a dedicated alias leaves
-/// `127.0.0.1:80`, `127.0.0.1:443` and `0.0.0.0:80` completely free, so
-/// installing fghj can't disturb a setup that was working.
-///
-/// Inside `127.0.0.0/8` rather than the `10.222.0.0/16` raw-zone pool
-/// because RFC 1122 forbids a loopback-destined datagram from ever reaching
-/// the wire — no LAN, VPN or corporate network can collide with it. `10/8`
-/// is ordinary RFC 1918 space that sites really do carve up, so a virtual IP
-/// there can shadow a real host the developer needs. (`127.0.0.11` for
-/// Docker's embedded DNS and `127.0.0.53` for systemd-resolved are the same
-/// trick.) Requires an `ifconfig lo0 alias` on macOS, which only assigns
-/// `127.0.0.1` itself — see `raw_net::add_loopback_alias`, called from
-/// `DaemonControl::activate`.
+/// A dedicated loopback alias rather than 127.0.0.1, so a developer's own
+/// :80/:443 keep working; inside 127/8 so it can't collide with a real network.
+/// Aliased onto `lo0` by `raw_net::add_loopback_alias`.
 pub const PROXY_IP: Ipv4Addr = Ipv4Addr::new(127, 222, 0, 1);
 
-/// Fails if `PROXY_IP` isn't aliased onto `lo0` yet — `activate` does that
-/// first, so the error below points at a genuinely occupied port rather
-/// than a missing alias.
 pub async fn bind_http() -> Result<TcpListener> {
     TcpListener::bind((PROXY_IP, HTTP_PORT))
         .await
@@ -91,10 +47,7 @@ pub async fn bind_https() -> Result<TcpListener> {
         .with_context(|| format!("failed to bind fghj's HTTPS listener on {PROXY_IP}:{HTTPS_PORT} — is something else already using it?"))
 }
 
-/// Longest request line / header line this server will read before giving
-/// up — plenty for a bare `GET /path HTTP/1.1` and a `Host:` header, and
-/// small enough that a client that never sends `\r\n` can't hold a
-/// connection's buffer open indefinitely.
+/// Bounds a client that never sends `\r\n`.
 const MAX_LINE_LEN: usize = 8 * 1024;
 
 fn parse_request_path(request_line: &str) -> Option<&str> {
@@ -115,16 +68,8 @@ fn build_redirect_response(host: &str, path: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Serves forever on `listener` (port 80). For any in-zone or reserved-TLD
-/// `#AdditionalHost` name (`dns::is_reserved_alias`), reads just enough of
-/// the request to learn its `Host` and path, then redirects to the same URL
-/// over HTTPS — a small hand-rolled reader is enough here — same spirit as
-/// `dns::parse_query` — since all this needs is the request line and one
-/// header, not a general-purpose HTTP implementation. A non-reserved
-/// `#AdditionalHost` that `routes` recognizes is different: it never gets a
-/// certificate (see `ca::DynamicCertResolver::resolve_for`), so this is the
-/// *only* way it's ever reachable — relayed here in plain HTTP instead of
-/// redirected.
+/// Redirects in-zone and reserved-TLD names to HTTPS. A routed non-reserved
+/// `#AdditionalHost` never gets a cert, so it is relayed over plain HTTP instead.
 pub async fn serve_http_redirect(listener: TcpListener, routes: Arc<dyn RouteResolver>) {
     println!(
         "fghjd: HTTP listener on 127.0.0.1:{HTTP_PORT}, redirecting everything to https:// except routed non-reserved additional hosts"
@@ -148,9 +93,7 @@ pub async fn serve_http_redirect(listener: TcpListener, routes: Arc<dyn RouteRes
 
 async fn handle_http_connection(stream: TcpStream, routes: Arc<dyn RouteResolver>) -> Result<()> {
     let mut reader = BufReader::new(stream);
-    // Bytes consumed from `reader` so far — replayed to the backend verbatim
-    // if this request ends up being relayed rather than redirected, since
-    // reading them here (to learn `Host`) already took them off the socket.
+    // Replayed to the backend if relayed: reading `Host` already consumed it.
     let mut prefix = Vec::new();
 
     let mut request_line = String::new();
@@ -171,9 +114,6 @@ async fn handle_http_connection(stream: TcpStream, routes: Arc<dyn RouteResolver
         }
     }
 
-    // Only a non-reserved, actually-routed `#AdditionalHost` gets relayed in
-    // plain HTTP — everything else (in-zone, reserved-TLD, or simply
-    // unrecognized) keeps today's behavior of redirecting to HTTPS.
     let plain_backend = (!dns::in_zone(&host) && !dns::is_reserved_alias(&host))
         .then(|| routes.resolve(&host))
         .flatten();
@@ -189,8 +129,6 @@ async fn handle_http_connection(stream: TcpStream, routes: Arc<dyn RouteResolver
     }
 }
 
-/// `read_line`, but bailing out instead of growing `buf` without bound if
-/// the peer never sends a newline.
 async fn read_bounded_line<R: AsyncBufReadExt + Unpin>(
     reader: &mut R,
     buf: &mut String,
@@ -226,16 +164,8 @@ fn not_found_response() -> Vec<u8> {
     resp
 }
 
-/// Serves forever on `listener` (port 443): terminates TLS using
-/// `cert_resolver` (which also rejects any out-of-zone SNI at the handshake
-/// layer — see `ca::DynamicCertResolver`), then routes by the negotiated
-/// server name. The zone apex (`fghj.internal`) always goes to
-/// `127.0.0.1:{control_port}`, i.e. `fghjd`'s own control API/UI; any other
-/// in-zone name is looked up via `routes` (backed by
-/// `daemon::WorkspaceRegistry::resolve_route` in production) and proxied to
-/// that container's published port if a running one claims it. Anything else
-/// gets a styled 404 instead of a browser TLS error, since it already has a
-/// valid certificate for its name.
+/// The zone apex goes to the control API, other names to their route, anything
+/// else to a styled 404.
 pub async fn serve_https(
     listener: TcpListener,
     cert_resolver: Arc<ca::DynamicCertResolver>,
@@ -267,8 +197,7 @@ pub async fn serve_https(
         supervisor::supervise("https connection", async move {
             match acceptor.accept(stream).await {
                 Ok(tls_stream) => handle_https_connection(tls_stream, control_port, routes).await,
-                // Expected and frequent for out-of-zone SNI, which
-                // `cert_resolver` intentionally aborts the handshake for.
+                // Expected for out-of-zone SNI.
                 Err(e) => eprintln!("fghjd: TLS handshake error: {e}"),
             }
         });
@@ -284,10 +213,6 @@ async fn handle_https_connection(
         let (_, conn) = tls_stream.get_ref();
         conn.server_name().map(|s| s.to_string())
     };
-    // `cert_resolver` only ever completes a handshake for an in-zone name,
-    // so `server_name` being `None` here would mean rustls accepted a
-    // connection without SNI at all — not possible given how the resolver
-    // is wired, but handled explicitly rather than assumed.
     let Some(name) = server_name else {
         return;
     };
@@ -309,25 +234,13 @@ async fn handle_https_connection(
         }
         None => {
             let _ = tls_stream.write_all(&not_found_response()).await;
-            // Sends a proper TLS close_notify rather than just dropping the
-            // socket — otherwise well-behaved TLS clients (rustls included)
-            // treat the abrupt EOF as a truncation error instead of a clean end
-            // of response.
+            // close_notify, or rustls clients report a truncation error.
             let _ = tls_stream.shutdown().await;
         }
     }
 }
 
-/// Relays `client_stream` to `backend` — usually `127.0.0.1:port` (the
-/// control API for the zone apex, or a running container's published port),
-/// but a sidecar's `RouteResolver` may resolve to a sibling container's own
-/// docker-network address instead. Generic over the client-side stream type
-/// so both the TLS path (`TlsStream<TcpStream>`) and the plain-HTTP path
-/// (`BufReader<TcpStream>`, which still needs to write to the client) share
-/// one implementation. `prefix` is written to the backend before the
-/// bidirectional copy starts — empty for HTTPS, and for HTTP the bytes
-/// `handle_http_connection` already consumed off the socket to read `Host`,
-/// which the backend still needs to see.
+/// `prefix` goes to the backend first: the bytes the HTTP path already read.
 async fn relay_to_backend<S>(client_stream: &mut S, backend: &Backend, prefix: &[u8]) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -347,15 +260,8 @@ where
             .context("failed to replay buffered request bytes to backend")?;
     }
 
-    // Split into two independently-tracked copy directions (instead of one
-    // `copy_bidirectional`) so an error can be attributed to a side: the
-    // client (browser) is inherently noisy — it opens spare/speculative
-    // connections and resets them, or a tab gets closed mid-request — while
-    // the backend is our own control API or a locally-run container, which
-    // should always be reachable and well-behaved once connected. This isn't perfectly
-    // precise (a client disappearing mid-download still surfaces as a write
-    // error on the backend -> client leg) but it's a much better signal than
-    // treating every reset/broken-pipe/EOF the same regardless of cause.
+    // Two legs so errors can be blamed on a side: browsers reset connections
+    // routinely, the backend shouldn't.
     let (mut client_read, mut client_write) = tokio::io::split(client_stream);
     let (mut backend_read, mut backend_write) = backend.split();
 
@@ -383,9 +289,6 @@ where
     Ok(())
 }
 
-/// Whether `e` is the kind of IO error a client (browser) routinely produces
-/// by resetting a spare/speculative connection or closing a tab mid-request —
-/// not a sign of an actual proxy or backend problem.
 fn is_benign_disconnect(e: &io::Error) -> bool {
     matches!(
         e.kind(),
@@ -427,9 +330,6 @@ mod tests {
         Arc::new(rustls::crypto::ring::default_provider())
     }
 
-    /// A `RouteResolver` backed by a plain in-memory map, so dispatch logic
-    /// can be exercised without a real workspace/run/Docker stack. Ports are
-    /// always resolved against `127.0.0.1`, matching the host-side proxy.
     struct StaticRoutes(std::collections::HashMap<String, u16>);
 
     impl RouteResolver for StaticRoutes {
@@ -460,9 +360,6 @@ mod tests {
         )
     }
 
-    /// End-to-end: a real TLS client, trusting the test CA, connects over a
-    /// real loopback socket, requests the apex SNI, and the proxy relays it
-    /// to a dummy backend that echoes back whatever it received.
     #[tokio::test]
     async fn apex_sni_proxies_to_the_control_backend() {
         let ca = ca::generate_ca_for_tests();
@@ -512,7 +409,6 @@ mod tests {
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
-        // control_port is never dialed for a non-apex name, so 0 is fine here.
         tokio::spawn(serve_https(listener, resolver, 0, provider(), no_routes()));
 
         let client_config = trusting_client_config(ca_der, provider());
@@ -531,9 +427,6 @@ mod tests {
         assert!(text.contains("fghj doesn't know this service yet"));
     }
 
-    /// A non-apex, in-zone SNI that a `RouteResolver` recognizes must be
-    /// proxied to that route's backend, exactly like the zone apex is —
-    /// the real per-service dispatch path this session wires up.
     #[tokio::test]
     async fn routed_in_zone_sni_proxies_to_its_registered_backend() {
         let ca = ca::generate_ca_for_tests();
@@ -556,7 +449,6 @@ mod tests {
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
-        // control_port is never dialed for a routed non-apex name, so 0 is fine here.
         tokio::spawn(serve_https(listener, resolver, 0, provider(), routes));
 
         let client_config = trusting_client_config(ca_der, provider());
@@ -584,8 +476,6 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(serve_https(listener, resolver, 0, provider(), no_routes()));
 
-        // A root store with a *different* CA — this client must not accept
-        // the certificate our proxy presents.
         let other_ca = ca::generate_ca_for_tests();
         let other_ca_der = other_ca.cert_der_for_tests();
         let client_config = trusting_client_config(other_ca_der, provider());
@@ -618,10 +508,6 @@ mod tests {
         )));
     }
 
-    /// Sets up a real TLS handshake over a loopback socket and hands back
-    /// both ends: the server-side stream `relay_to_backend` operates on, and
-    /// the client-side stream the test uses to simulate a well-behaved or
-    /// abruptly-reset browser connection.
     async fn handshake_pair(
         resolver: Arc<ca::DynamicCertResolver>,
         ca_der: rustls::pki_types::CertificateDer<'static>,
@@ -662,11 +548,7 @@ mod tests {
         let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider(), no_routes()));
         let (mut server_tls, client_tls) = handshake_pair(resolver, ca_der).await;
 
-        // Force a hard reset (RST) instead of a graceful close, mirroring a
-        // browser abandoning a spare/speculative connection mid-relay.
-        // `set_linger` is deprecated because a *nonzero* linger can block a
-        // runtime thread on drop — doesn't apply here, a zero linger closes
-        // immediately (that's precisely what forces the RST).
+        // Zero linger forces an RST; the deprecation is about nonzero linger blocking.
         let (client_tcp, _) = client_tls.get_ref();
         #[allow(deprecated)]
         client_tcp
@@ -703,17 +585,12 @@ mod tests {
         let resolver = Arc::new(ca::DynamicCertResolver::new(ca, provider(), no_routes()));
         let (mut server_tls, client_tls) = handshake_pair(resolver, ca_der).await;
 
-        // Clean close on the client side, so the client -> backend leg sees
-        // an ordinary EOF rather than an error — isolating the backend as
-        // the only source of trouble in this relay.
         drop(client_tls);
 
         let backend = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let backend_port = backend.local_addr().unwrap().port();
         tokio::spawn(async move {
             let (sock, _) = backend.accept().await.unwrap();
-            // Force a hard reset, mirroring the control API dying mid-relay
-            // (crash, panic, forcibly closed) rather than closing cleanly.
             #[allow(deprecated)]
             sock.set_linger(Some(std::time::Duration::ZERO)).unwrap();
             drop(sock);
@@ -749,10 +626,7 @@ mod tests {
             drop(sock);
         });
 
-        // "localhost" (not the literal "127.0.0.1") only succeeds if
-        // `relay_to_backend` actually dials `backend.host` — a sidecar
-        // resolving to a sibling container's own hostname/IP depends on
-        // exactly this, not a hardcoded loopback address.
+        // `localhost`, so this only passes if `backend.host` is actually dialed.
         let result = relay_to_backend(
             &mut server_tls,
             &Backend {

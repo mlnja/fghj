@@ -1,5 +1,3 @@
-//! Wiring, listing and stopping workspaces; serving the resolved universe.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 

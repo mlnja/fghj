@@ -1,10 +1,5 @@
-//! The canonical, reducer-owned shape of a workspace's in-memory state —
-//! see `workspace::WorkspaceState` for the root type. Every type here is
-//! data-only: no I/O, no async, nothing that can fail. Wired into the
-//! running daemon via `action.rs`/`reducer/`/`actor.rs`/`registry.rs`/
-//! `effects/`, and serialized straight to the frontend by
-//! `web::api::env`'s environment and the per-node lifecycle handlers —
-//! these types *are* the HTTP contract, there is no view layer in between.
+//! The reducer-owned workspace state. Data only; serialized straight to the
+//! UI, so these types are the HTTP contract.
 
 pub mod container;
 pub mod env;

@@ -1,5 +1,3 @@
-//! Container logs: tail, live stream, generations, history, and events.
-
 use std::convert::Infallible;
 
 use axum::Json;
@@ -72,12 +70,7 @@ pub(crate) async fn get_node_logs_stream(
         .into_response()
 }
 
-/// Lists the log generations `fghjd` has retained for this node (current and
-/// previous, per the two-generation retention policy — see
-/// `persistence::WorkspaceDb::begin_log_generation`), for the UI's generation
-/// picker. Reads straight from the db regardless of whether the run/node is
-/// still live, so history for a just-crashed or just-removed container
-/// stays browsable.
+/// Reads the db directly, so a removed container's history stays browsable.
 pub(crate) async fn get_run_node_log_generations(
     AxumPath(node_id): AxumPath<String>,
     WorkspaceExtractor(state): WorkspaceExtractor,
@@ -100,10 +93,7 @@ pub(crate) fn default_log_history_limit() -> i64 {
     500
 }
 
-/// Paginated log history for one generation, oldest-first — backs both the
-/// initial load (`before_seq` omitted, returns the most recent `limit`
-/// lines) and infinite scroll-back (`before_seq` set to the oldest `seq`
-/// currently loaded).
+/// Oldest first. `before_seq` pages backwards.
 pub(crate) async fn get_run_node_log_history(
     AxumPath(node_id): AxumPath<String>,
     Query(q): Query<LogHistoryQuery>,
@@ -125,10 +115,7 @@ pub(crate) struct EventsQuery {
     action: String,
 }
 
-/// The current cycle's step-by-step narration of what `fghjd` itself did
-/// for the last `start` or `stop` of this node — the ArgoCD-style "events"
-/// counterpart to the raw container-log history above. Only ever the most
-/// recent cycle of `action`: see `persistence::WorkspaceDb::begin_event_cycle`.
+/// fghjd's own narration of the last `start` or `stop` of this node.
 pub(crate) async fn get_node_events(
     AxumPath(node_id): AxumPath<String>,
     Query(q): Query<EventsQuery>,
