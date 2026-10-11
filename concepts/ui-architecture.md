@@ -52,13 +52,13 @@ waste requests:
 - `/universe.json` every 3s while the Repos tab is active (`App.svelte`'s
   `graphPoll` effect) — reflects live git state (branch/dirty — see
   [[branch-ownership-model]]) without a manual refresh.
-- `/runs` every 1s while the Actual tab is active (`runsPoll`) — matched to
+- `/environment` every 1s while the Actual tab is active (`envPoll`) — matched to
   `daemon::spawn_reconciler`'s own 1s tick (see
   [[run-lifecycle-and-registry]]), so the UI is essentially never stale
   relative to what the backend has already reconciled.
 
 Logs are the one exception: `Drawer.svelte` opens a real `EventSource`
-against `/runs/{run}/nodes/{node}/logs/stream` (SSE, backed by
+against `/nodes/{node}/logs/stream` (SSE, backed by
 `docker::logs_follow`) whenever the Logs tab is open on a node with a live
 container — genuinely pushed, not polled, since log lines arriving late by
 even a second would be a much more noticeable regression than a graph node

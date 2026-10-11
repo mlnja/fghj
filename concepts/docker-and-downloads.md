@@ -41,8 +41,8 @@ is lower-level than `docker build`/`docker run`:
 ## Volumes: two shapes, one Docker primitive
 
 `#Volume` (`schema/component.cue`) is a CUE disjunction: a bind mount
-(`{host, container, read_only}`) or a named volume (`{name, scope,
-container, read_only}`), never both — `resolver::VolumeMount` mirrors this
+(`{host, container, read_only}`) or a named volume (`{name, container,
+read_only, shared}`), never both — `resolver::VolumeMount` mirrors this
 directly as an untagged serde enum (`Bind` / `Named`), same pattern as
 `Environment`'s map-or-list. Both variants land in the exact same place at
 the Docker layer: `HostConfig.binds` accepts `"host/path:container/path"`
@@ -55,15 +55,14 @@ A `Bind`'s `host`, if relative, resolves against the checkout root
 `start_node` already has in hand for the build (`volume_base` — the live
 workspace path the image was actually built from). It is **not** sandboxed to that repo — an
 absolute or `..`-escaping path passes straight through, a deliberate
-choice (see PROGRESS.md's real-world dry-run findings) to support the
+choice (a real-world dry run found it) to support the
 pattern of bind-mounting a sibling repo's checkout directly (e.g.
 `aikido-core`'s `php` service mounting `../intel`).
 
 A `Named` volume's real Docker name is *derived*, never author-declared —
 same invariant as a node's domain (see [[node-identity-and-domains]]).
-`orchestrator::derive_volume_name` reuses `derive_domain` itself: `scope: "run"`
-(default) folds in the run id exactly like `domain_scope: "run"` does,
-`"stable"` doesn't. It also folds in **the declaring node's id**, which is
+`orchestrator::derive_volume_name` reuses `derive_domain` itself, so the
+workspace name is folded in. It also folds in **the declaring node's id**, which is
 what makes the author-chosen `name` private to the node that wrote it —
 `data` in one repo and `data` in another are two volumes, exactly as two
 services both called `api` are two nodes.
@@ -72,25 +71,18 @@ That qualification is newer than the rest of this page, and the reasoning
 is worth keeping. Volume names were originally keyed on the bare `name`,
 described here as transparent sharing. The sharing is genuinely useful, but
 it was *unbounded and cross-repo*: two peer repos each declaring
-`{name: data, scope: stable}` on their own Postgres got one volume with two
+`{name: data}` on their own Postgres got one volume with two
 database engines writing to it. Silent data corruption, reachable from two
 individually valid configs written by teams who have never spoken — the exact
 scenario the whole id-qualification scheme exists to prevent, in the one
 namespace that wasn't qualified, and the only one with a destructive failure
 mode. See `concepts/AUDIT.md` B3.
 
-B3's fix closed the *cross-repo* half of that hazard and left the
-*cross-run* half open, which is worth stating plainly rather than leaving as
-an implication of the paragraph above. `scope: "stable"` means one volume
-across every run **including two runs that are up at the same time** — the
-default run's Postgres and a named run's Postgres mounting one data
-directory is again two engines on one directory. The per-node locks in
-[[concurrency-model]] don't help: they're keyed by `(run_id, node_id)`, so
-two runs are different keys by construction. Nothing checks whether another
-run already has the volume mounted, and none of the three plausible fixes is
-obviously right (see `concepts/AUDIT.md` B16, which records all three). It is
-documented where an author will meet it — the `.fghj.yaml` reference's volume
-table and tutorial chapter 6 — and not enforced anywhere.
+B3's fix closed the *cross-repo* half of that hazard. A *cross-run* half
+(`concepts/AUDIT.md` B16) — the default run's Postgres and a named run's
+Postgres mounting one `scope: stable` volume at the same time — went away
+with named runs and volume `scope`: there is one environment per workspace,
+so one container per node, so one writer per volume.
 
 Sharing is still expressible, now as `#Volume.shared: true`, which drops the
 node-id qualification so the label alone decides identity. Reach for it
@@ -107,33 +99,27 @@ created before it are orphaned, not re-pointed.
 Named volumes are otherwise Docker-implicit — the daemon auto-creates one,
 unlabeled, the first time a container's `Binds` references a name that
 doesn't exist yet. `docker::ensure_volume` creates it explicitly instead,
-right before use in `Orchestrator::start_node`, attaching `fghj.scope`/
-`fghj.run` labels alongside the usual `com.docker.compose.project` one.
-`Orchestrator::stop` uses those labels to remove exactly the `scope: "run"`
-volumes belonging to the run being stopped, via
-`docker::remove_run_scoped_volumes` — but only when the run isn't the
-default run: Docker's `label` filter ANDs multiple values together, so this
-can only ever match a `"run"`-scoped volume, never a `"stable"` one, and the
-default run's own `"run"`-scoped volumes derive the exact same name on
-every start (the run id only gets folded in for a *named* run), so deleting
-them on stop would wipe data a subsequent default-run start expects to
-still be there.
+right before use in `Orchestrator::start_node`, attaching the usual
+`com.docker.compose.project` label (the workspace name).
+`docker::list_volumes` finds them again by that label, which is how
+`EnvState::volumes` gets populated. Nothing deletes them: `Orchestrator::stop`
+keeps volumes, because they hold the data the next start expects to find.
 
 ## Stopping a container is not the same as deleting it
 
 Every teardown path in `fghj` goes through `docker::stop_and_remove`: the
-whole-run `Orchestrator::stop`, the per-node `restart_node`, `start`'s
-own rollback when a later node fails, and the sidecar. For a long time that
+whole-environment `Orchestrator::stop`, the per-node `restart_node`, and
+the sidecar. For a long time that
 function was a single call — `remove_container` with `force: true`.
 
 `force: true` is SIGKILL with no grace period at all. That is defensible for
 a container you are deleting *because* it is broken, and indefensible for
-every other caller on that list: stopping a run, or restarting one node, is
+every other caller on that list: stopping the environment, or restarting one node, is
 an ordinary action a user takes several times a day. A dev Postgres with an
-hour of seeded state in a `scope: stable` volume was being killed mid-write
+hour of seeded state in a named volume was being killed mid-write
 by a routine click — which directly contradicts what a stable volume
-promises. The whole point of the scope distinction above is that some data
-outlives the run; killing the writer without warning throws that away one
+promises. The whole point of a named volume is that its data outlives the
+container; killing the writer without warning throws that away one
 `fsync` at a time.
 
 So `stop_and_remove` is now two calls: stop, then remove. The remove still

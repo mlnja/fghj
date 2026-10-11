@@ -191,7 +191,7 @@ impl Orchestrator {
     /// stopped/removed out-of-band between calls (see `refresh`).
     ///
     /// A node that fails blocks what can't start without it, and nothing
-    /// else, exactly as in `start`. Tearing down the three containers that
+    /// else. Tearing down the three containers that
     /// came up because the fourth didn't would destroy exactly the progress
     /// the per-node reporting below exists to keep. Each node is reported
     /// through `progress` as it comes up, and the error additionally carries

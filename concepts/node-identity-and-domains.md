@@ -111,20 +111,12 @@ No node kind can declare its own raw domain — there is no
 domain, services included, is derived the same way by `orchestrator::derive_domain`:
 
 ```rust
-pub fn derive_domain(
-    node_id: &str,
-    domain_scope: &str,
-    workspace_name: &str,
-    run_id: &str,
-    zone: DomainZone,
-) -> String {
-    let workspace = sanitize_label(workspace_name);
-    let suffix = zone.suffix();          // "fghj.internal" | "fghj.raw.internal"
-    if domain_scope == "stable" || run_id == DEFAULT_RUN_ID {
-        format!("{node_id}.{workspace}.{suffix}")
-    } else {
-        format!("{node_id}.{run_id}.{workspace}.{suffix}")
-    }
+pub fn derive_domain(node_id: &str, workspace_name: &str, zone: DomainZone) -> String {
+    format!(
+        "{node_id}.{}.{}",
+        sanitize_label(workspace_name),
+        zone.suffix()            // "fghj.internal" | "fghj.raw.internal"
+    )
 }
 ```
 
@@ -135,24 +127,13 @@ one, for callers that need a real port. [[two-zones-and-raw-ports]] covers
 what each is for and who answers it; everything below applies to both, since
 the suffixes are disjoint.
 
-`run_id` is folded in for named runs, since more than one can be
-alive at once and each needs its own identity — but the **default run**
-(the one shared per-workspace environment every "Start default environment"
-click and every `ensure_running` targets) drops it, so a service's everyday
-URL is just `cart.myworkspace.fghj.internal`, not
-`cart.default.myworkspace.fghj.internal`. `container_name`/the Docker
-network name still always fold in `run_id`, including for the default run —
-this opt-out is domain-only.
-
-The other opt-out is per-node, not per-run: `domain_scope: *"run" | "stable"`
-(`#BackingDependency.domain_scope`, `#Service.domain_scope`). `"stable"`
-drops the run id for that one node regardless of which run it's in — a
-deliberate CUE-author choice (e.g. a postgres meant to keep one fixed
-identity across every run of the graph), not an implicit bypass. Only one
-run can actually *serve* a `"stable"`-scoped name from the host at a time, but
-it's always the same name — and note that nothing enforces the "only one":
-both runs register the route, and `resolve_route` returns whichever comes
-first in map order. Which run you reach is unspecified.
+A workspace has one environment, so a node has exactly one address per zone:
+`cart.myworkspace.fghj.internal`. There used to be a run id folded in for
+*named runs* (`cart.review.myworkspace.fghj.internal`) and a per-node
+`domain_scope: "stable"` opt-out of it; both went with named runs
+([[run-lifecycle-and-registry]]). Container and network names still carry
+the fixed `DEFAULT_RUN_ID` segment, so existing containers keep their names
+— that is a Docker-name detail, not part of any address.
 
 `start_node` calls `derive_domain` when it actually launches a container, once
 per zone. The **raw** name is the Docker network alias registered on the
@@ -173,12 +154,12 @@ with its own escaping rule and its own collision domain. Almost every naming
 bug in this system has been a disagreement between two rows of this table, so
 here is the table.
 
-`W` = `sanitize_label(workspace folder name)`, `R` = the resolved run id,
-`Z` = the zone suffix (`fghj.internal` or `fghj.raw.internal`).
+`W` = `sanitize_label(workspace folder name)`, `R` = the fixed
+`DEFAULT_RUN_ID` (`default`), `Z` = the zone suffix (`fghj.internal` or `fghj.raw.internal`).
 
 | Projection | Formula | Escaping | Namespace it shares | Who catches a collision |
 |---|---|---|---|---|
-| **Domain** (both zones) | `{id}.{W}.{Z}`, or `{id}.{R}.{W}.{Z}` when the run isn't default and scope isn't `stable` — `orchestrator::derive_domain` | none: the id's dots become DNS label separators | one flat DNS zone, across *every* wired workspace | `resolver::uniqueness` (warning) for in-workspace clashes; `daemon::registry` (hard error) refuses to wire a second workspace whose folder sanitizes the same |
+| **Domain** (both zones) | `{id}.{W}.{Z}` — `orchestrator::derive_domain` | none: the id's dots become DNS label separators | one flat DNS zone, across *every* wired workspace | `resolver::uniqueness` (warning) for in-workspace clashes; `daemon::registry` (hard error) refuses to wire a second workspace whose folder sanitizes the same |
 | **Named-port alias** | `{port.name}.{domain}` | none | the same DNS zone | `resolver::uniqueness` — this is the projection that can silently shadow a backing dependency's domain |
 | **`additional_hosts` / `wildcard_hosts`** | author-written, verbatim | none | the same DNS zone, plus whatever real domain the author typed | `resolver::uniqueness` for the in-zone part; nothing at all if the author claims a name they don't own |
 | **Container name** | `fghj-{W}-{R}-{sanitize_label(id)}` — `orchestrator::node_spec` | `sanitize_label`: every non-alphanumeric run collapses to one `-` | the Docker daemon, machine-wide — shared with every other workspace *and* with containers fghj didn't create | Docker itself, by refusing a duplicate name — with an error that never says "naming" |
@@ -294,38 +275,23 @@ naming the repo, file and line while every other repo resolves normally (see
 [[flat-workspace-model]]). That is the right severity: a name *is* the identity,
 so a service whose name is invalid has no id to be represented by.
 
-## `Node.domain`: the default-run address, known ahead of time
+## `Node.domain`: the address, known ahead of time
 
-Because the domain formula only depends on `node.id` + `domain_scope` +
-workspace name (all known at resolve time) once `run_id` is fixed to
-`DEFAULT_RUN_ID`, `resolve_universe` can — and does — pre-compute each
-node's *default-run* domain and attach it as `Node.domain`, as a final pass
-over the sorted node list, before any container for that node has ever
+Because the domain formula only depends on `node.id` and the workspace name
+(both known at resolve time), `resolve_universe` can — and does —
+pre-compute each node's domain and attach it as `Node.domain`, as a final
+pass over the sorted node list, before any container for that node has ever
 started:
 
 ```rust
-node.domain = crate::orchestrator::derive_domain(
-    &node.id, &node.domain_scope, &workspace_name,
-    crate::orchestrator::DEFAULT_RUN_ID, DomainZone::Http,
-);
+node.domain = crate::orchestrator::derive_domain(&node.id, &workspace_name, DomainZone::Http);
 ```
 
 This is what `Drawer.svelte`'s "domain" info row and its "open" link
 (`liveInfo.routes?.some(r => r.domain === node.domain)`, falling back to a
 raw `127.0.0.1:<port>` link when no route matches) and `GraphView.svelte`'s
 container-mode node card (`n.domain || n.image || ''`) both key off. Until
-this field existed, that whole code path was silently dead — see the
-"Fixed" entry in `PROGRESS.md` for the story.
-
-**Caveat**: `Node.domain` always reflects the *default*-run address. A
-named run gets a different, run-id-qualified domain (unless the node
-opted into `domain_scope: "stable"`) that this field does not track — so the
-"open via domain" link only lights up while the drawer is showing the
-default run's live containers; for a named run it falls back to the port
-link, and the domain row shown is the node's default identity, not that
-run's actual one. Surfacing a run-scoped domain would need the frontend to
-ask for (or the backend to attach) a domain scoped to whichever run is
-currently selected, not the graph-wide default.
+this field existed, that whole code path was silently dead.
 
 ## Related
 
@@ -342,5 +308,4 @@ Implemented: `resolver::visit_local_service`/`visit_dependency` (ids),
 formula, shared by `orchestrator::start_node` and `resolver::resolve_universe`),
 `orchestrator::naming::derive_volume_name` (volumes), `orchestrator::node_spec` (container
 names, image tags), `raw_net` (virtual IPs), `resolver::uniqueness` (the
-collision pass), `resolver::name::Name` (the alphabet). See `PROGRESS.md` for
-the session history behind the leaf-first id flip and the `Node.domain` fix.
+collision pass), `resolver::name::Name` (the alphabet).

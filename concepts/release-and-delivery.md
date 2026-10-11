@@ -165,8 +165,7 @@ about a mutex to run.
 - **No `LICENSE` file** and no `license` field in `Cargo.toml`. The tap formula
   says `license "MIT"` with a `TODO: confirm` beside it.
 - **No uninstall path.** The CA stays in the system Keychain and the resolver
-  file under `/etc/resolver` across a full daemon stop, deliberately (see
-  `PROGRESS.md`), but `brew uninstall` leaves both behind with nothing to
+  file under `/etc/resolver` across a full daemon stop, deliberately, but `brew uninstall` leaves both behind with nothing to
   clean them up.
 
 ## Related

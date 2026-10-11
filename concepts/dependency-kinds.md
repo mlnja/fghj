@@ -82,18 +82,18 @@ can't be created, does fail, and its required dependents are blocked.
 
 ## Failure blocks dependents, not the run
 
-A whole-run start used to stop at the first failed node. A named run also
-rolled everything back. Now:
+A whole-run start used to stop at the first failed node, and a named run
+also rolled everything back. Now:
 
 - A failed node's required dependents, and theirs in turn, are skipped. Each
   one gets the event "blocked: db failed".
 - Everything else keeps starting. A broken worker doesn't stop an unrelated
   frontend.
-- The run then reports an error naming what failed and what was blocked.
-  Whatever came up stays up and visible, for named runs too.
+- The start then reports an error naming what failed and what was blocked.
+  Whatever came up stays up and visible.
 
-Only failing to create the run's network or sidecar still rolls a named run
-back, because nothing can start without them.
+Failing to create the network or sidecar fails the whole start, because
+nothing can start without them.
 
 ## Restart and stop follow required edges
 

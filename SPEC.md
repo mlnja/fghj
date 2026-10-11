@@ -5,7 +5,7 @@
 > best single statement of the *product* idea. It is **not** a description of
 > the shipped surface: §6's commands and §7's "Go or Rust" choice were both
 > settled differently. For what exists today read `concepts/` (start at
-> `concepts/README.md`), `PROGRESS.md` for the build state, and `docs/` for
+> `concepts/README.md`) and `docs/` for
 > the user-facing documentation. Where this file and those disagree, they win.
 
 ## 1. Overview & Vision

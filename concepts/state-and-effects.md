@@ -18,10 +18,11 @@ Action  ->  reducer::reduce(&state, action) -> Result<WorkspaceState, ActionReje
 ```
 
 - **`Action`** (`src/action.rs`) — the complete vocabulary of things that can
-  happen. Requests (`RunPlanned`, `RunNodeStartRequested`, `RunStopRequested`)
-  and reports (`ContainerObserved`, `ContainerActionSettled`,
-  `RunCreateProgress`, `RunCreateSettled`, `RunTeardownSettled`,
-  `ConfigDriftObserved`, `VolumeObserved`).
+  happen. Requests (`EnvPlanned`, `NodeStartRequested`, `NodeStopRequested`,
+  `NodeDeleteRequested`, `NodeDebugWaitRequested`) and reports
+  (`ContainerObserved`, `ContainerActionSettled`, `EnvCreateWorking`,
+  `EnvCreateProgress`, `EnvCreateSettled`, `ConfigDriftObserved`,
+  `VolumeObserved`, `OwnerSet`).
 - **`reducer::reduce`** (`src/reducer/`) — a pure function. No I/O, no clock,
   no Docker. It decides, it never acts. Rejecting an action here
   (`ActionRejected`) is how a duplicate or nonsensical request is refused,
@@ -74,10 +75,10 @@ exactly one home.** Two copies of a fact is two chances for them to
 disagree, and reconciling them is a poller, and a poller is a window in
 which the system is confidently wrong.
 
-That rule was learned the expensive way. Through migration phase 4 there
-were two stores: the actor's, and `orchestrator::Orchestrator`'s own
-`BTreeMap<String, RunState>`, kept roughly in step by `effects::bridge`
-re-polling the latter once a second. Every lifecycle call had to remember
+That rule was learned the expensive way. For a while there were two stores:
+the actor's, and the orchestrator's own map of run states (`RunRegistry`, as
+it was then), kept roughly in step by `effects::bridge` re-polling the
+latter once a second. Every lifecycle call had to remember
 to write both. What that bought:
 
 - Observations could reach the database ahead of the reducer that was
@@ -90,18 +91,18 @@ to write both. What that bought:
   the reducer's `pending_action`, so "is this node already starting?" had
   two answers.
 
-Phase 5 deleted the second store outright. `Orchestrator` now owns only the
+The second store was then deleted outright. `Orchestrator` owns only the
 Docker-facing *machinery* — the bollard client, the database handle, the
-per-node lifecycle locks, the log-capture tasks — and holds no run state
-at all. Where it used to read `self.runs`, it now takes what it needs as an
-argument and reports what happened back as an `Action`:
+per-node lifecycle locks, the log-capture tasks — and holds no environment
+state at all. Where it used to read its own map, it now takes what it needs
+as an argument and reports what happened back as an `Action`:
 
 | Then | Now |
 |---|---|
-| `start(graph, spec)` read prior state from `self.runs` | `start(graph, spec, prior, progress)` |
-| `refresh()` inspected Docker and wrote into `self.runs` | `inspect_containers(&runs) -> Vec<(run_id, observed)>` |
-| `config_drift(graph)` walked `self.runs` | `config_drift(graph, &runs)` |
-| `stop(run_id)` looked the run up in `self.runs` | `stop(run_id, &state)` |
+| `start(graph, spec)` read prior state from its own map | `ensure_running(graph, spec, prior, progress)` |
+| `refresh()` inspected Docker and wrote into its own map | `inspect_containers(&env) -> BTreeMap<node_id, observed>` |
+| `config_drift(graph)` walked its own map | `config_drift(graph, &env)` |
+| `stop(run_id)` looked the run up in its own map | `stop(&env)` |
 | `list()` was how the actor got seeded | `server::WorkspaceState::rehydrated`, read once |
 | `commit(run_id, apply)` merged concurrent per-node writes | the reducer; it is the only writer |
 
@@ -110,46 +111,48 @@ lifecycle call had to remember to do at the end, and became what they
 always were: pure functions of published state, `effects::persist` and
 `effects::routes`.
 
-## Reporting progress without `runs/` knowing about actors
+## Reporting progress without `orchestrator/` knowing about actors
 
 Removing the inline `save_run` from the create path opened a real hole: a
-daemon that died halfway through bringing up a five-node run would leave
+daemon that died halfway through bringing up a five-node environment would leave
 five containers running and nothing written down — fghj manufacturing the
 very `Orphaned` state its observer exists to surface
 ([[run-lifecycle-and-registry]]).
 
-The fix is `orchestrator::progress`: `start`/`ensure_running` take an optional
-`ProgressSink` (`mpsc::UnboundedSender<RunProgress>`) and report each node
-the moment it comes up. `effects::docker::converge` owns the receiving end
-and translates each report into `Action::RunCreateProgress`.
+The fix is `orchestrator::progress`: `ensure_running` takes an optional
+`ProgressSink` (`mpsc::UnboundedSender<RunProgress>`) and reports each node
+as work on it begins and the moment it comes up. `effects::docker::converge`
+owns the receiving end and translates each report into
+`Action::EnvCreateWorking` / `Action::EnvCreateProgress`.
 
-It is a plain channel rather than an `ActorHandle` on purpose: `runs/`
+It is a plain channel rather than an `ActorHandle` on purpose: `orchestrator/`
 knows how to talk to Docker and nothing about actors, actions, or reducers.
 Handing it an `ActorHandle` would invert that and make the orchestration
 layer depend on the state layer it is supposed to be driven by.
 
 Ordering matters and is explicit: `spawn_create` drops its sender and
 `await`s the drain task **before** the settle guard fires, so a late
-progress report can never land after `RunCreateSettled` and re-add a
+progress report can never land after `EnvCreateSettled` and re-add a
 container the settle just dropped.
 
-## Nothing resurrects a torn-down run
+## Tearing the environment down is not an action
 
-A create and a teardown can overlap — the user presses Stop while a
-five-node top-up is still on node three. `RunTeardownSettled(Ok)` removes
-the run from the map, which is exactly what `effects::persist` and
-`effects::routes` key off to clean up the database row and the sidecar's
-route directory. So every action that arrives *after* it must not put the
-run back:
+There is no teardown action. The only thing that removes an environment is
+unwiring its workspace (`daemon::WorkspaceRegistry::stop`, behind
+`POST /workspaces/stop`), which reads the environment off the actor,
+deregisters the actor and aborts its converge task, and only *then* calls
+`Orchestrator::stop`. The order is the point: once the actor is gone there
+is no state left for a late `EnvCreateProgress` or `EnvCreateSettled` to
+put a container back into.
 
-- `RunCreateProgress` uses `get_mut`, not `entry`.
-- `RunCreateSettled` checks presence before inserting, on both the success
-  and the partial-failure branch.
+This replaced `RunStopRequested` / `RunTeardownSettled`, which had to guard
+every later report against resurrecting a run the teardown had removed
+(`EnvCreateProgress` used `get_mut`, not `entry`; `EnvCreateSettled`
+checked presence first) — rules each new report would have had to remember.
 
-`RunPlanned` created the entry, so writing through it is always correct
-when the run is still supposed to exist. `reducer::observation`'s
-`a_create_that_settles_after_its_run_was_torn_down_does_not_resurrect_it`
-covers all three arms.
+Known gap: aborting the converge task does not abort a create *it already
+spawned*, so a create in flight when the workspace is unwired keeps doing
+Docker work against a network `stop` is removing.
 
 ## What this does *not* remove
 
@@ -162,8 +165,8 @@ and collapsing them is what created the two-answer `pending` map above.
 ## Status
 
 Implemented. `src/actor.rs`, `src/action.rs`, `src/reducer/`,
-`src/effects/`, `src/state/`. `Orchestrator` is stateless as of migration
-phase 5; `server::WorkspaceState` keeps `rehydrated` (what a previous
+`src/effects/`, `src/state/`. `Orchestrator` is stateless;
+`server::WorkspaceState` keeps `rehydrated` (what a previous
 `fghjd` lifetime left running, reconciled against Docker once at
 construction) purely to seed the actor in
 `daemon::WorkspaceRegistry::wire_actor`.

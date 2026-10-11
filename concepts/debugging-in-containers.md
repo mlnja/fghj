@@ -231,7 +231,7 @@ instead of recording a failure.
 
 The switch is a value in `desired`, and `PendingAction::Starting` is already
 the convergence that makes a container match its desired state. So
-`Action::RunNodeDebugWaitRequested` records the new desire, sets
+`Action::NodeDebugWaitRequested` records the new desire, sets
 `desired.running = true`, and queues `Starting`; `effects::docker::converge`
 reads `desired.debug_wait` back out when it calls `restart_node`. There
 is no dedicated pending action and no new effect plumbing
@@ -278,8 +278,8 @@ feed it, `src/orchestrator/node_spec.rs` (the published port and the two env var
 `debug_wait_overrides`, applied after `spec_hash`),
 `src/state/container.rs` (`ContainerDesired::debug_wait`),
 `src/persistence/sqlite/` (the `debug_wait` column and its round trip),
-`src/action.rs` + `src/reducer/run.rs` (`RunNodeDebugWaitRequested`),
-`src/web/api/runs.rs` (`POST /runs/{run_id}/nodes/{node_id}/debug-wait`),
+`src/action.rs` + `src/reducer/env.rs` (`NodeDebugWaitRequested`),
+`src/web/api/env.rs` (`POST /nodes/{node_id}/debug-wait`),
 and the drawer's debug row + halt-at-startup switch
 (`ui/src/lib/Drawer.svelte`, `ui/src/App.svelte`'s `setDebugWait`, which
 goes through the same one-at-a-time action queue as Start/Stop because it is

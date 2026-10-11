@@ -62,51 +62,33 @@ written**.
   nothing about whether the run works. Report it; start anyway.
 
 This replaced a flat `Vec<String>` whose only consumer was a UI banner.
-Nothing on the start path read it — `start`, `ensure_running`,
-`restart_container` and `perform_create` all take a `&Graph` and none of them
-looked at `.warnings` — so a workspace with a dangling shared-backing
+Nothing on the start path read it — every start path of the time took a
+`&Graph` and none of them looked at `.warnings` — so a workspace with a dangling shared-backing
 reference and two nodes claiming one domain started happily and misbehaved at
 runtime, with the explanation sitting unread on a different screen. Making
 every warning fatal would have been the wrong fix; giving the list a type
 that the start path can *act* on was the right one.
 
-## Rollback: the two start paths disagree on purpose
+## No rollback: what came up stays up
 
-`start` (a named run) and `ensure_running` (the shared default
-environment) do opposite things when a node fails partway through. This looks
-like an inconsistency and is in fact the same principle applied to two
-different situations.
+When a node fails partway through, `ensure_running` **keeps what came up**.
+There used to be a second start path, `start`, for named runs, and it rolled
+back: a named run was requested as a unit, nobody was using it a moment ago,
+and half of one wasn't a useful artifact. Named runs are gone (see
+[[run-lifecycle-and-registry]]), and with them the only case where rolling
+back was right.
 
-`start` **rolls back**: it stops and removes every container it created, the
-sidecar, and the network. A named run is a unit — it was requested as a
-whole, nobody was using it a moment ago, and a half-built review environment
-is not a useful artifact. Leaving three of five containers up would leave a
-thing that looks like a run and isn't one.
+The one environment is the one someone is very likely working in right now.
+Tearing down three containers that started fine because the fourth didn't
+would destroy exactly the progress the user cared about — and it would do so
+in response to a failure that may be entirely about the fourth node. Each
+node is reported through `progress` as it comes up, and the error
+additionally carries the whole partial state (`EnvCreateError::partial`), so
+those containers stay visible and routable rather than running unseen.
 
-`ensure_running` **keeps what came up**. It tops up the one shared default
-environment, which someone is very likely working in right now. Tearing down
-three containers that started fine because the fourth didn't would destroy
-exactly the progress the user cared about — and it would do so in response to
-a failure that may be entirely about the fourth node. Each node is reported
-through `progress` as it comes up, and the error additionally carries the
-whole partial state (`RunCreateError::partial`), so those containers stay
-visible and routable rather than running unseen.
-
-The rule underneath both: **roll back a thing that was requested as a unit;
-keep a thing that was requested as an increment.**
-
-Rolling back is still not an excuse to be violent about it. `start`'s
-rollback calls the same `docker::stop_and_remove` as an ordinary teardown,
-which means it stops the container and lets its own grace period run before
-removing it — see [[docker-and-downloads]]. A rollback is triggered by a
-*later* node failing; the containers being torn down have done nothing wrong,
-and one of them may have already written to a `scope: stable` volume. "This
-operation failed" is not a reason to SIGKILL a database.
-
-There is a second reason the incremental path reports per node rather than
-only at the end. A daemon that dies on node four must not lose the record of
+There is a second reason to report per node rather than only at the end. A daemon that dies on node four must not lose the record of
 nodes one through three — so `report(progress, …)` happens *before* the
-container is folded into the local map, and `Action::RunCreateProgress`
+container is folded into the local map, and `Action::EnvCreateProgress`
 reaches the reducer as each node comes up. Drain is ordered before settle so
 a late progress report can't re-add a container the settle already dropped.
 
@@ -114,11 +96,11 @@ a late progress report can't re-add a container the settle already dropped.
 
 Every mutating endpoint follows a dispatch-and-return contract: the handler
 dispatches an `Action` recording *intent* and returns immediately. The
-reducer records the intent (`pending_action`, `pending_create`,
-`pending_teardown`); `effects::docker::converge` does the real Docker work
+reducer records the intent (`pending_action`, `pending_create`);
+`effects::docker::converge` does the real Docker work
 afterwards and reports back with `*Settled`.
 
-So a `200` from `POST /runs` means "the intent was accepted", never "it
+So a `200` from `POST /switch` means "the intent was accepted", never "it
 worked". This is inherent to the architecture ([[state-and-effects]]) and not
 a defect — a container start can take minutes — but it does mean the
 response body cannot be the failure surface, and the ways a failure actually

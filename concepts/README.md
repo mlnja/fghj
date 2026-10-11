@@ -1,7 +1,6 @@
 # concepts/ — the fghj design guide
 
-This folder is the durable design record for `fghj` (see `PROGRESS.md` for
-the house convention it started from). Two kinds of document live here:
+This folder is the durable design record for `fghj`. Two kinds of document live here:
 
 - **Design decisions** — short, focused write-ups of a single precept that
   shapes the system (why it's true, what it rules out, where it's
@@ -25,8 +24,7 @@ it is, before re-deriving it from the code.
 
 For the product vision this all serves, see `SPEC.md` (note: aspirational in
 places — see the CLI-surface mismatch called out in
-[[control-api-and-cli]] and in `PROGRESS.md`'s "Known gaps"). For a running
-snapshot of what's actually built and what's left, see `PROGRESS.md` itself.
+[[control-api-and-cli]]). For what's still open, see `AUDIT.md`.
 
 ## Not this folder: documentation for users
 
@@ -79,13 +77,13 @@ it in the audit's tracker — the concept files stay the durable record.
 
 | File | Covers |
 |---|---|
-| [[node-identity-and-domains]] | How a node gets its `id`/`label`, how that id becomes a `*.fghj.internal` domain, `domain_scope`, and named/primary ports. |
+| [[node-identity-and-domains]] | How a node gets its `id`/`label`, how that id becomes a `*.fghj.internal` domain, and named/primary ports. |
 | [[local-ca-and-tls-proxy]] | The local root CA, on-the-fly per-SNI leaf certs, and the TLS-terminating reverse proxy that dispatches to real containers. |
 | [[split-dns]] | The hand-rolled authoritative DNS server for `*.fghj.internal` and how it's wired into the OS resolver. |
 | [[two-zones-and-raw-ports]] | Why there are two domain zones — `fghj.internal` (proxied, TLS, dispatch by name) and `fghj.raw.internal` (a real per-node address, any protocol) — and the virtual-IP allocator that makes the second one work. |
 | [[in-network-sidecar]] | The one-container-per-run DNS+TLS proxy that makes `fghj.internal` names resolve the same way from inside a run's network as they do from the host. |
 | [[host-aliases]] | `additional_hosts`/`wildcard_hosts` — literal hostnames fghj doesn't derive, the `/etc/hosts` block, and the one rule deciding what may ever get a certificate. |
-| [[run-lifecycle-and-registry]] | Default vs. named runs (and why named runs have no UI affordance), the reconciler, and how run state is kept honest against real Docker state. |
+| [[run-lifecycle-and-registry]] | One environment per workspace (and why named runs went), the one start path behind a top-up and a node Start, the reconciler, and how environment state is kept honest against real Docker state. |
 | [[state-and-effects]] | The actor/action/reducer/effects architecture: one store of state, one writer, and why an effect is `extract` + `converge`. |
 | [[concurrency-model]] | What may run at the same time, what may not: per-node locks, merging writes, and the run-wide health budget. |
 | [[config-drift]] | How fghj notices that a running container no longer matches the `.fghj.yaml` underneath it — and why it deliberately does nothing about it. |

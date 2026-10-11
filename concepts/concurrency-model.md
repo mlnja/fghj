@@ -14,7 +14,7 @@ There are three nested scopes, and each behaves differently:
 | scope | may run concurrently with itself? | guarded by |
 |---|---|---|
 | workspace | yes — different workspaces share nothing but the Docker daemon | nothing |
-| run (`RunState`) | no, by convention — `start` stops an existing run first | — |
+| environment (`EnvState`) | no — there is one, and only its actor writes it | the workspace actor |
 | node (one container) | **no** — serialized per node | `Orchestrator::node_locks` |
 
 Different workspaces are genuinely independent: separate networks, separate
@@ -54,24 +54,22 @@ no second gate on the same fact, because two gates can disagree.
 ## Writes merge; they do not clobber
 
 Finer locking makes a lost-update hazard that was previously masked. Every
-lifecycle path used to clone the whole `RunState`, mutate the clone across a
+lifecycle path used to clone the whole run state, mutate the clone across a
 long stretch of Docker work, and write the clone back wholesale. With one
 workspace-wide lock that was merely wasteful. With per-node locks it would
 lose data: two nodes starting concurrently would each write back a snapshot
 taken before the other's container existed, and whichever finished second
 would erase the first.
 
-So state changes go through `Orchestrator::commit`, which re-reads the live
-`RunState` under the registry mutex and applies a **targeted** change in
-place. It hands back the merged result, and that merged value — never the
-caller's earlier snapshot — is what gets passed to `save_run` and
-`write_route_table`. Otherwise the route table could publish a snapshot that
-had already lost a sibling's routes, which is worse than a stale database
-row: the sidecar would stop routing a container that is running fine.
-
-`commit` returns `None` when the run has disappeared while the caller was
-working. That is the honest answer — there is nothing left to update, and
-re-inserting the run would resurrect an environment the user just stopped.
+The fix went through two shapes. First an `Orchestrator::commit` that
+re-read the live state under a mutex and applied a targeted change in place.
+Now the orchestrator holds no state at all: lifecycle calls *return* what
+they did — a container, an `EnvCreateProgress` per node — and the workspace
+actor's reducer is the only thing that writes `EnvState`. Each report is
+applied to the current state as a targeted change, so two nodes reporting
+concurrently both land. Persistence, the route table and DNS are effects
+derived from the published state ([[state-and-effects]]), so none of them
+can render from a snapshot that has already lost a sibling's routes.
 
 ## Waiting is bounded per run, not per node
 
@@ -115,16 +113,18 @@ Stated plainly, because these are choices and not oversights:
 - **Two workspaces racing on Docker itself.** Network and container names are
   workspace-qualified, so they do not collide; host port allocation is left to
   Docker. Nothing serializes them.
-- **`start` and `ensure_running` against each other.** Neither takes a node
-  lock, because each owns the whole run. Calling both concurrently on one run
-  is a caller error the registry does not defend against.
+- **Two whole-environment starts.** Not a gap any more. The reducer rejects
+  a second `EnvPlanned` while `pending_create` is set, and every node action
+  while one is in flight, so there is never more than one create per
+  workspace. `bring_up` takes each node's lock around its `start_node`
+  anyway, which costs nothing and keeps the per-node rule unconditional.
 - **Out-of-band Docker changes.** Someone stopping a container by hand races
   with everything. That is what the observer path (`refresh`, `SyncStatus`)
   exists to notice after the fact — see [[run-lifecycle-and-registry]].
 
 ## Where this lives
 
-`src/orchestrator/registry.rs` (`node_locks`, `node_lock`, `commit`) ·
+`src/orchestrator/registry.rs` (`node_locks`, `node_lock`) ·
 `src/orchestrator/lifecycle.rs` (the three per-node commands) ·
 `src/orchestrator/health.rs` (`HealthBudget`, `RunBudget`, `wait_for_healthy`,
 `HealthOutcome`, `wait_for_exit`, `TaskOutcome`) ·

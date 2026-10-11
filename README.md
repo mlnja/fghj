@@ -158,7 +158,7 @@ cd docs && npm install && npm run dev
 | `sidecar/` | Dockerfile for the in-network sidecar image. |
 | `docs/` | The documentation site. |
 | `concepts/` | The durable design record — one file per subsystem or precept, plus `AUDIT.md`, the punch list. Read this before proposing an architecture change. |
-| `SPEC.md`, `PROGRESS.md` | Product vision (aspirational in places) and a running build snapshot. |
+| `SPEC.md` | Product vision (aspirational in places). |
 
 ## Contributing
 

@@ -17,7 +17,7 @@ copy. Drift is the comparison against the file.
 ## Nothing in the background acts on drift
 
 fghj detects drift continuously and never acts on it *on its own*. When the
-user asks — a top-up, an explicit `POST /runs` — a drifted container is
+user asks — a top-up, an explicit `POST /switch` — a drifted container is
 recreated. The split is not between observing and acting; it is between
 **who asked**.
 
@@ -25,7 +25,7 @@ This is the decision worth stating loudly, because the obvious alternative —
 recreate the container the moment its config changes — is what every
 `docker compose up` does and what people expect. As a *background* policy it
 is wrong here. A run may
-have a database with hours of seeded state in a `scope: stable` volume, a
+have a database with hours of seeded state in a named volume, a
 long-lived process mid-debug, a terminal attached. Recreating a container
 because someone touched an unrelated line of YAML would destroy work the user
 never asked to lose, at a moment they were not looking. Worse, the trigger is
@@ -114,7 +114,7 @@ is for.
 Two categories are excluded from the hash on purpose:
 
 - **Pure identity** — `container_name`, `domain`, `aliases`. These derive
-  one-to-one from `node.id` plus the run id (see the projection table in
+  one-to-one from `node.id` and the workspace name (see the projection table in
   [[node-identity-and-domains]]), so they cannot drift independently of the
   rest of the spec. Including them would add no signal.
 - **Genuinely ephemeral** — an unpinned port's actual host-side binding,

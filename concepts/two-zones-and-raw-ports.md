@@ -43,20 +43,12 @@ does not choose — the caller does, by choosing which name to use.
 ## `derive_domain`, with the zone
 
 ```rust
-pub fn derive_domain(
-    node_id: &str,
-    domain_scope: &str,
-    workspace_name: &str,
-    run_id: &str,
-    zone: DomainZone,
-) -> String {
-    let workspace = sanitize_label(workspace_name);
-    let suffix = zone.suffix();          // "fghj.internal" | "fghj.raw.internal"
-    if domain_scope == "stable" || run_id == DEFAULT_RUN_ID {
-        format!("{node_id}.{workspace}.{suffix}")
-    } else {
-        format!("{node_id}.{run_id}.{workspace}.{suffix}")
-    }
+pub fn derive_domain(node_id: &str, workspace_name: &str, zone: DomainZone) -> String {
+    format!(
+        "{node_id}.{}.{}",
+        sanitize_label(workspace_name),
+        zone.suffix()            // "fghj.internal" | "fghj.raw.internal"
+    )
 }
 ```
 
@@ -64,9 +56,8 @@ The zone is the *only* thing that differs between a node's two names. Every
 uniqueness argument in [[node-identity-and-domains]] therefore holds in both
 zones at once, and holds *between* them trivially, since the suffixes differ.
 
-`resolver::resolve_universe` calls this with `DEFAULT_RUN_ID` and
-`DomainZone::Http` only, so `Node.domain` carries a node's default-run browser
-address before any container exists. The raw name has no equivalent
+`resolver::resolve_universe` calls this with `DomainZone::Http` only, so
+`Node.domain` carries a node's browser address before any container exists. The raw name has no equivalent
 pre-computed field on `Node` — it only becomes meaningful once there is a
 container to alias it onto.
 

@@ -104,7 +104,7 @@ left alone. `clear_os_resolver_config` removes all of them on a clean
 shutdown, so a stopped `fghjd` doesn't leave names pointed at a dead port.
 
 Linux (`systemd-resolved`) and Windows (NRPT) integration are described in
-`SPEC.md` §5 but not implemented — see `PROGRESS.md`'s "Known gaps".
+`SPEC.md` §5 but not implemented.
 
 ## Related
 

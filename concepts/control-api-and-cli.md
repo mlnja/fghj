@@ -57,21 +57,23 @@ any of that being duplicated per-request.
 Routes, grouped by what they front:
 
 - **Workspace management**: `GET`/`POST /workspaces` (list / wire),
-  `POST /workspaces/stop` (unwire and tear down every run in it).
+  `POST /workspaces/stop` (unwire it and tear its environment down — the
+  only way to unwire; neither the CLI nor the UI calls it yet).
 - **Graph resolution**: `GET /universe.json` → `resolver::resolve_universe`,
   run in a blocking task since it shells out to `git` (see
   [[node-identity-and-domains]]).
 - **Downloads**: `POST`/`GET /pull-all`(`/status`), `POST`/`GET /pull/{node_id}`
   (`/status`), `GET /pull-jobs` — thin wrappers over
   `downloads::DownloadRegistry` (see [[docker-and-downloads]]).
-- **Runs**: `GET`/`POST /runs`, `POST /runs/{run_id}/stop`, and per-node
-  `POST .../nodes/{node_id}/start`|`stop`|`delete` — wrappers over
-  `orchestrator::Orchestrator` (see [[run-lifecycle-and-registry]]); `post_runs` is
-  the one handler that decides `start` vs. `ensure_running` based on
-  whether the request specified a `run_id`. `POST .../debug-wait` is the one
-  per-node route with a request body (`{"wait": bool}`); it flips a value in
-  `desired` and reuses the ordinary `Starting` convergence rather than
-  adding an action of its own (see [[debugging-in-containers]]).
+- **Environment**: `GET /environment` (the one `EnvState`, or `null`),
+  `POST /switch` (body `{"flow": …}` — start a flow's nodes and stop
+  everything outside it), and per-node `POST /nodes/{node_id}/start`|`stop`|
+  `delete`. Each dispatches an action and returns; `effects::docker::converge`
+  calls `orchestrator::Orchestrator` (see [[run-lifecycle-and-registry]]).
+  `POST /nodes/{node_id}/debug-wait` is the one per-node route with a
+  request body (`{"wait": bool}`); it flips a value in `desired` and reuses
+  the ordinary `Starting` convergence rather than adding an action of its
+  own (see [[debugging-in-containers]]).
 - **Per-node observation**: `GET .../logs` (a snapshot),  `.../logs/stream`
   (SSE, live), `.../logs/generations` and `.../logs/history` (previous
   container incarnations of the same node, which is what makes a crash loop
@@ -189,5 +191,5 @@ telemetry endpoints), `src/daemon_log.rs` (the ring buffer),
 `src/web/ui.rs` (embedded UI serving). Known
 mismatch: `SPEC.md`'s described CLI surface (`fghj setup`, `fghj up`,
 `fghj branch`, `fghj branch set`) does not match what's actually
-implemented — see `PROGRESS.md`'s "Known gaps" for the open question of
-whether `SPEC.md` is aspirational or just stale.
+implemented; `SPEC.md`'s own header now says its §6 was settled
+differently.

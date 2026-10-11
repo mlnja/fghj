@@ -229,8 +229,7 @@ hostname, and returns the host port Docker actually published that
 container's port on. Only `"running"` containers are considered, so a
 stopped-but-not-yet-reconciled container's stale route can't hand back a
 dead port — though see [[run-lifecycle-and-registry]]'s reconciler section
-and `PROGRESS.md`'s "Known gaps" for the one edge this doesn't quite close
-(a *removed*, not just stopped, container's route can briefly outlive it
+for the one edge this doesn't quite close (a *removed*, not just stopped, container's route can briefly outlive it
 between reconcile ticks).
 
 Where those routes actually come from is `orchestrator::start_node` — see
@@ -369,7 +368,5 @@ termination,
 names). `daemon::WorkspaceRegistry` implements `RouteResolver` over real run
 state. Not implemented: any non-macOS trust-store install path (Linux would
 need `update-ca-certificates` or equivalent; Windows, the platform CA
-store) — see `PROGRESS.md`'s "Known gaps". Real per-service routing has not
-been manually re-verified end-to-end since the flat-workspace/CUE-schema
-refactor changed the on-disk fixtures' expected shape — also in
-`PROGRESS.md`.
+store). Real per-service routing was last manually re-verified end-to-end
+against the fixtures on 2026-09-06.

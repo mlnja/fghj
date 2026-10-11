@@ -74,9 +74,9 @@ virtualization boundary is unreliable, which is precisely the class of
 platform-specific gap this subsystem exists to avoid. A 1s poll of one small
 JSON file costs nothing and has no missed-event failure mode.
 
-The file is a pure function of `RunState::containers`, rendered by
+The file is a pure function of `EnvState::containers`, rendered by
 `effects::routes` off published state. It used to be written by hand at the
-end of each lifecycle call, from a `RunState` snapshot taken *before* the
+end of each lifecycle call, from a run-state snapshot taken *before* the
 Docker work — which meant it could be rendered from a snapshot that had
 already lost a sibling's routes. Driving it from state removed that class of
 bug entirely; see [[state-and-effects]].
@@ -187,7 +187,7 @@ This matters because a pulled image lands in the local store under the
 reference it was pulled by. If the daemon asked Docker for a bare name, step 1
 would keep missing after a successful step 2, and every daemon start would
 re-pull. One string for a sidecar image, everywhere, is what keeps the
-"already present?" check from disagreeing with what `runs/` starts.
+"already present?" check from disagreeing with what `orchestrator/` starts.
 
 The registry is a constant rather than a setting on purpose. This is not a
 user-chosen image: its source is in this crate and its version must match the
