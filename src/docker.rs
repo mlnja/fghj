@@ -103,7 +103,7 @@ pub async fn ensure_volume(docker: &Docker, name: &str, project: &str) -> Result
 /// for `run_id`, regardless of `scope` — the read-only counterpart to
 /// `remove_run_scoped_volumes` (which deliberately restricts itself to
 /// `scope: "run"` only). Used by `effects::docker::observe` to discover
-/// what volumes actually exist for a run, since `state::RunState::volumes`
+/// what volumes actually exist for a run, since `state::EnvState::volumes`
 /// starts out empty for every run (`effects::docker::converge::mirror_run`
 /// never had anything to populate it from) and there is no other source of
 /// truth for volume identity yet.

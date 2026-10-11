@@ -1,19 +1,19 @@
-//! Drives real Docker create/start/stop/delete calls off `RunState`'s two
+//! Drives real Docker create/start/stop/delete calls off `EnvState`'s two
 //! convergence fields — `ContainerInfo::pending_action` (per-node
-//! start/stop/delete) and `RunState::pending_create` (whole-environment
+//! start/stop/delete) and `EnvState::pending_create` (whole-environment
 //! create/top-up/switch). Reuses `runs::RunRegistry`'s orchestration
 //! methods wholesale (`restart_container`/`stop_container`/
 //! `remove_container`/`ensure_running`, see `perform`/
 //! `perform_create`) rather than reimplementing container lifecycle here;
 //! this effect's only responsibility is *triggering* those calls from
 //! dispatched state and reporting the real result back
-//! (`Action::ContainerActionSettled`/`Action::RunCreateSettled`).
+//! (`Action::ContainerActionSettled`/`Action::EnvCreateSettled`).
 //!
 //! Every mutation this effect causes (create/top-up, start, stop, delete)
 //! reports its own real result directly, via the `*SettleGuard`s below, so
 //! nothing needs to re-derive it from a fresh snapshot a moment later.
 //! There is nothing to translate either: `RunRegistry` builds the same
-//! `state::RunState`/`ContainerInfo` the reducer holds, so what
+//! `state::EnvState`/`ContainerInfo` the reducer holds, so what
 //! `perform`/`perform_create` return is dispatched as-is.
 //!
 //! A container that changes state for a reason *neither* this effect nor an
@@ -35,7 +35,7 @@ use crate::runs::order::{dependents_of, requirements_of};
 use crate::runs::progress::{NodeDone, ProgressSink, RunProgress};
 use crate::server;
 use crate::state::{
-    ContainerInfo, PendingAction, RunCreateError, RunSpec, RunState, WorkspaceState,
+    ContainerInfo, EnvCreateError, EnvSpec, EnvState, PendingAction, WorkspaceState,
 };
 use crate::supervisor;
 
@@ -52,7 +52,7 @@ fn extract_pending(state: &WorkspaceState) -> Vec<PendingEntry> {
         .env
         .iter()
         // While a create/switch is in flight, the marks on its containers
-        // are `RunCreateWorking`'s — a picture of what the create is doing,
+        // are `EnvCreateWorking`'s — a picture of what the create is doing,
         // not work for this effect. Acting on them started each node a
         // second time, concurrently with the create starting it.
         .filter(|env| env.pending_create.is_none())
@@ -68,8 +68,8 @@ fn extract_pending(state: &WorkspaceState) -> Vec<PendingEntry> {
 }
 
 /// The environment's still-unfulfilled create/top-up, as seen by this
-/// effect's `extract` — a plain projection of `RunState::pending_create`.
-fn extract_pending_create(state: &WorkspaceState) -> Option<RunSpec> {
+/// effect's `extract` — a plain projection of `EnvState::pending_create`.
+fn extract_pending_create(state: &WorkspaceState) -> Option<EnvSpec> {
     state
         .env
         .as_ref()
@@ -106,7 +106,7 @@ fn plan(
 /// environment, and two concurrent calls would race each other over the
 /// same containers — a switch stopping what the other is starting. Returns
 /// the create to spawn, if any, and whether one is in flight afterwards.
-fn plan_create(in_flight: bool, snapshot: Option<&RunSpec>) -> (Option<RunSpec>, bool) {
+fn plan_create(in_flight: bool, snapshot: Option<&EnvSpec>) -> (Option<EnvSpec>, bool) {
     match snapshot {
         Some(plan) if !in_flight => (Some(plan.clone()), true),
         Some(_) => (None, true),
@@ -132,7 +132,7 @@ fn plan_create(in_flight: bool, snapshot: Option<&RunSpec>) -> (Option<RunSpec>,
 async fn perform(
     old: &server::WorkspaceState,
     entry: &PendingEntry,
-    run: &RunState,
+    run: &EnvState,
     cascaded: &mut Vec<ContainerInfo>,
 ) -> anyhow::Result<Option<ContainerInfo>> {
     let container = run.containers.get(&entry.node_id);
@@ -167,7 +167,7 @@ async fn perform(
                 }
             }
             // The reducer has already written the desired value
-            // (`RunNodeDebugWaitRequested`), so the ordinary `Starting`
+            // (`NodeDebugWaitRequested`), so the ordinary `Starting`
             // convergence is what applies a flip of the debug switch —
             // there is no separate action for it. Absent container: a node
             // being started for the first time, which never halts.
@@ -267,10 +267,10 @@ fn needs_start(container: Option<&ContainerInfo>) -> bool {
 /// `plan` to `RunRegistry::ensure_running`.
 async fn perform_create(
     old: &server::WorkspaceState,
-    plan: &RunSpec,
-    prior: Option<&RunState>,
+    plan: &EnvSpec,
+    prior: Option<&EnvState>,
     progress: Option<&ProgressSink>,
-) -> Result<RunState, RunCreateError> {
+) -> Result<EnvState, EnvCreateError> {
     let graph = resolve(old).await?;
     // Nothing has been created yet, so there is no partial state to carry:
     // the `From<anyhow::Error>` conversion's `partial: None` is correct.
@@ -326,11 +326,11 @@ impl Drop for SettleGuard {
 /// `SettleGuard`'s doc for the RAII guarantee this gives.
 struct CreateSettleGuard {
     actor: ActorHandle,
-    outcome: Option<Result<RunState, RunCreateError>>,
+    outcome: Option<Result<EnvState, EnvCreateError>>,
 }
 
 impl CreateSettleGuard {
-    fn settle(mut self, outcome: Result<RunState, RunCreateError>) {
+    fn settle(mut self, outcome: Result<EnvState, EnvCreateError>) {
         self.outcome = Some(outcome);
     }
 }
@@ -339,13 +339,13 @@ impl Drop for CreateSettleGuard {
     fn drop(&mut self) {
         let actor = self.actor.clone();
         let outcome = self.outcome.take().unwrap_or_else(|| {
-            Err(RunCreateError::bare(
+            Err(EnvCreateError::bare(
                 "environment creation task ended without reporting a result (likely a panic or cancellation)",
             ))
         });
         supervisor::supervise("env create settled dispatch", async move {
             let _ = actor
-                .dispatch(Action::RunCreateSettled { result: outcome })
+                .dispatch(Action::EnvCreateSettled { result: outcome })
                 .await;
         });
     }
@@ -358,7 +358,7 @@ impl Drop for CreateSettleGuard {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConvergeSnapshot {
     pending: Vec<PendingEntry>,
-    create: Option<RunSpec>,
+    create: Option<EnvSpec>,
 }
 
 /// Per-workspace `Effect` driving real Docker lifecycle and creation calls.
@@ -414,7 +414,7 @@ impl DockerConvergeEffect {
         });
     }
 
-    fn spawn_create(&self, plan: RunSpec) {
+    fn spawn_create(&self, plan: EnvSpec) {
         let old = self.old.clone();
         let guard = CreateSettleGuard {
             actor: self.actor.clone(),
@@ -432,7 +432,7 @@ impl DockerConvergeEffect {
                 while let Some(p) = rx.recv().await {
                     let action = match p {
                         RunProgress::Working { node_id, action } => {
-                            Action::RunCreateWorking { node_id, action }
+                            Action::EnvCreateWorking { node_id, action }
                         }
                         RunProgress::Done(done) => {
                             let NodeDone {
@@ -441,7 +441,7 @@ impl DockerConvergeEffect {
                                 sidecar_ip,
                                 info,
                             } = *done;
-                            Action::RunCreateProgress {
+                            Action::EnvCreateProgress {
                                 network,
                                 sidecar_container_name,
                                 sidecar_ip,
@@ -456,7 +456,7 @@ impl DockerConvergeEffect {
             // Dropped so the drain task sees the channel close and finishes
             // applying whatever is still queued before the settle below
             // lands — otherwise a late progress report could arrive *after*
-            // `RunCreateSettled` and re-add a container the settle dropped.
+            // `EnvCreateSettled` and re-add a container the settle dropped.
             drop(tx);
             if let Err(e) = drain.await {
                 daemon_log::warn(format!("env-create progress drain task failed: {e}"));
@@ -519,7 +519,7 @@ mod tests {
         c
     }
 
-    fn with_pending_create(containers: Vec<ContainerInfo>, plan: RunSpec) -> WorkspaceState {
+    fn with_pending_create(containers: Vec<ContainerInfo>, plan: EnvSpec) -> WorkspaceState {
         let mut state = state_with(containers);
         state.env.as_mut().unwrap().pending_create = Some(plan);
         state
@@ -551,7 +551,7 @@ mod tests {
     fn extract_pending_ignores_the_marks_of_an_in_flight_create() {
         let state = with_pending_create(
             vec![container("web", Some(PendingAction::Starting))],
-            RunSpec::Flow("app/main".into()),
+            EnvSpec::Flow("app/main".into()),
         );
         assert!(extract_pending(&state).is_empty());
     }
@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn extract_pending_create_reads_the_environments_intent() {
-        let plan = RunSpec::Flow("app/main".into());
+        let plan = EnvSpec::Flow("app/main".into());
         let state = with_pending_create(vec![], plan.clone());
         assert_eq!(extract_pending_create(&state), Some(plan));
     }
@@ -617,7 +617,7 @@ mod tests {
 
     #[test]
     fn plan_create_spawns_a_create_when_none_is_in_flight() {
-        let spec = RunSpec::Flow("app/main".into());
+        let spec = EnvSpec::Flow("app/main".into());
         let (to_spawn, in_flight) = plan_create(false, Some(&spec));
         assert_eq!(to_spawn, Some(spec));
         assert!(in_flight);
@@ -625,7 +625,7 @@ mod tests {
 
     #[test]
     fn plan_create_does_not_respawn_a_create_already_in_flight() {
-        let spec = RunSpec::Flow("app/main".into());
+        let spec = EnvSpec::Flow("app/main".into());
         let (to_spawn, in_flight) = plan_create(true, Some(&spec));
         assert!(to_spawn.is_none());
         assert!(in_flight);
@@ -694,7 +694,7 @@ mod tests {
     fn actor_with_pending_create() -> ActorHandle {
         crate::actor::spawn(with_pending_create(
             vec![],
-            RunSpec::Flow("app/main".into()),
+            EnvSpec::Flow("app/main".into()),
         ))
     }
 

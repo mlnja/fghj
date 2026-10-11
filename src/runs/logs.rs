@@ -6,11 +6,11 @@ use futures_util::StreamExt;
 
 use crate::docker;
 use crate::persistence::{LogLine, WorkspaceDb};
-use crate::state::RunState;
+use crate::state::EnvState;
 
 /// Returns the container name backing `node_id` in `state`, for the SSE
 /// live-follow endpoint to build a `docker::logs_follow` stream from.
-pub fn container_name_for<'a>(state: &'a RunState, node_id: &str) -> Result<&'a str> {
+pub fn container_name_for<'a>(state: &'a EnvState, node_id: &str) -> Result<&'a str> {
     state
         .containers
         .get(node_id)
@@ -114,7 +114,7 @@ pub(crate) async fn capture_container_logs(
 
 pub async fn logs_for_tail(
     docker: &bollard::Docker,
-    state: &RunState,
+    state: &EnvState,
     node_id: &str,
     tail: usize,
 ) -> Result<String> {

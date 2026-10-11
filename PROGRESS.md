@@ -14,7 +14,7 @@ recreate one node's container in an already-running run, picking up
 `.fghj.yaml` changes since it last started — Start),
 `RunRegistry::stop_container` (real `docker stop`, container and its
 volumes survive — Stop), and `RunRegistry::remove_container` (stop +
-remove, dropped from `RunState.containers` — Delete), routed at
+remove, dropped from `EnvState.containers` — Delete), routed at
 `POST /runs/{run_id}/nodes/{node_id}/{start,stop,delete}` in `src/daemon.rs`.
 Frontend: three buttons above the tabs in `Drawer.svelte`, disabled when no
 run is selected or when the action doesn't apply to the node's current
@@ -442,7 +442,7 @@ plans referenced above.
      error message discarded. Every API error was effectively undiagnosable
      from outside the daemon's own stdout. Fixed to use `{e:?}` (`Debug`),
      which includes the full "Caused by:" chain.
-  Still worth doing: filtering `resolve_route` (or its `RunState.containers`)
+  Still worth doing: filtering `resolve_route` (or its `EnvState.containers`)
   so a route to a *removed* container (not just a non-`"running"` one,
   already handled) can't briefly outlive it between `refresh()` ticks.
 - Subsystem B's OS integration is macOS-only (`/etc/resolver`); Linux

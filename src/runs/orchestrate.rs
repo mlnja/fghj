@@ -13,7 +13,7 @@ use super::start_node::StartContext;
 use crate::daemon_log;
 use crate::docker;
 use crate::resolver::{Graph, Node};
-use crate::state::{ContainerInfo, PendingAction, RunCreateError, RunSpec, RunState};
+use crate::state::{ContainerInfo, EnvCreateError, EnvSpec, EnvState, PendingAction};
 
 use super::registry::RunRegistry;
 
@@ -58,7 +58,7 @@ fn task_already_done(node: &Node, prior: Option<&ContainerInfo>) -> bool {
 /// Three conditions, and all three have to hold:
 ///
 /// 1. **The container is alive.** Checked against Docker itself, not against
-///    the persisted `RunState`, since a container can be stopped or removed
+///    the persisted `EnvState`, since a container can be stopped or removed
 ///    out-of-band between calls.
 /// 2. **fghj still has an `ContainerInfo` for it.** `state.containers` is
 ///    loaded from the DB (see `RunRegistry::new`'s reconciliation, which
@@ -141,7 +141,7 @@ impl RunRegistry {
     /// Starting a single node stops nothing.
     ///
     /// Liveness is checked directly against docker on every call rather than
-    /// trusting the persisted `RunState`, since a container can be
+    /// trusting the persisted `EnvState`, since a container can be
     /// stopped/removed out-of-band between calls (see `refresh`).
     ///
     /// A node that fails blocks what can't start without it, and nothing
@@ -149,7 +149,7 @@ impl RunRegistry {
     /// came up because the fourth didn't would destroy exactly the progress
     /// the per-node reporting below exists to keep. Each node is reported
     /// through `progress` as it comes up, and the error additionally carries
-    /// the whole partial state (`RunCreateError::partial`), so the
+    /// the whole partial state (`EnvCreateError::partial`), so the
     /// containers stay visible and routable instead of running unseen.
     ///
     /// A node this top-up recreates also restarts the alive nodes that
@@ -159,14 +159,14 @@ impl RunRegistry {
     pub async fn ensure_running(
         &self,
         graph: &Graph,
-        spec: &RunSpec,
-        prior: Option<&RunState>,
+        spec: &EnvSpec,
+        prior: Option<&EnvState>,
         progress: Option<&ProgressSink>,
-    ) -> Result<RunState, RunCreateError> {
+    ) -> Result<EnvState, EnvCreateError> {
         let run_id = DEFAULT_RUN_ID.to_string();
         let target_ids = match spec {
-            RunSpec::Flow(flow) => graph.start_ids(Some(flow))?,
-            RunSpec::Node(id) => {
+            EnvSpec::Flow(flow) => graph.start_ids(Some(flow))?,
+            EnvSpec::Node(id) => {
                 if !graph.nodes.iter().any(|n| &n.id == id) {
                     return Err(anyhow::anyhow!("no such node: {id}").into());
                 }
@@ -182,7 +182,7 @@ impl RunRegistry {
             .ensure_sidecar(&graph.workspace_name, &run_id, &network)
             .await?;
 
-        let mut state = prior.cloned().unwrap_or_else(|| RunState {
+        let mut state = prior.cloned().unwrap_or_else(|| EnvState {
             network: network.clone(),
             sidecar_container_name: sidecar_container_name.clone(),
             sidecar_ip: Some(sidecar_ip.clone()),
@@ -192,7 +192,7 @@ impl RunRegistry {
         state.sidecar_container_name = sidecar_container_name;
         state.sidecar_ip = Some(sidecar_ip);
 
-        if matches!(spec, RunSpec::Flow(_)) {
+        if matches!(spec, EnvSpec::Flow(_)) {
             self.stop_outside(graph, &target_ids, &mut state, progress)
                 .await;
         }
@@ -314,7 +314,7 @@ impl RunRegistry {
 
         match outcomes.error() {
             None => Ok(state),
-            Some(message) => Err(RunCreateError {
+            Some(message) => Err(EnvCreateError {
                 message,
                 partial: Some(Box::new(state)),
             }),
@@ -330,7 +330,7 @@ impl RunRegistry {
         &self,
         graph: &Graph,
         keep: &[String],
-        state: &mut RunState,
+        state: &mut EnvState,
         progress: Option<&ProgressSink>,
     ) {
         let outside: Vec<String> = state
@@ -371,7 +371,7 @@ fn working(progress: Option<&ProgressSink>, node_id: &str, action: Option<Pendin
     );
 }
 
-fn report_done(progress: Option<&ProgressSink>, state: &RunState, info: ContainerInfo) {
+fn report_done(progress: Option<&ProgressSink>, state: &EnvState, info: ContainerInfo) {
     report(
         progress,
         RunProgress::Done(Box::new(NodeDone {

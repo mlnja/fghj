@@ -43,10 +43,10 @@ pub(crate) enum ExecControl {
 
 /// `GET /nodes/{node_id}/exec/ws?workspace={id}` — proxies a
 /// real `docker exec` full duplex: see `docker::ExecSession`'s doc comment.
-/// Resolves the node the same way `get_run_logs_stream` does, as a plain
+/// Resolves the node the same way `get_node_logs_stream` does, as a plain
 /// pre-upgrade HTTP response, so a bad node id gets a clean 404/400
 /// instead of failing mid-handshake.
-pub(crate) async fn get_run_exec_ws(
+pub(crate) async fn get_node_exec_ws(
     AxumPath(node_id): AxumPath<String>,
     WorkspaceExtractor(state): WorkspaceExtractor,
     ActorExtractor(actor): ActorExtractor,

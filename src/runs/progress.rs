@@ -1,7 +1,7 @@
 //! Incremental progress reporting out of a whole-run create/top-up.
 //!
 //! `ensure_running` bring nodes up one at a time and used to
-//! persist the whole `RunState` to SQLite after each one, so that a daemon
+//! persist the whole `EnvState` to SQLite after each one, so that a daemon
 //! that died partway through still knew about the containers that had
 //! already come up. Persistence is now derived from published state
 //! (`effects::persist`), which only learns about a create when it settles —

@@ -23,7 +23,7 @@ pub struct WorkspaceState {
     /// actor's published `WorkspaceState` is the only record of the
     /// environment. It lives here rather than inside `RunRegistry` because
     /// `RunRegistry` deliberately holds no run state at all.
-    pub rehydrated: Option<crate::state::RunState>,
+    pub rehydrated: Option<crate::state::EnvState>,
 }
 
 impl WorkspaceState {

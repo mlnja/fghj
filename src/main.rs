@@ -490,7 +490,7 @@ fn terminal_size() -> (u16, u16) {
 }
 
 /// `fghj exec` — proxies a real `docker exec` full duplex over `fghjd`'s
-/// control socket (see `daemon::get_run_exec_ws`/`docker::ExecSession`).
+/// control socket (see `daemon::get_node_exec_ws`/`docker::ExecSession`).
 /// TTY allocation auto-detects the same way `docker compose exec` does: on
 /// when both local stdin and stdout are real terminals, off (plain
 /// bidirectional byte relay, no local raw mode/resize forwarding) otherwise

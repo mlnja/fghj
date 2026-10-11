@@ -6,11 +6,11 @@ use super::container::ContainerInfo;
 use super::volume::VolumeInfo;
 
 /// Why the environment is being brought up to date — the intent a
-/// `RunPlanned` action records and `effects::docker::converge` fulfils.
+/// `EnvPlanned` action records and `effects::docker::converge` fulfils.
 /// Serialized as `{"flow": ...}` / `{"node": ...}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RunSpec {
+pub enum EnvSpec {
     /// Switch to a flow: start its nodes and stop (not remove) every
     /// running container outside it, so the environment ends up as that
     /// flow and nothing else.
@@ -23,7 +23,7 @@ pub enum RunSpec {
 /// One run's canonical state: every container and volume fghj knows about
 /// for it. Keyed by `node_id` / volume name (`BTreeMap`) rather than a
 /// `Vec<ContainerInfo>` — a pure reducer dispatches almost every action by
-/// `node_id` (`RunNodeStartRequested`, `ContainerObserved`, ...) and needs
+/// `node_id` (`NodeStartRequested`, `ContainerObserved`, ...) and needs
 /// point lookup on essentially every action, not a linear scan; a map also
 /// structurally rules out the two-containers-same-`node_id` state a `Vec`
 /// never prevented.
@@ -38,7 +38,7 @@ pub enum RunSpec {
 /// translate to and from either — two structs for one run is what let
 /// `desired` and `observed` silently disagree before they were unified.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
-pub struct RunState {
+pub struct EnvState {
     pub network: String,
     pub containers: BTreeMap<String, ContainerInfo>,
     pub volumes: BTreeMap<String, VolumeInfo>,
@@ -53,14 +53,14 @@ pub struct RunState {
     /// every node start so `start_node` doesn't need a Docker round-trip
     /// just to set every node's `--dns`.
     pub sidecar_ip: Option<String>,
-    /// Set by `RunPlanned` to record the caller's still-unfulfilled intent
+    /// Set by `EnvPlanned` to record the caller's still-unfulfilled intent
     /// to (re)create/top-up this run; `effects::docker::converge` picks it
     /// up, does the real Docker work, and clears it via
-    /// `Action::RunCreateSettled`. Serialized because it is observable: while
+    /// `Action::EnvCreateSettled`. Serialized because it is observable: while
     /// it is set every node start is rejected as already in flight, and the
     /// UI says why ("switching to flow …") instead of leaving the user to
     /// guess.
-    pub pending_create: Option<RunSpec>,
+    pub pending_create: Option<EnvSpec>,
 }
 
 /// Why a whole-run create/top-up failed, and what came up anyway.
@@ -75,19 +75,19 @@ pub struct RunState {
 /// sidecar route table, yet absent from `GET /environment`, the UI and host
 /// routing (`state::query::resolve_route` reads reducer state only).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunCreateError {
+pub struct EnvCreateError {
     pub message: String,
     /// What is actually up now. `None` when nothing came up.
     ///
     /// Boxed because this is the `Err` half of a `Result` that the whole
-    /// create path returns: a `RunState` inline makes every such `Result`
+    /// create path returns: a `EnvState` inline makes every such `Result`
     /// (including every success) at least 224 bytes wide, which is what
     /// `clippy::result_large_err` objects to. A partial run is the rare case,
     /// so one allocation on the failure path is the right trade.
-    pub partial: Option<Box<RunState>>,
+    pub partial: Option<Box<EnvState>>,
 }
 
-impl RunCreateError {
+impl EnvCreateError {
     /// The common case: something went wrong before any node started, or in
     /// a path that cleans up after itself.
     pub fn bare(message: impl Into<String>) -> Self {
@@ -98,7 +98,7 @@ impl RunCreateError {
     }
 }
 
-impl From<anyhow::Error> for RunCreateError {
+impl From<anyhow::Error> for EnvCreateError {
     fn from(e: anyhow::Error) -> Self {
         Self::bare(format!("{e:#}"))
     }
@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn fresh_run_state_has_no_containers_or_volumes() {
-        let state = RunState {
+        let state = EnvState {
             network: "fghj-net-default".into(),
             containers: BTreeMap::new(),
             volumes: BTreeMap::new(),
@@ -124,13 +124,13 @@ mod tests {
 
     #[test]
     fn pending_create_serializes_as_the_intent() {
-        let state = RunState {
+        let state = EnvState {
             network: "fghj-net-default".into(),
             containers: BTreeMap::new(),
             volumes: BTreeMap::new(),
             sidecar_container_name: "fghj-sidecar-default".into(),
             sidecar_ip: None,
-            pending_create: Some(RunSpec::Node("web".into())),
+            pending_create: Some(EnvSpec::Node("web".into())),
         };
         let json = serde_json::to_value(&state).unwrap();
         assert_eq!(json["pending_create"], serde_json::json!({ "node": "web" }));

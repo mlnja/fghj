@@ -19,7 +19,7 @@ impl RunRegistry {
     /// its deterministic container name and its address on `network`.
     ///
     /// Idempotent, like `ensure_running`'s per-node liveness check: checked
-    /// directly against Docker rather than trusted from `RunState`, since
+    /// directly against Docker rather than trusted from `EnvState`, since
     /// the sidecar can be stopped/removed out-of-band just like any other
     /// container.
     pub(super) async fn ensure_sidecar(

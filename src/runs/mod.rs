@@ -12,7 +12,7 @@
 //! - [`order`] — dependency-first start ordering.
 //! - [`spec`] — the per-node launch spec and its drift hash.
 //!
-//! The shapes this module reads and writes — `RunState`, `ContainerInfo`,
+//! The shapes this module reads and writes — `EnvState`, `ContainerInfo`,
 //! `PortRoute`, `PendingAction` — live in [`crate::state`], which is where
 //! the reducer, `persistence`, and the `/runs` JSON get them from too.
 //! There is exactly one of each; this module used to define its own flatter

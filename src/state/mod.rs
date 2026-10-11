@@ -3,12 +3,12 @@
 //! data-only: no I/O, no async, nothing that can fail. Wired into the
 //! running daemon via `action.rs`/`reducer/`/`actor.rs`/`registry.rs`/
 //! `effects/`, and serialized straight to the frontend by
-//! `web::api::runs`'s environment and the per-node lifecycle handlers —
+//! `web::api::env`'s environment and the per-node lifecycle handlers —
 //! these types *are* the HTTP contract, there is no view layer in between.
 
 pub mod container;
+pub mod env;
 pub mod query;
-pub mod run;
 pub mod sync_status;
 #[cfg(test)]
 pub mod testing;
@@ -19,7 +19,7 @@ pub use container::{
     ContainerDesired, ContainerInfo, ContainerObserved, ContainerSource, NodeCondition,
     PendingAction, PortRoute,
 };
-pub use run::{RunCreateError, RunSpec, RunState};
+pub use env::{EnvCreateError, EnvSpec, EnvState};
 pub use sync_status::SyncStatus;
 pub use volume::{VolumeDesired, VolumeInfo, VolumeObserved};
 pub use workspace::WorkspaceState;

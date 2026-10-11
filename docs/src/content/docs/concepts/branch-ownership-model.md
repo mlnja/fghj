@@ -24,7 +24,7 @@ distinct owners:
    repo, shared by every flow that happens to reference it. There's no
    per-flow copy of a dependency's checkout, so there's exactly one branch
    active per repo, workspace-wide, at any moment.
-3. **Per-run branch pin** — this used to exist (a `RunSpec` override
+3. **Per-run branch pin** — this used to exist (a `EnvSpec` override
    building from a throwaway mirror + checkout under `.fghj/`, never
    touching the live workspace checkout or config) but has been **removed
    entirely**: its privilege-dropped mirror clone was never actually sound,

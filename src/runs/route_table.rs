@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::persistence::{self};
-use crate::state::{ContainerInfo, RunState};
+use crate::state::{ContainerInfo, EnvState};
 
 /// One entry in the route table `write_route_table` persists for a run's
 /// sidecar proxy to poll (see `src/bin/fghj-sidecar.rs`'s own
@@ -116,7 +116,7 @@ pub(crate) fn refresh_sidecar_ca_copy() -> Result<PathBuf> {
 /// valid the moment the container comes back). Best-effort: a write failure
 /// here shouldn't fail the start/stop call it's riding along on, since the
 /// next lifecycle call for this run retries it anyway.
-pub(crate) fn write_route_table(state: &RunState) -> Result<()> {
+pub(crate) fn write_route_table(state: &EnvState) -> Result<()> {
     let dir = sidecar_routes_dir(&state.network);
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {dir:?}"))?;
 

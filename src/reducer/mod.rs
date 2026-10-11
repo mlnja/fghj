@@ -7,8 +7,8 @@
 //! report; see `observation`). This is what lets `actor::spawn` call it
 //! inline on a single-threaded per-workspace loop without ever blocking.
 
+mod env;
 mod observation;
-mod run;
 
 use crate::action::{Action, ActionRejected};
 use crate::state::WorkspaceState;
@@ -18,17 +18,17 @@ use crate::state::WorkspaceState;
 /// phase) are expected to publish the returned value themselves.
 pub fn reduce(state: &WorkspaceState, action: Action) -> Result<WorkspaceState, ActionRejected> {
     match action {
-        Action::RunPlanned { .. }
-        | Action::RunNodeStartRequested { .. }
-        | Action::RunNodeStopRequested { .. }
-        | Action::RunNodeDeleteRequested { .. }
-        | Action::RunNodeDebugWaitRequested { .. } => run::reduce(state, action),
+        Action::EnvPlanned { .. }
+        | Action::NodeStartRequested { .. }
+        | Action::NodeStopRequested { .. }
+        | Action::NodeDeleteRequested { .. }
+        | Action::NodeDebugWaitRequested { .. } => env::reduce(state, action),
 
         Action::ContainerObserved { .. }
         | Action::ContainerActionSettled { .. }
-        | Action::RunCreateWorking { .. }
-        | Action::RunCreateProgress { .. }
-        | Action::RunCreateSettled { .. }
+        | Action::EnvCreateWorking { .. }
+        | Action::EnvCreateProgress { .. }
+        | Action::EnvCreateSettled { .. }
         | Action::VolumeObserved { .. }
         | Action::ConfigDriftObserved { .. } => observation::reduce(state, action),
 

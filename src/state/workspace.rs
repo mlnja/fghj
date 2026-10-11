@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use super::run::RunState;
+use super::env::EnvState;
 use crate::persistence::WorkspaceOwner;
 
 /// The single canonical, in-memory source of truth for one workspace —
@@ -25,7 +25,7 @@ pub struct WorkspaceState {
     pub owner: Option<WorkspaceOwner>,
     /// The workspace's one environment — `None` until something first
     /// creates it.
-    pub env: Option<RunState>,
+    pub env: Option<EnvState>,
 }
 
 #[cfg(test)]

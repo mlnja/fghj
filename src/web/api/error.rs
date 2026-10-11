@@ -27,12 +27,12 @@ pub(crate) fn bad_request(e: impl std::fmt::Display) -> Response {
 
 /// Maps an `ActionRejected` from a dispatched request to its HTTP response
 /// — the `actor::ActorHandle::dispatch` counterpart of `err_response`.
-/// `AlreadyInFlight` -> 409; `RunNotFound`/`NodeNotFound` -> 404.
+/// `AlreadyInFlight` -> 409; `NoEnvironment`/`NodeNotFound` -> 404.
 pub(crate) fn action_rejected_response(err: crate::action::ActionRejected) -> Response {
     use crate::action::ActionRejected;
     let status = match err {
         ActionRejected::AlreadyInFlight => StatusCode::CONFLICT,
-        ActionRejected::RunNotFound | ActionRejected::NodeNotFound => StatusCode::NOT_FOUND,
+        ActionRejected::NoEnvironment | ActionRejected::NodeNotFound => StatusCode::NOT_FOUND,
     };
     (
         status,

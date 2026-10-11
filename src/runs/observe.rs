@@ -1,12 +1,12 @@
 //! Read-only reconciliation: polls Docker for what is actually true and
-//! folds the answer back into the recorded `RunState`.
+//! folds the answer back into the recorded `EnvState`.
 
 use std::collections::BTreeMap;
 
 use super::spec::spec_hash;
 use crate::docker;
 use crate::resolver::Graph;
-use crate::state::{ContainerObserved, RunState, SyncStatus};
+use crate::state::{ContainerObserved, EnvState, SyncStatus};
 
 use super::naming::DEFAULT_RUN_ID;
 use super::registry::RunRegistry;
@@ -30,7 +30,7 @@ impl RunRegistry {
     /// re-joins each stored route against these freshly-observed `ports` at
     /// read time, so there is one correction, at the point of use, instead
     /// of a stored copy to keep in step.
-    pub async fn inspect_containers(&self, env: &RunState) -> BTreeMap<String, ContainerObserved> {
+    pub async fn inspect_containers(&self, env: &EnvState) -> BTreeMap<String, ContainerObserved> {
         let mut updated = BTreeMap::new();
         for (node_id, c) in &env.containers {
             let name = &c.desired.container_name;
@@ -113,7 +113,7 @@ impl RunRegistry {
     /// a separate `synced` field on its own copy of the container and
     /// re-persist the run, which meant two records of the same fact that
     /// could — and did — disagree.
-    pub async fn config_drift(&self, graph: &Graph, env: &RunState) -> Vec<DriftReport> {
+    pub async fn config_drift(&self, graph: &Graph, env: &EnvState) -> Vec<DriftReport> {
         let mut reports = Vec::new();
         for c in env.containers.values() {
             let sync = match graph.nodes.iter().find(|n| n.id == c.node_id) {
@@ -273,7 +273,7 @@ mod tests {
             },
             pending_action: None,
         };
-        let env = RunState {
+        let env = EnvState {
             network: "bridge".to_string(),
             containers: BTreeMap::from([("svc".to_string(), stale_container.clone())]),
             ..Default::default()

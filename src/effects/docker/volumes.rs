@@ -3,15 +3,15 @@
 //! via `Action::VolumeObserved`, letting `reducer::observation`'s existing
 //! bootstrap-on-first-observation logic (`VolumeInfo::desired` seeded from
 //! the first `VolumeObserved` for a name never seen before) populate
-//! `state::RunState::volumes`.
+//! `state::EnvState::volumes`.
 //!
 //! Deliberately not a full desired/observed diff with actuation: real
 //! desired-state volume tracking would need
-//! a volume's identity threaded through `RunSpec`/`Action::RunPlanned` from
-//! the resolved `.fghj.yaml` graph, which `RunSpec` doesn't carry (see
-//! `state::run::RunSpec`'s doc — it's deliberately thin)
+//! a volume's identity threaded through `EnvSpec`/`Action::EnvPlanned` from
+//! the resolved `.fghj.yaml` graph, which `EnvSpec` doesn't carry (see
+//! `state::env::EnvSpec`'s doc — it's deliberately thin)
 //! and `runs::orchestrate` doesn't populate either (it builds every
-//! `RunState` with `volumes: BTreeMap::new()`). Plumbing real volume specs
+//! `EnvState` with `volumes: BTreeMap::new()`). Plumbing real volume specs
 //! through would mean
 //! reaching into `RunRegistry::ensure_running`'s graph-resolution
 //! internals. What this module gives instead:

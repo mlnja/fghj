@@ -60,7 +60,7 @@ fn cert_eligible_by_default() -> bool {
 /// request, checks it for in-flight dedup
 /// (`container.pending_action.is_some()` → `ActionRejected::AlreadyInFlight`),
 /// and clears it on `Action::ContainerActionSettled` once the effect doing
-/// the real Docker call finishes — see `reducer::run` and
+/// the real Docker call finishes — see `reducer::env` and
 /// `reducer::observation`. It is the only such gate, so nothing can
 /// disagree about whether a node is busy.
 ///
@@ -132,7 +132,7 @@ pub struct ContainerSource {
 /// Docker. Split out from `ContainerObserved` (what Docker actually
 /// reports right now) because the two change on entirely different
 /// triggers: `desired` only changes in response to a dispatched `Action`
-/// (`RunPlanned`, `RunNodeStartRequested`, ...); `observed` only changes in
+/// (`EnvPlanned`, `NodeStartRequested`, ...); `observed` only changes in
 /// response to the Docker-polling effect's own inspection. Everything here
 /// is computed from a `NodeSpec`, never read back off a live container —
 /// that is exactly what makes `observed != desired` a meaningful reading

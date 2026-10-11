@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use crate::persistence::workspace_owner::WorkspaceOwner;
 use crate::runs::DEFAULT_RUN_ID;
-use crate::state::{ContainerDesired, ContainerInfo, ContainerObserved, RunState, SyncStatus};
+use crate::state::{ContainerDesired, ContainerInfo, ContainerObserved, EnvState, SyncStatus};
 
 use super::WorkspaceDb;
 
@@ -89,7 +89,7 @@ impl WorkspaceDb {
         .context("load_owner task panicked")?
     }
 
-    pub async fn save_env(self: Arc<Self>, state: RunState) -> Result<()> {
+    pub async fn save_env(self: Arc<Self>, state: EnvState) -> Result<()> {
         tokio::task::spawn_blocking(move || {
             let mut conn = self.conn.lock().unwrap();
             let tx = conn.transaction()?;
@@ -158,14 +158,14 @@ impl WorkspaceDb {
         .context("delete_env task panicked")?
     }
 
-    pub async fn load_env(self: Arc<Self>) -> Result<Option<RunState>> {
+    pub async fn load_env(self: Arc<Self>) -> Result<Option<EnvState>> {
         tokio::task::spawn_blocking(move || {
             let conn = self.conn.lock().unwrap();
             let env = conn.query_row(
                 "SELECT network, sidecar_container_name, sidecar_ip FROM runs WHERE run_id = ?1",
                 rusqlite::params![DEFAULT_RUN_ID],
                 |row| {
-                    Ok(RunState {
+                    Ok(EnvState {
                         network: row.get(0)?,
                         sidecar_container_name: row
                             .get::<_, Option<String>>(1)?
@@ -309,7 +309,7 @@ mod tests {
             .await
             .unwrap();
 
-        let state = RunState {
+        let state = EnvState {
             network: "fghj-demo-default".to_string(),
             containers: BTreeMap::from([("svc-a".to_string(), container())]),
             sidecar_container_name: "fghj-demo-default-sidecar".to_string(),
@@ -335,7 +335,7 @@ mod tests {
 
         let mut c = container();
         c.desired.debug_wait = true;
-        let state = RunState {
+        let state = EnvState {
             network: "fghj-demo-default".to_string(),
             containers: BTreeMap::from([("svc-a".to_string(), c)]),
             sidecar_container_name: "fghj-demo-default-sidecar".to_string(),
@@ -369,7 +369,7 @@ mod tests {
             dirty: false,
         });
         db.clone()
-            .save_env(RunState {
+            .save_env(EnvState {
                 containers: BTreeMap::from([("svc-a".to_string(), c)]),
                 ..Default::default()
             })
@@ -401,7 +401,7 @@ mod tests {
         let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
 
         db.clone()
-            .save_env(RunState {
+            .save_env(EnvState {
                 containers: BTreeMap::from([("svc-a".to_string(), container())]),
                 ..Default::default()
             })
@@ -437,7 +437,7 @@ mod tests {
         crashed.observed.status = "exited".to_string();
         crashed.observed.sync = SyncStatus::Drifted;
         db.clone()
-            .save_env(RunState {
+            .save_env(EnvState {
                 containers: BTreeMap::from([("svc-a".to_string(), crashed)]),
                 ..Default::default()
             })
@@ -457,7 +457,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
         db.clone()
-            .save_env(RunState {
+            .save_env(EnvState {
                 containers: BTreeMap::from([("svc-a".to_string(), container())]),
                 ..Default::default()
             })

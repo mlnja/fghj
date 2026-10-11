@@ -3,7 +3,7 @@
 //! requesting a change — see `action::Action`'s module doc for the
 //! request/report split.
 //!
-//! Unlike `reducer::run`, nothing here ever returns `Err`: a report about a
+//! Unlike `reducer::env`, nothing here ever returns `Err`: a report about a
 //! run/node this workspace no longer tracks isn't a caller mistake to
 //! reject, it's an unremarkable race between an effect's own polling
 //! cadence and a node being deleted out from under it — by the time the
@@ -13,7 +13,7 @@
 
 use crate::action::{Action, ActionRejected};
 use crate::state::{
-    ContainerInfo, RunCreateError, RunState, VolumeDesired, VolumeInfo, VolumeObserved,
+    ContainerInfo, EnvCreateError, EnvState, VolumeDesired, VolumeInfo, VolumeObserved,
     WorkspaceState,
 };
 
@@ -86,9 +86,9 @@ pub(super) fn reduce(
             Ok(next)
         }
 
-        Action::RunCreateSettled { result } => {
+        Action::EnvCreateSettled { result } => {
             let mut next = state.clone();
-            // Every branch writes through the entry `RunPlanned` created
+            // Every branch writes through the entry `EnvPlanned` created
             // rather than inserting: a report describes work on an
             // environment the reducer already knows about, and never brings
             // one into existence on its own.
@@ -106,7 +106,7 @@ pub(super) fn reduce(
                 // `pending_create` is cleared explicitly rather than relying
                 // on the partial carrying `None`, since it is a snapshot of
                 // a working copy, not a freshly-built run.
-                Err(RunCreateError {
+                Err(EnvCreateError {
                     partial: Some(mut run),
                     ..
                 }) => {
@@ -126,15 +126,15 @@ pub(super) fn reduce(
             Ok(next)
         }
 
-        Action::RunCreateWorking { node_id, action } => {
+        Action::EnvCreateWorking { node_id, action } => {
             let mut next = state.clone();
-            // Same write-through rule as `RunCreateSettled` above.
+            // Same write-through rule as `EnvCreateSettled` above.
             if let Some(run) = next.env.as_mut() {
                 match (action, run.containers.get_mut(&node_id)) {
                     (Some(action), Some(container)) => container.pending_action = Some(action),
                     (Some(_), None) => {
                         run.containers
-                            .insert(node_id.clone(), super::run::starting_placeholder(&node_id));
+                            .insert(node_id.clone(), super::env::starting_placeholder(&node_id));
                     }
                     (None, Some(container)) if is_placeholder(container) => {
                         run.containers.remove(&node_id);
@@ -146,20 +146,20 @@ pub(super) fn reduce(
             Ok(next)
         }
 
-        Action::RunCreateProgress {
+        Action::EnvCreateProgress {
             network,
             sidecar_container_name,
             sidecar_ip,
             mut info,
         } => {
             let mut next = state.clone();
-            // Same write-through rule as `RunCreateSettled` above — hence
+            // Same write-through rule as `EnvCreateSettled` above — hence
             // `as_mut` rather than `get_or_insert`.
             if let Some(run) = next.env.as_mut() {
                 run.network = network;
                 run.sidecar_container_name = sidecar_container_name;
                 run.sidecar_ip = sidecar_ip;
-                // The node's work is done, so its `RunCreateWorking` mark
+                // The node's work is done, so its `EnvCreateWorking` mark
                 // comes off with it.
                 info.pending_action = None;
                 run.containers.insert(info.node_id.clone(), info);
@@ -209,11 +209,11 @@ fn is_placeholder(container: &ContainerInfo) -> bool {
     container.desired.container_name.is_empty()
 }
 
-/// Takes off every `RunCreateWorking` mark once the create is over — the
+/// Takes off every `EnvCreateWorking` mark once the create is over — the
 /// settled state is the truth now, and a mark left behind would keep its
 /// node reading "starting…" (and rejecting actions) forever. A placeholder
 /// for a node that never got a container goes with it.
-fn clear_create_marks(run: &mut RunState) {
+fn clear_create_marks(run: &mut EnvState) {
     run.containers.retain(|_, c| !is_placeholder(c));
     for container in run.containers.values_mut() {
         container.pending_action = None;
@@ -223,7 +223,7 @@ fn clear_create_marks(run: &mut RunState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{PendingAction, RunState, SyncStatus};
+    use crate::state::{EnvState, PendingAction, SyncStatus};
     use std::collections::BTreeMap;
 
     use crate::state::testing::{container, workspace};
@@ -390,14 +390,14 @@ mod tests {
         assert!(c.pending_action.is_none());
     }
 
-    /// The success path replaces the placeholder `RunPlanned` left behind
+    /// The success path replaces the placeholder `EnvPlanned` left behind
     /// with the real, fully-built run. It writes *through* that entry
     /// rather than inserting unconditionally — see
     /// `create_reports_never_bring_an_environment_into_existence`.
     #[test]
     fn run_create_settled_replaces_the_planned_entry_on_success() {
         let state = workspace(vec![]);
-        let created = RunState {
+        let created = EnvState {
             network: "fghj-net-default".into(),
             containers: BTreeMap::from([("web".to_string(), container("web"))]),
             volumes: BTreeMap::new(),
@@ -407,7 +407,7 @@ mod tests {
         };
         let next = reduce(
             &state,
-            Action::RunCreateSettled {
+            Action::EnvCreateSettled {
                 result: Ok(created),
             },
         )
@@ -419,11 +419,11 @@ mod tests {
     fn run_create_settled_clears_pending_create_without_touching_containers_on_failure() {
         let mut existing = workspace(vec![container("web")]);
         existing.env.as_mut().unwrap().pending_create =
-            Some(crate::state::RunSpec::Flow("app/main".into()));
+            Some(crate::state::EnvSpec::Flow("app/main".into()));
         let next = reduce(
             &existing,
-            Action::RunCreateSettled {
-                result: Err(RunCreateError::bare("docker daemon unreachable")),
+            Action::EnvCreateSettled {
+                result: Err(EnvCreateError::bare("docker daemon unreachable")),
             },
         )
         .unwrap();
@@ -440,11 +440,11 @@ mod tests {
     fn run_create_settled_adopts_the_partial_state_of_a_failed_top_up() {
         let mut existing = workspace(vec![container("web")]);
         existing.env.as_mut().unwrap().pending_create =
-            Some(crate::state::RunSpec::Flow("app/main".into()));
+            Some(crate::state::EnvSpec::Flow("app/main".into()));
 
         // `web` was already up; `api` came up during this top-up before
         // `worker` failed.
-        let partial = RunState {
+        let partial = EnvState {
             network: "fghj-net-default".into(),
             containers: BTreeMap::from([
                 ("web".to_string(), container("web")),
@@ -455,13 +455,13 @@ mod tests {
             sidecar_ip: Some("172.20.0.2".into()),
             // A working copy, not a freshly-built run — the reducer must
             // clear this itself rather than assume it arrives clear.
-            pending_create: Some(crate::state::RunSpec::Flow("app/main".into())),
+            pending_create: Some(crate::state::EnvSpec::Flow("app/main".into())),
         };
 
         let next = reduce(
             &existing,
-            Action::RunCreateSettled {
-                result: Err(RunCreateError {
+            Action::EnvCreateSettled {
+                result: Err(EnvCreateError {
                     message: "worker: image pull failed".into(),
                     partial: Some(Box::new(partial)),
                 }),
@@ -548,7 +548,7 @@ mod tests {
         let state = workspace(vec![]);
         let next = reduce(
             &state,
-            Action::RunCreateProgress {
+            Action::EnvCreateProgress {
                 network: "fghj-default".into(),
                 sidecar_container_name: "fghj-default-sidecar".into(),
                 sidecar_ip: Some("172.30.0.2".into()),
@@ -562,8 +562,8 @@ mod tests {
         assert!(run.containers.contains_key("web"));
     }
 
-    /// `RunCreateProgress` and `RunCreateSettled` only ever update the
-    /// environment `RunPlanned` created; a report with nothing to update
+    /// `EnvCreateProgress` and `EnvCreateSettled` only ever update the
+    /// environment `EnvPlanned` created; a report with nothing to update
     /// is dropped rather than inventing one.
     #[test]
     fn create_reports_never_bring_an_environment_into_existence() {
@@ -571,7 +571,7 @@ mod tests {
 
         let after_progress = reduce(
             &state,
-            Action::RunCreateProgress {
+            Action::EnvCreateProgress {
                 network: "fghj-default".into(),
                 sidecar_container_name: "fghj-default-sidecar".into(),
                 sidecar_ip: None,
@@ -583,8 +583,8 @@ mod tests {
 
         let after_ok = reduce(
             &state,
-            Action::RunCreateSettled {
-                result: Ok(RunState {
+            Action::EnvCreateSettled {
+                result: Ok(EnvState {
                     ..Default::default()
                 }),
             },
@@ -594,10 +594,10 @@ mod tests {
 
         let after_partial = reduce(
             &state,
-            Action::RunCreateSettled {
-                result: Err(RunCreateError {
+            Action::EnvCreateSettled {
+                result: Err(EnvCreateError {
                     message: "node 2 of 3 failed".into(),
-                    partial: Some(Box::new(RunState {
+                    partial: Some(Box::new(EnvState {
                         ..Default::default()
                     })),
                 }),
@@ -608,7 +608,7 @@ mod tests {
     }
 
     fn working(node_id: &str, action: Option<PendingAction>) -> Action {
-        Action::RunCreateWorking {
+        Action::EnvCreateWorking {
             node_id: node_id.into(),
             action,
         }
@@ -655,7 +655,7 @@ mod tests {
         info.pending_action = Some(PendingAction::Starting);
         let next = reduce(
             &next,
-            Action::RunCreateProgress {
+            Action::EnvCreateProgress {
                 network: "fghj-net".into(),
                 sidecar_container_name: "fghj-sidecar".into(),
                 sidecar_ip: None,
@@ -675,13 +675,13 @@ mod tests {
     fn run_create_settled_err_clears_every_working_mark() {
         let mut state = workspace(vec![container("web")]);
         state.env.as_mut().unwrap().pending_create =
-            Some(crate::state::RunSpec::Flow("app/main".into()));
+            Some(crate::state::EnvSpec::Flow("app/main".into()));
         let next = reduce(&state, working("web", Some(PendingAction::Stopping))).unwrap();
         let next = reduce(&next, working("db", Some(PendingAction::Starting))).unwrap();
         let next = reduce(
             &next,
-            Action::RunCreateSettled {
-                result: Err(RunCreateError::bare("boom")),
+            Action::EnvCreateSettled {
+                result: Err(EnvCreateError::bare("boom")),
             },
         )
         .unwrap();

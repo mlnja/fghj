@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 
 use crate::docker;
 use crate::resolver::Graph;
-use crate::state::{ContainerInfo, RunState};
+use crate::state::{ContainerInfo, EnvState};
 
 use super::health::RunBudget;
 use super::naming::DEFAULT_RUN_ID;
@@ -20,7 +20,7 @@ impl RunRegistry {
     /// Takes the run rather than looking it up: the reducer owns the only
     /// copy, and the caller (`daemon::WorkspaceRegistry::stop`, as the
     /// workspace's actor goes away) already has it.
-    pub async fn stop(&self, state: &RunState) -> Result<()> {
+    pub async fn stop(&self, state: &EnvState) -> Result<()> {
         let run_id = DEFAULT_RUN_ID;
         for c in state.containers.values() {
             self.begin_event_cycle(run_id, &c.node_id, "stop").await;

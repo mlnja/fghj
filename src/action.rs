@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use crate::persistence::WorkspaceOwner;
-use crate::state::{ContainerInfo, PendingAction, RunCreateError, RunSpec, RunState, SyncStatus};
+use crate::state::{ContainerInfo, EnvCreateError, EnvSpec, EnvState, PendingAction, SyncStatus};
 
 /// Split into two families by who originates them: `Run*`/`OwnerSet` are
 /// *requests* — dispatched by an HTTP handler (or, later, an internal
@@ -25,22 +25,22 @@ pub enum Action {
     /// Records the intent only; the `.fghj.yaml` graph is resolved later
     /// by `effects::docker::converge`, since real I/O has no place in a
     /// pure reducer.
-    RunPlanned {
-        plan: RunSpec,
+    EnvPlanned {
+        plan: EnvSpec,
     },
-    RunNodeStartRequested {
+    NodeStartRequested {
         node_id: String,
     },
-    RunNodeStopRequested {
+    NodeStopRequested {
         node_id: String,
     },
     /// Flip the per-container debug switch and recreate the container to
     /// apply it — see `state::ContainerDesired::debug_wait`.
-    RunNodeDebugWaitRequested {
+    NodeDebugWaitRequested {
         node_id: String,
         wait: bool,
     },
-    RunNodeDeleteRequested {
+    NodeDeleteRequested {
         node_id: String,
     },
 
@@ -73,21 +73,21 @@ pub enum Action {
         node_id: String,
         result: Result<Option<ContainerInfo>, String>,
     },
-    /// Reported by `effects::docker::converge` once a `RunPlanned` intent
-    /// (`RunState::pending_create`) actually finishes being created/topped
+    /// Reported by `effects::docker::converge` once a `EnvPlanned` intent
+    /// (`EnvState::pending_create`) actually finishes being created/topped
     /// up against real Docker. `Ok(run)` wholesale-replaces the environment
     /// with the freshly re-observed state (mirroring how
-    /// `RunRegistry::ensure_running` returns the whole `RunState` it produced).
+    /// `RunRegistry::ensure_running` returns the whole `EnvState` it produced).
     /// `Err` clears `pending_create` and, when the failure left containers
-    /// actually running (`RunCreateError::partial` — an `ensure_running`
+    /// actually running (`EnvCreateError::partial` — an `ensure_running`
     /// top-up that got part way), replaces the environment with that partial
     /// state rather than guessing. Without it, those containers are running
     /// and persisted but invisible to `GET /environment` and to host routing. With
     /// no partial (nothing started, or a path like `start` that rolled
     /// itself back) the environment's last-known-good state is left untouched, which
     /// is still the right answer.
-    RunCreateSettled {
-        result: Result<RunState, RunCreateError>,
+    EnvCreateSettled {
+        result: Result<EnvState, EnvCreateError>,
     },
     /// Reported by `effects::docker::converge` for each node that comes up
     /// during a still-in-flight create/top-up, so progress is recorded as it
@@ -102,8 +102,8 @@ pub enum Action {
     /// sidecar exist, which is also when the first node can come up.
     ///
     /// Deliberately leaves `pending_create` set: the run is still in
-    /// flight, and only `RunCreateSettled` ends that.
-    RunCreateProgress {
+    /// flight, and only `EnvCreateSettled` ends that.
+    EnvCreateProgress {
         network: String,
         sidecar_container_name: String,
         sidecar_ip: Option<String>,
@@ -114,9 +114,9 @@ pub enum Action {
     /// has given up on it (`None`) — so the node carries the same
     /// `pending_action` mark a single-node start or stop would, rather than
     /// sitting unchanged while the environment rejects every node action as
-    /// already in flight. `RunCreateProgress` and `RunCreateSettled` take the
+    /// already in flight. `EnvCreateProgress` and `EnvCreateSettled` take the
     /// mark back off.
-    RunCreateWorking {
+    EnvCreateWorking {
         node_id: String,
         action: Option<PendingAction>,
     },
@@ -142,10 +142,10 @@ pub enum Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionRejected {
     /// `container.pending_action.is_some()` already, or a whole-environment
-    /// create is still running; see `reducer::run`'s module doc.
+    /// create is still running; see `reducer::env`'s module doc.
     AlreadyInFlight,
     /// The workspace has no environment yet, so there is no node to act on.
-    RunNotFound,
+    NoEnvironment,
     /// The action named a `node_id` that isn't a key of the environment's
     /// `containers` map.
     NodeNotFound,
@@ -155,7 +155,7 @@ impl std::fmt::Display for ActionRejected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ActionRejected::AlreadyInFlight => write!(f, "an action is already in flight"),
-            ActionRejected::RunNotFound => write!(f, "no environment yet"),
+            ActionRejected::NoEnvironment => write!(f, "no environment yet"),
             ActionRejected::NodeNotFound => write!(f, "no such node"),
         }
     }
@@ -169,8 +169,11 @@ mod tests {
 
     #[test]
     fn action_rejected_variants_are_distinguishable() {
-        assert_ne!(ActionRejected::AlreadyInFlight, ActionRejected::RunNotFound);
-        assert_ne!(ActionRejected::RunNotFound, ActionRejected::NodeNotFound);
+        assert_ne!(
+            ActionRejected::AlreadyInFlight,
+            ActionRejected::NoEnvironment
+        );
+        assert_ne!(ActionRejected::NoEnvironment, ActionRejected::NodeNotFound);
     }
 
     #[test]

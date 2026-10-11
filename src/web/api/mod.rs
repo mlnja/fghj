@@ -13,11 +13,11 @@ use axum::routing::{get, post};
 
 pub mod control;
 pub mod downloads;
+pub mod env;
 pub mod error;
 pub mod exec;
 pub mod extract;
 pub mod logs;
-pub mod runs;
 pub mod workspaces;
 
 use crate::daemon::control::DaemonControl;
@@ -29,14 +29,14 @@ use control::{
 use downloads::{
     get_pull_all_status, get_pull_jobs, get_pull_node_status, post_pull_all, post_pull_node,
 };
-use exec::get_run_exec_ws;
-use logs::{
-    get_run_logs, get_run_logs_stream, get_run_node_events, get_run_node_log_generations,
-    get_run_node_log_history,
+use env::{
+    get_environment, post_node_debug_wait, post_node_delete, post_node_start, post_node_stop,
+    post_switch,
 };
-use runs::{
-    get_environment, post_run_node_debug_wait, post_run_node_delete, post_run_node_start,
-    post_run_node_stop, post_switch,
+use exec::get_node_exec_ws;
+use logs::{
+    get_node_events, get_node_logs, get_node_logs_stream, get_run_node_log_generations,
+    get_run_node_log_history,
 };
 use workspaces::{get_universe, get_workspaces, post_workspaces, post_workspaces_stop};
 
@@ -54,15 +54,12 @@ pub(crate) fn build_router(registry: Arc<WorkspaceRegistry>, daemon: Arc<DaemonC
         .route("/pull-jobs", get(get_pull_jobs))
         .route("/environment", get(get_environment))
         .route("/switch", post(post_switch))
-        .route("/nodes/{node_id}/start", post(post_run_node_start))
-        .route("/nodes/{node_id}/stop", post(post_run_node_stop))
-        .route("/nodes/{node_id}/delete", post(post_run_node_delete))
-        .route(
-            "/nodes/{node_id}/debug-wait",
-            post(post_run_node_debug_wait),
-        )
-        .route("/nodes/{node_id}/logs", get(get_run_logs))
-        .route("/nodes/{node_id}/logs/stream", get(get_run_logs_stream))
+        .route("/nodes/{node_id}/start", post(post_node_start))
+        .route("/nodes/{node_id}/stop", post(post_node_stop))
+        .route("/nodes/{node_id}/delete", post(post_node_delete))
+        .route("/nodes/{node_id}/debug-wait", post(post_node_debug_wait))
+        .route("/nodes/{node_id}/logs", get(get_node_logs))
+        .route("/nodes/{node_id}/logs/stream", get(get_node_logs_stream))
         .route(
             "/nodes/{node_id}/logs/generations",
             get(get_run_node_log_generations),
@@ -71,8 +68,8 @@ pub(crate) fn build_router(registry: Arc<WorkspaceRegistry>, daemon: Arc<DaemonC
             "/nodes/{node_id}/logs/history",
             get(get_run_node_log_history),
         )
-        .route("/nodes/{node_id}/events", get(get_run_node_events))
-        .route("/nodes/{node_id}/exec/ws", get(get_run_exec_ws))
+        .route("/nodes/{node_id}/events", get(get_node_events))
+        .route("/nodes/{node_id}/exec/ws", get(get_node_exec_ws))
         .with_state(registry);
 
     let daemon_api = Router::new()

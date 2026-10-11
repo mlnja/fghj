@@ -2,9 +2,9 @@
 //!
 //! The sidecar proxy polls a `routes.json` naming every domain it
 //! should answer for and where to connect. That file is a pure function of
-//! `RunState::containers`, so it belongs here rather than being written by
+//! `EnvState::containers`, so it belongs here rather than being written by
 //! hand at the end of each lifecycle call — which is what `runs/` used to
-//! do, from a `RunState` snapshot taken *before* the Docker work, and
+//! do, from a `EnvState` snapshot taken *before* the Docker work, and
 //! therefore occasionally from a snapshot that had already lost a sibling
 //! node's routes.
 //!
@@ -13,13 +13,13 @@
 //! changes, from whatever the state actually says at that moment.
 
 use crate::runs::route_table::{sidecar_routes_dir, write_route_table};
-use crate::state::{RunState, WorkspaceState};
+use crate::state::{EnvState, WorkspaceState};
 
 use super::Effect;
 
-/// The whole `RunState`, because `write_route_table` derives the network
+/// The whole `EnvState`, because `write_route_table` derives the network
 /// path and the entries from it together.
-pub type Snapshot = Option<RunState>;
+pub type Snapshot = Option<EnvState>;
 
 #[derive(Default)]
 pub struct RouteTableEffect {
@@ -71,7 +71,7 @@ mod tests {
     use crate::state::{ContainerDesired, ContainerInfo, PortRoute};
     use std::collections::BTreeMap;
 
-    fn env_with_route(network: &str, domain: &str) -> RunState {
+    fn env_with_route(network: &str, domain: &str) -> EnvState {
         let mut containers = BTreeMap::new();
         containers.insert(
             "web".to_string(),
@@ -100,7 +100,7 @@ mod tests {
                 pending_action: None,
             },
         );
-        RunState {
+        EnvState {
             network: network.to_string(),
             containers,
             ..Default::default()
@@ -126,7 +126,7 @@ mod tests {
     fn an_environment_without_a_network_yet_is_skipped() {
         let mut effect = RouteTableEffect::new();
         effect
-            .converge(&Some(RunState::default()))
+            .converge(&Some(EnvState::default()))
             .expect("must not fail");
         assert!(effect.written.is_none());
     }

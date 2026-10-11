@@ -37,9 +37,9 @@ impl ActorHandle {
             // daemon is shutting down) — there's no reducer left to
             // accept or reject this, which reads the same to a caller as
             // "the thing you asked about doesn't exist any more."
-            return Err(ActionRejected::RunNotFound);
+            return Err(ActionRejected::NoEnvironment);
         }
-        reply_rx.await.unwrap_or(Err(ActionRejected::RunNotFound))
+        reply_rx.await.unwrap_or(Err(ActionRejected::NoEnvironment))
     }
 
     /// A fresh, independent `watch::Receiver`. Cloning this (rather than
@@ -124,11 +124,11 @@ mod tests {
     async fn dispatch_surfaces_a_reducer_rejection() {
         let handle = spawn(WorkspaceState::default());
         let result = handle
-            .dispatch(Action::RunNodeStopRequested {
+            .dispatch(Action::NodeStopRequested {
                 node_id: "web".into(),
             })
             .await;
-        assert_eq!(result.unwrap_err(), ActionRejected::RunNotFound);
+        assert_eq!(result.unwrap_err(), ActionRejected::NoEnvironment);
     }
 
     #[tokio::test]
@@ -173,6 +173,6 @@ mod tests {
             state: watch::channel(Arc::new(WorkspaceState::default())).1,
         };
         let result = orphaned.dispatch(Action::OwnerSet { owner: owner() }).await;
-        assert_eq!(result.unwrap_err(), ActionRejected::RunNotFound);
+        assert_eq!(result.unwrap_err(), ActionRejected::NoEnvironment);
     }
 }

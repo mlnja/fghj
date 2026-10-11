@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::state::RunState;
+use crate::state::EnvState;
 
 use super::sqlite::WorkspaceDb;
 
@@ -24,7 +24,7 @@ use super::sqlite::WorkspaceDb;
 pub async fn rehydrate(
     db: Arc<WorkspaceDb>,
     docker: Arc<bollard::Docker>,
-) -> Result<Option<RunState>> {
+) -> Result<Option<EnvState>> {
     let Some(mut state) = db.clone().load_env().await? else {
         return Ok(None);
     };
@@ -58,7 +58,7 @@ pub async fn rehydrate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ContainerDesired, ContainerInfo, ContainerObserved, RunState};
+    use crate::state::{ContainerDesired, ContainerInfo, ContainerObserved, EnvState};
 
     /// A container that no longer exists in Docker (inspect returns a 404,
     /// which `docker::inspect_status` maps to `Ok(None)`) must be dropped
@@ -75,7 +75,7 @@ mod tests {
             bollard::Docker::connect_with_local_defaults().expect("docker client for test"),
         );
 
-        let dead_state = RunState {
+        let dead_state = EnvState {
             network: "fghj-test-dead".to_string(),
             containers: BTreeMap::from([(
                 "svc".to_string(),

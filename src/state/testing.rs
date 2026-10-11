@@ -1,6 +1,6 @@
 //! Shared fixtures for tests that build `WorkspaceState` by hand.
 
-use super::{ContainerDesired, ContainerInfo, RunState, WorkspaceState};
+use super::{ContainerDesired, ContainerInfo, EnvState, WorkspaceState};
 
 /// A running, settled container with every name derived from `node_id`.
 /// Tests tweak the one field they care about on the result.
@@ -21,8 +21,8 @@ pub fn container(node_id: &str) -> ContainerInfo {
 }
 
 /// The environment holding `containers`, keyed by node id.
-pub fn run_state(containers: Vec<ContainerInfo>) -> RunState {
-    RunState {
+pub fn run_state(containers: Vec<ContainerInfo>) -> EnvState {
+    EnvState {
         network: "fghj-net".into(),
         containers: containers
             .into_iter()

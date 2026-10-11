@@ -39,7 +39,7 @@ pub(crate) async fn get_environment(ActorExtractor(actor): ActorExtractor) -> Re
 /// Switches the environment to a flow: body `{"flow": "repo/flow"}`. Starts
 /// the flow's nodes and stops (not removes) every running container outside
 /// it. Returns once the intent is recorded; `effects::docker::converge` does
-/// the Docker work and reports back via `Action::RunCreateSettled`.
+/// the Docker work and reports back via `Action::EnvCreateSettled`.
 pub(crate) async fn post_switch(ActorExtractor(actor): ActorExtractor, body: Bytes) -> Response {
     #[derive(serde::Deserialize)]
     struct Body {
@@ -49,8 +49,8 @@ pub(crate) async fn post_switch(ActorExtractor(actor): ActorExtractor, body: Byt
         Ok(b) => b,
         Err(e) => return bad_request(e),
     };
-    let action = action::Action::RunPlanned {
-        plan: state::RunSpec::Flow(body.flow),
+    let action = action::Action::EnvPlanned {
+        plan: state::EnvSpec::Flow(body.flow),
     };
     match actor.dispatch(action).await {
         Ok(()) => Json(&actor.current().env).into_response(),
@@ -74,11 +74,11 @@ pub(crate) async fn dispatch_node_action(
     }
 }
 
-pub(crate) async fn post_run_node_start(
+pub(crate) async fn post_node_start(
     AxumPath(node_id): AxumPath<String>,
     ActorExtractor(actor): ActorExtractor,
 ) -> Response {
-    let action = action::Action::RunNodeStartRequested {
+    let action = action::Action::NodeStartRequested {
         node_id: node_id.clone(),
     };
     dispatch_node_action(&actor, node_id, action).await
@@ -92,7 +92,7 @@ pub(crate) async fn post_run_node_start(
 /// `desired.debug_wait` back out when it recreates the container. Requires
 /// the container to already exist — a node with nothing running has nothing
 /// to halt.
-pub(crate) async fn post_run_node_debug_wait(
+pub(crate) async fn post_node_debug_wait(
     AxumPath(node_id): AxumPath<String>,
     ActorExtractor(actor): ActorExtractor,
     body: Bytes,
@@ -115,28 +115,28 @@ pub(crate) async fn post_run_node_debug_wait(
             Err(e) => return bad_request(e),
         }
     };
-    let action = action::Action::RunNodeDebugWaitRequested {
+    let action = action::Action::NodeDebugWaitRequested {
         node_id: node_id.clone(),
         wait,
     };
     dispatch_node_action(&actor, node_id, action).await
 }
 
-pub(crate) async fn post_run_node_stop(
+pub(crate) async fn post_node_stop(
     AxumPath(node_id): AxumPath<String>,
     ActorExtractor(actor): ActorExtractor,
 ) -> Response {
-    let action = action::Action::RunNodeStopRequested {
+    let action = action::Action::NodeStopRequested {
         node_id: node_id.clone(),
     };
     dispatch_node_action(&actor, node_id, action).await
 }
 
-pub(crate) async fn post_run_node_delete(
+pub(crate) async fn post_node_delete(
     AxumPath(node_id): AxumPath<String>,
     ActorExtractor(actor): ActorExtractor,
 ) -> Response {
-    let action = action::Action::RunNodeDeleteRequested {
+    let action = action::Action::NodeDeleteRequested {
         node_id: node_id.clone(),
     };
     dispatch_node_action(&actor, node_id, action).await

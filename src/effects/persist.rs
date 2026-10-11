@@ -7,11 +7,11 @@
 use std::sync::Arc;
 
 use crate::persistence::WorkspaceDb;
-use crate::state::{RunState, WorkspaceState};
+use crate::state::{EnvState, WorkspaceState};
 
 use super::AsyncEffect;
 
-pub type Snapshot = Option<RunState>;
+pub type Snapshot = Option<EnvState>;
 
 pub struct PersistEffect {
     db: Arc<WorkspaceDb>,
@@ -64,8 +64,8 @@ mod tests {
         (tmp, db)
     }
 
-    fn created_env() -> RunState {
-        RunState {
+    fn created_env() -> EnvState {
+        EnvState {
             network: "fghj-net".to_string(),
             ..Default::default()
         }
@@ -88,7 +88,7 @@ mod tests {
     async fn an_uncreated_environment_is_not_written() {
         let (_tmp, db) = db();
         let mut effect = PersistEffect::new(db.clone());
-        effect.converge(Some(RunState::default())).await.unwrap();
+        effect.converge(Some(EnvState::default())).await.unwrap();
         assert!(db.clone().load_env().await.unwrap().is_none());
     }
 

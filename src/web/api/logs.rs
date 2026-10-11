@@ -19,7 +19,7 @@ pub(crate) struct TailQuery {
     tail: Option<usize>,
 }
 
-pub(crate) async fn get_run_logs(
+pub(crate) async fn get_node_logs(
     AxumPath(node_id): AxumPath<String>,
     Query(q): Query<TailQuery>,
     WorkspaceExtractor(state): WorkspaceExtractor,
@@ -39,7 +39,7 @@ pub(crate) async fn get_run_logs(
     }
 }
 
-pub(crate) async fn get_run_logs_stream(
+pub(crate) async fn get_node_logs_stream(
     AxumPath(node_id): AxumPath<String>,
     WorkspaceExtractor(state): WorkspaceExtractor,
     ActorExtractor(actor): ActorExtractor,
@@ -131,7 +131,7 @@ pub(crate) struct EventsQuery {
 /// for the last `start` or `stop` of this node — the ArgoCD-style "events"
 /// counterpart to the raw container-log history above. Only ever the most
 /// recent cycle of `action`: see `persistence::WorkspaceDb::begin_event_cycle`.
-pub(crate) async fn get_run_node_events(
+pub(crate) async fn get_node_events(
     AxumPath(node_id): AxumPath<String>,
     Query(q): Query<EventsQuery>,
     WorkspaceExtractor(state): WorkspaceExtractor,
