@@ -1,23 +1,7 @@
-//! `fghj`'s in-network TLS proxy sidecar — one per run, attached to that
-//! run's own docker network, so a container inside the network can reach a
-//! sibling's `*.fghj.internal` (or `#AdditionalHost`) name over HTTPS with
-//! the exact same addressing a browser outside the network uses against the
-//! host-side proxy (`fghjd::proxy`/`fghjd::ca`, reused here unmodified). Also
-//! this run's in-network DNS authority for that same zone (see `dns::serve`
-//! below) — every node points `--dns` here first, so no per-consumer opt-in
-//! is needed to reach either the proxy or a sibling's real, unproxied
-//! `*.fghj.raw.internal` address.
-//!
-//! A separate binary rather than a mode flag on `fghjd`: this container gets
-//! the CA's private key bind-mounted in (read-only), so it deserves its own
-//! minimal, easy-to-audit entrypoint rather than a branch inside the daemon
-//! binary, which also unconditionally requires root and runs the full
-//! control API. See `orchestrator/`'s sidecar lifecycle for how this gets started,
-//! and `sidecar_image.rs` for how its Docker image gets built.
-//!
-//! Fixed, hardcoded mount paths (no CLI args, nothing to configure) — the
-//! bind mounts `orchestrator/` sets up are the only thing that ever has to agree
-//! with this binary about paths.
+//! The per-run in-network sidecar: TLS proxy and DNS authority for the run's
+//! docker network, so containers reach siblings by the same names a browser
+//! uses. A separate binary because it holds the signing key. Paths are fixed;
+//! only `orchestrator/`'s bind mounts have to agree with them.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -35,15 +19,8 @@ const CA_DIR: &str = "/etc/fghj-sidecar/ca";
 const ROUTES_PATH: &str = "/etc/fghj-sidecar/routes/routes.json";
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// One entry from the route table `orchestrator/` writes — see its
-/// `RouteFileEntry` (kept as a separately-defined, field-name-matching type
-/// rather than a shared one, so this binary doesn't need to depend on
-/// `fghj::runs` at all). `lookup` is a `fghj.internal` domain (or an active
-/// alias) this sidecar is the DNS authority for, per every node's `--dns`
-/// pointing here first; `connect_host`/`connect_port` is where to actually
-/// relay it — the backend's own `fghj.raw.internal` domain, a Docker network
-/// alias Docker's own embedded DNS already resolves for any container on
-/// this network, including this one.
+/// Mirrors `orchestrator`'s `RouteFileEntry` without depending on it.
+/// `connect_host` is the backend's raw-zone alias, which Docker's DNS resolves.
 #[derive(Debug, Clone, Deserialize)]
 struct RouteFileEntry {
     lookup: String,
@@ -53,15 +30,9 @@ struct RouteFileEntry {
     connect_port: u16,
 }
 
-/// Polling (not inotify) `RouteResolver` — bind-mount filesystem event
-/// propagation across the OrbStack/Docker-Desktop virtualization boundary is
-/// unreliable, exactly the kind of platform-specific gap this whole feature
-/// exists to avoid. A 1s poll of one small JSON file costs nothing and has
-/// no missed-event failure mode.
+/// Polled, not inotify: bind-mount events across the VM boundary are
+/// unreliable.
 struct FileRoutes {
-    /// This sidecar container's own in-network address — every recognized
-    /// query is answered with this, never with a per-backend IP (see
-    /// `dns::ZoneSource`'s impl below).
     own_ip: Ipv4Addr,
     routes: Mutex<Vec<RouteFileEntry>>,
 }
@@ -83,9 +54,8 @@ impl FileRoutes {
         this
     }
 
-    /// A named `async fn` rather than an inline block so its return type is
-    /// `()`: the `loop` never breaks, and a bare async block would then have
-    /// type `!`, which satisfies no `supervisor::Outcome` impl.
+    /// A `loop` that never breaks would type as `!`, which no `supervisor::Outcome`
+    /// covers.
     async fn poll_routes(watched: Arc<Self>) {
         let mut last_mtime: Option<SystemTime> = std::fs::metadata(ROUTES_PATH)
             .ok()
@@ -106,8 +76,7 @@ impl FileRoutes {
 impl proxy::RouteResolver for FileRoutes {
     fn resolve(&self, host: &str) -> Option<proxy::Backend> {
         let routes = self.routes.lock().unwrap();
-        // Exact matches win over a wildcard match — same precedence as
-        // `daemon::WorkspaceRegistry::resolve_route`.
+        // Exact matches win, as in `state::query::resolve_route`.
         routes
             .iter()
             .find(|r| !r.wildcard && r.lookup == host)
@@ -123,22 +92,15 @@ impl proxy::RouteResolver for FileRoutes {
     }
 }
 
-/// The sidecar's DNS-forwarder authority set is exactly its TLS/SNI-dispatch
-/// route table — a name is "ours" the instant it's routable, no separate
-/// zone-suffix bookkeeping needed. Reuses `RouteResolver::resolve` (already
-/// polled/loaded) rather than a second data source.
+/// A name is ours exactly when it's routable.
 impl dns::ZoneSource for FileRoutes {
     fn answer_for(&self, qname: &str) -> Option<Ipv4Addr> {
         proxy::RouteResolver::resolve(self, qname).map(|_| self.own_ip)
     }
 }
 
-/// Self-discovers this container's own address on the run's docker network
-/// with no env var, no DNS lookup, and no dependency on anything else being
-/// up yet: connecting a UDP socket doesn't send a packet, it only forces the
-/// kernel to pick a local route/source address for the (unreachable, never
-/// actually contacted) destination — reading it back off `local_addr()` is
-/// this container's real in-network IP.
+/// Connecting a UDP socket sends nothing but makes the kernel pick our source
+/// address.
 fn discover_own_ip() -> Result<Ipv4Addr> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0")
         .context("failed to bind a scratch UDP socket for self-IP discovery")?;
@@ -183,20 +145,15 @@ async fn main() -> Result<()> {
         proxy::HTTPS_PORT
     );
 
-    // Every node in this run points its `--dns` at this container first
-    // (see `orchestrator::start_node`) — recognized names (this run's
-    // `fghj.internal` zone and any active alias) are answered directly with
-    // this container's own address; anything else is forwarded verbatim to
-    // Docker's embedded resolver, exactly like the host server forwards
-    // nothing at all because the OS never routes it an out-of-zone query.
+    // Every node's `--dns` points here; unrecognized names go to Docker's
+    // embedded resolver.
     let dns_socket = UdpSocket::bind(("0.0.0.0", 53))
         .await
         .context("failed to bind sidecar DNS listener on 0.0.0.0:53")?;
     let docker_embedded_dns = SocketAddr::from((Ipv4Addr::new(127, 0, 0, 11), 53));
     println!("fghj-sidecar: DNS listening on 0.0.0.0:53, answering recognized names with {own_ip}");
 
-    // No control API in this container — nothing in a run's network ever
-    // presents the zone apex's own SNI, so this is never actually dialed.
+    // Never dialed: nothing in a run's network presents the zone apex.
     let control_port = 0;
     tokio::join!(
         proxy::serve_http_redirect(http_listener, routes.clone()),

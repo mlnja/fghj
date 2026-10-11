@@ -1,9 +1,4 @@
-/// Parses a `.env`-style file's contents into "KEY=value" pairs — blank
-/// lines and `#`-comments are skipped, and matching surrounding quotes on
-/// the value are stripped (the common `.env` convention). No multi-line
-/// values or `export` prefixes: real `.env` files in the wild are simple
-/// enough that this covers the practical cases, same scope Compose's own
-/// `env_file` support covers.
+/// No multi-line values or `export` prefixes, same scope as Compose.
 pub fn parse_env_file(contents: &str) -> Vec<String> {
     contents
         .lines()

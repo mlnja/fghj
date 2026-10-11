@@ -1,8 +1,4 @@
-/// Folds arbitrary text down to a `[a-z0-9-]` slug: lowercased, every run of
-/// non-alphanumeric characters collapsed to a single `-`, and no leading or
-/// trailing `-`. The shape Docker accepts for a container, network or volume
-/// name, and the shape a DNS label accepts — so the same function serves
-/// both.
+/// Valid as a Docker object name and as a DNS label.
 pub fn sanitize_label(s: &str) -> String {
     let lower = s.to_lowercase();
     let mut out = String::new();
