@@ -1,9 +1,5 @@
-//! The `Effect` trait and its two generic drivers. `dns`, `hosts`, and
-//! `raw_net` are daemon-wide fanned-in effects (`spawn_all` below spawns
-//! them together). The per-workspace effects (`docker::converge`,
-//! `persist`, `routes`, ...) are wired in
-//! `daemon::WorkspaceRegistry::wire_actor` instead, since each is driven
-//! off one workspace's own state, not every workspace's combined.
+//! //! The `Effect` traits and their drivers. `dns`, `hosts` and `raw_net` are
+//! //! daemon-wide; the rest are wired per workspace in `wire_actor`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -14,9 +10,6 @@ use crate::actor::ActorHandle;
 use crate::state::WorkspaceState;
 use crate::supervisor;
 
-/// Every currently-wired workspace's actor, by workspace id — what
-/// `daemon::WorkspaceRegistry` publishes so a fanned-in effect can notice a
-/// workspace being wired or stopped and add/drop its forwarder for it.
 pub type ActorMap = Arc<BTreeMap<String, ActorHandle>>;
 
 pub mod dns;
@@ -26,14 +19,8 @@ pub mod persist;
 pub mod raw_net;
 pub mod routes;
 
-/// Converges some external resource (a file, an OS firewall table, Docker)
-/// to match a workspace's desired state — the "make reality match state"
-/// half of the Redux model this daemon is moving to. `extract`/`converge`
-/// are kept separate, rather than one `fn run(&mut self, state)`, so the
-/// *driver* (below) can own the "did anything actually change" check
-/// uniformly for every effect, instead of each one reimplementing its own
-/// diff the way `dns.rs`/`hosts_file.rs`/`raw_net::macos` each currently
-/// do independently.
+/// Converges an external resource to a workspace's state. `extract` is separate
+/// from `converge` so the driver can skip unchanged snapshots for every effect.
 pub trait Effect: Send {
     type Snapshot: PartialEq + Clone + Send;
 
@@ -42,16 +29,6 @@ pub trait Effect: Send {
     fn converge(&mut self, snapshot: &Self::Snapshot) -> anyhow::Result<()>;
 }
 
-/// `Effect` for a resource whose convergence is itself asynchronous — the
-/// database, principally, whose writes go through `spawn_blocking`.
-///
-/// A separate trait rather than making `Effect::converge` async: the three
-/// OS-resource effects (`dns`, `hosts`, `raw_net`) converge by writing a
-/// file or reloading a table, with nothing to await, and making them async
-/// would buy them nothing while costing every one of them a desugaring.
-/// The two drivers are otherwise identical, including the "skip converge
-/// when the snapshot is unchanged" rule that is the whole point of
-/// splitting `extract` from `converge`.
 pub trait AsyncEffect: Send {
     type Snapshot: PartialEq + Clone + Send;
 
@@ -63,8 +40,6 @@ pub trait AsyncEffect: Send {
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 }
 
-/// `run_effect` for an `AsyncEffect`. Same contract, including leaving
-/// `last` untouched on failure so the next state change retries.
 pub async fn run_async_effect<E: AsyncEffect>(
     mut effect: E,
     mut rx: watch::Receiver<Arc<WorkspaceState>>,
@@ -85,11 +60,7 @@ pub async fn run_async_effect<E: AsyncEffect>(
     }
 }
 
-/// The daemon-wide counterpart of `Effect`, for an effect that renders one
-/// shared OS resource from *every* currently-registered workspace's state
-/// combined (DNS resolver files, the hosts file, pf/raw-net — see the
-/// plan's "(B) Daemon-wide fanned-in effects" section) rather than a
-/// single workspace's.
+/// An effect rendering one shared OS resource from every workspace's state.
 pub trait FannedInEffect: Send {
     type Snapshot: PartialEq + Clone + Send;
 
@@ -98,19 +69,8 @@ pub trait FannedInEffect: Send {
     fn converge(&mut self, snapshot: &Self::Snapshot) -> anyhow::Result<()>;
 }
 
-/// Drives a single-workspace `Effect` for as long as `rx` has a live
-/// sender — i.e. for that workspace actor's whole lifetime. Skips
-/// `converge` (and whatever I/O it does) whenever the newly observed
-/// snapshot is unchanged from the last one actually converged, so an
-/// unrelated action on the same workspace never causes redundant work.
-///
-/// A `converge` failure is logged and *not* retried immediately: `last` is
-/// left at its old value, so the next actual state change re-attempts it —
-/// and since the actor publishes a new state on every successfully-applied
-/// action regardless of which fields it touched, "the next actual state
-/// change" in practice means "the next action dispatched to this
-/// workspace," not a fixed timer — the same "log and continue" the
-/// fanned-in `raw_net`/`dns` effects use.
+/// Runs for the workspace actor's lifetime, skipping unchanged snapshots. A
+/// failure is logged and retried on the next state change.
 pub async fn run_effect<E: Effect>(
     mut effect: E,
     mut rx: watch::Receiver<Arc<WorkspaceState>>,
@@ -126,22 +86,13 @@ pub async fn run_effect<E: Effect>(
             }
         }
         if rx.changed().await.is_err() {
-            // The workspace actor is gone — nothing left to converge.
             break;
         }
     }
 }
 
-/// Drives a `FannedInEffect` across every workspace currently registered
-/// in `registry_rx`. Rather than juggle a dynamically-sized set of
-/// `watch::Receiver`s directly in a `select!`, every per-workspace change
-/// is funneled through one shared "something changed" signal
-/// (`tokio::sync::Notify`), fed by one small forwarder task per
-/// currently-registered workspace — itself spawned/aborted as the
-/// registry's own workspace set changes. On every wake, the effect
-/// re-reads *all* currently-registered workspaces' latest state fresh;
-/// there's no attempt to track *which* workspace changed, only *that* one
-/// did, since `extract` needs the full set every time regardless.
+/// One forwarder task per workspace pokes a shared `Notify`; each wake
+/// re-reads every workspace, since `extract` needs them all anyway.
 pub async fn run_fanned_in_effect<E: FannedInEffect>(
     mut effect: E,
     mut registry_rx: watch::Receiver<ActorMap>,
@@ -154,12 +105,6 @@ pub async fn run_fanned_in_effect<E: FannedInEffect>(
     loop {
         let workspaces = registry_rx.borrow().clone();
 
-        // Reconcile the forwarder-task set against the current workspace
-        // set: spawn one for each newly-registered workspace, abort one
-        // for each deregistered workspace. Aborting (rather than letting
-        // it run to completion) is correct here — the workspace it was
-        // watching no longer exists, so it has nothing useful left to
-        // report.
         forwarders.retain(|id, task| {
             let keep = workspaces.contains_key(id);
             if !keep {
@@ -206,10 +151,6 @@ pub async fn run_fanned_in_effect<E: FannedInEffect>(
     }
 }
 
-/// Every daemon-wide fanned-in effect — see `spawn_all`. Bundled into one
-/// struct (rather than three loose `JoinHandle`s in
-/// `daemon::ActiveResources`) so `abort_all` can guarantee all three stop
-/// together.
 pub struct EffectTasks {
     raw_net: tokio::task::AbortHandle,
     dns: tokio::task::AbortHandle,
@@ -224,12 +165,6 @@ impl EffectTasks {
     }
 }
 
-/// Spawns the raw-net, DNS-routing, and `/etc/hosts` fanned-in effects
-/// together, all driven off the same daemon-wide `registry_rx` — the single
-/// call site `DaemonControl::activate` uses in place of the three separate
-/// `hosts_file::sync`/`dns::install_os_resolver_config` calls and the one
-/// `raw_net` task spawn it used to do individually. `dns_port` is the port
-/// `dns::bind` already bound the DNS server to by the time this is called.
 pub fn spawn_all(dns_port: u16, registry_rx: watch::Receiver<ActorMap>) -> EffectTasks {
     EffectTasks {
         raw_net: supervisor::supervise_forever(
@@ -259,8 +194,6 @@ mod tests {
     use crate::state::WorkspaceState;
     use std::time::Duration;
 
-    /// Converges whenever the owner's uid changes, recording every
-    /// distinct snapshot it ever converged.
     struct RecordingEffect {
         converged: Arc<std::sync::Mutex<Vec<Option<u32>>>>,
     }
@@ -320,10 +253,6 @@ mod tests {
         tokio::spawn(run_effect(effect, handle.subscribe(), "test"));
         wait_until(|| !converged.lock().unwrap().is_empty()).await;
 
-        // OwnerSet with the same uid a caller last observed still produces
-        // a *new* WorkspaceState value (a fresh clone), but the effect's
-        // own extracted Snapshot is unchanged, so no second convergence
-        // should happen.
         handle
             .dispatch(Action::OwnerSet { owner: owner(501) })
             .await
@@ -333,14 +262,11 @@ mod tests {
             .dispatch(Action::OwnerSet { owner: owner(501) })
             .await
             .unwrap();
-        // Give a redundant convergence a chance to (wrongly) show up.
         tokio::time::sleep(Duration::from_millis(30)).await;
 
         assert_eq!(converged.lock().unwrap().as_slice(), [None, Some(501)]);
     }
 
-    /// Sums the uids of every workspace's owner, recording every distinct
-    /// snapshot it's ever asked to converge (in order).
     struct FannedInSum {
         converged: Arc<std::sync::Mutex<Vec<u32>>>,
     }
@@ -383,9 +309,6 @@ mod tests {
             .await
             .unwrap();
 
-        // However many intermediate snapshots the two racing dispatches
-        // above produce, the last one converged must reflect both
-        // workspaces once both updates have landed.
         wait_until(|| converged.lock().unwrap().last() == Some(&42)).await;
     }
 
@@ -405,14 +328,9 @@ mod tests {
         registry.send_modify(|actors| {
             Arc::make_mut(actors).remove("a");
         });
-        // The removal is itself a registry-set change, which the driver
-        // reacts to by rebuilding its forwarder set (aborting "a"'s) and
-        // reconverging once against the now-empty workspace set.
         wait_until(|| converged.lock().unwrap().last() == Some(&0)).await;
         let snapshots_after_removal = converged.lock().unwrap().len();
 
-        // A dispatch to the now-deregistered workspace must not trigger
-        // another convergence — its forwarder was aborted above.
         a.dispatch(Action::OwnerSet { owner: owner(99) })
             .await
             .unwrap();

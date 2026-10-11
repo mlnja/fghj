@@ -1,42 +1,15 @@
-//! Volume *discovery*, not full desired/observed diffing: reports what
-//! `docker::list_volumes` actually finds for the workspace into actor state
-//! via `Action::VolumeObserved`, letting `reducer::observation`'s existing
-//! bootstrap-on-first-observation logic (`VolumeInfo::desired` seeded from
-//! the first `VolumeObserved` for a name never seen before) populate
-//! `state::EnvState::volumes`.
-//!
-//! Deliberately not a full desired/observed diff with actuation: real
-//! desired-state volume tracking would need
-//! a volume's identity threaded through `EnvSpec`/`Action::EnvPlanned` from
-//! the resolved `.fghj.yaml` graph, which `EnvSpec` doesn't carry (see
-//! `state::env::EnvSpec`'s doc — it's deliberately thin)
-//! and `orchestrator::orchestrate` doesn't populate either (it builds every
-//! `EnvState` with `volumes: BTreeMap::new()`). Plumbing real volume specs
-//! through would mean
-//! reaching into `Orchestrator::ensure_running`'s graph-resolution
-//! internals. What this module gives instead:
-//! every volume that actually exists in Docker for a run becomes visible
-//! (`observed.exists == true`), with its `desired` bootstrapped to match —
-//! so a volume that gets deleted out from under `fghj` by hand would *not*
-//! currently show as "missing" (nothing re-reports `exists: false` for a
-//! name that's simply absent from `list_volumes`'s result), only a
-//! volume unexpectedly present becomes visible. That asymmetry is a known
-//! limit, not an oversight.
+//! //! Volume discovery: reports what Docker has for the workspace. A volume
+//! //! deleted by hand doesn't show as missing — only presence is reported.
 
 use crate::action::Action;
 use crate::actor::ActorHandle;
 use crate::orchestrator::Orchestrator;
 
-/// Discovers the environment's volumes via Docker and reports each one
-/// found.
 pub async fn observe_volumes(orchestrator: &Orchestrator, actor: &ActorHandle) {
     let names = orchestrator.volume_names().await;
     dispatch_observed_volumes(actor, names).await;
 }
 
-/// The pure-ish dispatch half of `observe_volumes`, split out so it's
-/// unit-testable without a real `Orchestrator`/Docker client — the actor is
-/// still real (in-process, no Docker needed to spawn one).
 async fn dispatch_observed_volumes(actor: &ActorHandle, names: Vec<String>) {
     for name in names {
         let _ = actor

@@ -1,14 +1,5 @@
-//! Fans every registered workspace's running containers' `wildcard_hosts`
-//! suffixes into `dns::install_os_resolver_config`, using the same
-//! `FannedInEffect` idiom as `effects::raw_net::RawNetEffect`. Nothing else
-//! may call `dns::install_os_resolver_config` while this effect runs — two
-//! writers of the same `/etc/resolver` directory would just race each other.
-//!
-//! This is only the *write* side of DNS: which zones the OS routes to fghj's
-//! server. Actually *answering* a query is a live read path, not a converge
-//! loop, and lives in `daemon::routing`'s `dns::ZoneSource` impl — but both
-//! now read the same zone list from `state::query::wildcard_suffixes`, so
-//! the set of zones routed here can't drift from the set answered there.
+//! //! Routes every workspace's `wildcard_hosts` suffixes to fghj's DNS server
+//! //! via `/etc/resolver`. The only writer of that directory.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -17,10 +8,6 @@ use crate::dns;
 use crate::effects::FannedInEffect;
 use crate::state::{WorkspaceState, query};
 
-/// The daemon-wide DNS-routing effect: aggregates every registered
-/// workspace's running containers' wildcard-host suffixes and syncs the OS
-/// resolver config (macOS `/etc/resolver`) so each one routes to this DNS
-/// server at `port`.
 pub struct DnsEffect {
     pub port: u16,
 }

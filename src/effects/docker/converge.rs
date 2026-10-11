@@ -1,27 +1,7 @@
-//! Drives real Docker create/start/stop/delete calls off `EnvState`'s two
-//! convergence fields — `ContainerInfo::pending_action` (per-node
-//! start/stop/delete) and `EnvState::pending_create` (whole-environment
-//! create/top-up/switch). Reuses `orchestrator::Orchestrator`'s orchestration
-//! methods wholesale (`restart_node`/`stop_container`/
-//! `remove_container`/`ensure_running`, see `perform`/
-//! `perform_create`) rather than reimplementing container lifecycle here;
-//! this effect's only responsibility is *triggering* those calls from
-//! dispatched state and reporting the real result back
-//! (`Action::ContainerActionSettled`/`Action::EnvCreateSettled`).
-//!
-//! Every mutation this effect causes (create/top-up, start, stop, delete)
-//! reports its own real result directly, via the `*SettleGuard`s below, so
-//! nothing needs to re-derive it from a fresh snapshot a moment later.
-//! There is nothing to translate either: `Orchestrator` builds the same
-//! `state::EnvState`/`ContainerInfo` the reducer holds, so what
-//! `perform`/`perform_create` return is dispatched as-is.
-//!
-//! A container that changes state for a reason *neither* this effect nor an
-//! HTTP-dispatched request caused (Docker's own restart policy reviving a
-//! crashed container, an operator running `docker stop` by hand) is picked
-//! up by `effects::docker::observe`, which reports
-//! `Action::ContainerObserved` off the reconciler's existing once-a-second
-//! inspection.
+//! //! Drives Docker start/stop/delete off `ContainerInfo::pending_action`, and
+//! //! creates off `EnvState::pending_create`, through `Orchestrator`, and reports
+//! //! each result back as an action. Changes nobody asked for are picked up by
+//! //! `observe`.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -39,8 +19,6 @@ use crate::state::{
 };
 use crate::supervisor;
 
-/// One container currently mid-start/stop/delete, as seen by this effect's
-/// `extract` — a plain projection of `ContainerInfo::pending_action`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingEntry {
     node_id: String,
@@ -51,10 +29,8 @@ fn extract_pending(state: &WorkspaceState) -> Vec<PendingEntry> {
     state
         .env
         .iter()
-        // While a create/switch is in flight, the marks on its containers
-        // are `EnvCreateWorking`'s — a picture of what the create is doing,
-        // not work for this effect. Acting on them started each node a
-        // second time, concurrently with the create starting it.
+        // While a create is in flight, its containers' marks are the create's
+        // progress, not jobs; acting on them started each node twice.
         .filter(|env| env.pending_create.is_none())
         .flat_map(|env| {
             env.containers.values().filter_map(|c| {
@@ -67,8 +43,6 @@ fn extract_pending(state: &WorkspaceState) -> Vec<PendingEntry> {
         .collect()
 }
 
-/// The environment's still-unfulfilled create/top-up, as seen by this
-/// effect's `extract` — a plain projection of `EnvState::pending_create`.
 fn extract_pending_create(state: &WorkspaceState) -> Option<EnvSpec> {
     state
         .env
@@ -76,16 +50,8 @@ fn extract_pending_create(state: &WorkspaceState) -> Option<EnvSpec> {
         .and_then(|env| env.pending_create.clone())
 }
 
-/// Decides which of `snapshot`'s entries need a fresh Docker call spawned —
-/// any not already in `in_flight` — and returns the refreshed `in_flight`
-/// set to replace it with. Pure and synchronous, so it's the one part of
-/// this effect's dedup logic (`converge` is called with the *whole*
-/// current snapshot every
-/// time anything about it changes, not a diff, so without this a container
-/// still pending for an unrelated reason — e.g. a sibling container's own
-/// action settling — would get a redundant second Docker call spawned
-/// against it) that's unit-testable without spawning a task or touching
-/// Docker at all.
+/// Spawns entries not already in flight. `converge` gets the whole snapshot
+/// each time, so without this a still-pending node would get a second call.
 fn plan(
     in_flight: &HashSet<String>,
     snapshot: &[PendingEntry],
@@ -101,11 +67,7 @@ fn plan(
     (to_spawn, still_in_flight)
 }
 
-/// `plan`'s counterpart for the environment-level create: at most one at a
-/// time, because `Orchestrator::ensure_running` operates on the whole
-/// environment, and two concurrent calls would race each other over the
-/// same containers — a switch stopping what the other is starting. Returns
-/// the create to spawn, if any, and whether one is in flight afterwards.
+/// At most one create at a time: two would fight over the same containers.
 fn plan_create(in_flight: bool, snapshot: Option<&EnvSpec>) -> (Option<EnvSpec>, bool) {
     match snapshot {
         Some(plan) if !in_flight => (Some(plan.clone()), true),
@@ -114,22 +76,9 @@ fn plan_create(in_flight: bool, snapshot: Option<&EnvSpec>) -> (Option<EnvSpec>,
     }
 }
 
-/// Actually performs `entry`'s action through `orchestrator::Orchestrator`.
-/// `Starting` alone needs a freshly-resolved `Graph` first (real I/O a pure
-/// reducer can't do), deliberately not cached, since a stale graph would
-/// silently ignore a `.fghj.yaml` edit made between the request and this
-/// call. Returns the container's freshly re-observed state (`None` only for
-/// `Removing`, where there's nothing left to observe) rather than just
-/// `()`, so the caller can report real post-action truth instead of a bare
-/// success/failure.
-///
-/// Starting and stopping follow required edges (`concepts/dependency-kinds.md`):
-/// a start goes through `Orchestrator::restart_node`, the same path a
-/// create/top-up takes, which also starts what the node can't start without
-/// and restarts what can't start without it; a stop first stops the latter
-/// itself. Every other container this touches is pushed onto `cascaded`, so
-/// its real state is reported too — including when the node itself then
-/// fails.
+/// Performs `entry`'s action. Starting resolves a fresh graph so a recent
+/// `.fghj.yaml` edit is seen. Other containers touched (requirements,
+/// dependents) go into `cascaded` so their state is reported too.
 async fn perform(
     old: &server::WorkspaceState,
     entry: &PendingEntry,
@@ -140,14 +89,8 @@ async fn perform(
     match entry.action {
         PendingAction::Starting => {
             let graph = resolve(old).await?;
-            // Starting one node still reads the whole graph (that is how it
-            // learns what to link to), so a blocking problem anywhere in
-            // the workspace is a blocking problem here too.
             graph.refuse_if_blocked()?;
-            // The reducer has already written the desired value
-            // (`NodeDebugWaitRequested`), so the ordinary `Starting`
-            // convergence is what applies a flip of the debug switch —
-            // `restart_node` reads it back off `run`.
+            // The reducer already wrote the debug switch; `restart_node` reads it.
             let restarted = old
                 .orchestrator
                 .restart_node(&graph, &entry.node_id, run)
@@ -158,9 +101,8 @@ async fn perform(
         PendingAction::Stopping => {
             let container =
                 container.ok_or_else(|| anyhow::anyhow!("no such node: {}", entry.node_id))?;
-            // What can't run without this node stops first. Best effort: a
-            // graph that can't be resolved right now only means this node
-            // stops alone, which is still what was asked for.
+            // Dependents stop first. Best effort: an unresolvable graph means this node
+            // stops alone.
             let dependents = match resolve(old).await {
                 Ok(graph) => dependents_of(&entry.node_id, &graph.edges),
                 Err(_) => Vec::new(),
@@ -180,8 +122,6 @@ async fn perform(
                     )),
                 }
             }
-            // Returns the stopped container directly, so there is no
-            // read-back from a second copy of the environment to disagree with.
             let info = old
                 .orchestrator
                 .stop_container(&entry.node_id, container)
@@ -199,14 +139,10 @@ async fn perform(
     }
 }
 
-/// A fresh graph, read off the blocking pool.
 async fn resolve(old: &server::WorkspaceState) -> anyhow::Result<resolver::Graph> {
     resolver::resolve_universe_async(old.path.clone()).await
 }
 
-/// `perform`'s counterpart for bringing the environment up to date: resolves
-/// a fresh graph (same reasoning as `perform`'s `Starting` case), then hands
-/// `plan` to `Orchestrator::ensure_running`.
 async fn perform_create(
     old: &server::WorkspaceState,
     plan: &EnvSpec,
@@ -214,25 +150,14 @@ async fn perform_create(
     progress: Option<&ProgressSink>,
 ) -> Result<EnvState, EnvCreateError> {
     let graph = resolve(old).await?;
-    // Nothing has been created yet, so there is no partial state to carry:
-    // the `From<anyhow::Error>` conversion's `partial: None` is correct.
     graph.refuse_if_blocked()?;
     old.orchestrator
         .ensure_running(&graph, plan, prior, progress)
         .await
 }
 
-/// Dispatches `Action::ContainerActionSettled` when dropped, unless
-/// [`SettleGuard::settle`] already recorded a real outcome — the RAII
-/// "always reports, even on panic or an early return" guarantee in-flight
-/// dedup depends on: a node whose result is never reported stays busy
-/// forever.
-/// `settle` consumes `self` but that value is still dropped normally right
-/// after (nothing calls `mem::forget`), so the same `Drop` impl handles both
-/// the happy path (outcome already `Some`) and a panic/early-return inside
-/// `perform` (outcome still `None`, since a panic unwinding through an
-/// in-progress `.await` drops every live local in the async fn's frame
-/// exactly like it would in a plain synchronous function).
+/// Reports the outcome on drop if `settle` wasn't called, so a panic or early
+/// return never leaves a node busy forever.
 struct SettleGuard {
     actor: ActorHandle,
     node_id: String,
@@ -266,8 +191,6 @@ impl Drop for SettleGuard {
     }
 }
 
-/// `SettleGuard`'s counterpart for an environment create/top-up job — see
-/// `SettleGuard`'s doc for the RAII guarantee this gives.
 struct CreateSettleGuard {
     actor: ActorHandle,
     outcome: Option<Result<EnvState, EnvCreateError>>,
@@ -295,21 +218,12 @@ impl Drop for CreateSettleGuard {
     }
 }
 
-/// The combined snapshot this effect converges on: both per-node
-/// start/stop/delete jobs and the environment's create/top-up, bundled
-/// together so a single `Effect` (wired once per workspace, see
-/// `daemon::WorkspaceRegistry::wire_actor`) drives both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConvergeSnapshot {
     pending: Vec<PendingEntry>,
     create: Option<EnvSpec>,
 }
 
-/// Per-workspace `Effect` driving real Docker lifecycle and creation calls.
-/// One instance per workspace actor (see
-/// `daemon::WorkspaceRegistry::wire_actor`), holding that same workspace's
-/// `Arc<server::WorkspaceState>`, whose `Orchestrator` is what actually
-/// talks to Docker.
 pub struct DockerConvergeEffect {
     old: Arc<server::WorkspaceState>,
     actor: ActorHandle,
@@ -334,8 +248,6 @@ impl DockerConvergeEffect {
             node_id: entry.node_id.clone(),
             outcome: None,
         };
-        // The environment as the reducer currently has it — the only copy
-        // there is, taken at spawn time.
         let run = self.actor.current().env.clone();
         let actor = self.actor.clone();
         supervisor::supervise("container action", async move {
@@ -367,9 +279,7 @@ impl DockerConvergeEffect {
         let actor = self.actor.clone();
         let prior = self.actor.current().env.clone();
         supervisor::supervise("env create", async move {
-            // Per-node progress is translated into actions here rather than
-            // in `orchestrator/`, which deliberately knows nothing about actors.
-            // The draining task ends when `perform_create` drops its sender.
+            // Translated here: `orchestrator/` knows nothing about actors.
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RunProgress>();
             let progress_actor = actor.clone();
             let drain = tokio::spawn(async move {
@@ -397,19 +307,13 @@ impl DockerConvergeEffect {
                 }
             });
             let result = perform_create(&old, &plan, prior.as_ref(), Some(&tx)).await;
-            // Dropped so the drain task sees the channel close and finishes
-            // applying whatever is still queued before the settle below
-            // lands — otherwise a late progress report could arrive *after*
-            // `EnvCreateSettled` and re-add a container the settle dropped.
+            // Closing the channel lets the drain finish first, so a late progress report
+            // can't land after `EnvCreateSettled`.
             drop(tx);
             if let Err(e) = drain.await {
                 daemon_log::warn(format!("env-create progress drain task failed: {e}"));
             }
-            // The HTTP caller already had its `200` long before this ran, so
-            // without a log line here a failed create leaves no trace outside
-            // the per-node events table — including the case where part of a
-            // top-up succeeded and the rest didn't, which is exactly when
-            // someone will be looking for an explanation.
+            // The HTTP caller got its 200 long ago; this is the only trace of a failure.
             if let Err(e) = &result {
                 let came_up = e.partial.as_ref().map(|p| p.containers.len()).unwrap_or(0);
                 daemon_log::warn(format!(
@@ -487,10 +391,6 @@ mod tests {
         assert_eq!(snapshot[0].node_id, "web");
     }
 
-    /// The marks a create/switch puts on the containers it is working on
-    /// are not jobs: performing them started each node a second time,
-    /// concurrently with the create, and the two collided on the container
-    /// name.
     #[test]
     fn extract_pending_ignores_the_marks_of_an_in_flight_create() {
         let state = with_pending_create(
@@ -539,8 +439,6 @@ mod tests {
     #[test]
     fn plan_drops_bookkeeping_for_an_entry_that_settled() {
         let in_flight = HashSet::from(["web".to_string()]);
-        // "web" no longer appears in the snapshot - it settled and the
-        // reducer cleared its `pending_action`.
         let (to_spawn, still_in_flight) = plan(&in_flight, &[]);
         assert!(to_spawn.is_empty());
         assert!(still_in_flight.is_empty());
@@ -615,10 +513,6 @@ mod tests {
         wait_until(|| web_is_settled(&handle)).await;
     }
 
-    /// Simulates `perform` panicking (or the task being cancelled) before it
-    /// ever calls `settle` — the guard must still dispatch a fallback
-    /// outcome on drop, or a container would be stuck showing
-    /// `pending_action: Some(..)` forever.
     #[tokio::test]
     async fn settle_guard_dispatches_a_fallback_outcome_when_dropped_unsettled() {
         let handle = actor_with_pending("web", PendingAction::Stopping);
@@ -628,8 +522,6 @@ mod tests {
                 node_id: "web".into(),
                 outcome: None,
             };
-            // Dropped here without calling `settle` - the failure path this
-            // test exercises.
         }
 
         wait_until(|| web_is_settled(&handle)).await;
@@ -663,11 +555,6 @@ mod tests {
         .await;
     }
 
-    /// Same "always reports, even on panic or cancellation" guarantee as
-    /// `settle_guard_dispatches_a_fallback_outcome_when_dropped_unsettled`,
-    /// for the create guard: a dropped-without-settling job must still
-    /// clear `pending_create`, or the environment would be stuck looking
-    /// permanently mid-creation.
     #[tokio::test]
     async fn create_settle_guard_dispatches_a_fallback_outcome_when_dropped_unsettled() {
         let handle = actor_with_pending_create();

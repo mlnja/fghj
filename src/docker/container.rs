@@ -1,6 +1,3 @@
-//! Container lifecycle and I/O: create/start, stop/remove, inspect,
-//! logs, and exec sessions.
-
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
 
@@ -21,10 +18,7 @@ use tokio::io::AsyncWrite;
 
 use crate::resolver::Healthcheck;
 
-/// Maps `#RunOptions.restart`'s CUE-side spelling to bollard's enum — an
-/// unrecognized value (shouldn't happen once `fghj validate` has run, but
-/// `resolver/` parses YAML independently of CUE, see its module doc) falls
-/// back to `"no"` rather than erroring, matching the CUE default.
+/// Falls back to `"no"`, the CUE default, for an unknown value.
 fn restart_policy_name(restart: &str) -> RestartPolicyNameEnum {
     match restart {
         "always" => RestartPolicyNameEnum::ALWAYS,
@@ -39,72 +33,39 @@ pub struct RunOpts<'a> {
     pub network: &'a str,
     pub aliases: &'a [String],
     pub env: &'a [String],
-    /// container-side ports to publish, each with an optional fixed
-    /// host-side port — `None` publishes to a random ephemeral localhost
-    /// port (the default), `Some(p)` binds exactly `127.0.0.1:p`.
+    /// `None` publishes to an ephemeral localhost port.
     pub ports: &'a [(String, Option<u16>)],
     pub image: &'a str,
-    /// Overrides the image's default `CMD` when non-empty — see `#Service`'s
-    /// and `#BackingDependency`'s `command` doc comments in
-    /// `schema/*.cue`. Empty leaves the image's own `CMD` untouched.
+    /// Empty keeps the image's `CMD`.
     pub command: &'a [String],
-    /// stack/project id — mirrors Docker Compose's `com.docker.compose.project`
-    /// label so Docker Desktop (and `docker ps`/`compose ls` tooling) groups
-    /// every container in a run together, even though we never call `docker compose`.
+    /// Compose's project label, so Docker Desktop groups the containers.
     pub project: &'a str,
     pub service_name: &'a str,
-    /// Pre-formatted `HostConfig.binds` entries — either a bind mount
-    /// (`host/path:container/path[:ro]`) or a named volume
-    /// (`volume-name:container/path[:ro]`). Docker itself disambiguates the
-    /// two by whether the left side contains a `/`, so both forms share this
-    /// one field.
     pub binds: &'a [String],
-    /// `#RunOptions.restart` — see `docker::restart_policy_name`.
     pub restart_policy: &'a str,
-    /// `#RunOptions.stop_signal` — `ContainerCreateBody.StopSignal`. `None`
-    /// leaves the image's own `STOPSIGNAL` alone.
     pub stop_signal: Option<&'a str>,
-    /// `#RunOptions.stop_grace_period` — `ContainerCreateBody.StopTimeout`,
-    /// in seconds. Recorded on the container rather than passed to each
-    /// `stop_container` call so that every path that ever stops this
-    /// container honours it, including ones that no longer have a `Node` to
-    /// read: an orphan whose node was deleted, a container that outlived the
-    /// daemon, a `docker stop` typed by hand.
+    /// Stamped on the container so every stop honours it, including a manual
+    /// `docker stop`.
     pub stop_grace_period: u64,
     pub user: Option<&'a str>,
     pub working_dir: Option<&'a str>,
-    /// User-declared labels — merged under fghj's own `com.docker.compose.*`
-    /// labels below, which always win on key conflict.
+    /// fghj's own labels win on conflict.
     pub labels: &'a BTreeMap<String, String>,
     pub cap_add: &'a [String],
     pub cap_drop: &'a [String],
     pub privileged: bool,
-    /// Pre-formatted `HostConfig.extra_hosts` entries (`"hostname:ip"`).
     pub extra_hosts: &'a [String],
-    /// `HostConfig.dns` — resolver IPs to use instead of Docker's default,
-    /// tried in order. Every node gets the run's sidecar first (authoritative
-    /// for the `fghj.internal` zone and any active alias) and Docker's own
-    /// embedded resolver (`127.0.0.11`) second as a fallback. Empty leaves
-    /// Docker's default (embedded resolver only) untouched.
     pub dns: &'a [String],
     pub healthcheck: Option<&'a Healthcheck>,
-    /// Pins the image's platform for `create_container`'s platform-aware
-    /// image lookup (`os[/arch[/variant]]`, e.g. "linux/amd64"). fghj doesn't
-    /// pull images itself today, so this only helps when the requested
-    /// platform's image is already present locally.
+    /// Only helps when that platform's image is already local: fghj doesn't pull.
     pub platform: Option<&'a str>,
 }
 
-/// Creates and starts `opts.name`, replacing whatever container already
-/// holds that name — fghj's container names are deterministic, so anything
-/// there is a previous incarnation of this same container (stopped, crashed,
-/// half-created, or out of date), and leaving it to every caller to clear it
-/// first is how one path forgot and failed on a name conflict.
+/// Creates and starts `opts.name`, replacing any container already holding the
+/// name.
 pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
     stop_and_remove(docker, opts.name).await;
 
-    // User-declared labels first, so fghj's own bookkeeping labels below
-    // always win on a key conflict — see `RunOpts.labels`'s doc comment.
     let mut labels: HashMap<String, String> = opts
         .labels
         .iter()
@@ -217,10 +178,7 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
         .with_context(|| format!("docker run {} failed", opts.name))?;
 
     if let Err(e) = docker.start_container(opts.name, None).await {
-        // Docker leaves the container behind in `Created` state when start
-        // fails post-create (e.g. network attach failure) — clean it up so
-        // it doesn't sit there half-made. Only here, never after a failed
-        // create: then the container under that name isn't this one.
+        // Only after a failed start: after a failed create the name isn't ours.
         let _ = docker
             .remove_container(
                 opts.name,
@@ -232,30 +190,12 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Stops a container without removing it — the counterpart to
-/// `stop_and_remove` below, used by `Orchestrator::stop_container` so a
-/// single node can be paused without losing the container (its logs, its
-/// exact identity for a later plain restart) the way a full remove would.
 pub async fn stop_container(docker: &Docker, name: &str) {
     let _ = docker.stop_container(name, None).await;
 }
 
-/// Stops a container and then removes it — two calls, deliberately, not one
-/// `remove_container(force: true)`.
-///
-/// `force` is SIGKILL with no grace period at all, and this function is on
-/// ordinary paths: stopping a whole run, restarting a single node,
-/// reconciling a container whose config changed. A dev database with an
-/// hour of seeded state in a named volume would be killed
-/// mid-write by a routine action — the opposite of what a volume
-/// promises. So stop first and let the container's own `StopSignal` /
-/// `StopTimeout` (stamped on at create time by `run_container`) run their
-/// course; Docker escalates to SIGKILL itself once the grace period expires,
-/// so this cannot hang indefinitely.
-///
-/// The remove still passes `force`, for the case the stop could not finish:
-/// a container that is somehow still running must not survive a teardown and
-/// hold its name, network or volumes hostage from the next start.
+/// Stop, then remove — not `force`, which is SIGKILL and would kill a database
+/// mid-write. Docker escalates after the grace period, so this can't hang.
 pub async fn stop_and_remove(docker: &Docker, name: &str) {
     let _ = docker.stop_container(name, None).await;
     let _ = docker
@@ -269,20 +209,12 @@ pub async fn stop_and_remove(docker: &Docker, name: &str) {
 pub struct ContainerStatus {
     pub status: String,
     pub published_port: Option<u16>,
-    /// The process's exit code, once Docker has one to report — `None`
-    /// while the container is still running (and for a container that never
-    /// ran). The reading a terminating node (`Node.kind == "task"`, see
-    /// `orchestrator::health::wait_for_exit`) is actually waiting on: for a
-    /// long-running service `status` alone answers every question, but for a
-    /// container whose entire purpose is to finish, "exited" is only half
-    /// the answer.
+    /// `None` while running.
     pub exit_code: Option<i64>,
 }
 
-/// Inspects a container, returning its status and the host port bound to
-/// `container_port` (e.g. "8080" or "8080/tcp"), if published. Returns
-/// `Ok(None)` if the container doesn't exist, rather than erroring — this is
-/// used as the "does it exist" check everywhere.
+/// Status and the host port bound to `container_port`. `Ok(None)` if the
+/// container doesn't exist.
 pub async fn inspect_status(
     docker: &Docker,
     name: &str,
@@ -334,15 +266,7 @@ pub async fn inspect_status(
     }))
 }
 
-/// A container's own IP address on one specific docker network — nothing
-/// today exposes this; `RunOpts.aliases`/Docker's embedded per-network DNS
-/// covers every existing need to *reach* a container by name, but the
-/// sidecar-proxy `extra_hosts` sentinel (see `orchestrator/`'s
-/// `rewrite_extra_hosts_sentinel`) needs the sidecar's raw IP to hand to
-/// *other* containers via `HostConfig.extra_hosts`, which takes literal IPs,
-/// not names. Returns `Ok(None)` if the container doesn't exist or isn't
-/// attached to `network` (same not-found-is-fine convention as
-/// `inspect_status`).
+/// `Ok(None)` if the container doesn't exist or isn't on `network`.
 pub async fn inspect_network_ip(
     docker: &Docker,
     name: &str,
@@ -370,11 +294,8 @@ pub async fn inspect_network_ip(
         .filter(|ip| !ip.is_empty()))
 }
 
-/// Inspects a container's declared `HEALTHCHECK` status ("starting",
-/// "healthy", "unhealthy"), if it has one. Returns `Ok(None)` both when the
-/// container doesn't exist (404, same convention as `inspect_status`) and
-/// when it exists but declares no healthcheck at all — callers that need to
-/// tell those two cases apart should call `inspect_status` too.
+/// `Ok(None)` both when the container doesn't exist and when it has no
+/// healthcheck.
 pub async fn inspect_health(docker: &Docker, name: &str) -> Result<Option<String>> {
     let inspected = match docker
         .inspect_container(
@@ -397,7 +318,6 @@ pub async fn inspect_health(docker: &Docker, name: &str) -> Result<Option<String
         .map(|s| s.to_string()))
 }
 
-/// One-shot: fetches the last `tail` lines and returns them as a string.
 pub async fn logs_tail(docker: &Docker, name: &str, tail: usize) -> Result<String> {
     let options = LogsOptionsBuilder::default()
         .stdout(true)
@@ -418,13 +338,6 @@ pub async fn logs_tail(docker: &Docker, name: &str, tail: usize) -> Result<Strin
     Ok(combined)
 }
 
-/// Continuous: follows the container's log output, never ending until the
-/// container stops or the caller drops the stream. Used by the SSE endpoint.
-///
-/// Bollard's `Docker::logs` clones what it needs out of `&self` before
-/// returning (see its `process_request`), so the returned stream owns
-/// everything it needs and isn't tied to `docker`'s or `name`'s lifetime —
-/// safe to return from a handler after `docker`/`name` go out of scope.
 pub fn logs_follow(
     docker: &Docker,
     name: &str,
@@ -440,11 +353,6 @@ pub fn logs_follow(
     docker.logs(name, Some(options))
 }
 
-/// A live `docker exec` session — `output` and `input` are independent
-/// halves of one duplex connection (Docker upgrades the HTTP connection to a
-/// raw byte stream once attached), so both directions can be driven
-/// concurrently by a `tokio::select!` loop. See `bollard::exec::start_exec`'s
-/// `StartExecResults::Attached` variant, which this wraps.
 pub struct ExecSession {
     pub id: String,
     pub output: Pin<
@@ -455,10 +363,7 @@ pub struct ExecSession {
     pub input: Pin<Box<dyn AsyncWrite + Send>>,
 }
 
-/// Starts a command inside an already-running container and attaches to it,
-/// full duplex. `tty` merges stdout/stderr into one undifferentiated stream
-/// (real terminal semantics) — same simplification `fghj exec` relies on to
-/// avoid stream-tagging both with and without a TTY.
+/// `tty` merges stdout and stderr.
 pub async fn exec_start(
     docker: &Docker,
     container_name: &str,
@@ -500,16 +405,10 @@ pub async fn exec_start(
             output,
             input,
         }),
-        // We always pass `detach: false` above, so Docker never takes the
-        // detached path — `start_exec` only returns `Detached` when the
-        // caller asks for it.
         StartExecResults::Detached => bail!("docker start_exec unexpectedly detached"),
     }
 }
 
-/// Resizes an exec session's pseudo-TTY — a no-op error from Docker's side
-/// if the session wasn't started with `tty: true`, so callers only need to
-/// call this when they know they allocated one.
 pub async fn exec_resize(docker: &Docker, exec_id: &str, cols: u16, rows: u16) -> Result<()> {
     docker
         .resize_exec(
@@ -523,10 +422,7 @@ pub async fn exec_resize(docker: &Docker, exec_id: &str, cols: u16, rows: u16) -
         .context("docker resize_exec failed")
 }
 
-/// The exec's exit code, once its process has finished. `-1` if Docker
-/// doesn't report one (shouldn't happen for a completed exec, but this is
-/// simpler than propagating a second failure mode this far into a stream's
-/// end for something purely informational).
+/// `-1` if Docker reports no code.
 pub async fn exec_exit_code(docker: &Docker, exec_id: &str) -> Result<i64> {
     let inspected = docker
         .inspect_exec(exec_id)
@@ -541,9 +437,6 @@ mod tests {
     use std::process::Command;
     use tokio::io::AsyncWriteExt;
 
-    /// A throwaway `busybox` container, torn down on drop — exists purely so
-    /// exec tests below have a real running container to attach to, without
-    /// pulling in the resolver/`RunOpts` machinery `run_container` needs.
     struct TestContainer {
         name: String,
     }
@@ -612,8 +505,6 @@ mod tests {
         let docker = crate::daemon::connect_docker().expect("docker client");
         let container = TestContainer::start();
 
-        // `cat` echoes stdin back to stdout, then exits 0 once stdin closes —
-        // exercises the duplex `input` half, not just `output`.
         let mut session = exec_start(
             &docker,
             &container.name,
@@ -647,8 +538,6 @@ mod tests {
             "cat should exit 0 once stdin closes"
         );
 
-        // A second exec against the same still-running container that exits
-        // nonzero — confirms exit codes aren't always trivially 0/-1.
         let mut failing = exec_start(
             &docker,
             &container.name,

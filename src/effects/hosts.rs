@@ -1,8 +1,5 @@
-//! Fans every registered workspace's running containers' `#AdditionalHost`
-//! aliases into `hosts_file::sync`, using the same `FannedInEffect` idiom
-//! as `effects::raw_net::RawNetEffect`. Nothing else may call
-//! `hosts_file::sync` while this effect runs — two writers of the same
-//! managed `/etc/hosts` block would just race each other.
+//! //! Writes every workspace's `#AdditionalHost` aliases into the managed
+//! //! `/etc/hosts` block. The only writer of that block.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -11,12 +8,7 @@ use crate::effects::FannedInEffect;
 use crate::hosts_file;
 use crate::state::WorkspaceState;
 
-/// Every `#AdditionalHost` alias currently claimed by a `"running"`
-/// container across every workspace in `states`, using the same
-/// `observed.status == "running"` filter `effects::raw_net::extract_endpoints`
-/// already applies. `hosts_file::sync` itself also sorts/dedupes its input,
-/// but doing it here too keeps this effect's `Snapshot` comparison
-/// (`PartialEq` on the `Vec`) exact rather than order-sensitive-by-accident.
+/// Sorted and deduped so the snapshot comparison is exact.
 fn extract_hosts(states: &BTreeMap<String, Arc<WorkspaceState>>) -> Vec<String> {
     let mut hosts: Vec<String> = states
         .values()
@@ -30,9 +22,6 @@ fn extract_hosts(states: &BTreeMap<String, Arc<WorkspaceState>>) -> Vec<String> 
     hosts
 }
 
-/// The daemon-wide `/etc/hosts` effect: aggregates every registered
-/// workspace's running containers' additional-host aliases and rewrites the
-/// fghjd-managed block to match.
 pub struct HostsEffect;
 
 impl FannedInEffect for HostsEffect {

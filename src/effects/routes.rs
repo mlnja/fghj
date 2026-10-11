@@ -1,31 +1,16 @@
-//! Renders the environment's sidecar route table from workspace state.
-//!
-//! The sidecar proxy polls a `routes.json` naming every domain it
-//! should answer for and where to connect. That file is a pure function of
-//! `EnvState::containers`, so it belongs here rather than being written by
-//! hand at the end of each lifecycle call — which is what `orchestrator/` used to
-//! do, from a `EnvState` snapshot taken *before* the Docker work, and
-//! therefore occasionally from a snapshot that had already lost a sibling
-//! node's routes.
-//!
-//! Driving it off published state instead removes that whole class of
-//! mistake: the table is rewritten whenever the state it is derived from
-//! changes, from whatever the state actually says at that moment.
+//! //! Renders the sidecar's `routes.json` from published state, so it's never
+//! //! written from a stale snapshot.
 
 use crate::orchestrator::route_table::{sidecar_routes_dir, write_route_table};
 use crate::state::{EnvState, WorkspaceState};
 
 use super::Effect;
 
-/// The whole `EnvState`, because `write_route_table` derives the network
-/// path and the entries from it together.
 pub type Snapshot = Option<EnvState>;
 
 #[derive(Default)]
 pub struct RouteTableEffect {
-    /// The network whose directory exists because this effect wrote it.
-    /// Kept so an environment that disappears has its table removed rather
-    /// than left behind for a sidecar to keep serving.
+    /// So a vanished environment's table is removed, not served on.
     written: Option<String>,
 }
 
@@ -43,8 +28,6 @@ impl Effect for RouteTableEffect {
     }
 
     fn converge(&mut self, snapshot: &Self::Snapshot) -> anyhow::Result<()> {
-        // An environment that has been planned but not yet created has no
-        // network to write a table into. Nothing to do until it does.
         let network = snapshot
             .as_ref()
             .filter(|env| !env.network.is_empty())
@@ -52,9 +35,6 @@ impl Effect for RouteTableEffect {
         if let Some(env) = snapshot.as_ref().filter(|_| network.is_some()) {
             write_route_table(env)?;
         }
-        // An environment that is gone from state takes its route table with
-        // it. Leaving the file would let a sidecar keep answering for
-        // domains that no longer resolve to anything.
         if let Some(old) = self.written.take()
             && network.as_ref() != Some(&old)
         {
@@ -107,9 +87,6 @@ mod tests {
         }
     }
 
-    /// The snapshot is the environment itself, so any change to its
-    /// containers re-triggers a write — that is what makes this effect a
-    /// replacement for the hand-placed calls it removes.
     #[test]
     fn the_snapshot_tracks_the_environment() {
         let effect = RouteTableEffect::new();
@@ -119,9 +96,6 @@ mod tests {
         assert!(effect.extract(&state).is_some());
     }
 
-    /// A planned-but-not-yet-created environment has no network, so there
-    /// is no directory to write into. It must be skipped rather than
-    /// producing a path like `.../runs//routes.json`.
     #[test]
     fn an_environment_without_a_network_yet_is_skipped() {
         let mut effect = RouteTableEffect::new();

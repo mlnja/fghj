@@ -1,8 +1,4 @@
-//! Mirrors workspace state into the per-workspace SQLite store.
-//!
-//! Derived, not remembered: whatever the actor has
-//! published is what lands in the database, and the reducer is the only
-//! thing that decides what that is.
+//! //! Mirrors workspace state into the workspace's SQLite store.
 
 use std::sync::Arc;
 
@@ -15,9 +11,7 @@ pub type Snapshot = Option<EnvState>;
 
 pub struct PersistEffect {
     db: Arc<WorkspaceDb>,
-    /// Whether this effect has written an environment, so one that
-    /// disappears from state gets deleted rather than lingering to be
-    /// rehydrated on next start.
+    /// So an environment that leaves state is deleted, not rehydrated later.
     written: bool,
 }
 
@@ -36,9 +30,7 @@ impl AsyncEffect for PersistEffect {
 
     async fn converge(&mut self, snapshot: Self::Snapshot) -> anyhow::Result<()> {
         match snapshot {
-            // An environment with no containers and no network has not been
-            // created yet — persisting it would resurrect an empty shell on
-            // the next daemon start.
+            // Not created yet: persisting it would resurrect an empty shell.
             Some(env) if env.network.is_empty() && env.containers.is_empty() => {}
             Some(env) => {
                 self.db.clone().save_env(env).await?;
@@ -81,9 +73,6 @@ mod tests {
         assert_eq!(loaded, Some(created_env()));
     }
 
-    /// An environment that has been planned but never created has nothing
-    /// worth remembering — writing it would make the next daemon start
-    /// rehydrate an empty environment that never existed.
     #[tokio::test]
     async fn an_uncreated_environment_is_not_written() {
         let (_tmp, db) = db();
@@ -92,8 +81,6 @@ mod tests {
         assert!(db.clone().load_env().await.unwrap().is_none());
     }
 
-    /// An environment that leaves state has to leave the database too, or
-    /// the next start would rehydrate one the user just tore down.
     #[tokio::test]
     async fn an_environment_that_leaves_state_is_deleted_from_the_database() {
         let (_tmp, db) = db();
@@ -106,8 +93,6 @@ mod tests {
         assert!(db.clone().load_env().await.unwrap().is_none());
     }
 
-    /// Only an environment this effect actually wrote gets deleted — an
-    /// idle workspace must not issue a delete on every change.
     #[tokio::test]
     async fn deletion_is_limited_to_what_this_effect_wrote() {
         let (_tmp, db) = db();

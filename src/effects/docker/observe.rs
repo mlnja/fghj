@@ -1,27 +1,7 @@
-//! Reports containers that changed state for a reason neither `converge`
-//! nor an HTTP-dispatched request caused (crashed, `docker stop`'d by hand,
-//! a restart-policy-triggered restart) as `Action::ContainerObserved`, so
-//! `observed != desired` becomes visible in actor state.
-//!
-//! Deliberately does **not** run its own independent Docker-inspection
-//! timer. `daemon::spawn_reconciler` calls `report` once a second, and
-//! `report` does the inspecting itself (`Orchestrator::inspect_containers`);
-//! a second, independent Docker-polling loop here would double the real
-//! Docker API load for the exact same information.
-//!
-//! This is the *only* way a container's real status reaches anything
-//! that acts on it: live HTTPS routing and DNS answering read the reducer
-//! state these reports feed (`state::query`), not `orchestrator::Orchestrator`. If
-//! this stops being called, routes go stale.
-//!
-//! Container drift is deliberately only ever *reported*, never fed back
-//! into `converge`: `effects::docker::converge::DockerConvergeEffect::extract`
-//! derives its convergence snapshot purely from `ContainerInfo::desired`
-//! (and `pending_action`/`pending_create`), never `observed` — so a
-//! container `report` finds crashed becomes visible to the UI
-//! (`observed.status != desired.running`-style drift) without `converge`
-//! ever trying to restart it. See `effects::docker::policy::DockerHealPolicy`
-//! for the switch that would change that, deliberately unused for now.
+//! //! Reports containers that changed for reasons fghj didn't cause, as
+//! //! `Action::ContainerObserved`. Runs on the reconciler's tick rather than its
+//! //! own timer. Drift is only reported: `converge` reads `desired`, never
+//! //! `observed`.
 
 use crate::action::Action;
 use crate::actor::ActorHandle;
@@ -32,11 +12,6 @@ use crate::state::ContainerObserved;
 
 use super::volumes;
 
-/// Re-inspects every container the actor currently records and reports
-/// what Docker actually says about it — plus the environment's real volumes —
-/// back into the actor's state: the inspection takes the actor's state as
-/// its input and its results go straight out as actions — one read, one
-/// writer.
 pub async fn report(orchestrator: &Orchestrator, actor: &ActorHandle) {
     let Some(env) = actor.current().env.clone() else {
         return;
@@ -49,15 +24,7 @@ pub async fn report(orchestrator: &Orchestrator, actor: &ActorHandle) {
     volumes::observe_volumes(orchestrator, actor).await;
 }
 
-/// The config-drift counterpart to [`report`], driven on its own much
-/// slower schedule by `daemon::spawn_sync_reconciler` (re-resolving every
-/// `.fghj.yaml` is real work; re-inspecting a container is not). `graph` is
-/// the freshly-resolved workspace the caller just read off disk.
-///
-/// This is what makes `Action::ConfigDriftObserved` reach the reducer at
-/// all: before it existed, `Orchestrator::refresh_sync_status` wrote drift
-/// into the *old* state only, so `ContainerObserved::sync` stayed `Unknown`
-/// forever and the UI's "desired ≠ actual" badge never lit up.
+/// Config drift, on the slower `spawn_sync_reconciler` schedule.
 pub async fn report_config_drift(orchestrator: &Orchestrator, actor: &ActorHandle, graph: &Graph) {
     let Some(env) = actor.current().env.clone() else {
         return;
@@ -67,9 +34,6 @@ pub async fn report_config_drift(orchestrator: &Orchestrator, actor: &ActorHandl
     }
 }
 
-/// Pure translation from a drift verdict to the report `Action` the new
-/// system understands — split out from `report_config_drift` for the same
-/// reason `container_observed` is split out from `report`.
 fn config_drift_observed(report: &DriftReport) -> Action {
     Action::ConfigDriftObserved {
         node_id: report.node_id.clone(),
@@ -77,20 +41,12 @@ fn config_drift_observed(report: &DriftReport) -> Action {
     }
 }
 
-/// Pure projection of a freshly re-inspected container into the report
-/// `Action` the reducer understands — split out from `report` so it's
-/// unit-testable without a real `Orchestrator`/Docker client. Takes a
-/// `ContainerObserved`, not a whole `ContainerInfo`, so it is structurally
-/// incapable of carrying anything from `desired`: this is an observation,
-/// and the reducer must never learn what fghj wants from something
-/// claiming to say what Docker did.
+/// Takes `ContainerObserved` only, so an observation can't carry `desired`.
 fn container_observed(node_id: &str, observed: &ContainerObserved) -> Action {
     Action::ContainerObserved {
         node_id: node_id.to_string(),
         status: observed.status.clone(),
         published_port: observed.published_port,
-        // `Orchestrator::inspect_containers` doesn't inspect a container's
-        // network-internal address, so there's none to report here.
         ip: None,
         ports: observed.ports.clone(),
         exit_code: observed.exit_code,
@@ -135,9 +91,6 @@ mod tests {
         }
     }
 
-    /// Every verdict reaches the reducer unchanged — `Orphaned` included.
-    /// It used to arrive as `Unknown`, which is what made a vanished node
-    /// invisible downstream no matter what the drift check had decided.
     #[test]
     fn config_drift_observed_carries_every_verdict_through() {
         use crate::state::SyncStatus;
@@ -171,11 +124,7 @@ mod tests {
 
         let current = handle.current();
         let web = &current.env.as_ref().unwrap().containers["web"];
-        // Drift is now visible in `observed`...
         assert_eq!(web.observed.status, "exited");
-        // ...but `desired.running` — what `converge`'s `extract()` actually
-        // reads — is completely untouched, matching the observer-only
-        // policy.
         assert!(web.desired.running);
     }
 }
