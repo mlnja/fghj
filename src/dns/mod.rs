@@ -11,7 +11,7 @@ use crate::daemon_log;
 mod macos;
 
 /// The zone this server is authoritative for. Every node's domain
-/// (`runs::start_node`) is derived into this zone from its id, workspace,
+/// (`orchestrator::start_node`) is derived into this zone from its id, workspace,
 /// and run id — never author-declared, so nothing outside this zone needs
 /// answering.
 pub(crate) const ZONE: &str = "fghj.internal";
@@ -19,7 +19,7 @@ const ZONE_SUFFIX: &str = ".fghj.internal";
 
 /// The raw/direct zone: reachable in-network via Docker's own embedded DNS
 /// already (a node's `raw_domain` is a real Docker network alias — see
-/// `runs/`), and — once a `raw_net` virtual IP is answered for it here —
+/// `orchestrator/`), and — once a `raw_net` virtual IP is answered for it here —
 /// reachable from the host too, NAT'd straight to the container's real
 /// published port. Never TLS-terminated, never certified (`cert_eligible`
 /// only matches `ZONE`), and never answered with the shared `ANSWER`
@@ -106,7 +106,7 @@ pub fn is_reserved_alias(host: &str) -> bool {
 /// browser mint trust for a name nothing in this workspace declared. A real,
 /// non-reserved-TLD hostname (e.g. a third-party OAuth callback host) is
 /// never eligible, `routed` or not — see `web::ca::DynamicCertResolver::resolve_for`,
-/// the one caller that actually mints certs off this, and `runs::start_node`,
+/// the one caller that actually mints certs off this, and `orchestrator::start_node`,
 /// which uses it to tell the UI whether a route can ever be linked as
 /// `https://` at all.
 pub(crate) fn cert_eligible(name: &str, routed: bool) -> bool {

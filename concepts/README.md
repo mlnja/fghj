@@ -121,11 +121,11 @@ be compared.
 | `src/raw_net/` | [[two-zones-and-raw-ports]] |
 | `src/sidecar_image.rs`, `src/bin/fghj-sidecar.rs` | [[in-network-sidecar]], [[release-and-delivery]] |
 | `src/actor.rs`, `src/action.rs`, `src/reducer/`, `src/state/`, `src/effects/` | [[state-and-effects]] |
-| `src/runs/` | [[run-lifecycle-and-registry]], [[concurrency-model]], [[node-identity-and-domains]], [[terminating-nodes]] |
+| `src/orchestrator/` | [[run-lifecycle-and-registry]], [[concurrency-model]], [[node-identity-and-domains]], [[terminating-nodes]] |
 | `src/persistence/` | [[persistence-and-workspace-store]], [[security-model]] |
 | `src/hosts_file.rs`, `src/effects/hosts.rs` | [[host-aliases]] |
-| `src/runs/spec.rs`, `src/state/sync_status.rs` | [[config-drift]] |
-| `src/runs/node_spec.rs`, `src/runs/start_node.rs` (`debug_wait_overrides`) | [[debugging-in-containers]], [[config-drift]] |
+| `src/orchestrator/spec.rs`, `src/state/sync_status.rs` | [[config-drift]] |
+| `src/orchestrator/node_spec.rs`, `src/orchestrator/start_node.rs` (`debug_wait_overrides`) | [[debugging-in-containers]], [[config-drift]] |
 | `src/docker/`, `src/downloads.rs` | [[docker-and-downloads]], [[build-inputs]], [[builder-parity]] |
 | `src/web/api/`, `src/daemon/`, `src/daemon_log.rs`, `src/main.rs`, `src/bin/fghjd.rs` | [[control-api-and-cli]] |
 | `src/doctor.rs` | [[preflight-checks]] |

@@ -117,7 +117,7 @@ fn set_debug_wait(
 /// `NodeStartRequested` is the one per-node action that must succeed even
 /// when `node_id` has no live entry in `run.containers` — the Drawer's
 /// "Start"/"Recreate" button is the documented way to bring a *deleted*
-/// node's container back (`runs::RunRegistry::restart_container` looks the
+/// node's container back (`orchestrator::Orchestrator::restart_container` looks the
 /// node up in the resolved `.fghj.yaml` graph, not in any live container
 /// list, so a prior `NodeDeleteRequested` removing the entry outright
 /// must not make this node permanently unstartable). A fresh placeholder is

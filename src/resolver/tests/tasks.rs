@@ -54,7 +54,7 @@ fn completed_successfully_makes_the_target_a_task() {
 
     // db -> migrate -> api is the start order.
     let ids: Vec<String> = graph.nodes.iter().map(|n| n.id.clone()).collect();
-    let order = crate::runs::topological_start_order(&ids, &graph.edges);
+    let order = crate::orchestrator::topological_start_order(&ids, &graph.edges);
     let pos = |id: &str| order.iter().position(|o| o == id).unwrap();
     assert!(pos("db.api") < pos("migrate.api"));
     assert!(pos("migrate.api") < pos("api.api"));

@@ -13,7 +13,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::web::api::error::bad_request;
 use crate::web::api::extract::{ActorExtractor, WorkspaceExtractor};
-use crate::{docker, runs};
+use crate::{docker, orchestrator};
 
 /// First message a client must send once the socket is upgraded — everything
 /// `docker::exec_start` needs. `cols`/`rows` are only meaningful when `tty`.
@@ -63,7 +63,7 @@ pub(crate) async fn get_node_exec_ws(
                 .into_response();
         }
     };
-    let container_name = match runs::container_name_for(&run_state, &node_id) {
+    let container_name = match orchestrator::container_name_for(&run_state, &node_id) {
         Ok(name) => name.to_string(),
         Err(e) => return bad_request(e),
     };

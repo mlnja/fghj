@@ -29,7 +29,7 @@ pub enum EnvSpec {
 /// never prevented.
 ///
 /// The single representation of the environment in fghj, held in a single
-/// place: the actor's `WorkspaceState`. `runs::RunRegistry` keeps no copy;
+/// place: the actor's `WorkspaceState`. `orchestrator::Orchestrator` keeps no copy;
 /// it takes whatever prior state a call needs as an argument and reports
 /// the result back as an `Action`. `persistence` stores it, derived from
 /// published state by `effects::persist`.
@@ -43,7 +43,7 @@ pub struct EnvState {
     pub containers: BTreeMap<String, ContainerInfo>,
     pub volumes: BTreeMap<String, VolumeInfo>,
     /// The deterministic name of this run's in-network TLS proxy sidecar
-    /// (see `RunRegistry::ensure_sidecar`) — one per run, never shared
+    /// (see `Orchestrator::ensure_sidecar`) — one per run, never shared
     /// across workspaces. Empty for a run persisted before this field
     /// existed, until that run is next started/topped up.
     pub sidecar_container_name: String,

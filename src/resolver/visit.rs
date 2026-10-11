@@ -553,7 +553,7 @@ impl<'a> ResolveCtx<'a> {
             };
             let mut seen = BTreeSet::new();
             for pair in &node.environment {
-                for path in crate::runs::fqdn_template::fqdn_template_paths(pair) {
+                for path in crate::orchestrator::fqdn_template::fqdn_template_paths(pair) {
                     if !seen.insert(path.clone()) {
                         continue;
                     }

@@ -44,7 +44,7 @@ description: How fghj's pieces — the CLI, the superdaemon, the resolver, the p
   flow membership along the way. See [Node identity & domains](/concepts/node-identity-and-domains/),
   [Flat workspace model](/concepts/flat-workspace-model/), and
   [Fog-of-war visibility](/concepts/fog-of-war-visibility/).
-- **The run registry** (`src/runs/`) turns that graph into running Docker
+- **The run registry** (`src/orchestrator/`) turns that graph into running Docker
   containers — one environment per workspace, switched between flows.
   See
   [Run lifecycle & registry](/concepts/run-lifecycle-and-registry/) and

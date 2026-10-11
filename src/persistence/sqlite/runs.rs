@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use crate::orchestrator::DEFAULT_RUN_ID;
 use crate::persistence::workspace_owner::WorkspaceOwner;
-use crate::runs::DEFAULT_RUN_ID;
 use crate::state::{ContainerDesired, ContainerInfo, ContainerObserved, EnvState, SyncStatus};
 
 use super::WorkspaceDb;

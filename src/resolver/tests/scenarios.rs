@@ -8,8 +8,8 @@
 //! Order inside a wave is deliberately unspecified.
 
 use super::write_yaml;
+use crate::orchestrator::topological_start_order;
 use crate::resolver::*;
-use crate::runs::topological_start_order;
 
 fn workspace(repos: &[(&str, &str)]) -> (tempfile::TempDir, Graph) {
     let tmp = tempfile::tempdir().unwrap();

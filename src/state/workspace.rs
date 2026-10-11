@@ -11,7 +11,7 @@ use crate::persistence::WorkspaceOwner;
 /// these lives behind an `actor::ActorHandle` per registered workspace
 /// (see `actor.rs`, `registry.rs`). Not to be confused with
 /// `server::WorkspaceState`, the bundle of Docker-facing machinery
-/// (`WorkspaceDb`, `RunRegistry`, `DownloadRegistry`) that carries out
+/// (`WorkspaceDb`, `Orchestrator`, `DownloadRegistry`) that carries out
 /// what this one says.
 ///
 /// Does not derive `PartialEq`: `WorkspaceOwner` (`persistence::workspace_owner`) doesn't

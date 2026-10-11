@@ -77,7 +77,7 @@ pub enum Action {
     /// (`EnvState::pending_create`) actually finishes being created/topped
     /// up against real Docker. `Ok(run)` wholesale-replaces the environment
     /// with the freshly re-observed state (mirroring how
-    /// `RunRegistry::ensure_running` returns the whole `EnvState` it produced).
+    /// `Orchestrator::ensure_running` returns the whole `EnvState` it produced).
     /// `Err` clears `pending_create` and, when the failure left containers
     /// actually running (`EnvCreateError::partial` — an `ensure_running`
     /// top-up that got part way), replaces the environment with that partial
@@ -125,7 +125,7 @@ pub enum Action {
         exists: bool,
     },
     /// Addressed per container, like `ContainerObserved`:
-    /// `RunRegistry::config_drift` computes drift per container, and this
+    /// `Orchestrator::config_drift` computes drift per container, and this
     /// updates that container's `ContainerObserved::sync`.
     ConfigDriftObserved {
         node_id: String,

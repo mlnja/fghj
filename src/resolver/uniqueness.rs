@@ -129,7 +129,7 @@ fn check_domains(nodes: &[Node]) -> Vec<Warning> {
         .collect()
 }
 
-/// `runs::node_spec` names a container
+/// `orchestrator::node_spec` names a container
 /// `fghj-{workspace}-{run}-{sanitize_label(node.id)}`. Two ids that sanitize
 /// alike mean the second container fails to be created at all, with a Docker
 /// name-conflict error that never mentions the node ids involved.

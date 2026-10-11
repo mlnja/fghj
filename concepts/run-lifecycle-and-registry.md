@@ -1,6 +1,6 @@
 # Run lifecycle and the run registry
 
-> **Where state lives.** `RunRegistry` holds no run state. It owns the
+> **Where state lives.** `Orchestrator` holds no run state. It owns the
 > Docker client, the database handle, the per-node lifecycle locks and the
 > log-capture tasks — the machinery that *does* things. Every `RunState` in
 > the daemon lives in the workspace actor, and everything below reports its
@@ -39,7 +39,7 @@ that killed the branch pin, because the graph does not move.
 
 ## Two different verbs, one shared registry
 
-`RunRegistry` (`src/runs/`) has two entry points that look similar but
+`Orchestrator` (`src/orchestrator/`) has two entry points that look similar but
 mean different things, and picking the wrong one would either destroy work
 unnecessarily or silently fail to start what the user asked for:
 
@@ -59,7 +59,7 @@ unnecessarily or silently fail to start what the user asked for:
   (`RunControls.svelte`'s `startDefault`) and "Run flow"
   (`Header.svelte`'s `runFlow`, on the Actual tab) — both are just different
   scopes of the same idempotent top-up. `fghj` models **one** shared set of
-  running containers per workspace under `runs::DEFAULT_RUN_ID`, not a
+  running containers per workspace under `orchestrator::DEFAULT_RUN_ID`, not a
   separate environment per flow, so picking a flow to run must never
   restart (or duplicate) whatever's already up because some *other* flow
   needed it too. Liveness is checked directly against Docker on every call
@@ -71,7 +71,7 @@ unnecessarily or silently fail to start what the user asked for:
   that did start successfully.
 
   "Already alive" is necessary but not sufficient to skip a node —
-  `runs::orchestrate::top_up_may_skip` holds the three conditions, and the
+  `orchestrator::orchestrate::top_up_may_skip` holds the three conditions, and the
   third is that the node's config hasn't drifted since it was started. A
   top-up is an explicit user action, and the expectation people bring to one
   is `compose up`'s: my edits take effect. Note the deliberate asymmetry with
@@ -178,7 +178,7 @@ graph's shape).
 = 1s, matched to the frontend's own `/runs` poll interval in `App.svelte` so
 the UI is essentially never stale) that calls
 `effects::docker::observe::report` for every wired workspace. That reads the
-actor's current state, hands it to `RunRegistry::inspect_containers`, and
+actor's current state, hands it to `Orchestrator::inspect_containers`, and
 dispatches what Docker actually says back as `Action::ContainerObserved` —
 including flagging a container that's vanished entirely (`docker rm`'d by
 hand, outside fghj) as `"removed"`. This is explicitly analogous to a
@@ -300,7 +300,7 @@ reconciles.
 
 ## Status
 
-Implemented: `src/runs/` (`RunRegistry::start`/`ensure_running`/`stop`/
+Implemented: `src/orchestrator/` (`Orchestrator::start`/`ensure_running`/`stop`/
 `inspect_containers`, route derivation).
 `daemon::spawn_reconciler` drives the inspection on a 1s tick. Known gap (see
 `PROGRESS.md`): `resolve_route` filters on `status == "running"`, which

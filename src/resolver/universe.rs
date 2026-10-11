@@ -82,8 +82,11 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     for node in &mut nodes {
         // Always known once a node's id is — see the field's own doc
         // comment for why this isn't just set at construction time.
-        node.domain =
-            crate::runs::derive_domain(&node.id, &workspace_name, crate::runs::DomainZone::Http);
+        node.domain = crate::orchestrator::derive_domain(
+            &node.id,
+            &workspace_name,
+            crate::orchestrator::DomainZone::Http,
+        );
     }
 
     let edges = ctx.edges;

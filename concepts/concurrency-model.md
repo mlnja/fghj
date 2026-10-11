@@ -15,7 +15,7 @@ There are three nested scopes, and each behaves differently:
 |---|---|---|
 | workspace | yes — different workspaces share nothing but the Docker daemon | nothing |
 | run (`RunState`) | no, by convention — `start` stops an existing run first | — |
-| node (one container) | **no** — serialized per node | `RunRegistry::node_locks` |
+| node (one container) | **no** — serialized per node | `Orchestrator::node_locks` |
 
 Different workspaces are genuinely independent: separate networks, separate
 sidecars, separate databases, separate route-table directories. Nothing in
@@ -24,7 +24,7 @@ sidecars, separate databases, separate route-table directories. Nothing in
 ## Per-node locks, not a workspace lock
 
 `restart_container`, `stop_container`, and `remove_container` each take the
-lock for **their node only** — `RunRegistry::node_lock(run_id, node_id)`,
+lock for **their node only** — `Orchestrator::node_lock(run_id, node_id)`,
 which hands out a `tokio::sync::Mutex` created on first use and keyed by the
 pair.
 
@@ -61,7 +61,7 @@ lose data: two nodes starting concurrently would each write back a snapshot
 taken before the other's container existed, and whichever finished second
 would erase the first.
 
-So state changes go through `RunRegistry::commit`, which re-reads the live
+So state changes go through `Orchestrator::commit`, which re-reads the live
 `RunState` under the registry mutex and applies a **targeted** change in
 place. It hands back the merged result, and that merged value — never the
 caller's earlier snapshot — is what gets passed to `save_run` and
@@ -124,11 +124,11 @@ Stated plainly, because these are choices and not oversights:
 
 ## Where this lives
 
-`src/runs/registry.rs` (`node_locks`, `node_lock`, `commit`) ·
-`src/runs/lifecycle.rs` (the three per-node commands) ·
-`src/runs/health.rs` (`HealthBudget`, `RunBudget`, `wait_for_healthy`,
+`src/orchestrator/registry.rs` (`node_locks`, `node_lock`, `commit`) ·
+`src/orchestrator/lifecycle.rs` (the three per-node commands) ·
+`src/orchestrator/health.rs` (`HealthBudget`, `RunBudget`, `wait_for_healthy`,
 `HealthOutcome`, `wait_for_exit`, `TaskOutcome`) ·
-`src/runs/orchestrate.rs` (one budget per whole-run call)
+`src/orchestrator/orchestrate.rs` (one budget per whole-run call)
 
 A version of this page rewritten for a reader who has not read `src/` lives
 at `docs/src/content/docs/concepts/concurrency-model.md`; this one stays the

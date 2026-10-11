@@ -233,7 +233,7 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
 }
 
 /// Stops a container without removing it — the counterpart to
-/// `stop_and_remove` below, used by `RunRegistry::stop_container` so a
+/// `stop_and_remove` below, used by `Orchestrator::stop_container` so a
 /// single node can be paused without losing the container (its logs, its
 /// exact identity for a later plain restart) the way a full remove would.
 pub async fn stop_container(docker: &Docker, name: &str) {
@@ -272,7 +272,7 @@ pub struct ContainerStatus {
     /// The process's exit code, once Docker has one to report — `None`
     /// while the container is still running (and for a container that never
     /// ran). The reading a terminating node (`Node.kind == "task"`, see
-    /// `runs::health::wait_for_exit`) is actually waiting on: for a
+    /// `orchestrator::health::wait_for_exit`) is actually waiting on: for a
     /// long-running service `status` alone answers every question, but for a
     /// container whose entire purpose is to finish, "exited" is only half
     /// the answer.
@@ -337,7 +337,7 @@ pub async fn inspect_status(
 /// A container's own IP address on one specific docker network — nothing
 /// today exposes this; `RunOpts.aliases`/Docker's embedded per-network DNS
 /// covers every existing need to *reach* a container by name, but the
-/// sidecar-proxy `extra_hosts` sentinel (see `runs/`'s
+/// sidecar-proxy `extra_hosts` sentinel (see `orchestrator/`'s
 /// `rewrite_extra_hosts_sentinel`) needs the sidecar's raw IP to hand to
 /// *other* containers via `HostConfig.extra_hosts`, which takes literal IPs,
 /// not names. Returns `Ok(None)` if the container doesn't exist or isn't

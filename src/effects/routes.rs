@@ -3,7 +3,7 @@
 //! The sidecar proxy polls a `routes.json` naming every domain it
 //! should answer for and where to connect. That file is a pure function of
 //! `EnvState::containers`, so it belongs here rather than being written by
-//! hand at the end of each lifecycle call — which is what `runs/` used to
+//! hand at the end of each lifecycle call — which is what `orchestrator/` used to
 //! do, from a `EnvState` snapshot taken *before* the Docker work, and
 //! therefore occasionally from a snapshot that had already lost a sibling
 //! node's routes.
@@ -12,7 +12,7 @@
 //! mistake: the table is rewritten whenever the state it is derived from
 //! changes, from whatever the state actually says at that moment.
 
-use crate::runs::route_table::{sidecar_routes_dir, write_route_table};
+use crate::orchestrator::route_table::{sidecar_routes_dir, write_route_table};
 use crate::state::{EnvState, WorkspaceState};
 
 use super::Effect;

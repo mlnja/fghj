@@ -103,7 +103,7 @@ pub fn ca_cert_path(dir: &Path) -> PathBuf {
 
 /// Path to the CA private key PEM `ensure_ca` persists under `dir` —
 /// exposed so callers (e.g. the sidecar container's bind-mount setup in
-/// `runs/`) can name the key file without reaching into `ca.rs` internals.
+/// `orchestrator/`) can name the key file without reaching into `ca.rs` internals.
 pub fn ca_key_path(dir: &Path) -> PathBuf {
     dir.join(CA_KEY_FILE)
 }
@@ -281,7 +281,7 @@ fn signing_generation() -> String {
 ///   anywhere. It is the key the OS trust store vouches for, so a leak of it
 ///   is a leak of trust for *every* hostname — `IsCa::Ca(Unconstrained)`
 ///   means a browser would accept a cert it signed for any domain at all.
-/// - The **signing** key cannot stay that private. `runs::route_table`'s
+/// - The **signing** key cannot stay that private. `orchestrator::route_table`'s
 ///   `refresh_sidecar_ca_copy` has to hand it to every run's sidecar
 ///   container as a world-readable `0644` file, because Docker's macOS
 ///   bind-mount bridge performs its permission check host-side, as the
@@ -336,7 +336,7 @@ pub fn ensure_signing_ca(dir: &Path, root: &LoadedCa) -> Result<LoadedCa> {
 }
 
 /// Path to the signing CA's certificate under `dir` — exposed so
-/// `runs::route_table` can copy it into the sidecar's own directory.
+/// `orchestrator::route_table` can copy it into the sidecar's own directory.
 pub fn signing_cert_path(dir: &Path) -> PathBuf {
     dir.join(SIGNING_CERT_FILE)
 }

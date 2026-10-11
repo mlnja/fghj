@@ -9,9 +9,9 @@ use crate::resolver::Graph;
 use crate::state::{ContainerObserved, EnvState, SyncStatus};
 
 use super::naming::DEFAULT_RUN_ID;
-use super::registry::RunRegistry;
+use super::registry::Orchestrator;
 
-impl RunRegistry {
+impl Orchestrator {
     /// Re-inspects every container in `env` against real docker state and
     /// reports its status, published port, and per-port host bindings —
     /// including flagging any container that's vanished (e.g. `docker rm`'d
@@ -85,7 +85,7 @@ impl RunRegistry {
     /// The read-only Docker-volume counterpart to `refresh` — lists what
     /// `docker::list_run_volumes` actually finds for the environment right now.
     /// Keeps `self.docker` private to this module (nothing outside
-    /// `runs/` touches the Docker client directly) while still letting
+    /// `orchestrator/` touches the Docker client directly) while still letting
     /// `effects::docker::observe` discover volume identity without its own
     /// independent Docker-polling loop. Empty (rather than an error) if the
     /// Docker call itself fails — same "purely observational, never worth
@@ -241,7 +241,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
-        let registry = RunRegistry::new(tmp.path().to_path_buf(), db, docker);
+        let registry = Orchestrator::new(tmp.path().to_path_buf(), db, docker);
 
         let stale_port = real_port.wrapping_add(1).max(1);
         let stale_container = ContainerInfo {

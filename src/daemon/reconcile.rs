@@ -24,7 +24,7 @@ pub(crate) const SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(15);
 /// Background loop, analogous to a Kubernetes controller's reconcile loop
 /// but read-only with respect to Docker: on each tick it re-inspects every
 /// workspace's live containers and updates their recorded status, published
-/// port, and routes (see `RunRegistry::inspect_containers`) so drift caused by someone
+/// port, and routes (see `Orchestrator::inspect_containers`) so drift caused by someone
 /// `docker stop`/`rm`-ing a container by hand, or Docker itself moving a
 /// container to a different ephemeral host port on a restart it initiated
 /// (restart policy, `dockerd` restarting), shows up — and routes correctly —
@@ -55,7 +55,7 @@ async fn reconcile_loop(daemon: Arc<DaemonControl>) {
                 // `effects::docker::observe`'s module doc for why this
                 // is the loop's only Docker read.
                 if let Some(actor) = daemon.registry.actor(&id) {
-                    effects::docker::observe::report(&state.runs, &actor).await;
+                    effects::docker::observe::report(&state.orchestrator, &actor).await;
                 }
             }
         }
@@ -69,7 +69,7 @@ async fn reconcile_loop(daemon: Arc<DaemonControl>) {
 /// slower interval (`SYNC_RECONCILE_INTERVAL`), re-resolves each wired
 /// workspace's `.fghj.yaml` from disk, compares that freshly-resolved graph
 /// against the config each live container was actually last started with
-/// (`RunRegistry::config_drift`), and reports the verdicts into the
+/// (`Orchestrator::config_drift`), and reports the verdicts into the
 /// workspace actor as `Action::ConfigDriftObserved`. Runs regardless of
 /// `daemon.is_active()` — sync status is informational graph metadata, not
 /// a routing/`/etc/hosts` side effect, so there's no "idle fghjd" reason to
@@ -96,7 +96,8 @@ async fn sync_reconcile_loop(daemon: Arc<DaemonControl>) {
             let Some(actor) = daemon.registry.actor(&id) else {
                 continue;
             };
-            effects::docker::observe::report_config_drift(&state.runs, &actor, &graph).await;
+            effects::docker::observe::report_config_drift(&state.orchestrator, &actor, &graph)
+                .await;
         }
     }
 }

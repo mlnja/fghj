@@ -125,6 +125,6 @@ lists them too. A flow never adds an edge, and an edge never adds a flow.
 
 Implemented: resolver (`visit.rs` no longer creates uses edges;
 `order.rs`/`cycles.rs` over required edges; `Graph::start_advisories` from
-`required: false` edges), runtime (`runs/orchestrate.rs` blocked
+`required: false` edges), runtime (`orchestrator/orchestrate.rs` blocked
 propagation, restart on recreate; `effects/docker/converge.rs` per-node
 cascades), the UI (dashed means `required: false`).

@@ -144,11 +144,11 @@ time, and nothing in the system knows it happened.
 Closing this needs a third node kind and a second termination predicate in the
 ordering algebra — not a field.
 
-> `src/runs/health.rs:14` · `src/runs/start_node.rs:258` · `src/daemon/api/exec.rs:49`
+> `src/orchestrator/health.rs:14` · `src/orchestrator/start_node.rs:258` · `src/daemon/api/exec.rs:49`
 > · exhaustive search for `seed|migrate|job|hook|post_start` returns nothing
 
 **Closed.** `#Task` is that third kind, declared inline by the service that
-needs it; `runs::health::wait_for_exit` is that second termination predicate.
+needs it; `orchestrator::health::wait_for_exit` is that second termination predicate.
 A task starts after its `after` targets and before its owner, and is not
 considered started until it has *finished* — a non-zero exit blocks every node
 downstream of it. Default re-run policy is `on_start` (idempotence is the task
@@ -178,7 +178,7 @@ The concept doc argues the removal well on *permission* grounds. But it removed
 the only variability mechanism and put nothing in its place, and records that as
 a bug fix rather than as a deliberate collapse of the run space.
 
-> `src/runs/fqdn_template.rs` · [[branch-ownership-model]] "Per-run branch pin … removed entirely"
+> `src/orchestrator/fqdn_template.rs` · [[branch-ownership-model]] "Per-run branch pin … removed entirely"
 
 <a id="e3"></a>
 #### E3 · Builds cannot carry credentials — in a tool built for private multi-repo orgs
@@ -198,7 +198,7 @@ Missing `target` is separately painful: `target: dev` vs `target: prod` off one
 multi-stage Dockerfile is the standard pattern, and here it forces a second
 Dockerfile.
 
-> `src/resolver/config.rs:29` · `src/runs/node_spec.rs:146` (`build_image` takes only dir, dockerfile, tag, platform)
+> `src/resolver/config.rs:29` · `src/orchestrator/node_spec.rs:146` (`build_image` takes only dir, dockerfile, tag, platform)
 
 **Closed.** `#Build` gained `target`, `ssh` and `secrets` (with `#BuildSecret`).
 `build_image` originally dispatched on whether the build actually needed
@@ -243,7 +243,7 @@ field behind it. So: no multiple networks, no external network to join, no
 *not* reach B**. Any dev environment whose purpose is testing isolation,
 partition behaviour, or mesh policy is outside the language.
 
-> `src/runs/orchestrate.rs:27,104` · `src/docker.rs:222`
+> `src/orchestrator/orchestrate.rs:27,104` · `src/docker.rs:222`
 
 <a id="e6"></a>
 #### E6 · The repo→folder map is non-injective, and the override was deleted
@@ -431,7 +431,7 @@ runs/workspaces either." Both are true across runs and workspaces and false
 within a node. `check_port_config` catches only duplicate `primary` and orphan
 `wildcard`; there is no domain-collision check at all.
 
-> `src/runs/start_node.rs:213` · `src/resolver/visit_dependency.rs:196` · `src/state/query.rs:68` · `src/resolver/validate.rs`
+> `src/orchestrator/start_node.rs:213` · `src/resolver/visit_dependency.rs:196` · `src/state/query.rs:68` · `src/resolver/validate.rs`
 
 **Resolution (closed, with [B2](#b2) and [B4](#b4)).** New pass
 `resolver::uniqueness::check_derived_name_collisions`, run at the end of
@@ -473,7 +473,7 @@ Note the asymmetry: `derive_domain` does *not* sanitize `node_id` (dots
 preserved, injectivity kept) while `container_name` does (dots destroyed). The
 same id flows into two projections with opposite escaping rules.
 
-> `src/runs/node_spec.rs:36` · `src/util/label.rs:6` · `src/runs/domain.rs:42`
+> `src/orchestrator/node_spec.rs:36` · `src/util/label.rs:6` · `src/orchestrator/domain.rs:42`
 
 **Resolution (closed).** Checked by `uniqueness::check_container_names`, in the
 pass described under [B1](#b1).
@@ -496,7 +496,7 @@ names are the one namespace in the design that is not qualified, and the doc's
 phrasing ("transparently") obscures that it is also the one with a destructive
 failure mode.
 
-> `src/runs/naming.rs:25` · [[docker-and-downloads]] "Volumes: two shapes, one Docker primitive"
+> `src/orchestrator/naming.rs:25` · [[docker-and-downloads]] "Volumes: two shapes, one Docker primitive"
 
 **Resolution (closed).** Both halves of the suggested remedy, since they are
 the same change seen from two sides. `derive_volume_name` now takes the
@@ -544,7 +544,7 @@ refactor only by luck.
 | claim in `concepts/` | actual status |
 |---|---|
 | "Only one run can actually own a `stable`-scoped name from the host at a time." ([[node-identity-and-domains]]) | **Not enforced.** Both runs register the same route; `resolve_route`'s `find_map` returns the first by map order. Nothing rejects the second run, nothing warns, and which run you reach is unspecified. |
-| "Two nodes can never collide on the result." (`src/runs/domain.rs`) | **True of the formula, false of the codomain** — see [B1](#b1), now warned on at resolve time. |
+| "Two nodes can never collide on the result." (`src/orchestrator/domain.rs`) | **True of the formula, false of the codomain** — see [B1](#b1), now warned on at resolve time. |
 | "The folder name (`local_path`) is guaranteed unique…" ([[node-identity-and-domains]]) | `local_path` no longer exists. The guarantee now reads: two same-named repos *cannot both be present* — see [E6](#e6). |
 | "A dependency whose local folder isn't present renders as a stub instead of failing." ([[flat-workspace-model]]) | **True**, and now true of a malformed one too, in a different way — see [B11](#b11). |
 | Diamond branch conflicts are "structurally impossible." ([[branch-ownership-model]]) | **True** — and the strongest argument in the folder. Worth noting the cost: the conflict is not resolved, it is made *unrepresentable*, so a genuine need for two branches of one repo must be serialized in wall-clock time with no mechanism to help. |
@@ -582,10 +582,10 @@ a UI affordance. The policy question — stop it, keep it, ask — can stay the
 user's, exactly as the read-only reconciler philosophy demands. But the
 *observation* has to be representable before any policy can exist.
 
-> `src/state/sync_status.rs:15-20` · `src/runs/observe.rs:175-181` · `src/daemon/reconcile.rs:81`
+> `src/state/sync_status.rs:15-20` · `src/orchestrator/observe.rs:175-181` · `src/daemon/reconcile.rs:81`
 
 **Resolution (closed).** `SyncStatus::Orphaned` added as a fourth variant.
-`runs::observe::config_drift` now returns it when `graph.nodes` has no entry for
+`orchestrator::observe::config_drift` now returns it when `graph.nodes` has no entry for
 a live container, and `DriftReport` carries the full `SyncStatus` rather than the
 `Option<bool>` that made `Orphaned` and `Unknown` indistinguishable before the
 reducer ever saw them. The Actual tab synthesizes a graph node for any orphaned
@@ -647,7 +647,7 @@ drifted container precisely *because* it was alive meant editing
 `.fghj.yaml` and pressing the button did nothing at all. The distinction is
 not whether drift should be healed but **who asked**.
 
-`runs::orchestrate::top_up_may_skip` now holds all three skip conditions
+`orchestrator::orchestrate::top_up_may_skip` now holds all three skip conditions
 (alive, described, unchanged) as one pure, tested function; an inconclusive
 re-resolve counts as unchanged, since bouncing a healthy container on a guess
 is the worse mistake. The recreate is narrated as a `create` event with its
@@ -800,7 +800,7 @@ discarded without logging — the only trace is the per-node events table.
 The clearest case in the codebase of the four-store problem from §0 producing a
 state no single component can see.
 
-> `src/runs/orchestrate.rs:180` · `src/effects/docker/converge.rs:239,247` · `src/reducer/observation.rs:31-40,82-86`
+> `src/orchestrator/orchestrate.rs:180` · `src/effects/docker/converge.rs:239,247` · `src/reducer/observation.rs:31-40,82-86`
 
 **Resolution (closed).** Not by rolling back — that is the one fix that would
 be wrong here. `start` builds a *named* run from nothing, so a half-built run is
@@ -941,7 +941,7 @@ are possible. At start time:
 ```rust
 if !progressed {
     ordered.extend(remaining.into_iter().map(str::to_string));
-    break;                                  // src/runs/order.rs:51
+    break;                                  // src/orchestrator/order.rs:51
 }
 ```
 
@@ -1018,12 +1018,12 @@ mutex — across `start_node` → `wait_for_healthy`. One unhealthy node blocks 
 other node's lifecycle operation in that workspace for up to two minutes.
 `begin_action` dedups only the *same* node.
 
-> `src/runs/health.rs:14-23` · `src/runs/registry.rs:26` · `src/runs/lifecycle.rs:72,116,159`
+> `src/orchestrator/health.rs:14-23` · `src/orchestrator/registry.rs:26` · `src/orchestrator/lifecycle.rs:72,116,159`
 
 **Resolution.** Both halves fixed, and they turned out to be one problem seen
 twice: the lock and the timeout were each scoped to the wrong unit.
 
-The workspace-wide `action_lock` became `RunRegistry::node_locks`, a
+The workspace-wide `action_lock` became `Orchestrator::node_locks`, a
 `tokio::sync::Mutex` per `(run_id, node_id)` created on first use. Two calls
 for the same node genuinely must not interleave — both `stop_and_remove` and
 then recreate one fixed container name, which Docker rejects for the loser.
@@ -1034,7 +1034,7 @@ the workspace.
 Finer locking exposed a hazard the coarse lock had masked: every lifecycle
 path cloned the whole `RunState`, mutated the clone across its Docker work,
 and wrote it back wholesale, so two concurrent per-node updates would each
-erase the other's container. `RunRegistry::commit` now re-reads the live state
+erase the other's container. `Orchestrator::commit` now re-reads the live state
 under the registry mutex, applies a targeted change, and hands back the
 *merged* value — which is what goes to `save_run` and `write_route_table`,
 since a route table written from a stale snapshot would unroute a container
@@ -1080,7 +1080,7 @@ changed what was known, not just where it was recorded.
 - ~~`README.md`'s "Map of the codebase" points at `src/resolver.rs`,
   `src/runs.rs`, `src/daemon.rs`, `src/store.rs` — **all four no longer exist**
   (split into directories).~~ **Closed.** The map now names the real paths, and
-  the run row was split in two so `src/runs/` and the actor stack point at
+  the run row was split in two so `src/orchestrator/` and the actor stack point at
   different guides.
 - ~~[[flat-workspace-model]]: "overridable via `local_path`" — `local_path` is gone
   from the schema entirely.~~ **Closed.** The claim is gone; the file now
@@ -1123,21 +1123,21 @@ argument.
 - ~~The **actor / action / reducer / effects architecture** (`src/action.rs`,
   `src/reducer/`, `src/effects/`, `src/state/`) — the single largest structural
   change in the codebase, described nowhere. [[run-lifecycle-and-registry]] still
-  describes the pre-refactor `RunRegistry`.~~ **Closed** by
+  describes the pre-refactor `Orchestrator`.~~ **Closed** by
   [[state-and-effects]], written when the migration finished.
 
   **Resolution.** The migration was half-done and the half-doneness was the
   expensive part. Two stores of run state existed — the actor's
-  `WorkspaceState` and `RunRegistry`'s own `BTreeMap<String, RunState>` —
+  `WorkspaceState` and `Orchestrator`'s own `BTreeMap<String, RunState>` —
   reconciled by `effects::bridge` re-polling the second one about once a
   second. Everything that made the codebase feel bigger than "hosts, domains,
   ports and TLS over Docker" traced back to that duplication: every lifecycle
   call wrote both copies, observations could reach SQLite ahead of the reducer
   that owned them, config drift had two fields that disagreed, and duplicate-
-  action gating had two answers (`RunRegistry.pending` and
+  action gating had two answers (`Orchestrator.pending` and
   `ContainerInfo::pending_action`).
 
-  `RunRegistry` is now stateless. It keeps the Docker client, the database
+  `Orchestrator` is now stateless. It keeps the Docker client, the database
   handle, the per-node locks and the log-capture tasks; it takes whatever
   prior state a call needs as an argument and reports results back as
   `Action`s. `refresh` became `inspect_containers(&runs) -> Vec<..>` —
@@ -1150,7 +1150,7 @@ argument.
 
   Two hazards the removal exposed, both fixed here rather than left implicit:
   a daemon dying mid-create would have left containers running and unrecorded
-  (fixed by `runs::progress` -> `Action::RunCreateProgress`, reported per node
+  (fixed by `orchestrator::progress` -> `Action::RunCreateProgress`, reported per node
   as it comes up, with the drain ordered before the settle so a late report
   can't re-add a container the settle dropped); and a create settling *after*
   its run was torn down would have resurrected it, so `RunCreateSettled` now
@@ -1245,7 +1245,7 @@ reading the code had not.
 - [B16](#b16) above.
 - [[branch-ownership-model]] described `default_branch` as "the initial
   `pull_all` clone target, **and the fallback label for a run's build tag**".
-  The second half was never true: `runs::node_spec` tags images from
+  The second half was never true: `orchestrator::node_spec` tags images from
   `node.branch`, which for any node that can actually be built is the *live*
   git branch (falling back to `"local"`, not to the declared value), and the
   declared value only ever appears as the `branch` of a **stub** node — which
@@ -1345,7 +1345,7 @@ Findings that were not path-level:
 - **Two module references that the path check structurally could not see**,
   because they were written as a bare `` `runs.rs` `` with no `src/` prefix.
   One of them also mis-attributed per-container rehydration to
-  `RunRegistry::new()`, which no longer reloads anything — that moved to
+  `Orchestrator::new()`, which no longer reloads anything — that moved to
   `persistence::rehydrate`. A prefix-anchored path check is blind to this;
   matching a bare `` `word.rs` `` too is a one-line widening and worth it.
 
@@ -1485,7 +1485,7 @@ conflict.
 unreachable `DOCKER_HOST` is the check that the split is honest.
 
 Running that check surfaced eight *more* failures with nothing to do with
-Docker: `runs::registry`'s node-lock tests and
+Docker: `orchestrator::registry`'s node-lock tests and
 `daemon::registry`/`daemon::control`'s workspace-index tests are pure
 bookkeeping, but they sit behind types that own a `bollard::Docker`, and
 `connect_with_local_defaults` resolves the unix socket at **construction** —

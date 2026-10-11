@@ -66,7 +66,7 @@ Routes, grouped by what they front:
   `downloads::DownloadRegistry` (see [[docker-and-downloads]]).
 - **Runs**: `GET`/`POST /runs`, `POST /runs/{run_id}/stop`, and per-node
   `POST .../nodes/{node_id}/start`|`stop`|`delete` — wrappers over
-  `runs::RunRegistry` (see [[run-lifecycle-and-registry]]); `post_runs` is
+  `orchestrator::Orchestrator` (see [[run-lifecycle-and-registry]]); `post_runs` is
   the one handler that decides `start` vs. `ensure_running` based on
   whether the request specified a `run_id`. `POST .../debug-wait` is the one
   per-node route with a request body (`{"wait": bool}`); it flips a value in

@@ -2,7 +2,7 @@
 //! life, applies the pure `reducer::reduce` to every dispatched `Action`
 //! serially, and publishes the result for effects to observe. It is the
 //! only store of environment state in the daemon: everything else
-//! (`runs::RunRegistry`, the effects) reads it and reports back to it.
+//! (`orchestrator::Orchestrator`, the effects) reads it and reports back to it.
 
 use std::sync::Arc;
 

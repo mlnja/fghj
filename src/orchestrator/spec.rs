@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use crate::resolver::{Healthcheck, Node, NodeBuild};
 
-/// The pure, side-effect-free result of `RunRegistry::resolve_node_spec` —
+/// The pure, side-effect-free result of `Orchestrator::resolve_node_spec` —
 /// everything about a node's config that has to be actually computed (as
 /// opposed to read straight off `Node`) before it can be either run for real
 /// (`start_node`) or hashed to check for drift (`spec_hash`,
@@ -23,7 +23,7 @@ pub(crate) struct NodeSpec {
 
 /// Hashes everything about `node` + `spec` that actually affects how the
 /// container runs, for `ContainerInfo::config_hash` /
-/// `RunRegistry::config_drift` to compare against. Deliberately
+/// `Orchestrator::config_drift` to compare against. Deliberately
 /// excludes anything that's either pure identity (`container_name`, `domain`,
 /// `aliases` all derive one-to-one from `node.id` + run id — never drift
 /// independently of the rest of the spec) or genuinely ephemeral (an
@@ -133,8 +133,8 @@ pub(crate) fn spec_hash(node: &Node, spec: &NodeSpec) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orchestrator::testing::test_node;
     use crate::resolver::NodeBuild;
-    use crate::runs::testing::test_node;
 
     fn empty_spec() -> NodeSpec {
         NodeSpec {

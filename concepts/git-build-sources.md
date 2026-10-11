@@ -100,6 +100,6 @@ context may be a git URL); `resolver::build_source` (parsing, clone path,
 on-disk state) and `BuildSource` on `NodeBuild`; the checks in
 `resolver::validate` (`check_build`, `check_source_paths`); cloning in
 `downloads.rs` (`clone_source_logged`, from Pull all, a flow's pull and a
-node's download); the build in `runs/node_spec.rs` and `docker/image.rs`
+node's download); the build in `orchestrator/node_spec.rs` and `docker/image.rs`
 (`INLINE_DOCKERFILE`, `skip_git_dir`); the Drawer's source rows and Pull
 button.

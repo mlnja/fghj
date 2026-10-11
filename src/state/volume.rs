@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 /// Everything about a Docker volume fghj *wants* to exist — currently just
-/// its derived name (see `runs::naming::derive_volume_name`).
+/// its derived name (see `orchestrator::naming::derive_volume_name`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VolumeDesired {
     pub name: String,

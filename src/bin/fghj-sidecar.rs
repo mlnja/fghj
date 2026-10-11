@@ -12,11 +12,11 @@
 //! the CA's private key bind-mounted in (read-only), so it deserves its own
 //! minimal, easy-to-audit entrypoint rather than a branch inside the daemon
 //! binary, which also unconditionally requires root and runs the full
-//! control API. See `runs/`'s sidecar lifecycle for how this gets started,
+//! control API. See `orchestrator/`'s sidecar lifecycle for how this gets started,
 //! and `sidecar_image.rs` for how its Docker image gets built.
 //!
 //! Fixed, hardcoded mount paths (no CLI args, nothing to configure) — the
-//! bind mounts `runs/` sets up are the only thing that ever has to agree
+//! bind mounts `orchestrator/` sets up are the only thing that ever has to agree
 //! with this binary about paths.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -35,7 +35,7 @@ const CA_DIR: &str = "/etc/fghj-sidecar/ca";
 const ROUTES_PATH: &str = "/etc/fghj-sidecar/routes/routes.json";
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// One entry from the route table `runs/` writes — see its
+/// One entry from the route table `orchestrator/` writes — see its
 /// `RouteFileEntry` (kept as a separately-defined, field-name-matching type
 /// rather than a shared one, so this binary doesn't need to depend on
 /// `fghj::runs` at all). `lookup` is a `fghj.internal` domain (or an active
@@ -184,7 +184,7 @@ async fn main() -> Result<()> {
     );
 
     // Every node in this run points its `--dns` at this container first
-    // (see `runs::start_node`) — recognized names (this run's
+    // (see `orchestrator::start_node`) — recognized names (this run's
     // `fghj.internal` zone and any active alias) are answered directly with
     // this container's own address; anything else is forwarded verbatim to
     // Docker's embedded resolver, exactly like the host server forwards

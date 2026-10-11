@@ -21,7 +21,7 @@ questions with two different answers:
    SQLite database at `<workspace>/.fghj/fghj.db` (`WorkspaceDb`),
    colocated with the workspace the same way `.git` is, so it travels with
    the checkout rather than living only in `fghjd`'s process memory. This is
-   the durable twin of `RunRegistry`'s in-memory state — reopened and
+   the durable twin of `Orchestrator`'s in-memory state — reopened and
    reconciled against real Docker state on every daemon startup (see
    [[run-lifecycle-and-registry]]).
 

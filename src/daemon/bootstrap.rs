@@ -153,9 +153,10 @@ pub async fn run_control_api() -> Result<()> {
     // Best-effort: this is a cleanup, and failing it should not stop `fghjd`
     // from coming up — `ensure_sidecar` calls the same function and will
     // surface a real error if the copy is actually needed.
-    if let Err(e) = tokio::task::spawn_blocking(crate::runs::route_table::refresh_sidecar_ca_copy)
-        .await
-        .context("sidecar CA refresh task panicked")?
+    if let Err(e) =
+        tokio::task::spawn_blocking(crate::orchestrator::route_table::refresh_sidecar_ca_copy)
+            .await
+            .context("sidecar CA refresh task panicked")?
     {
         daemon_log::warn(format!(
             "fghjd: failed to refresh the sidecar CA copy: {e:#}"
@@ -177,7 +178,7 @@ pub async fn run_control_api() -> Result<()> {
     // run before `fghjd` itself might need to restart, so a slow or failed
     // fetch here shouldn't hold up `fghjd` starting or fail it outright — a
     // run that actually needs its sidecar will surface a real error from
-    // `RunRegistry::ensure_sidecar`'s own call to this same function. Doing it
+    // `Orchestrator::ensure_sidecar`'s own call to this same function. Doing it
     // here at all is what usually keeps the cost off the first run: a pull is
     // fast but not instant, and the fallback path compiles the whole crate
     // inside a container.

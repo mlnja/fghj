@@ -114,7 +114,7 @@ pub(crate) fn sibling_domain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runs::testing::{test_graph, test_node};
+    use crate::orchestrator::testing::{test_graph, test_node};
 
     #[test]
     fn expand_service_fqdn_templates_resolves_self_reference() {

@@ -47,7 +47,7 @@ impl WorkspaceDb {
     /// Appends one step to the cycle opened by [`Self::begin_event_cycle`].
     /// `status` is a small open-ended vocabulary (`"running"`, `"ok"`,
     /// `"error"`) rather than an enum, matching the informal, human-facing
-    /// nature of these entries — see `runs::RunRegistry::record_event`, the
+    /// nature of these entries — see `orchestrator::Orchestrator::record_event`, the
     /// only caller.
     pub async fn append_event(
         self: Arc<Self>,

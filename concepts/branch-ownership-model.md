@@ -16,7 +16,7 @@ distinct owners:
    against them. It is read once, at clone time, and never again. It is not a
    pin: `downloads::ensure_checkout_is` only verifies `origin` on a checkout
    that already exists, so re-pulling never moves a live tree off its branch.
-   Nor does it reach a build tag — `runs::node_spec` tags images
+   Nor does it reach a build tag — `orchestrator::node_spec` tags images
    `fghj/{id}:{sanitize_label(node.branch)}` from the *live* branch (falling
    back to `"local"`), and a node with no checkout can't be built at all, so
    the declared value is only ever the `branch` of a **stub** node, which is

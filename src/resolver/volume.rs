@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// dependency. Mirrors `#Volume` in `schema/component.cue` — the untagged
 /// shapes match its `{host,...}` vs `{name,...}` disjunction directly.
 /// A named volume's real Docker name is derived (never author-declared),
-/// the same way a node's domain is — see `runs::derive_volume_name`, which
+/// the same way a node's domain is — see `orchestrator::derive_volume_name`, which
 /// folds in the declaring node's id unless `shared` is set.
 #[derive(Debug, Deserialize, Clone, Serialize)]
 #[serde(untagged)]

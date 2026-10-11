@@ -1,7 +1,7 @@
 //! Dependency-cycle detection.
 //!
 //! [[branch-ownership-model]] acknowledges outright that real requirement
-//! cycles between repos are possible, and `runs::topological_start_order`
+//! cycles between repos are possible, and `orchestrator::topological_start_order`
 //! already handles one without hanging: when no node can make progress, the
 //! remainder is appended in sorted order and the run starts anyway. That
 //! fallback is the right call — refusing to bring up an entire environment
@@ -120,7 +120,7 @@ fn walk<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runs::testing::{edge, runtime_edge};
+    use crate::orchestrator::testing::{edge, runtime_edge};
 
     #[test]
     fn an_acyclic_graph_reports_nothing() {

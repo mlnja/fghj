@@ -12,7 +12,7 @@ use crate::supervisor;
 /// actor's published `state::WorkspaceState` is the only store, so callers
 /// pass in whatever prior state a call needs and dispatch the result back
 /// as an action.
-pub struct RunRegistry {
+pub struct Orchestrator {
     pub(super) workspace: std::path::PathBuf,
     pub(super) db: Arc<WorkspaceDb>,
     pub(super) docker: Arc<bollard::Docker>,
@@ -49,7 +49,7 @@ pub struct RunRegistry {
     pub(super) log_captures: Mutex<HashMap<String, tokio::task::AbortHandle>>,
 }
 
-impl RunRegistry {
+impl Orchestrator {
     pub fn new(
         workspace: std::path::PathBuf,
         db: Arc<WorkspaceDb>,
@@ -115,11 +115,11 @@ mod tests {
     /// A registry with no runs, backed by a throwaway database. The docker
     /// client is never dialled by anything below — these tests are about the
     /// locking and merge rules, which are pure bookkeeping.
-    async fn empty_registry() -> (tempfile::TempDir, RunRegistry) {
+    async fn empty_registry() -> (tempfile::TempDir, Orchestrator) {
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
         let docker = Arc::new(crate::docker::undialled_client());
-        let registry = RunRegistry::new(tmp.path().to_path_buf(), db, docker);
+        let registry = Orchestrator::new(tmp.path().to_path_buf(), db, docker);
         (tmp, registry)
     }
 

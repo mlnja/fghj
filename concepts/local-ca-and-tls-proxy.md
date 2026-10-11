@@ -233,7 +233,7 @@ and `PROGRESS.md`'s "Known gaps" for the one edge this doesn't quite close
 (a *removed*, not just stopped, container's route can briefly outlive it
 between reconcile ticks).
 
-Where those routes actually come from is `runs::start_node` — see
+Where those routes actually come from is `orchestrator::start_node` — see
 [[node-identity-and-domains]] for how a route's domain is derived, and
 [[run-lifecycle-and-registry]] for when `start_node` runs and how
 `ContainerInfo.routes` gets persisted so routing survives a `fghjd` restart.
@@ -363,7 +363,7 @@ Implemented: `src/web/ca.rs` (root CA generation/persistence/trust install,
 the name-constrained signing CA, dynamic per-SNI leaf issuance, the two
 key-free trust files and their de-duplicated bundle), the
 `/etc/fghj/certs` bind on every container (`daemon::certs_dir`,
-`runs::node_spec`), `src/web/proxy.rs` (HTTP redirect, TLS
+`orchestrator::node_spec`), `src/web/proxy.rs` (HTTP redirect, TLS
 termination,
 `RouteResolver`, apex vs. per-service dispatch, fancy-404 for unknown in-zone
 names). `daemon::WorkspaceRegistry` implements `RouteResolver` over real run

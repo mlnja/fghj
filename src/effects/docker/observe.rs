@@ -5,13 +5,13 @@
 //!
 //! Deliberately does **not** run its own independent Docker-inspection
 //! timer. `daemon::spawn_reconciler` calls `report` once a second, and
-//! `report` does the inspecting itself (`RunRegistry::inspect_containers`);
+//! `report` does the inspecting itself (`Orchestrator::inspect_containers`);
 //! a second, independent Docker-polling loop here would double the real
 //! Docker API load for the exact same information.
 //!
 //! This is the *only* way a container's real status reaches anything
 //! that acts on it: live HTTPS routing and DNS answering read the reducer
-//! state these reports feed (`state::query`), not `runs::RunRegistry`. If
+//! state these reports feed (`state::query`), not `orchestrator::Orchestrator`. If
 //! this stops being called, routes go stale.
 //!
 //! Container drift is deliberately only ever *reported*, never fed back
@@ -25,9 +25,9 @@
 
 use crate::action::Action;
 use crate::actor::ActorHandle;
+use crate::orchestrator::Orchestrator;
+use crate::orchestrator::observe::DriftReport;
 use crate::resolver::Graph;
-use crate::runs::RunRegistry;
-use crate::runs::observe::DriftReport;
 use crate::state::ContainerObserved;
 
 use super::volumes;
@@ -37,16 +37,16 @@ use super::volumes;
 /// back into the actor's state: the inspection takes the actor's state as
 /// its input and its results go straight out as actions — one read, one
 /// writer.
-pub async fn report(runs: &RunRegistry, actor: &ActorHandle) {
+pub async fn report(orchestrator: &Orchestrator, actor: &ActorHandle) {
     let Some(env) = actor.current().env.clone() else {
         return;
     };
-    for (node_id, observed) in runs.inspect_containers(&env).await {
+    for (node_id, observed) in orchestrator.inspect_containers(&env).await {
         let _ = actor
             .dispatch(container_observed(&node_id, &observed))
             .await;
     }
-    volumes::observe_volumes(runs, actor).await;
+    volumes::observe_volumes(orchestrator, actor).await;
 }
 
 /// The config-drift counterpart to [`report`], driven on its own much
@@ -55,14 +55,14 @@ pub async fn report(runs: &RunRegistry, actor: &ActorHandle) {
 /// the freshly-resolved workspace the caller just read off disk.
 ///
 /// This is what makes `Action::ConfigDriftObserved` reach the reducer at
-/// all: before it existed, `RunRegistry::refresh_sync_status` wrote drift
+/// all: before it existed, `Orchestrator::refresh_sync_status` wrote drift
 /// into the *old* state only, so `ContainerObserved::sync` stayed `Unknown`
 /// forever and the UI's "desired ≠ actual" badge never lit up.
-pub async fn report_config_drift(runs: &RunRegistry, actor: &ActorHandle, graph: &Graph) {
+pub async fn report_config_drift(orchestrator: &Orchestrator, actor: &ActorHandle, graph: &Graph) {
     let Some(env) = actor.current().env.clone() else {
         return;
     };
-    for report in runs.config_drift(graph, &env).await {
+    for report in orchestrator.config_drift(graph, &env).await {
         let _ = actor.dispatch(config_drift_observed(&report)).await;
     }
 }
@@ -79,7 +79,7 @@ fn config_drift_observed(report: &DriftReport) -> Action {
 
 /// Pure projection of a freshly re-inspected container into the report
 /// `Action` the reducer understands — split out from `report` so it's
-/// unit-testable without a real `RunRegistry`/Docker client. Takes a
+/// unit-testable without a real `Orchestrator`/Docker client. Takes a
 /// `ContainerObserved`, not a whole `ContainerInfo`, so it is structurally
 /// incapable of carrying anything from `desired`: this is an observation,
 /// and the reducer must never learn what fghj wants from something
@@ -89,7 +89,7 @@ fn container_observed(node_id: &str, observed: &ContainerObserved) -> Action {
         node_id: node_id.to_string(),
         status: observed.status.clone(),
         published_port: observed.published_port,
-        // `RunRegistry::inspect_containers` doesn't inspect a container's
+        // `Orchestrator::inspect_containers` doesn't inspect a container's
         // network-internal address, so there's none to report here.
         ip: None,
         ports: observed.ports.clone(),

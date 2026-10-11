@@ -137,7 +137,7 @@ actually opens the file for sharing runs as the real macOS user and enforces
 its own permission check *before* the request ever reaches the container's
 UID namespace — verified directly: even outside any container, `cat` on
 that file failed the same way as the logged-in user. Fixed by
-`refresh_sidecar_ca_copy()` in `src/runs/route_table.rs`, which keeps a separate `0644`
+`refresh_sidecar_ca_copy()` in `src/orchestrator/route_table.rs`, which keeps a separate `0644`
 world-readable copy of the **signing** CA's cert+key at
 `/var/lib/fghjd/sidecar-ca/`, refreshed on every sidecar (re)creation, and
 mounts *that* into the sidecar instead of the real CA directory. The root's

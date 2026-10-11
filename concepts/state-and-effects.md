@@ -75,22 +75,22 @@ disagree, and reconciling them is a poller, and a poller is a window in
 which the system is confidently wrong.
 
 That rule was learned the expensive way. Through migration phase 4 there
-were two stores: the actor's, and `runs::RunRegistry`'s own
+were two stores: the actor's, and `orchestrator::Orchestrator`'s own
 `BTreeMap<String, RunState>`, kept roughly in step by `effects::bridge`
 re-polling the latter once a second. Every lifecycle call had to remember
 to write both. What that bought:
 
 - Observations could reach the database ahead of the reducer that was
-  supposed to own them, because `refresh` wrote into `RunRegistry`'s copy
-  and `RunRegistry` persisted its copy.
-- Config drift was written into a second `synced` field on `RunRegistry`'s
+  supposed to own them, because `refresh` wrote into `Orchestrator`'s copy
+  and `Orchestrator` persisted its copy.
+- Config drift was written into a second `synced` field on `Orchestrator`'s
   container as well as into `ContainerObserved::sync`, and the two
   disagreed.
-- A `pending` map in `RunRegistry` gated duplicate actions in parallel with
+- A `pending` map in `Orchestrator` gated duplicate actions in parallel with
   the reducer's `pending_action`, so "is this node already starting?" had
   two answers.
 
-Phase 5 deleted the second store outright. `RunRegistry` now owns only the
+Phase 5 deleted the second store outright. `Orchestrator` now owns only the
 Docker-facing *machinery* — the bollard client, the database handle, the
 per-node lifecycle locks, the log-capture tasks — and holds no run state
 at all. Where it used to read `self.runs`, it now takes what it needs as an
@@ -118,7 +118,7 @@ five containers running and nothing written down — fghj manufacturing the
 very `Orphaned` state its observer exists to surface
 ([[run-lifecycle-and-registry]]).
 
-The fix is `runs::progress`: `start`/`ensure_running` take an optional
+The fix is `orchestrator::progress`: `start`/`ensure_running` take an optional
 `ProgressSink` (`mpsc::UnboundedSender<RunProgress>`) and report each node
 the moment it comes up. `effects::docker::converge` owns the receiving end
 and translates each report into `Action::RunCreateProgress`.
@@ -162,7 +162,7 @@ and collapsing them is what created the two-answer `pending` map above.
 ## Status
 
 Implemented. `src/actor.rs`, `src/action.rs`, `src/reducer/`,
-`src/effects/`, `src/state/`. `RunRegistry` is stateless as of migration
+`src/effects/`, `src/state/`. `Orchestrator` is stateless as of migration
 phase 5; `server::WorkspaceState` keeps `rehydrated` (what a previous
 `fghjd` lifetime left running, reconciled against Docker once at
 construction) purely to seed the actor in

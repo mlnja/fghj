@@ -4,7 +4,7 @@
 //! running container in every workspace" loop: `WorkspaceRegistry`'s
 //! `resolve_route` (SNI -> backend port), `active_wildcard_suffixes` (DNS
 //! zones) and `active_raw_endpoints` (raw-net telemetry) walked the *old*
-//! `runs::RunRegistry`, while `effects::dns` and `effects::raw_net` walked
+//! `orchestrator::Orchestrator`, while `effects::dns` and `effects::raw_net` walked
 //! the new `state::WorkspaceState` for the same facts. This is that walk,
 //! written once, over the new state only.
 //!

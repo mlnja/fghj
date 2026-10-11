@@ -15,7 +15,7 @@ use crate::docker;
 use crate::resolver::{Graph, Node};
 use crate::state::{ContainerInfo, EnvCreateError, EnvSpec, EnvState, PendingAction};
 
-use super::registry::RunRegistry;
+use super::registry::Orchestrator;
 
 /// Whether a top-up should leave `node` alone because it is a terminating
 /// node that has already done its job.
@@ -61,7 +61,7 @@ fn task_already_done(node: &Node, prior: Option<&ContainerInfo>) -> bool {
 ///    the persisted `EnvState`, since a container can be stopped or removed
 ///    out-of-band between calls.
 /// 2. **fghj still has an `ContainerInfo` for it.** `state.containers` is
-///    loaded from the DB (see `RunRegistry::new`'s reconciliation, which
+///    loaded from the DB (see `Orchestrator::new`'s reconciliation, which
 ///    drops a whole run's history the moment any one of its containers isn't
 ///    found), so it can be missing a node whose container is running
 ///    perfectly well. Recreating is how such a node gets re-described and
@@ -113,7 +113,7 @@ fn recreated_requirement<'a>(
         .find(|to| recreated.contains(*to))
 }
 
-impl RunRegistry {
+impl Orchestrator {
     /// Narrates a node a start skipped because something it can't start
     /// without failed.
     pub(super) async fn record_blocked(&self, run_id: &str, node_id: &str, by: &str) {
@@ -386,7 +386,7 @@ fn report_done(progress: Option<&ProgressSink>, state: &EnvState, info: Containe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runs::testing::test_node;
+    use crate::orchestrator::testing::test_node;
     use crate::state::{ContainerDesired, ContainerObserved};
 
     fn task(id: &str, run: &str) -> Node {

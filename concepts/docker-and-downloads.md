@@ -61,7 +61,7 @@ pattern of bind-mounting a sibling repo's checkout directly (e.g.
 
 A `Named` volume's real Docker name is *derived*, never author-declared —
 same invariant as a node's domain (see [[node-identity-and-domains]]).
-`runs::derive_volume_name` reuses `derive_domain` itself: `scope: "run"`
+`orchestrator::derive_volume_name` reuses `derive_domain` itself: `scope: "run"`
 (default) folds in the run id exactly like `domain_scope: "run"` does,
 `"stable"` doesn't. It also folds in **the declaring node's id**, which is
 what makes the author-chosen `name` private to the node that wrote it —
@@ -107,9 +107,9 @@ created before it are orphaned, not re-pointed.
 Named volumes are otherwise Docker-implicit — the daemon auto-creates one,
 unlabeled, the first time a container's `Binds` references a name that
 doesn't exist yet. `docker::ensure_volume` creates it explicitly instead,
-right before use in `RunRegistry::start_node`, attaching `fghj.scope`/
+right before use in `Orchestrator::start_node`, attaching `fghj.scope`/
 `fghj.run` labels alongside the usual `com.docker.compose.project` one.
-`RunRegistry::stop` uses those labels to remove exactly the `scope: "run"`
+`Orchestrator::stop` uses those labels to remove exactly the `scope: "run"`
 volumes belonging to the run being stopped, via
 `docker::remove_run_scoped_volumes` — but only when the run isn't the
 default run: Docker's `label` filter ANDs multiple values together, so this
@@ -122,7 +122,7 @@ still be there.
 ## Stopping a container is not the same as deleting it
 
 Every teardown path in `fghj` goes through `docker::stop_and_remove`: the
-whole-run `RunRegistry::stop`, the per-node `restart_container`, `start`'s
+whole-run `Orchestrator::stop`, the per-node `restart_container`, `start`'s
 own rollback when a later node fails, and the sidecar. For a long time that
 function was a single call — `remove_container` with `force: true`.
 

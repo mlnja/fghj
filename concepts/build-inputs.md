@@ -5,8 +5,8 @@
 > `graph::NodeBuildSecret`); transport in `src/docker/image.rs`
 > (`BuildOpts`, `build_image`, `build_image_buildkit`,
 > `solve_on_dedicated_thread`, `SSH_AUTH_SOCK_ENV`); resolution in
-> `src/runs/node_spec.rs` (`build_node_image`, `resolve_build_secrets`);
-> drift in `src/runs/spec.rs`. Closes [[AUDIT]] E3.
+> `src/orchestrator/node_spec.rs` (`build_node_image`, `resolve_build_secrets`);
+> drift in `src/orchestrator/spec.rs`. Closes [[AUDIT]] E3.
 
 ## The hole this fills
 

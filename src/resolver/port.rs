@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// A declared container port and its role. `primary` (at most one per node)
 /// puts it at the node's own derived domain; `name` gives it an additional
-/// nested domain `{name}.{node's domain}` — `runs::start_node` derives both
+/// nested domain `{name}.{node's domain}` — `orchestrator::start_node` derives both
 /// the same way it derives the node's own domain, so a named port can never
 /// collide across runs/workspaces either. Neither set: still published to an
 /// ephemeral localhost port, just with no `*.fghj.internal` name. Mirrors

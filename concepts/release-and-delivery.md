@@ -130,8 +130,8 @@ root is [[persistence-and-workspace-store]]'s subject.
 Fourteen tests are marked
 `#[ignore = "needs a Docker daemon: ..."]` — the ones that start real
 containers or run real builds (`docker/`'s exec and BuildKit tests,
-`runs/health.rs`'s `wait_for_exit` tests, `runs/start_node.rs`'s task tests,
-`runs/observe.rs`'s published-port test, `persistence/rehydrate.rs`'s
+`orchestrator/health.rs`'s `wait_for_exit` tests, `orchestrator/start_node.rs`'s task tests,
+`orchestrator/observe.rs`'s published-port test, `persistence/rehydrate.rs`'s
 dead-container test). They run with `cargo test -- --ignored` on any machine
 with Docker, which in practice means a developer's Mac.
 
@@ -145,7 +145,7 @@ honest: if a test that needs a daemon is missing its `#[ignore]`, it fails
 there instead of in CI.
 
 Running that check turned up a second class of failure with nothing to do with
-Docker. Eight tests — `runs::registry`'s node-lock tests and
+Docker. Eight tests — `orchestrator::registry`'s node-lock tests and
 `daemon::registry`/`daemon::control`'s workspace-index tests — are pure
 bookkeeping, but they sit behind types that *own* a `bollard::Docker`, and
 `connect_with_local_defaults` resolves the unix socket at **construction**:

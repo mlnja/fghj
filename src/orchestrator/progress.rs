@@ -14,7 +14,7 @@
 //! instead of staying empty until the last one is healthy — and, with
 //! `RunProgress::Working`, shows which node is being worked on right now.
 //!
-//! Deliberately a channel rather than an `ActorHandle`: `runs/` drives
+//! Deliberately a channel rather than an `ActorHandle`: `orchestrator/` drives
 //! Docker and should not know that actors, actions, or reducers exist. The
 //! effect on the other end does the translating.
 

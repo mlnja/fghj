@@ -3,7 +3,7 @@
 > Implemented in `src/buildx.rs` (`default_builder`, `HostBuilder`);
 > `src/docker/image.rs` (`BuildOpts::builder`, `solve_on_host_builder`,
 > `buildkit_image_of`, `retire_builder_if_image_changed`, `load_image_tar`,
-> `FGHJ_BUILDKIT_CONTAINER`); `src/runs/node_spec.rs` (`build_node_image`).
+> `FGHJ_BUILDKIT_CONTAINER`); `src/orchestrator/node_spec.rs` (`build_node_image`).
 
 ## The bug this closes
 

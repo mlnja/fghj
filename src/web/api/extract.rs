@@ -40,7 +40,7 @@ impl FromRequestParts<Arc<WorkspaceRegistry>> for WorkspaceExtractor {
 /// Extracts the `actor::ActorHandle` for the workspace named by
 /// `?workspace=<id>` — the counterpart of `WorkspaceExtractor` for
 /// handlers that dispatch an `Action` instead of calling
-/// `runs::RunRegistry` directly.
+/// `orchestrator::Orchestrator` directly.
 pub(crate) struct ActorExtractor(pub(crate) actor::ActorHandle);
 
 impl FromRequestParts<Arc<WorkspaceRegistry>> for ActorExtractor {

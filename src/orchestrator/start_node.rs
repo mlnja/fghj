@@ -13,7 +13,7 @@ use crate::state::{
     ContainerDesired, ContainerInfo, ContainerObserved, ContainerSource, PortRoute, SyncStatus,
 };
 
-use super::registry::RunRegistry;
+use super::registry::Orchestrator;
 
 /// Everything about *this* start that isn't the node's own declared config:
 /// which run and network the container joins, where the run's sidecar is,
@@ -41,7 +41,7 @@ pub(super) struct StartContext<'a> {
     pub(super) wait_ready: bool,
 }
 
-impl RunRegistry {
+impl Orchestrator {
     /// Actually starts a node's container: resolves its full spec via
     /// `resolve_node_spec` (`side_effects: true`, so the image gets built
     /// and named volumes get created along the way), stamps the resulting
@@ -564,8 +564,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::orchestrator::testing::{test_graph, test_node};
     use crate::persistence::WorkspaceDb;
-    use crate::runs::testing::{test_graph, test_node};
 
     fn debug_spec(env: Vec<String>) -> super::super::spec::NodeSpec {
         super::super::spec::NodeSpec {
@@ -636,11 +636,11 @@ mod tests {
         assert!(env.len() > spec.env.len());
     }
 
-    /// A `RunRegistry` over a throwaway workspace/db plus a real, uniquely
+    /// A `Orchestrator` over a throwaway workspace/db plus a real, uniquely
     /// named Docker network, torn down on drop along with every container
     /// this test started on it.
     struct TaskFixture {
-        registry: RunRegistry,
+        registry: Orchestrator,
         network: String,
         run_id: String,
         _tmp: tempfile::TempDir,
@@ -659,7 +659,7 @@ mod tests {
             docker::ensure_network(&docker, &network, &network)
                 .await
                 .expect("ensure_network");
-            let registry = RunRegistry::new(tmp.path().to_path_buf(), db, docker);
+            let registry = Orchestrator::new(tmp.path().to_path_buf(), db, docker);
             TaskFixture {
                 registry,
                 network,

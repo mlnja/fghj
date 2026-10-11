@@ -14,7 +14,7 @@ use crate::resolver::{Graph, Node, VolumeMount};
 use crate::util::env_file::parse_env_file;
 use crate::util::label::sanitize_label;
 
-use super::registry::RunRegistry;
+use super::registry::Orchestrator;
 
 /// Build-context size for the events pane. Binary units, one decimal, since
 /// the number is read to answer "is that bigger than I expected" and not to
@@ -46,7 +46,7 @@ fn human_duration(d: std::time::Duration) -> String {
     format!("{}m {:02}s", (secs / 60.0) as u64, (secs % 60.0) as u64)
 }
 
-impl RunRegistry {
+impl Orchestrator {
     /// Builds `tag` from `build`, rooted at `repo_root`, recording the
     /// attempt into `node_id`'s event stream so a failing build reads as a
     /// failing step rather than an opaque start error.
@@ -526,10 +526,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::orchestrator::testing::{test_graph, test_node};
     use crate::persistence::WorkspaceDb;
     use crate::resolver::NodeBuildSecret;
     use crate::resolver::port::PortConfig;
-    use crate::runs::testing::{test_graph, test_node};
 
     /// The context size is the number in this pair that nobody is expecting,
     /// so it has to be unambiguous at a glance — a stray factor of 1024 here
@@ -609,14 +609,14 @@ mod tests {
         assert!(resolve_build_secrets(repo.path(), &[secret("npmrc", "ci")]).is_err());
     }
 
-    /// A `RunRegistry` whose Docker handle is never dialled — see
+    /// A `Orchestrator` whose Docker handle is never dialled — see
     /// `docker::undialled_client`. Every test below resolves a node that
     /// declares an `image:` with `side_effects: false`, which is the wholly
     /// pure path: no build, no `ensure_volume`, no daemon.
-    fn registry() -> (RunRegistry, tempfile::TempDir) {
+    fn registry() -> (Orchestrator, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
-        let registry = RunRegistry::new(
+        let registry = Orchestrator::new(
             tmp.path().to_path_buf(),
             db,
             Arc::new(crate::docker::undialled_client()),
@@ -755,8 +755,8 @@ mod tests {
         let plain = debuggable(None);
         let debugging = debuggable(Some(9229));
 
-        let before = crate::runs::spec::spec_hash(&plain, &spec_for(&plain).await);
-        let after = crate::runs::spec::spec_hash(&debugging, &spec_for(&debugging).await);
+        let before = crate::orchestrator::spec::spec_hash(&plain, &spec_for(&plain).await);
+        let after = crate::orchestrator::spec::spec_hash(&debugging, &spec_for(&debugging).await);
 
         assert_ne!(before, after);
     }

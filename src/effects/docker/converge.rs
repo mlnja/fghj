@@ -1,7 +1,7 @@
 //! Drives real Docker create/start/stop/delete calls off `EnvState`'s two
 //! convergence fields — `ContainerInfo::pending_action` (per-node
 //! start/stop/delete) and `EnvState::pending_create` (whole-environment
-//! create/top-up/switch). Reuses `runs::RunRegistry`'s orchestration
+//! create/top-up/switch). Reuses `orchestrator::Orchestrator`'s orchestration
 //! methods wholesale (`restart_container`/`stop_container`/
 //! `remove_container`/`ensure_running`, see `perform`/
 //! `perform_create`) rather than reimplementing container lifecycle here;
@@ -12,7 +12,7 @@
 //! Every mutation this effect causes (create/top-up, start, stop, delete)
 //! reports its own real result directly, via the `*SettleGuard`s below, so
 //! nothing needs to re-derive it from a fresh snapshot a moment later.
-//! There is nothing to translate either: `RunRegistry` builds the same
+//! There is nothing to translate either: `Orchestrator` builds the same
 //! `state::EnvState`/`ContainerInfo` the reducer holds, so what
 //! `perform`/`perform_create` return is dispatched as-is.
 //!
@@ -30,9 +30,9 @@ use crate::action::Action;
 use crate::actor::ActorHandle;
 use crate::daemon_log;
 use crate::effects::Effect;
+use crate::orchestrator::order::{dependents_of, requirements_of};
+use crate::orchestrator::progress::{NodeDone, ProgressSink, RunProgress};
 use crate::resolver;
-use crate::runs::order::{dependents_of, requirements_of};
-use crate::runs::progress::{NodeDone, ProgressSink, RunProgress};
 use crate::server;
 use crate::state::{
     ContainerInfo, EnvCreateError, EnvSpec, EnvState, PendingAction, WorkspaceState,
@@ -102,7 +102,7 @@ fn plan(
 }
 
 /// `plan`'s counterpart for the environment-level create: at most one at a
-/// time, because `RunRegistry::ensure_running` operates on the whole
+/// time, because `Orchestrator::ensure_running` operates on the whole
 /// environment, and two concurrent calls would race each other over the
 /// same containers — a switch stopping what the other is starting. Returns
 /// the create to spawn, if any, and whether one is in flight afterwards.
@@ -114,7 +114,7 @@ fn plan_create(in_flight: bool, snapshot: Option<&EnvSpec>) -> (Option<EnvSpec>,
     }
 }
 
-/// Actually performs `entry`'s action through `runs::RunRegistry`.
+/// Actually performs `entry`'s action through `orchestrator::Orchestrator`.
 /// `Starting` alone needs a freshly-resolved `Graph` first (real I/O a pure
 /// reducer can't do), deliberately not cached, since a stale graph would
 /// silently ignore a `.fghj.yaml` edit made between the request and this
@@ -146,7 +146,7 @@ async fn perform(
             let restart = |node_id: String, debug_wait: bool| {
                 let graph = &graph;
                 async move {
-                    old.runs
+                    old.orchestrator
                         .restart_container(
                             graph,
                             &node_id,
@@ -218,7 +218,7 @@ async fn perform(
                 if c.pending_action.is_some() || c.observed.status != "running" {
                     continue;
                 }
-                match old.runs.stop_container(dependent, c).await {
+                match old.orchestrator.stop_container(dependent, c).await {
                     Ok(info) => cascaded.push(info),
                     Err(e) => daemon_log::warn(format!(
                         "fghjd: stopping {dependent} before {} failed: {e:#}",
@@ -228,13 +228,18 @@ async fn perform(
             }
             // Returns the stopped container directly, so there is no
             // read-back from a second copy of the environment to disagree with.
-            let info = old.runs.stop_container(&entry.node_id, container).await?;
+            let info = old
+                .orchestrator
+                .stop_container(&entry.node_id, container)
+                .await?;
             Ok(Some(info))
         }
         PendingAction::Removing => {
             let container =
                 container.ok_or_else(|| anyhow::anyhow!("no such node: {}", entry.node_id))?;
-            old.runs.remove_container(&entry.node_id, container).await?;
+            old.orchestrator
+                .remove_container(&entry.node_id, container)
+                .await?;
             Ok(None)
         }
     }
@@ -264,7 +269,7 @@ fn needs_start(container: Option<&ContainerInfo>) -> bool {
 
 /// `perform`'s counterpart for bringing the environment up to date: resolves
 /// a fresh graph (same reasoning as `perform`'s `Starting` case), then hands
-/// `plan` to `RunRegistry::ensure_running`.
+/// `plan` to `Orchestrator::ensure_running`.
 async fn perform_create(
     old: &server::WorkspaceState,
     plan: &EnvSpec,
@@ -275,7 +280,9 @@ async fn perform_create(
     // Nothing has been created yet, so there is no partial state to carry:
     // the `From<anyhow::Error>` conversion's `partial: None` is correct.
     graph.refuse_if_blocked()?;
-    old.runs.ensure_running(&graph, plan, prior, progress).await
+    old.orchestrator
+        .ensure_running(&graph, plan, prior, progress)
+        .await
 }
 
 /// Dispatches `Action::ContainerActionSettled` when dropped, unless
@@ -364,7 +371,7 @@ pub struct ConvergeSnapshot {
 /// Per-workspace `Effect` driving real Docker lifecycle and creation calls.
 /// One instance per workspace actor (see
 /// `daemon::WorkspaceRegistry::wire_actor`), holding that same workspace's
-/// `Arc<server::WorkspaceState>`, whose `RunRegistry` is what actually
+/// `Arc<server::WorkspaceState>`, whose `Orchestrator` is what actually
 /// talks to Docker.
 pub struct DockerConvergeEffect {
     old: Arc<server::WorkspaceState>,
@@ -424,7 +431,7 @@ impl DockerConvergeEffect {
         let prior = self.actor.current().env.clone();
         supervisor::supervise("env create", async move {
             // Per-node progress is translated into actions here rather than
-            // in `runs/`, which deliberately knows nothing about actors.
+            // in `orchestrator/`, which deliberately knows nothing about actors.
             // The draining task ends when `perform_create` drops its sender.
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RunProgress>();
             let progress_actor = actor.clone();

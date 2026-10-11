@@ -8,11 +8,11 @@ use crate::state::{ContainerInfo, EnvState};
 
 use super::health::RunBudget;
 use super::naming::DEFAULT_RUN_ID;
-use super::registry::RunRegistry;
+use super::registry::Orchestrator;
 use super::route_table::sidecar_routes_dir;
 use super::start_node::StartContext;
 
-impl RunRegistry {
+impl Orchestrator {
     /// Tears the environment down: every container, the sidecar and the
     /// network. Volumes are kept — they hold the data the next start
     /// expects to find.

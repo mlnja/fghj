@@ -16,7 +16,7 @@ easy to accidentally conflate them:
 
 `.fghj.yaml` only ever declares the label (`#Service.name`, `#BackingDependency.name`).
 Everything else — id and domain — is derived by fghj itself, in `src/resolver/`
-and `src/runs/`.
+and `src/orchestrator/`.
 
 ## Why the id can't just be the label
 
@@ -108,7 +108,7 @@ names without any extra schema.
 No node kind can declare its own raw domain — there is no
 `#Service.internal_domain` (removed), no per-route domain override
 (`#HttpRoute.domain` became `#HttpRoute.name`, a bare label). Every node's
-domain, services included, is derived the same way by `runs::derive_domain`:
+domain, services included, is derived the same way by `orchestrator::derive_domain`:
 
 ```rust
 pub fn derive_domain(
@@ -178,13 +178,13 @@ here is the table.
 
 | Projection | Formula | Escaping | Namespace it shares | Who catches a collision |
 |---|---|---|---|---|
-| **Domain** (both zones) | `{id}.{W}.{Z}`, or `{id}.{R}.{W}.{Z}` when the run isn't default and scope isn't `stable` — `runs::derive_domain` | none: the id's dots become DNS label separators | one flat DNS zone, across *every* wired workspace | `resolver::uniqueness` (warning) for in-workspace clashes; `daemon::registry` (hard error) refuses to wire a second workspace whose folder sanitizes the same |
+| **Domain** (both zones) | `{id}.{W}.{Z}`, or `{id}.{R}.{W}.{Z}` when the run isn't default and scope isn't `stable` — `orchestrator::derive_domain` | none: the id's dots become DNS label separators | one flat DNS zone, across *every* wired workspace | `resolver::uniqueness` (warning) for in-workspace clashes; `daemon::registry` (hard error) refuses to wire a second workspace whose folder sanitizes the same |
 | **Named-port alias** | `{port.name}.{domain}` | none | the same DNS zone | `resolver::uniqueness` — this is the projection that can silently shadow a backing dependency's domain |
 | **`additional_hosts` / `wildcard_hosts`** | author-written, verbatim | none | the same DNS zone, plus whatever real domain the author typed | `resolver::uniqueness` for the in-zone part; nothing at all if the author claims a name they don't own |
-| **Container name** | `fghj-{W}-{R}-{sanitize_label(id)}` — `runs::node_spec` | `sanitize_label`: every non-alphanumeric run collapses to one `-` | the Docker daemon, machine-wide — shared with every other workspace *and* with containers fghj didn't create | Docker itself, by refusing a duplicate name — with an error that never says "naming" |
-| **Network name** | `fghj-{W}-{R}` — `runs::orchestrate` | `sanitize_label` on the workspace only | the Docker daemon, machine-wide | Docker; but this one is *meant* to be idempotent (`ensure_network` reuses an existing one), so a clash between two workspaces that sanitize alike silently merges their networks — the same case `daemon::registry` already refuses to wire |
-| **Volume name** | `fghj-vol-{sanitize_label(derive_domain({name}.{owner_id}, …))}` — `runs::naming::derive_volume_name`; `shared: true` drops the `.{owner_id}` | `sanitize_label` over the whole derived domain | the Docker daemon, machine-wide | nothing — a volume collision is *silent*, which is exactly why the owner qualification is unconditional (see [[docker-and-downloads]]) |
-| **Image tag** | `fghj/{sanitize_label(id)}:{sanitize_label(branch or "local")}` — `runs::node_spec` | `sanitize_label` on both halves | the local image store, machine-wide | nothing; and note the tag is deliberately stable across rebuilds, which is why `build` had to be folded into `spec_hash` instead ([[build-inputs]]) |
+| **Container name** | `fghj-{W}-{R}-{sanitize_label(id)}` — `orchestrator::node_spec` | `sanitize_label`: every non-alphanumeric run collapses to one `-` | the Docker daemon, machine-wide — shared with every other workspace *and* with containers fghj didn't create | Docker itself, by refusing a duplicate name — with an error that never says "naming" |
+| **Network name** | `fghj-{W}-{R}` — `orchestrator::orchestrate` | `sanitize_label` on the workspace only | the Docker daemon, machine-wide | Docker; but this one is *meant* to be idempotent (`ensure_network` reuses an existing one), so a clash between two workspaces that sanitize alike silently merges their networks — the same case `daemon::registry` already refuses to wire |
+| **Volume name** | `fghj-vol-{sanitize_label(derive_domain({name}.{owner_id}, …))}` — `orchestrator::naming::derive_volume_name`; `shared: true` drops the `.{owner_id}` | `sanitize_label` over the whole derived domain | the Docker daemon, machine-wide | nothing — a volume collision is *silent*, which is exactly why the owner qualification is unconditional (see [[docker-and-downloads]]) |
+| **Image tag** | `fghj/{sanitize_label(id)}:{sanitize_label(branch or "local")}` — `orchestrator::node_spec` | `sanitize_label` on both halves | the local image store, machine-wide | nothing; and note the tag is deliberately stable across rebuilds, which is why `build` had to be folded into `spec_hash` instead ([[build-inputs]]) |
 | **Virtual IP** | `10.222.0.0/16` + SHA-256 of the raw-zone domain, then made sticky and collision-resolved by `raw_net::assign` | n/a — the name is hashed, not escaped | one /16 on the host | `raw_net::assign`, which probes forward on a real collision; see [[two-zones-and-raw-ports]] |
 
 Three things fall out of reading it as a table rather than one row at a time.
@@ -304,9 +304,9 @@ over the sorted node list, before any container for that node has ever
 started:
 
 ```rust
-node.domain = crate::runs::derive_domain(
+node.domain = crate::orchestrator::derive_domain(
     &node.id, &node.domain_scope, &workspace_name,
-    crate::runs::DEFAULT_RUN_ID, DomainZone::Http,
+    crate::orchestrator::DEFAULT_RUN_ID, DomainZone::Http,
 );
 ```
 
@@ -338,9 +338,9 @@ currently selected, not the graph-wide default.
 ## Status
 
 Implemented: `resolver::visit_local_service`/`visit_dependency` (ids),
-`resolver::PortConfig`/`check_ports` (ports), `runs::derive_domain` (domain
-formula, shared by `runs::start_node` and `resolver::resolve_universe`),
-`runs::naming::derive_volume_name` (volumes), `runs::node_spec` (container
+`resolver::PortConfig`/`check_ports` (ports), `orchestrator::derive_domain` (domain
+formula, shared by `orchestrator::start_node` and `resolver::resolve_universe`),
+`orchestrator::naming::derive_volume_name` (volumes), `orchestrator::node_spec` (container
 names, image tags), `raw_net` (virtual IPs), `resolver::uniqueness` (the
 collision pass), `resolver::name::Name` (the alphabet). See `PROGRESS.md` for
 the session history behind the leaf-first id flip and the `Node.domain` fix.

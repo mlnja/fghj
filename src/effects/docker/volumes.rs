@@ -10,10 +10,10 @@
 //! a volume's identity threaded through `EnvSpec`/`Action::EnvPlanned` from
 //! the resolved `.fghj.yaml` graph, which `EnvSpec` doesn't carry (see
 //! `state::env::EnvSpec`'s doc — it's deliberately thin)
-//! and `runs::orchestrate` doesn't populate either (it builds every
+//! and `orchestrator::orchestrate` doesn't populate either (it builds every
 //! `EnvState` with `volumes: BTreeMap::new()`). Plumbing real volume specs
 //! through would mean
-//! reaching into `RunRegistry::ensure_running`'s graph-resolution
+//! reaching into `Orchestrator::ensure_running`'s graph-resolution
 //! internals. What this module gives instead:
 //! every volume that actually exists in Docker for a run becomes visible
 //! (`observed.exists == true`), with its `desired` bootstrapped to match —
@@ -25,17 +25,17 @@
 
 use crate::action::Action;
 use crate::actor::ActorHandle;
-use crate::runs::RunRegistry;
+use crate::orchestrator::Orchestrator;
 
 /// Discovers the environment's volumes via Docker and reports each one
 /// found.
-pub async fn observe_volumes(runs: &RunRegistry, actor: &ActorHandle) {
-    let names = runs.volume_names().await;
+pub async fn observe_volumes(orchestrator: &Orchestrator, actor: &ActorHandle) {
+    let names = orchestrator.volume_names().await;
     dispatch_observed_volumes(actor, names).await;
 }
 
 /// The pure-ish dispatch half of `observe_volumes`, split out so it's
-/// unit-testable without a real `RunRegistry`/Docker client — the actor is
+/// unit-testable without a real `Orchestrator`/Docker client — the actor is
 /// still real (in-process, no Docker needed to spawn one).
 async fn dispatch_observed_volumes(actor: &ActorHandle, names: Vec<String>) {
     for name in names {

@@ -273,8 +273,8 @@ rest of the threat model this sits inside.
 
 Implemented: `schema/dependency.cue` (`#RunOptions.debug`),
 `src/resolver/graph.rs` (`Node::debug`) and the three config structs that
-feed it, `src/runs/node_spec.rs` (the published port and the two env vars),
-`src/runs/start_node.rs` (`StartContext::debug_wait`,
+feed it, `src/orchestrator/node_spec.rs` (the published port and the two env vars),
+`src/orchestrator/start_node.rs` (`StartContext::debug_wait`,
 `debug_wait_overrides`, applied after `spec_hash`),
 `src/state/container.rs` (`ContainerDesired::debug_wait`),
 `src/persistence/sqlite/` (the `debug_wait` column and its round trip),

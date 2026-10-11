@@ -176,8 +176,8 @@ a destructor rather than a line at the end of the happy path is what makes
 
 Implemented: `src/resolver/warning.rs` (`Severity`, `Graph::blocking`),
 `src/resolver/workspace_scan.rs` (per-repo isolation),
-`src/runs/orchestrate.rs` (the two rollback policies),
-`src/runs/events.rs` (best-effort narration),
+`src/orchestrator/orchestrate.rs` (the two rollback policies),
+`src/orchestrator/events.rs` (best-effort narration),
 `src/effects/docker/converge.rs` (`SettleGuard`, `CreateSettleGuard`),
 `src/daemon_log.rs` (process-level output). Open: the settle error string is
 not retained in workspace state.

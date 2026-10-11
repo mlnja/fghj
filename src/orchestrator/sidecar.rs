@@ -8,9 +8,9 @@ use super::route_table::{refresh_sidecar_ca_copy, sidecar_routes_dir, sidecar_ro
 use crate::docker;
 
 use super::naming::sidecar_name;
-use super::registry::RunRegistry;
+use super::registry::Orchestrator;
 
-impl RunRegistry {
+impl Orchestrator {
     /// Starts (or confirms already running) this run's in-network TLS proxy
     /// sidecar — one per run, on that run's own docker network, never
     /// shared across workspaces/runs, so a container inside the network can

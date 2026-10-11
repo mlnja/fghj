@@ -2,9 +2,9 @@
 
 > **Status:** implemented. Language in `schema/dependency.cue` (`#Task`) and
 > `src/resolver/` (`TaskConfig`, `Dependency::Task`, `Node.kind == "task"`,
-> `Node.run_policy`); runtime in `src/runs/health.rs`
-> (`wait_for_exit`/`TaskOutcome`/`RunBudget`), `src/runs/start_node.rs`,
-> `src/runs/node_spec.rs` and `src/runs/orchestrate.rs`; state in
+> `Node.run_policy`); runtime in `src/orchestrator/health.rs`
+> (`wait_for_exit`/`TaskOutcome`/`RunBudget`), `src/orchestrator/start_node.rs`,
+> `src/orchestrator/node_spec.rs` and `src/orchestrator/orchestrate.rs`; state in
 > `state::ContainerDesired::terminating` and
 > `state::ContainerObserved::exit_code`; rendering in
 > `ui/src/lib/GraphView.svelte`. Closes [[AUDIT]] E1.
@@ -79,7 +79,7 @@ services:
 - **`build: .` is the usual case**, since a migration is usually this
   repo's code with a different command. It builds under the task's own tag;
   Docker's layer cache makes the second build of the same context free
-  (`runs::node_spec`).
+  (`orchestrator::node_spec`).
 - **A task has no healthcheck and no restart policy** — declaring either is
   blocking.
 - **A task nothing waits on declares `run:`.** A seed only one journey needs
@@ -90,14 +90,14 @@ services:
 ## Ordering
 
 A task is ordered by `depends_on` edges like everything else: `to` is the
-dependency and `from` the dependent (`runs::topological_start_order`). The
+dependency and `from` the dependent (`orchestrator::topological_start_order`). The
 example orders as `db → migrate → api`.
 
 Ordering alone would be decoration, though. What makes it load-bearing is
 that `start_node` does not consider a task *started* until it has
 **finished**: it waits for the container to exit, and a task that exits
 non-zero — or never exits — fails the node. A failed node blocks everything
-that requires it, transitively (`runs::order::StartOutcomes`), so a failed
+that requires it, transitively (`orchestrator::order::StartOutcomes`), so a failed
 migration keeps the service from coming up against an unmigrated database.
 The rest of the run keeps starting; see [[dependency-kinds]].
 

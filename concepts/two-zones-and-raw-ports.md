@@ -1,10 +1,10 @@
 # Two zones: `fghj.internal` and `fghj.raw.internal`
 
 > **Status:** implemented. Zones in `src/dns/` (`ZONE`, `ZONE_RAW`,
-> `ZoneSource`) and `src/runs/domain.rs` (`DomainZone`, `derive_domain`);
+> `ZoneSource`) and `src/orchestrator/domain.rs` (`DomainZone`, `derive_domain`);
 > host-side answering in `src/daemon/routing.rs`; in-network answering in
 > `src/bin/fghj-sidecar.rs` (see [[in-network-sidecar]]); virtual IPs and NAT
-> in `src/raw_net/`; templating in `src/runs/fqdn_template.rs`. Closes
+> in `src/raw_net/`; templating in `src/orchestrator/fqdn_template.rs`. Closes
 > [[AUDIT]] D1's stale `derive_domain` signature and D2's dual-zone,
 > `raw_net` and FQDN-templating gaps.
 

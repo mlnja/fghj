@@ -42,7 +42,7 @@ So the observation and the policy are split. The observation must be
 
 ### The one place drift is acted on, and why it is not a contradiction
 
-`RunRegistry::ensure_running` — the top-up — recreates a container whose hash
+`Orchestrator::ensure_running` — the top-up — recreates a container whose hash
 no longer matches. See `top_up_may_skip`, which is where all three skip
 conditions live.
 
@@ -173,7 +173,7 @@ which `effects::docker::observe::report_config_drift` turns into
 onto `ContainerObserved::sync`. There is exactly one record of the fact.
 
 That is a deliberate correction. Drift used to be written in two places —
-the reducer's copy *and* a separate `synced` field on `RunRegistry`'s own
+the reducer's copy *and* a separate `synced` field on `Orchestrator`'s own
 container record — and the two could, and did, disagree. It is the same
 duplication [[state-and-effects]] removed everywhere else; drift was one of
 its last instances.
@@ -200,14 +200,14 @@ lifetime is a guess about a file that has since been re-read.
 
 ## Status
 
-Implemented: `src/runs/spec.rs` (`spec_hash`, `NodeSpec`),
-`src/runs/observe.rs` (`config_drift`, `DriftReport`),
-`src/runs/start_node.rs` (the `fghj.config_hash` label),
+Implemented: `src/orchestrator/spec.rs` (`spec_hash`, `NodeSpec`),
+`src/orchestrator/observe.rs` (`config_drift`, `DriftReport`),
+`src/orchestrator/start_node.rs` (the `fghj.config_hash` label),
 `src/state/sync_status.rs` (the enum and its SQLite round trip),
 `src/effects/docker/observe.rs` (`report_config_drift`), surfaced in the UI
 as a pill on the graph node (`GraphView.svelte`) and in the drawer
 (`Drawer.svelte`) — with `Unknown` rendering nothing, since it is the one
 verdict with nothing to say.
 
-Acted on in exactly one place: `runs::orchestrate::top_up_may_skip`, which
+Acted on in exactly one place: `orchestrator::orchestrate::top_up_may_skip`, which
 `ensure_running` consults per node. No background loop acts on a verdict.

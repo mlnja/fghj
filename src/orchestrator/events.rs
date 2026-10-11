@@ -1,9 +1,9 @@
 //! Operator-facing narration of what a run action is doing, recorded
 //! per (run, node, action) cycle and read back by the UI's events pane.
 
-use super::registry::RunRegistry;
+use super::registry::Orchestrator;
 
-impl RunRegistry {
+impl Orchestrator {
     /// Clears out the previous cycle of `action` ("start" or "stop") for
     /// `node_id`, so the step-by-step narration `record_event` appends next
     /// is the only one a caller of the `/events` endpoint sees — per the

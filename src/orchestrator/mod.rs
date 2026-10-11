@@ -1,10 +1,10 @@
-//! Run lifecycle: turning a resolved `Graph` into real Docker containers and
+//! Environment lifecycle: turning a resolved `Graph` into real Docker containers and
 //! keeping the recorded state honest against what Docker actually reports.
 //!
 //! See `concepts/run-lifecycle-and-registry.md` for the design. The module is
 //! split so each file holds one responsibility.
 //!
-//! Pure helpers, free of `RunRegistry` and of I/O:
+//! Pure helpers, free of `Orchestrator` and of I/O:
 //!
 //! - [`naming`] — run ids and derived Docker volume names.
 //! - [`domain`] — which `*.fghj.internal` zone a node answers on.
@@ -24,7 +24,7 @@
 //! - [`health`] — healthcheck polling.
 //! - [`logs`] — container log capture and lookup.
 //!
-//! [`RunRegistry`] itself — the orchestrator. Its inherent `impl` is split
+//! [`Orchestrator`] itself — the orchestrator. Its inherent `impl` is split
 //! across these files by the job each group of methods does:
 //!
 //! - [`registry`] — the struct and its constructor.
@@ -61,4 +61,4 @@ pub use domain::{DomainZone, derive_domain};
 pub use logs::{container_name_for, logs_for_tail};
 pub use naming::DEFAULT_RUN_ID;
 pub use order::topological_start_order;
-pub use registry::RunRegistry;
+pub use registry::Orchestrator;

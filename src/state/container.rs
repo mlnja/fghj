@@ -88,7 +88,7 @@ impl std::fmt::Display for PendingAction {
 /// was last actually started through fghj.
 ///
 /// `ContainerDesired::config_hash` already makes a moved checkout *visible*:
-/// `runs::spec::spec_hash` folds the same `head`/`dirty` pair into the hash,
+/// `orchestrator::spec::spec_hash` folds the same `head`/`dirty` pair into the hash,
 /// so a commit, pull or rebase flips the node to `Drifted`. What the hash
 /// cannot do is say what changed, because it is a digest — it compares equal
 /// or unequal and keeps nothing. This keeps the inputs in plain text next to
@@ -164,16 +164,16 @@ pub struct ContainerDesired {
     /// `primary` (see the selection logic in `start_node`). `None` for a
     /// node with no declared ports at all, matching
     /// `docker::inspect_status`'s own "inspect status only" mode. Kept
-    /// around rather than re-derived so `RunRegistry::inspect_containers` can
+    /// around rather than re-derived so `Orchestrator::inspect_containers` can
     /// re-inspect the same port `start_node` picked without needing the
     /// original `Node` config back.
     pub status_port: Option<String>,
     /// Hex-encoded hash of everything about this node's resolved config
     /// that actually affects how the container runs (image, command, env,
     /// ports, volumes, ...) at the moment it was last actually started
-    /// through fghj — see `runs::spec::spec_hash`. Compared against a
+    /// through fghj — see `orchestrator::spec::spec_hash`. Compared against a
     /// freshly recomputed hash of the *current* `.fghj.yaml` by
-    /// `RunRegistry::config_drift` to detect drift; never used to decide
+    /// `Orchestrator::config_drift` to detect drift; never used to decide
     /// anything on its own.
     pub config_hash: String,
     /// The checkout this container was built from — see [`ContainerSource`].
@@ -212,7 +212,7 @@ pub struct ContainerDesired {
     /// shared — pinning it there would halt every teammate's start of this
     /// node indefinitely.
     ///
-    /// Deliberately **not** part of `runs::spec::spec_hash`. The hash is a
+    /// Deliberately **not** part of `orchestrator::spec::spec_hash`. The hash is a
     /// statement about the node's resolved *config*, and this isn't one; if
     /// it were included, `ensure_running`'s drift check would read a halted
     /// container as drifted and recreate it, killing the debug session the
@@ -228,14 +228,14 @@ pub struct ContainerDesired {
 /// Everything about a container Docker itself last reported — the
 /// convergence-target-agnostic half of `ContainerInfo`; see
 /// `ContainerDesired`'s doc for why the split exists. Only ever written
-/// from a real inspection (`RunRegistry::inspect_containers`,
+/// from a real inspection (`Orchestrator::inspect_containers`,
 /// `Action::ContainerObserved`), never from what fghj asked for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct ContainerObserved {
     pub status: String,
     pub published_port: Option<u16>,
     /// The container's address on its Docker network. `None` until
-    /// something actually inspects it — `RunRegistry` has never needed it,
+    /// something actually inspects it — `Orchestrator` has never needed it,
     /// so in practice only `Action::ContainerObserved` can set it.
     pub ip: Option<String>,
     /// The host-published port for every one of this node's declared
@@ -261,7 +261,7 @@ pub struct ContainerObserved {
 /// One container's full state: what fghj wants (`desired`), what Docker
 /// last reported (`observed`), and what's currently in flight
 /// (`pending_action`). The single representation — the reducer, the
-/// `RunRegistry` that drives Docker, SQLite, and the `/runs` JSON the UI
+/// `Orchestrator` that drives Docker, SQLite, and the `/runs` JSON the UI
 /// reads all use this one type, so there is nothing to translate between
 /// and nothing that can be lost in translation.
 #[derive(Debug, Clone, PartialEq, Eq)]

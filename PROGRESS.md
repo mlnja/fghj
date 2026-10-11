@@ -9,11 +9,11 @@ wildcarded at all; `Node.ports[port].wildcard` was already serialized to
 the UI, just never read by `Drawer.svelte`).
 Prior update, same day (added per-node Start/Stop/Delete controls in the
 Drawer — the first lifecycle granularity below "whole run", where every
-control used to live. Backend: `RunRegistry::restart_container` (stop +
+control used to live. Backend: `Orchestrator::restart_container` (stop +
 recreate one node's container in an already-running run, picking up
 `.fghj.yaml` changes since it last started — Start),
-`RunRegistry::stop_container` (real `docker stop`, container and its
-volumes survive — Stop), and `RunRegistry::remove_container` (stop +
+`Orchestrator::stop_container` (real `docker stop`, container and its
+volumes survive — Stop), and `Orchestrator::remove_container` (stop +
 remove, dropped from `EnvState.containers` — Delete), routed at
 `POST /runs/{run_id}/nodes/{node_id}/{start,stop,delete}` in `src/daemon.rs`.
 Frontend: three buttons above the tabs in `Drawer.svelte`, disabled when no
@@ -24,9 +24,9 @@ actual state / reconciliation" feature discussed but not yet designed — see
 Prior update, same day (fixed named volumes never being cleaned up on
 `stop` — they were Docker-implicit, auto-created unlabeled on first bind
 reference, so there was nothing to filter on for removal. Added
-`docker::ensure_volume`, called from `RunRegistry::start_node` right before
+`docker::ensure_volume`, called from `Orchestrator::start_node` right before
 each named-volume bind, which labels the volume with
-`com.docker.compose.project`/`fghj.scope`/`fghj.run`; `RunRegistry::stop`
+`com.docker.compose.project`/`fghj.scope`/`fghj.run`; `Orchestrator::stop`
 now calls the new `docker::remove_run_scoped_volumes`, filtered on those
 labels, for every run *except* the default one — a default run's
 `scope: "run"` volumes derive the same name on every start regardless, so
@@ -40,9 +40,9 @@ Prior update, same day (added domain templating in `environment`/
 path like `aikifactory::aikifactory::minio` disambiguates a leaf `name`
 that matches more than one sibling — the same segments a node's id is
 already built from leaf-first, just reversed), resolved by
-`runs::start_node` via `expand_service_fqdn_templates`/`sibling_domain` in
+`orchestrator::start_node` via `expand_service_fqdn_templates`/`sibling_domain` in
 `src/runs.rs` — so a CUE author no longer has to hand-compute
-`runs::derive_domain`'s formula into a literal string, closing the gap
+`orchestrator::derive_domain`'s formula into a literal string, closing the gap
 called out in every hardcoded `*_HOST`/`*_URL` value across
 `aikido-core`/`aikifactory`'s real `.fghj.yaml` files, now rewritten to use
 it. See "Domain templates in `environment`" in
@@ -137,7 +137,7 @@ durable record, plans in `~/.claude/plans/` are not.
   to `/etc/resolver` on every reconciler tick — so a wildcard zone starts
   or stops answering within one query/tick of its owning container
   starting or stopping, no `fghjd` restart needed. Two ways to opt in, both
-  landing on the same `runs::PortRoute.wildcard` mechanism:
+  landing on the same `orchestrator::PortRoute.wildcard` mechanism:
   `#Service.additional_hosts` entries are now either a bare hostname
   (exact match) or `{host, wildcard: true}` (matches every subdomain of
   it), replacing the separate `wildcard_hosts` field from the same-day
@@ -149,7 +149,7 @@ durable record, plans in `~/.claude/plans/` are not.
   `acme.myservice.local`, `microsoft.myservice.local`, and any other
   not-pre-declared subdomain), replicating a tenant-per-subdomain
   production pattern locally — something exact-match-only aliases can't
-  do, since `/etc/hosts` has no wildcard syntax. `runs::PortRoute` carries
+  do, since `/etc/hosts` has no wildcard syntax. `orchestrator::PortRoute` carries
   a `#[serde(default)] wildcard: bool` (no DB migration needed — routes
   persist as one JSON blob); `resolve_route` tries an exact match first,
   then falls back to a suffix match over `wildcard: true` routes, so a more
@@ -203,7 +203,7 @@ durable record, plans in `~/.claude/plans/` are not.
   instead of standing up containers; `WorkspaceRegistry` implements it
   (`resolve_route`) by scanning every wired workspace's active runs for a
   `"running"` container whose `ContainerInfo.routes` claims that hostname.
-  `runs::start_node` builds those routes when a container starts: each port
+  `orchestrator::start_node` builds those routes when a container starts: each port
   with `primary: true` gets a route at the node's own domain, each port with
   a `name` gets one at `{name}.{domain}` (a port can be both), pointing at
   whatever host port Docker actually published it on — a port with neither
@@ -211,7 +211,7 @@ durable record, plans in `~/.claude/plans/` are not.
   `ContainerInfo.routes` is persisted alongside the rest of a run's state
   (`store.rs`'s `containers` table gained a `routes_json` column, migrated in
   via `ALTER TABLE ... ADD COLUMN` like the existing `meta.owner_*` columns)
-  so routing survives a `fghjd` restart along with everything else `RunRegistry::new`
+  so routing survives a `fghjd` restart along with everything else `Orchestrator::new`
   reconciles. The control API itself no longer has a hardcoded port (the old
   `CONTROL_PORT = 7880` constant is gone): `fghjd` binds it on an OS-assigned
   port and publishes it at `/var/run/fghjd.port`
@@ -237,7 +237,7 @@ durable record, plans in `~/.claude/plans/` are not.
 - **Uniform, scoped `*.fghj.internal` domain derivation**: no node kind can
   declare its own raw domain anymore (`#Service.internal_domain` is gone,
   `#HttpRoute.domain` is now `#HttpRoute.name`, a bare label). Every node's
-  domain — services included — is derived by `runs::start_node` the same
+  domain — services included — is derived by `orchestrator::start_node` the same
   way, from `node.id` + workspace + run id, so it can never collide the way
   an author-typed string could. `run_id` is folded in for named/review runs
   (since more than one can be alive at once), but the default run — the one
@@ -281,7 +281,7 @@ durable record, plans in `~/.claude/plans/` are not.
   above). The result: that UI path was dead code, and the "open" link never
   used a node's real domain even when `proxy.rs`'s per-service routing was
   working correctly underneath it. Fixed by extracting the domain formula
-  `start_node` already used into a standalone `runs::derive_domain(node_id,
+  `start_node` already used into a standalone `orchestrator::derive_domain(node_id,
   domain_scope, workspace_name, run_id)`, and having `resolve_universe` call
   it (with `run_id = DEFAULT_RUN_ID`) as a final pass over `nodes` to
   populate `Node.domain` with each node's default-run address — the one
@@ -401,7 +401,7 @@ plans referenced above.
   etc.) — so detecting "container is running a stale config relative to
   `.fghj.yaml`" needs a new persisted snapshot (e.g. a hash or JSON blob of
   the resolved `Node` + overrides at start time) to diff against, which
-  doesn't exist today. `RunRegistry::refresh()` (the existing background
+  doesn't exist today. `Orchestrator::refresh()` (the existing background
   reconciler, ticking every `RECONCILE_INTERVAL` in `daemon.rs`) is
   explicitly read-only today — it updates observed status, including
   flagging a vanished container `"removed"`, but never recreates or
@@ -537,13 +537,13 @@ plans referenced above.
     `schema/dependency.cue`) now support both a bind mount (`host:`) and a
     Docker-managed named volume (`name:` + `scope: "run" | "stable"`,
     mirroring `domain_scope`'s run/stable semantics) — see
-    `resolver::VolumeMount`, `runs::derive_volume_name`, and
+    `resolver::VolumeMount`, `orchestrator::derive_volume_name`, and
     `docker::RunOpts.binds`. A `kind: backing` Postgres with a `volumes:
     [{name: pgdata, container: /var/lib/postgresql/data}]` entry now
     survives an `ensure_running` re-create. Still shared-internal-Postgres
     idea above should land after this, not before, per the original
     reasoning — that's now safe to revisit. **Known follow-up gap:** named
-    volumes are never pruned (`RunRegistry::stop` tears down containers +
+    volumes are never pruned (`Orchestrator::stop` tears down containers +
     network only) — a `"run"`-scoped preview run that's stopped and never
     restarted leaks an orphaned Docker volume, with no `compose down -v`
     equivalent yet.
@@ -557,9 +557,9 @@ plans referenced above.
   - ~~**`healthcheck` + real `depends_on` ordering**~~ **Done (2026-09-07)**
     — `#Healthcheck` (`schema/dependency.cue`, shared by `#Service` and
     `#BackingDependency` via `#RunOptions`) mirrors Docker's own
-    `HEALTHCHECK`; `runs::topological_start_order` now starts every node in
+    `HEALTHCHECK`; `orchestrator::topological_start_order` now starts every node in
     dependency order (`depends-on`/`owns` edges) instead of workspace-scan
-    order, in both `start` and `ensure_running`, and `runs::wait_for_healthy`
+    order, in both `start` and `ensure_running`, and `orchestrator::wait_for_healthy`
     (polling `docker::inspect_health`) blocks a dependency's dependents from
     starting until it reports `healthy` — but only for a node that actually
     declares a `healthcheck`; one that doesn't behaves exactly as before. No

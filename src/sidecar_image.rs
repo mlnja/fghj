@@ -1,5 +1,5 @@
 //! Gets the Docker image for `fghj-sidecar` (see `src/bin/fghj-sidecar.rs`)
-//! — the in-network TLS proxy sidecar `runs/` starts one of per run — onto
+//! — the in-network TLS proxy sidecar `orchestrator/` starts one of per run — onto
 //! the machine, by pulling the published build or, failing that, building it.
 //!
 //! **Pulling** is the normal path for an installed release: the release
@@ -30,7 +30,7 @@ const CARGO_LOCK: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Carg
 const DOCKERFILE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/sidecar/Dockerfile"));
 
 /// Where the release workflow publishes the prebuilt sidecar image, and so
-/// also the reference `runs/` starts sidecar containers from.
+/// also the reference `orchestrator/` starts sidecar containers from.
 ///
 /// The registry is baked into the binary rather than configurable because this
 /// is not a user-chosen image: it is fghj's own proxy, whose source lives in
@@ -42,7 +42,7 @@ const DOCKERFILE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/side
 /// to a bare `fghj-sidecar:x.y.z`) means there is exactly one string for a
 /// sidecar image anywhere in the system — `docker images` shows the pulled
 /// image under the same name a local build produces, so `ensure_built`'s
-/// "already present?" check cannot disagree with what `runs/` asks for.
+/// "already present?" check cannot disagree with what `orchestrator/` asks for.
 const SIDECAR_REPOSITORY: &str = "ghcr.io/mlnja/fghj-sidecar";
 
 /// Set to any non-empty value to skip the pull and always build from the
@@ -57,7 +57,7 @@ pub fn image_tag() -> String {
 }
 
 /// Makes `image_tag()` available locally — called once near daemon startup and
-/// again from `RunRegistry::ensure_sidecar`, so it has to be cheap when there
+/// again from `Orchestrator::ensure_sidecar`, so it has to be cheap when there
 /// is nothing to do.
 ///
 /// Three paths, in order:
@@ -240,7 +240,7 @@ mod tests {
 
     /// Guards the "one string for a sidecar image" invariant. If this ever
     /// went back to a bare `fghj-sidecar:x.y.z`, `ensure_built`'s pull target
-    /// and the reference `runs/` asks Docker for would quietly disagree:
+    /// and the reference `orchestrator/` asks Docker for would quietly disagree:
     /// the pull would land under a registry-qualified name, the inspect would
     /// keep missing, and every start would re-pull.
     #[test]

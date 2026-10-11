@@ -15,7 +15,7 @@ use crate::{actor, daemon_log, effects, persistence, state, supervisor};
 
 /// The segment a workspace at `path` contributes to every domain its nodes
 /// derive — `resolve_universe` takes the canonical path's `file_name` as the
-/// workspace name and `runs::derive_domain` runs it through `sanitize_label`.
+/// workspace name and `orchestrator::derive_domain` runs it through `sanitize_label`.
 /// Duplicated here as one small function rather than by calling into the
 /// resolver, because this needs the answer for a workspace that has not been
 /// resolved yet (and must not be, if it is about to be rejected).
@@ -225,7 +225,7 @@ impl WorkspaceRegistry {
         );
         // Persistence and the sidecar route table are both pure functions
         // of published state, so they are derived here rather than written
-        // by hand at the end of every lifecycle call in `runs/`. See
+        // by hand at the end of every lifecycle call in `orchestrator/`. See
         // `effects::persist` and `effects::routes` for why that move fixes
         // a real class of stale write, not just tidiness.
         supervisor::supervise(
@@ -427,7 +427,7 @@ impl WorkspaceRegistry {
                     task.abort();
                 }
                 if let Some(env) = env {
-                    let _ = state.runs.stop(&env).await;
+                    let _ = state.orchestrator.stop(&env).await;
                 }
                 let mut index = persistence::load_index(&self.index_path);
                 index.remove(id);

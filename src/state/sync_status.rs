@@ -2,7 +2,7 @@ use serde::Serialize;
 
 /// Whether a container's actual config still matches what `.fghj.yaml`
 /// would produce right now — the reducer-state counterpart of
-/// `runs::RunRegistry::config_drift`'s verdict. Purely informational:
+/// `orchestrator::Orchestrator::config_drift`'s verdict. Purely informational:
 /// nothing feeds a `Drifted` or `Orphaned` reading back into a reducer
 /// decision (see `effects::docker::converge`'s module doc) — these exist
 /// so the UI can

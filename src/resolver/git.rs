@@ -102,7 +102,7 @@ pub fn git_remote_and_branch(dir: &Path) -> (Option<String>, Option<String>) {
 /// fghj builds is `fghj/{id}:{branch}`, which is stable across commits — so
 /// without this, committing (or pulling, or rebasing) on the same branch left
 /// the drift hash byte-identical while the running container served a stale
-/// image. See `runs::spec_hash` and `concepts/config-drift.md`.
+/// image. See `orchestrator::spec_hash` and `concepts/config-drift.md`.
 ///
 /// `None` when the directory isn't a git working tree, or git can't be run at
 /// all. Deliberately not "treated as changed" the way `git_status_dirty`

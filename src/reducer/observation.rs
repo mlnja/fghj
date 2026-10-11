@@ -57,7 +57,7 @@ pub(super) fn reduce(
                     Ok(Some(mut info)) => {
                         // The mark comes off here rather than being left to
                         // whatever built `info` — settling *is* the action
-                        // being over. `RunRegistry::stop_container` returns
+                        // being over. `Orchestrator::stop_container` returns
                         // a clone of the container it was handed, which
                         // still carries the `Stopping` that triggered it, so
                         // inserting that verbatim left the node reading
@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(c.observed.published_port, Some(54321));
     }
 
-    /// `RunRegistry::stop_container` builds its return value by cloning the
+    /// `Orchestrator::stop_container` builds its return value by cloning the
     /// `ContainerInfo` it was handed, which is the one carrying the
     /// `Stopping` that triggered the call in the first place. Settling must
     /// clear it anyway: leaving it set stuck the node at "stopping" with the

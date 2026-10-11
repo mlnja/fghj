@@ -28,8 +28,8 @@ pub struct Node {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_path: Option<String>,
     /// This node's canonical `*.fghj.internal` address — derived from `id`
-    /// and the workspace by `runs::derive_domain`, never declared, the same
-    /// value `runs::start_node` uses when it launches the container.
+    /// and the workspace by `orchestrator::derive_domain`, never declared, the same
+    /// value `orchestrator::start_node` uses when it launches the container.
     /// Populated as a final pass in `resolve_universe` (not at node
     /// construction time, since it needs the workspace name, only known
     /// once resolution is complete) so the UI can show/link to a node's
@@ -90,19 +90,19 @@ pub struct Node {
     /// Extra literal hostnames this service also answers on (`#Service`
     /// only — the non-wildcarded entries of `schema/component.cue`'s
     /// `#Service.additional_hosts`), routed to its `primary` port by
-    /// `runs::start_node`. Always empty for backing and stub nodes.
+    /// `orchestrator::start_node`. Always empty for backing and stub nodes.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub additional_hosts: Vec<String>,
     /// Same as `additional_hosts`, but each entry also matches every
     /// subdomain of itself (`#Service` only — the `wildcard: true` entries
     /// of `schema/component.cue`'s `#Service.additional_hosts`), routed to
-    /// the same `primary` port by `runs::start_node`. Always empty for
+    /// the same `primary` port by `orchestrator::start_node`. Always empty for
     /// backing and stub nodes.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub wildcard_hosts: Vec<String>,
     /// `.env`-style files to load before `environment` — see
     /// `#RunOptions.env_file`'s doc comment. Resolved and merged into
-    /// `environment` by `runs::start_node`, not here — resolving a relative
+    /// `environment` by `orchestrator::start_node`, not here — resolving a relative
     /// path needs a checkout root (this node's own for a service, the owning
     /// service's for a backing dependency), which isn't known until
     /// `start_node` runs.
@@ -151,7 +151,7 @@ pub struct Node {
     /// `#RunOptions.debug` — the in-container port this node's debugger
     /// listens on, or `None` for a node that declares none.
     ///
-    /// Carries into the run layer in exactly one place: `runs::node_spec`
+    /// Carries into the run layer in exactly one place: `orchestrator::node_spec`
     /// publishes it alongside the node's declared `ports`, so it answers at
     /// `{raw_domain}:{debug}` on the declared number, host and in-network
     /// alike. Nothing is injected into the container's environment, for the
@@ -360,7 +360,7 @@ impl Graph {
     /// That is right for a *view* and wrong for an *actuation* — before
     /// this, `resolve_universe` would happily hand a graph containing "'a'
     /// depends on a service name that does not exist" straight to
-    /// `RunRegistry::ensure_running`, which would then bring up a subset of the
+    /// `Orchestrator::ensure_running`, which would then bring up a subset of the
     /// environment that nobody asked for and report success.
     ///
     /// So the severity split lives on the warning and the refusal lives at

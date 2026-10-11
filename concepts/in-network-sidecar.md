@@ -1,9 +1,9 @@
 # The in-network sidecar: one TLS proxy per run
 
 > **Status:** implemented. The binary is `src/bin/fghj-sidecar.rs`; its image
-> is built by `src/sidecar_image.rs`; its lifecycle by `src/runs/sidecar.rs`
-> (`ensure_sidecar`) and `src/runs/orchestrate.rs`; its route table by
-> `src/effects/routes.rs` and `src/runs/route_table.rs`. Closes [[AUDIT]] D2's
+> is built by `src/sidecar_image.rs`; its lifecycle by `src/orchestrator/sidecar.rs`
+> (`ensure_sidecar`) and `src/orchestrator/orchestrate.rs`; its route table by
+> `src/effects/routes.rs` and `src/orchestrator/route_table.rs`. Closes [[AUDIT]] D2's
 > sidecar gap — the subsystem existed in `docs/` but not in `concepts/`.
 
 ## The hole this fills

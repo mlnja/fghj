@@ -196,7 +196,7 @@ impl StartOutcomes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runs::testing::{edge, runtime_edge};
+    use crate::orchestrator::testing::{edge, runtime_edge};
 
     #[test]
     fn topological_start_order_places_dependencies_before_dependents() {
