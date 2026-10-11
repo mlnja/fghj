@@ -129,7 +129,7 @@ root is [[persistence-and-workspace-store]]'s subject.
 
 Fourteen tests are marked
 `#[ignore = "needs a Docker daemon: ..."]` — the ones that start real
-containers or run real builds (`docker.rs`'s exec and BuildKit tests,
+containers or run real builds (`docker/`'s exec and BuildKit tests,
 `runs/health.rs`'s `wait_for_exit` tests, `runs/start_node.rs`'s task tests,
 `runs/observe.rs`'s published-port test, `persistence/rehydrate.rs`'s
 dead-container test). They run with `cargo test -- --ignored` on any machine

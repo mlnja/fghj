@@ -2,7 +2,7 @@
 
 > **Status:** implemented. Language in `schema/component.cue` (`#Build`,
 > `#BuildSecret`) and `src/resolver/` (`config::Build`, `graph::NodeBuild`,
-> `graph::NodeBuildSecret`); transport in `src/docker.rs`
+> `graph::NodeBuildSecret`); transport in `src/docker/image.rs`
 > (`BuildOpts`, `build_image`, `build_image_buildkit`,
 > `solve_on_dedicated_thread`, `SSH_AUTH_SOCK_ENV`); resolution in
 > `src/runs/node_spec.rs` (`build_node_image`, `resolve_build_secrets`);
@@ -183,7 +183,7 @@ including a private key and a production JWT — into image layers on every
 build, and a second repo uploaded 209 MiB where 2 MiB was warranted.
 
 Implemented in `src/dockerignore.rs`, applied by `append_filtered` in
-`src/docker.rs`.
+`src/docker/image.rs`.
 
 ### Why this is hand-rolled
 

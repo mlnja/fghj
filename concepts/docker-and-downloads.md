@@ -6,10 +6,10 @@
 *mimics* Compose in a few places for tooling compatibility — `run_container`
 sets `com.docker.compose.project`/`.service`/`.oneoff` labels so Docker
 Desktop's own UI, and `docker ps`/`compose ls`, group a run's containers
-together as if they were a real Compose stack, even though `docker.rs`
+together as if they were a real Compose stack, even though `docker/`
 talks to the Engine API directly via `bollard`.
 
-A few choices in `src/docker.rs` exist specifically because `bollard`'s API
+A few choices in `src/docker/` exist specifically because `bollard`'s API
 is lower-level than `docker build`/`docker run`:
 
 - **`build_image`** has to hand the Docker daemon a tar stream of the build
@@ -259,7 +259,7 @@ resolver used to have a second privilege-dropped clone path,
 
 ## Status
 
-Implemented: `src/docker.rs` (build/run/inspect/logs/`stop_and_remove` over
+Implemented: `src/docker/` (build/run/inspect/logs/`stop_and_remove` over
 `bollard`),
 `src/downloads.rs` (`DownloadRegistry`, single-node/pull-all/pull-flow
 jobs, log streaming). `daemon/` exposes all of it over HTTP (see

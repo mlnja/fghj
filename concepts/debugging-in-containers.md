@@ -113,7 +113,7 @@ daemon you don't.
 everything else follows from machinery that already exists
 ([[two-zones-and-raw-ports]]):
 
-- `docker.rs` publishes every entry of `port_list` to `127.0.0.1:<ephemeral>`.
+- `docker/container.rs` publishes every entry of `port_list` to `127.0.0.1:<ephemeral>`.
 - `state::query::raw_endpoints` reads the *full* observed port map — every
   published port, not only the routed ones — and feeds `raw_net::reconcile`.
 - So the debugger answers at **`{node's raw domain}:{declared port}`**, on

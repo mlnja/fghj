@@ -1,7 +1,7 @@
 # Builder parity: build where `docker build` would have
 
 > Implemented in `src/buildx.rs` (`default_builder`, `HostBuilder`);
-> `src/docker.rs` (`BuildOpts::builder`, `solve_on_host_builder`,
+> `src/docker/image.rs` (`BuildOpts::builder`, `solve_on_host_builder`,
 > `buildkit_image_of`, `retire_builder_if_image_changed`, `load_image_tar`,
 > `FGHJ_BUILDKIT_CONTAINER`); `src/runs/node_spec.rs` (`build_node_image`).
 
@@ -135,7 +135,7 @@ building image   fghj/app:main  ·  /Users/me/src/app  ·  buildkit: orb-builder
 ## Status
 
 Implemented. Verified against a real daemon by three `#[ignore]`d tests in
-`src/docker.rs` (`mod build_tests`) covering: the image landing in dockerd's
+`src/docker/image.rs` (`mod build_tests`) covering: the image landing in dockerd's
 store and running; container reuse across two builds with identical layer
 digests, version parity with buildx, and buildx's own container and volume
 left untouched; and `--build-arg`/`--target` surviving the tar round trip.
