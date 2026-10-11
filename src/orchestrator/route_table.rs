@@ -7,17 +7,8 @@ use serde::Serialize;
 use crate::persistence::{self};
 use crate::state::{ContainerInfo, EnvState};
 
-/// One entry in the route table `write_route_table` persists for a run's
-/// sidecar proxy to poll (see `src/bin/fghj-sidecar.rs`'s own
-/// field-name-matching `RouteFileEntry`, kept as a separate type so that
-/// binary doesn't need to depend on this module at all). Needs no raw
-/// IP/container-name derivation: `connect_host` is the container's
-/// `fghj.raw.internal` domain, a real Docker network alias (see
-/// `resolve_node_spec`'s `aliases`) that Docker's own embedded per-network
-/// DNS resolves for any container on the network, including the sidecar
-/// itself — the `fghj.internal` domain (`lookup`) is deliberately *not* a
-/// Docker alias on the node's own container anymore, since the sidecar
-/// itself is what needs to own that name's resolution.
+/// Must match `RouteFileEntry` in `src/bin/fghj-sidecar.rs`. `connect_host` is
+/// the container's raw domain, a Docker alias the sidecar can resolve.
 #[derive(Debug, PartialEq, Serialize)]
 pub(crate) struct RouteFileEntry {
     lookup: String,
@@ -26,11 +17,6 @@ pub(crate) struct RouteFileEntry {
     connect_port: u16,
 }
 
-/// The pure part of `write_route_table` — every routable domain across
-/// `containers`, connecting via each container's own `raw_domain` (see
-/// `RouteFileEntry`'s doc comment for why). Split out from the actual file
-/// write so it can be unit-tested without touching `/var/lib/fghjd`, which
-/// is root-owned in production.
 pub(crate) fn route_file_entries<'a>(
     containers: impl IntoIterator<Item = &'a ContainerInfo>,
 ) -> Vec<RouteFileEntry> {
@@ -62,38 +48,16 @@ pub(crate) fn sidecar_ca_dir() -> PathBuf {
     persistence::fghjd_root().join("sidecar-ca")
 }
 
-/// A world-readable copy of the **signing** CA's cert+key, refreshed on
-/// every sidecar (re)creation, kept separate from the real
-/// `daemon::ca_dir()` — `fghjd` runs as root and the real keys are
-/// deliberately `0600` root-owned, but Docker Desktop/OrbStack's bind-mount
-/// sharing on macOS is brokered by a process running as the logged-in user,
-/// not root: even a container claiming to run as `root` can't read a `0600`
-/// root-owned file through that bridge, since the permission check happens
-/// on the host side against the real user, before the request ever reaches
-/// the container's own UID namespace. Mounting a CA key into a container at
-/// all is the accepted tradeoff for this feature (see `fghj-sidecar.rs`'s
-/// own doc comment); what bounds it is that the key made readable here can
-/// only certify fghj's own zone and the reserved alias TLDs — see
-/// `ca::ensure_signing_ca`.
-///
-/// Also called once at daemon startup, not just before creating a sidecar.
-/// Installs that predate the two-CA split left the **root** key sitting in
-/// this directory at `0644`, and nothing would have overwritten it until the
-/// next time a run happened to start a sidecar — on a machine where no run
-/// ever starts, never. Since this function already writes exactly the bytes
-/// that should be there, running it up front is the whole migration.
+/// A world-readable copy of the signing CA for the sidecar: Docker Desktop and
+/// OrbStack check bind-mount permissions as the logged-in user, so a `0600`
+/// root file can't be mounted. The signing CA is name-constrained to fghj's
+/// zones; see `ca::ensure_signing_ca`. Also run at startup to overwrite a root
+/// key older installs left here.
 pub(crate) fn refresh_sidecar_ca_copy() -> Result<PathBuf> {
     let dir = sidecar_ca_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {dir:?}"))?;
 
-    // The **signing** CA, not the root. Both land under the filenames the
-    // sidecar already loads (`ca::ensure_ca` against `/etc/fghj-sidecar/ca`),
-    // so nothing in `fghj-sidecar.rs` changes: it loads "a CA" and mints
-    // leaves under it, and that CA now happens to be a name-constrained
-    // subordinate whose certificate the leaf chain carries. The root's own
-    // key stays `0600` in `ca_dir()` and is never copied anywhere — see
-    // `ca::ensure_signing_ca` for why exactly one of the two keys can be
-    // allowed to be world-readable, and which.
+    // The signing CA, never the root.
     let src_dir = crate::daemon::ca_dir();
     for (src, dest_name) in [
         (crate::web::ca::signing_cert_path(&src_dir), "ca-cert.pem"),
@@ -109,13 +73,8 @@ pub(crate) fn refresh_sidecar_ca_copy() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Regenerates the route table this run's sidecar proxy polls from, from
-/// `state.containers` alone — every routable domain across every container
-/// this run knows about, whether or not that container's own status is
-/// currently `running` (matching a stopped-then-restarted route staying
-/// valid the moment the container comes back). Best-effort: a write failure
-/// here shouldn't fail the start/stop call it's riding along on, since the
-/// next lifecycle call for this run retries it anyway.
+/// Regenerates the sidecar's route table from `state.containers`, stopped
+/// containers included so a route is valid the moment one comes back.
 pub(crate) fn write_route_table(state: &EnvState) -> Result<()> {
     let dir = sidecar_routes_dir(&state.network);
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {dir:?}"))?;

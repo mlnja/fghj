@@ -1,30 +1,9 @@
 use super::domain::{DomainZone, derive_domain};
 use crate::resolver::{Graph, Node};
 
-/// Expands `${FGHJ_SERVICE_FQDN}`/`${FGHJ_SERVICE_FQDN:path}` (this node's
-/// own, or another service's, `fghj.raw.internal` domain — see
-/// `sibling_domain` for what `path` can look like) and `${FGHJ_SERVICE_FQDN_HTTP}`/
-/// `${FGHJ_SERVICE_FQDN_HTTP:path}` (the `fghj.internal` — proxied — domain
-/// instead) in a single `environment`/`env_file` value, so a CUE author can
-/// reference a derived address without hand-computing `derive_domain`'s
-/// formula into a literal string (the convention every hardcoded
-/// `*_HOST`/`*_URL` value in `aikido-core`/`aikifactory`'s `.fghj.yaml`
-/// followed before this existed). The bare `FQDN` form resolves to the raw
-/// zone — direct container access — because that's what every real caller
-/// of this macro today actually needs (a database connection string, a raw
-/// S3 endpoint); `_HTTP` is the rare opt-in for a service's own *proxied*
-/// identity (e.g. a presigned URL meant to be handed to something outside
-/// the network). The longer `_HTTP` token is checked first so it's never
-/// mistaken for the shorter one plus a literal `_HTTP` suffix. A manual scan
-/// rather than the `regex` crate (not otherwise a dependency) — the grammar
-/// is just those forms, simple enough that a scanner is less code than
-/// pulling in a new crate. An unresolvable `:path` (no such sibling) or a
-/// token missing its closing `}` is left untouched in the output rather
-/// than erroring — a typo here shouldn't fail an entire run when the
-/// literal fallback is at least diagnosable in logs, the same tolerance
-/// `parse_env_file` extends to a malformed line. (One in `environment` never
-/// gets here: the resolver refuses it — see `fqdn_template_paths`. Only an
-/// `env_file` value, read at start, can.)
+/// Expands `${FGHJ_SERVICE_FQDN[:path]}` (raw zone) and
+/// `${FGHJ_SERVICE_FQDN_HTTP[:path]}` (proxied zone) in an env value. An
+/// unresolvable token is left as is rather than failing the start.
 pub(crate) fn expand_service_fqdn_templates(
     value: &str,
     node: &Node,
@@ -32,13 +11,8 @@ pub(crate) fn expand_service_fqdn_templates(
     own_http_domain: &str,
     graph: &Graph,
 ) -> String {
-    // `TOKEN_RAW` is a literal prefix of `TOKEN_HTTP`, so `rest.find`ing it
-    // always lands on the truly leftmost occurrence of either token — a
-    // standalone `_HTTP` search alone would miss the case where the
-    // leftmost token is actually the plain (raw) form, and searching both
-    // separately would need extra tie-breaking since they can share a start
-    // index. Whichever one `find` lands on, a cheap `starts_with` check at
-    // that position tells the two apart.
+    // `TOKEN_RAW` is a prefix of `TOKEN_HTTP`, so finding it finds the leftmost of
+    // either; `starts_with` then tells them apart.
     const TOKEN_HTTP: &str = "${FGHJ_SERVICE_FQDN_HTTP";
     const TOKEN_RAW: &str = "${FGHJ_SERVICE_FQDN";
     let mut out = String::with_capacity(value.len());
@@ -70,12 +44,8 @@ pub(crate) fn expand_service_fqdn_templates(
     out
 }
 
-/// Every `path` named by a `${FGHJ_SERVICE_FQDN:path}` or
-/// `${FGHJ_SERVICE_FQDN_HTTP:path}` in `value`, in order — the bare
-/// self-reference forms name nothing. The resolver refuses one that names
-/// nothing, so a typo fails at resolve time instead of leaking a literal
-/// into a container's environment. It never makes an edge: a hostname is
-/// sugar, not a dependency.
+/// Every `path` named by an FQDN template in `value`. The resolver refuses
+/// unknown ones so a typo fails at resolve time.
 pub fn fqdn_template_paths(value: &str) -> Vec<String> {
     const TOKEN_RAW: &str = "${FGHJ_SERVICE_FQDN";
     let mut paths = Vec::new();
@@ -92,13 +62,8 @@ pub fn fqdn_template_paths(value: &str) -> Vec<String> {
     paths
 }
 
-/// The domain `${FGHJ_SERVICE_FQDN:path}` means from `node`'s own
-/// `environment`. `path` is `name` — a service in `node`'s repo — or
-/// `alias/name`, a service in a repo `node`'s repo includes. The alias is
-/// looked up in `node.includes`, the folder it resolved to; nothing else is
-/// searched, so the same path always means the same service no matter what
-/// is running. `None` when the alias isn't one, or the service isn't in the
-/// graph (a repo not pulled yet).
+/// The domain `${FGHJ_SERVICE_FQDN:path}` means for `node`: `name` (same repo)
+/// or `alias/name` (a repo `node`'s repo includes). `None` if not found.
 pub(crate) fn sibling_domain(
     node: &Node,
     path: &str,
@@ -174,8 +139,6 @@ mod tests {
         assert_eq!(out, "https://mysql.app.shop.fghj.internal/");
     }
 
-    /// `alias/name` goes through the repo's `include:` — the folder it
-    /// points at, whatever it's called on disk.
     #[test]
     fn expand_service_fqdn_templates_resolves_an_included_repos_service() {
         let mut php = test_node("php.app", "php", "service");
@@ -192,8 +155,6 @@ mod tests {
         assert_eq!(out, "http://api.billing-svc.shop.fghj.raw.internal");
     }
 
-    /// A bare name never reaches into another repo, however unambiguous
-    /// it would be: the same path always means the same service.
     #[test]
     fn expand_service_fqdn_templates_does_not_search_other_repos_for_a_bare_name() {
         let php = test_node("php.app", "php", "service");

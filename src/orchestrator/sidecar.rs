@@ -1,4 +1,4 @@
-//! The per-run sidecar container that fronts a run's HTTP routes.
+//! //! The environment's sidecar container that fronts its HTTP routes.
 
 use std::collections::BTreeMap;
 
@@ -11,17 +11,8 @@ use super::naming::sidecar_name;
 use super::registry::Orchestrator;
 
 impl Orchestrator {
-    /// Starts (or confirms already running) this run's in-network TLS proxy
-    /// sidecar — one per run, on that run's own docker network, never
-    /// shared across workspaces/runs, so a container inside the network can
-    /// reach a sibling's `*.fghj.internal` name with the same addressing a
-    /// browser outside the network gets from the host-side proxy. Returns
-    /// its deterministic container name and its address on `network`.
-    ///
-    /// Idempotent, like `ensure_running`'s per-node liveness check: checked
-    /// directly against Docker rather than trusted from `EnvState`, since
-    /// the sidecar can be stopped/removed out-of-band just like any other
-    /// container.
+    /// Starts the environment's in-network TLS proxy sidecar unless it's already
+    /// running. Returns its name and its address on `network`.
     pub(super) async fn ensure_sidecar(
         &self,
         workspace_name: &str,
@@ -47,26 +38,15 @@ impl Orchestrator {
                 .with_context(|| format!("failed to create {routes_path:?}"))?;
         }
 
-        // Canonicalized, not the literal `/var/lib/...` path: macOS's `/var`
-        // is a symlink to `/private/var`, and OrbStack's bind-mount source
-        // resolution doesn't follow it — a source of `/var/lib/fghjd/...`
-        // silently resolves inside the Docker VM's own filesystem instead of
-        // the real host path, so the mounted directory shows up empty
-        // instead of erroring. The already-resolved `/private/var/lib/...`
-        // form mounts correctly.
+        // Canonicalized: OrbStack doesn't follow macOS's `/var` symlink and would
+        // mount an empty directory.
         let routes_dir = std::fs::canonicalize(&routes_dir)
             .with_context(|| format!("failed to canonicalize {routes_dir:?}"))?;
         let ca_dir = refresh_sidecar_ca_copy()?;
         let ca_dir = std::fs::canonicalize(ca_dir)
             .context("failed to canonicalize the sidecar CA directory")?;
 
-        // Sibling mounts, not nested — binding `ca` underneath an already
-        // bind-mounted, read-only `/etc/fghj-sidecar` fails outright (the
-        // container runtime can't create a mountpoint inside a read-only
-        // mount). `/etc/fghj-sidecar` itself is never bind-mounted from the
-        // host, so the runtime creates it as an ordinary (writable)
-        // directory in the container's own layer, and both binds attach
-        // under it independently.
+        // Sibling mounts: a bind can't be nested inside a read-only bind.
         let binds = vec![
             format!("{}:/etc/fghj-sidecar/routes:ro", routes_dir.display()),
             format!("{}:/etc/fghj-sidecar/ca:ro", ca_dir.display()),
@@ -86,10 +66,7 @@ impl Orchestrator {
                 service_name: "fghj-sidecar",
                 binds: &binds,
                 restart_policy: "unless-stopped",
-                // The sidecar holds no state worth flushing — it is a proxy
-                // and a resolver, both rebuilt from `routes.json` on the next
-                // start — so it gets a short grace period rather than the
-                // 10s default, to keep teardown of a whole run snappy.
+                // Stateless, so a short grace period keeps teardown snappy.
                 stop_signal: None,
                 stop_grace_period: 2,
                 user: None,

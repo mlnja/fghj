@@ -5,47 +5,18 @@ use super::logs::capture_container_logs;
 use crate::persistence::WorkspaceDb;
 use crate::supervisor;
 
-/// The Docker-facing half of run management: it owns the clients and
-/// handles needed to *do* things (create a container, wait on a
-/// healthcheck, stream logs) and the locks that keep those calls from
-/// interleaving with themselves. It deliberately holds no run state: the
-/// actor's published `state::WorkspaceState` is the only store, so callers
-/// pass in whatever prior state a call needs and dispatch the result back
-/// as an action.
+/// Docker-facing clients and locks. Holds no state: callers pass in what they
+/// need and dispatch the result back to the actor.
 pub struct Orchestrator {
     pub(super) workspace: std::path::PathBuf,
     pub(super) db: Arc<WorkspaceDb>,
     pub(super) docker: Arc<bollard::Docker>,
-    /// One lock per node, serializing that node's lifecycle
-    /// calls — `start_node` (via `bring_up`) / `stop_container` / `remove_container`.
-    ///
-    /// Per node, not per workspace. Two concurrent calls for the *same* node
-    /// both `docker::stop_and_remove` then recreate the same container name,
-    /// which Docker itself rejects for whichever loses the race, so those
-    /// genuinely must not interleave. Two calls for *different* nodes have
-    /// no such conflict: they touch different containers, different volumes,
-    /// different route entries. A workspace-wide lock conflated the two, and
-    /// since these calls are held across `start_node` — which waits on a
-    /// healthcheck — one slow node could block every other node's Start or
-    /// Stop button in the workspace for the length of that wait.
-    ///
-    /// The inner mutexes are `tokio::sync::Mutex` because they are held
-    /// across `.await`; the outer `std::sync::Mutex` only guards the brief
-    /// lookup that hands one out, and is never held across an await.
-    ///
-    /// Serializing is all this does. Rejecting a genuine duplicate — a
-    /// second "start" for a node already starting, which would otherwise
-    /// just wait its turn and then redundantly stop-and-recreate the
-    /// container the first call just started — happens upstream, in the
-    /// reducer, off `ContainerInfo::pending_action`. This struct used to
-    /// keep its own parallel `pending` map for that, a second gate on the
-    /// same fact that could disagree with the first.
+    /// Per node, not per workspace: two calls for one node would both recreate the
+    /// same container name, but different nodes don't conflict, and one slow
+    /// healthcheck mustn't block every other node. Duplicate starts are rejected
+    /// by the reducer, not here.
     pub(super) node_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Background per-node tasks streaming that node's
-    /// *current* container's logs into `db` as they're produced — see
-    /// `spawn_log_capture`. Keyed so that starting a node again aborts its
-    /// previous capture task before replacing it, guaranteeing at most one
-    /// task (and one open generation) writing for a given node at a time.
+    /// At most one capture task per node.
     pub(super) log_captures: Mutex<HashMap<String, tokio::task::AbortHandle>>,
 }
 
@@ -64,18 +35,8 @@ impl Orchestrator {
         }
     }
 
-    /// Starts (or restarts) background capture of `container_name`'s logs
-    /// into `db`, opening a fresh generation for `node_id`. Called
-    /// from `start_node` — the single choke point every container-creating
-    /// path (`ensure_running`, `restart_node`) already funnels
-    /// through — so every container gets its own capture task without each
-    /// caller needing to remember to set one up.
-    ///
-    /// Aborts any capture task already running for this node first: normally
-    /// the old task would already have ended on its own (the previous
-    /// container's log stream ends when Docker removes it, which
-    /// `start_node`'s callers always do before recreating), but aborting
-    /// explicitly avoids ever leaving two tasks writing under the same key.
+    /// Aborts any previous capture for the node so two tasks never write under the
+    /// same key.
     pub(super) fn spawn_log_capture(&self, node_id: &str, container_name: &str) {
         let handle = supervisor::supervise(
             format!("log capture[{node_id}]"),
@@ -96,9 +57,6 @@ impl Orchestrator {
         }
     }
 
-    /// The lifecycle lock for one node, created on first use. Held across
-    /// the whole of a `restart`/`stop`/`remove` so that node's Docker calls
-    /// never interleave with themselves — see `node_locks`.
     pub(super) fn node_lock(&self, node_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.node_locks
             .lock()
@@ -115,9 +73,6 @@ mod tests {
     use crate::persistence::WorkspaceDb;
     use std::time::Duration;
 
-    /// A registry with no runs, backed by a throwaway database. The docker
-    /// client is never dialled by anything below — these tests are about the
-    /// locking and merge rules, which are pure bookkeeping.
     async fn empty_registry() -> (tempfile::TempDir, Orchestrator) {
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
@@ -136,10 +91,6 @@ mod tests {
         assert!(!Arc::ptr_eq(&a1, &b));
     }
 
-    /// B12 itself: one node stuck in a long lifecycle call must not hold up
-    /// any other node's. Under the old workspace-wide `action_lock` the
-    /// second acquisition here would have blocked for the length of the
-    /// first — up to a full healthcheck wait.
     #[tokio::test]
     async fn a_node_held_for_a_long_time_does_not_block_a_different_node() {
         let (_tmp, registry) = empty_registry().await;
@@ -154,9 +105,6 @@ mod tests {
         drop(held);
     }
 
-    /// The other half of the same rule: two calls for the *same* node still
-    /// have to take turns, because they both stop-and-recreate one container
-    /// name and Docker rejects whichever loses that race.
     #[tokio::test]
     async fn two_calls_for_one_node_still_take_turns() {
         let (_tmp, registry) = empty_registry().await;

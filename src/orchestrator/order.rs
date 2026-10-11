@@ -2,18 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::resolver::Edge;
 
-/// Orders `node_ids` so that every node's dependencies — the `to` of an
-/// edge it can't start without ([`Edge::needed_to_start`]) — are started
-/// before it. A `required: false` edge orders nothing: two services that
-/// call each other at runtime would otherwise each wait for the other. Used
-/// by both `start` and `ensure_running` so containers come up in dependency
-/// order instead of whatever order `graph.nodes` happens to iterate in.
-/// Edges pointing outside `node_ids` (e.g. a flow-filtered run that excludes
-/// a node's dependency) are ignored — nothing to order against.
-///
-/// A cycle can't make progress by definition. The resolver refuses one
-/// (`resolver::cycles`), so this is a backstop: whatever's left over is
-/// appended in stable sorted order rather than looping forever.
+/// Orders `node_ids` so every node's start requirements come first. Runtime
+/// edges and edges leaving `node_ids` order nothing. A cycle (which the
+/// resolver refuses) is appended in sorted order rather than looping.
 pub fn topological_start_order(node_ids: &[String], edges: &[Edge]) -> Vec<String> {
     let ids: HashSet<&str> = node_ids.iter().map(|s| s.as_str()).collect();
     let mut deps: HashMap<&str, HashSet<&str>> = HashMap::new();
@@ -33,8 +24,6 @@ pub fn topological_start_order(node_ids: &[String], edges: &[Edge]) -> Vec<Strin
 
     let mut ordered: Vec<String> = Vec::new();
     let mut placed: HashSet<&str> = HashSet::new();
-    // Sorted, not hashmap-iteration-order, so ties (and the cycle fallback
-    // below) are stable across calls.
     let mut remaining: Vec<&str> = node_ids.iter().map(|s| s.as_str()).collect();
     remaining.sort_unstable();
 
@@ -59,10 +48,8 @@ pub fn topological_start_order(node_ids: &[String], edges: &[Edge]) -> Vec<Strin
     ordered
 }
 
-/// The members of `ids` that something else in `ids` can't start without —
-/// the nodes a start has to wait on until ready. Everything else in the run
-/// is either a leaf or only needed at runtime, and waiting on it would hold
-/// up the rest of the run for nothing.
+/// The members of `ids` something else in `ids` can't start without — the only
+/// nodes worth waiting on.
 pub fn waited_on(ids: &[String], edges: &[Edge]) -> HashSet<String> {
     let set: HashSet<&str> = ids.iter().map(String::as_str).collect();
     edges
@@ -73,14 +60,10 @@ pub fn waited_on(ids: &[String], edges: &[Edge]) -> HashSet<String> {
         .collect()
 }
 
-/// Everything `id` can't start without, transitively, in start order and
-/// without `id` itself.
 pub fn requirements_of(id: &str, edges: &[Edge]) -> Vec<String> {
     closure(id, edges, |e| (&e.from, &e.to))
 }
 
-/// Everything that can't start without `id`, transitively, in start order
-/// and without `id` itself.
 pub fn dependents_of(id: &str, edges: &[Edge]) -> Vec<String> {
     closure(id, edges, |e| (&e.to, &e.from))
 }
@@ -104,18 +87,13 @@ fn closure<'e>(
     topological_start_order(&found, edges)
 }
 
-/// Which nodes of a start failed, and which were skipped because something
-/// they can't start without did. A failure blocks its required dependents,
-/// transitively, and nothing else: a broken worker doesn't stop an unrelated
-/// frontend from coming up. See `concepts/dependency-kinds.md`.
+/// Which nodes failed and which were blocked by a failure. A failure blocks
+/// only its required dependents. See `concepts/dependency-kinds.md`.
 #[derive(Debug, Default)]
 pub struct StartOutcomes {
-    /// For each node of the run, the members of the run it can't start
-    /// without.
     requirements: HashMap<String, Vec<String>>,
     failed: BTreeMap<String, String>,
-    /// Blocked node → the failed node it was blocked by, so a chain of
-    /// blocks names the root cause rather than its nearest victim.
+    /// Blocked node → the root failure, not its nearest victim.
     blocked: BTreeMap<String, String>,
 }
 
@@ -137,9 +115,7 @@ impl StartOutcomes {
         }
     }
 
-    /// The failed node `id` can't start without, if any — directly, or
-    /// through a requirement that was itself blocked. Call in start order:
-    /// it only sees outcomes already recorded.
+    /// Call in start order: only sees outcomes already recorded.
     pub fn blocked_by(&self, id: &str) -> Option<&str> {
         let mut causes: Vec<&str> = self
             .requirements
@@ -166,8 +142,6 @@ impl StartOutcomes {
         self.blocked.insert(id.to_string(), by.to_string());
     }
 
-    /// One error naming every failure and what each one blocked, or `None`
-    /// when everything came up.
     pub fn error(&self) -> Option<String> {
         if self.failed.is_empty() {
             return None;
@@ -210,8 +184,6 @@ mod tests {
 
     #[test]
     fn topological_start_order_ignores_edges_outside_the_target_set() {
-        // A flow-filtered run can exclude a node's dependency entirely —
-        // that edge should just be ignored, not panic on a missing id.
         let ids = vec!["app".to_string()];
         let edges = vec![edge("app", "not-in-this-run", "depends-on")];
         let order = topological_start_order(&ids, &edges);
@@ -229,7 +201,6 @@ mod tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
-    /// web -> api -> db, worker -> db, api ~> hooks (runtime).
     fn shop() -> Vec<Edge> {
         vec![
             edge("web", "api", "depends-on"),
@@ -263,7 +234,6 @@ mod tests {
         assert_eq!(outcomes.blocked_by("hooks"), None);
         assert_eq!(outcomes.blocked_by("api"), Some("db"));
         outcomes.block("api", "db");
-        // Named by the root cause, not by the blocked api in between.
         assert_eq!(outcomes.blocked_by("web"), Some("db"));
         outcomes.block("web", "db");
         assert_eq!(outcomes.blocked_by("worker"), Some("db"));

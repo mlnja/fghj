@@ -1,40 +1,5 @@
-//! Environment lifecycle: turning a resolved `Graph` into real Docker containers and
-//! keeping the recorded state honest against what Docker actually reports.
-//!
-//! See `concepts/run-lifecycle-and-registry.md` for the design. The module is
-//! split so each file holds one responsibility.
-//!
-//! Pure helpers, free of `Orchestrator` and of I/O:
-//!
-//! - [`naming`] — Docker network, container and volume names.
-//! - [`domain`] — which `*.fghj.internal` zone a node answers on.
-//! - [`fqdn_template`] — the `${FGHJ_SERVICE_FQDN}` expansion language.
-//! - [`order`] — dependency-first start ordering.
-//! - [`spec`] — the per-node launch spec and its drift hash.
-//!
-//! The shapes this module reads and writes — `EnvState`, `ContainerInfo`,
-//! `PortRoute`, `PendingAction` — live in [`crate::state`], which is where
-//! the reducer, `persistence`, and the `/runs` JSON get them from too.
-//! There is exactly one of each; this module used to define its own flatter
-//! copies and translate at every boundary.
-//!
-//! I/O helpers:
-//!
-//! - [`route_table`] — the on-disk route table the sidecar reads.
-//! - [`health`] — healthcheck polling.
-//! - [`logs`] — container log capture and lookup.
-//!
-//! [`Orchestrator`] itself — the orchestrator. Its inherent `impl` is split
-//! across these files by the job each group of methods does:
-//!
-//! - [`registry`] — the struct and its constructor.
-//! - [`events`] — operator-facing narration of what an action is doing.
-//! - [`observe`] — read-only reconciliation against real Docker state.
-//! - [`lifecycle`] — per-node get/stop/restart/remove.
-//! - [`sidecar`] — the per-run sidecar container.
-//! - [`orchestrate`] — starting a whole run and bringing it up to date.
-//! - [`node_spec`] — deriving one node's launch spec (image, binds, env).
-//! - [`start_node`] — creating one node's container and its routes.
+//! //! Environment lifecycle: turns a resolved `Graph` into Docker containers.
+//! //! See `concepts/run-lifecycle-and-registry.md`.
 
 pub mod domain;
 pub mod events;

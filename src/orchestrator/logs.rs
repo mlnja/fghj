@@ -8,8 +8,6 @@ use crate::docker;
 use crate::persistence::{LogLine, WorkspaceDb};
 use crate::state::EnvState;
 
-/// Returns the container name backing `node_id` in `state`, for the SSE
-/// live-follow endpoint to build a `docker::logs_follow` stream from.
 pub fn container_name_for<'a>(state: &'a EnvState, node_id: &str) -> Result<&'a str> {
     state
         .containers
@@ -18,17 +16,9 @@ pub fn container_name_for<'a>(state: &'a EnvState, node_id: &str) -> Result<&'a 
         .ok_or_else(|| anyhow::anyhow!("no such node in run: {node_id}"))
 }
 
-/// Runs for the lifetime of one container: opens a fresh log generation,
-/// then streams `container_name`'s stdout/stderr into it via
-/// `docker::logs_follow` until the stream ends (the container stops or is
-/// removed), flushing periodically so a live tail stays close to real-time
-/// and unconditionally at the end so a crash's final lines are never lost —
-/// the whole point of persisting logs in the first place, since Docker's own
-/// retained logs are destroyed the moment `stop_and_remove` runs.
-///
-/// Each stream (stdout/stderr) gets its own leftover buffer so a line split
-/// across two chunks is reassembled correctly without stdout/stderr
-/// interleaving corrupting each other's partial line.
+/// Streams one container's logs into a fresh generation until the container
+/// goes away. Docker's own logs die with `stop_and_remove`, so this is the only
+/// copy of a crash's last lines.
 pub(crate) async fn capture_container_logs(
     db: Arc<WorkspaceDb>,
     docker: Arc<bollard::Docker>,

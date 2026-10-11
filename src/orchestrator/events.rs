@@ -1,15 +1,10 @@
-//! Operator-facing narration of what an action is doing, recorded per
-//! (node, action) cycle and read back by the UI's events pane. Distinct from
-//! the container's own output, which `spawn_log_capture` records.
-//!
-//! Best-effort throughout: a failure to record is printed, never allowed to
-//! fail the start or stop it narrates.
+//! //! Operator-facing narration of an action, per (node, action) cycle, for the
+//! //! UI's events pane. Best-effort: a failure to record is printed, never fatal.
 
 use std::fmt::Display;
 
 use super::registry::Orchestrator;
 
-/// The narration of one `action` ("start", "stop", "create") on one node.
 pub(super) struct Events<'a> {
     orchestrator: &'a Orchestrator,
     node_id: &'a str,
@@ -27,8 +22,7 @@ impl Orchestrator {
 }
 
 impl Events<'_> {
-    /// Drops the previous cycle of this action: a new start replaces the
-    /// last start's narration, a new stop the last stop's.
+    /// Replaces this action's previous narration.
     pub(super) async fn begin(&self) {
         let db = self.orchestrator.db.clone();
         if let Err(e) = db
@@ -47,16 +41,13 @@ impl Events<'_> {
         self.record(step, "ok", None).await;
     }
 
-    /// `{detail:#}`, so an `anyhow::Error` records its whole context chain.
     pub(super) async fn failed(&self, step: &str, detail: impl Display) {
         self.record(step, "error", Some(format!("{detail:#}")))
             .await;
     }
 
-    /// `failed`, unless an inner step of this cycle already recorded the
-    /// failure — so an outer handler doesn't repeat it under the wrong step.
-    /// If the check itself fails, record anyway: a duplicate line beats a
-    /// failure nothing narrates.
+    /// Skips recording if an inner step of this cycle already did, so the error
+    /// isn't repeated under the wrong step.
     pub(super) async fn failed_unless_reported(&self, step: &str, detail: impl Display) {
         let db = self.orchestrator.db.clone();
         let already = db

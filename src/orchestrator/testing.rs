@@ -1,10 +1,7 @@
-//! Shared fixtures for the `runs` submodule tests.
-
 use std::collections::BTreeMap;
 
 use crate::resolver::{Edge, Graph, Node};
 
-/// A `required: false` "depends-on" edge: needed at runtime, not to start.
 pub fn runtime_edge(from: &str, to: &str) -> Edge {
     Edge {
         required: false,
@@ -32,8 +29,6 @@ pub fn test_node(id: &str, label: &str, kind: &str) -> Node {
         image: None,
         branch: None,
         repo: None,
-        // Ids are `{name}.{local_path}`, so the repo is everything after
-        // the first dot.
         local_path: id.split_once('.').map(|(_, repo)| repo.to_string()),
         domain: String::new(),
         downloaded: true,

@@ -1,5 +1,3 @@
-//! Creates the Docker container for one node and derives its routes.
-
 use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
@@ -15,33 +13,20 @@ use crate::state::{
 
 use super::registry::Orchestrator;
 
-/// Everything about *this* start that isn't the node's own declared config.
 #[derive(Clone, Copy)]
 pub(super) struct StartContext<'a> {
     pub(super) network: &'a str,
     pub(super) sidecar_ip: Option<&'a str>,
     pub(super) budget: &'a RunBudget,
-    /// See [`debug_wait_overrides`] for what this changes and why it is
-    /// passed in here rather than read off the node.
     pub(super) debug_wait: bool,
-    /// Whether something in the run needs this node to start, and so has
-    /// to wait for its healthcheck. A node only runtime dependents need is
-    /// not waited on: nothing would be held up for it but the rest of the
-    /// run. A task is waited on regardless, since its exit code is its
-    /// result. See `concepts/dependency-kinds.md`.
+    /// Whether something in the run needs this node to start, and so waits for its
+    /// healthcheck. See `concepts/dependency-kinds.md`.
     pub(super) wait_ready: bool,
 }
 
 impl Orchestrator {
-    /// Actually starts a node's container: resolves its full spec via
-    /// `resolve_node_spec` (`side_effects: true`, so the image gets built
-    /// and named volumes get created along the way), stamps the resulting
-    /// `spec_hash` onto the container as a `fghj.config_hash` label, runs
-    /// it, and inspects the result. That label — and the copy of the same
-    /// hash returned on `ContainerDesired::config_hash` — is what a later
-    /// `config_drift` pass compares a freshly recomputed desired hash
-    /// against to decide whether this node has drifted since it was last
-    /// started.
+    /// Starts a node's container, stamping `spec_hash` on it as `fghj.config_hash`
+    /// for drift checks.
     pub(super) async fn start_node(
         &self,
         graph: &Graph,
@@ -61,11 +46,7 @@ impl Orchestrator {
         let spec = match self.resolve_node_spec(graph, node, true).await {
             Ok(spec) => spec,
             Err(e) => {
-                // The backstop. Most failures in here are a build, a secret
-                // or the ssh-agent, and `resolve_node_spec` already recorded
-                // the step that actually broke — recording again would put
-                // the same text in the events pane a second time under
-                // `resolving config`, which is not what failed.
+                // `resolve_node_spec` usually records the failing step itself.
                 ev.failed_unless_reported("resolving config", &e).await;
                 return Err(e);
             }
@@ -74,13 +55,8 @@ impl Orchestrator {
         let config_hash = spec_hash(node, &spec);
         let mut labels = node.labels.clone();
         labels.insert("fghj.config_hash".to_string(), config_hash.clone());
-        // The same two facts as `ContainerDesired::source`, on the container
-        // itself. `config_hash` above is a digest, so `docker inspect` can
-        // show that two containers differ but never what either was built
-        // from; these make "which commit is this thing running" answerable
-        // without fghj, its database, or a resolved graph in hand. Omitted
-        // rather than written empty when git could not be read, so a missing
-        // label means unknown instead of "no branch".
+        // What the container was built from, readable with `docker inspect`. Omitted
+        // when git couldn't be read.
         if let Some(checkout) = node.build_checkout() {
             if let Some(branch) = checkout.branch {
                 labels.insert("fghj.source_branch".to_string(), branch.to_string());
@@ -91,19 +67,10 @@ impl Orchestrator {
             labels.insert("fghj.source_dirty".to_string(), checkout.dirty.to_string());
         }
 
-        // Deliberately *after* `spec_hash` above, and that ordering is the
-        // whole reason this isn't folded into `resolve_node_spec` — see
-        // `debug_wait_overrides`.
+        // After `spec_hash` on purpose — see `debug_wait_overrides`.
         let (env, healthcheck) = debug_wait_overrides(&spec, node, debug_wait);
 
-        // Every node asks this run's sidecar for DNS first — it's the
-        // authority for the `fghj.internal` zone (and any active
-        // `additional_hosts`/`wildcard_hosts` alias) inside this network,
-        // forwarding anything else on to Docker's own embedded resolver.
-        // Falls back to Docker's default (unset) only if the sidecar's IP
-        // somehow isn't known yet — `ensure_sidecar` always runs, and is
-        // inspected for its IP, before any node's `start_node` call, so
-        // this shouldn't actually happen in practice.
+        // The sidecar answers `fghj.internal` and forwards the rest to Docker's DNS.
         let dns: Vec<String> = sidecar_ip
             .map(|ip| vec![ip.to_string(), "127.0.0.11".to_string()])
             .unwrap_or_default();
@@ -146,10 +113,7 @@ impl Orchestrator {
 
         self.spawn_log_capture(&node.id, &spec.container_name);
 
-        // Prefer the port explicitly marked `primary` — the one actually
-        // meant to be "the" entrypoint — over an arbitrary map-iteration
-        // order (a `BTreeMap<String, _>` sorts port numbers as strings, so
-        // e.g. "10000" would otherwise sort before "9000").
+        // Prefer `primary`: the map sorts ports as strings ("10000" < "9000").
         let status_port = node
             .ports
             .iter()
@@ -164,25 +128,11 @@ impl Orchestrator {
             Some(s) => (s.status, s.published_port),
             None => ("unknown".to_string(), None),
         };
-        // Only ever set for a terminating node, and only by the wait below:
-        // a service's exit code, if it even has one yet, says nothing this
-        // moment after `run_container` returned.
         let mut exit_code: Option<i64> = None;
 
-        // Every declared port's actual host-published binding, not just the
-        // routed ones — a plain TCP backing dependency (postgres, mysql)
-        // has no `primary`/`name`d port to route at all, but the UI still
-        // wants a `127.0.0.1:<port>` connection string for it. Reuses the
-        // inspect already done above for `status_port`'s own binding rather
-        // than re-querying it; one more inspect per remaining port (there's
-        // rarely more than one or two per node).
-        //
-        // Keyed off `spec.port_list` rather than `node.ports`, because that
-        // is the set actually published — it also carries the `debug` port,
-        // and `raw_net::reconcile` NATs a node's raw domain only to the
-        // ports it finds *here* (via `state::query::raw_endpoints`). Reading
-        // `node.ports` instead left the debugger published by Docker but
-        // unreachable at `{raw_domain}:{debug}`.
+        // Every published port, routed or not: the UI shows a connection string for
+        // plain TCP services, and raw_net NATs exactly these. Keyed off
+        // `spec.port_list` so the `debug` port is included.
         let mut port_host_ports: BTreeMap<String, Option<u16>> = BTreeMap::new();
         for (port, _) in &spec.port_list {
             let host_port = if status_port.as_deref() == Some(port.as_str()) {
@@ -197,15 +147,8 @@ impl Orchestrator {
             port_host_ports.insert(port.clone(), host_port);
         }
 
-        // Every port with a domain — the `primary` one, at this node's own
-        // domain, and/or any `name`d one, at `{name}.{domain}` (a port can
-        // be both) — gets a route to the host port Docker actually
-        // published it on. `fghjd` runs on the host, not inside the docker
-        // network, so it can't resolve these names the way sibling
-        // containers do (via Docker's embedded per-network DNS, which only
-        // answers from inside that network) — this is what lets
-        // `web::proxy::serve_https` dispatch an incoming SNI straight to the
-        // right container instead.
+        // `fghjd` runs on the host and can't use Docker's DNS, so each domain routes
+        // to the host port Docker published.
         let mut routes = Vec::new();
         for (port, cfg) in &node.ports {
             if !cfg.primary && cfg.name.is_none() {
@@ -235,13 +178,8 @@ impl Orchestrator {
             }
         }
 
-        // `#AdditionalHost` aliases route to the same host port as the
-        // node's own primary domain — same "multiple names, one backend
-        // port" pattern as a named port, just keyed off a literal
-        // author-declared hostname instead of a derived one. Silently
-        // dropped (not an error) if there's no primary-port route to attach
-        // to — `resolver::check_ports` already warns about exactly this at
-        // graph-resolution time.
+        // `#AdditionalHost` aliases share the primary domain's route; dropped without
+        // one (the resolver already warned).
         let mut additional_hosts_active = Vec::new();
         if let Some((host_port, container_port)) = routes
             .iter()
@@ -269,38 +207,18 @@ impl Orchestrator {
             }
         }
 
-        // A terminating node is not "started" until it has *finished*: its
-        // dependents (the owning service, via the `owns` edge — see
-        // `topological_start_order`, for which `to` is always the
-        // dependency) come after it in the start order precisely so a
-        // migration runs before the service that needs it. Waiting here,
-        // and failing the node if the wait doesn't end in a clean exit, is
-        // what makes that ordering mean anything: without it "started" would
-        // only mean "the container was created", and the service would come
-        // up against an unmigrated database.
-        //
-        // Mutually exclusive with the healthcheck wait below by
-        // construction, not just by this `else`: `TaskConfig` has no
-        // `healthcheck` field at all, because a container that has exited
-        // can never report Docker-healthy.
+        // A task isn't started until it exits cleanly: dependents come after it, and
+        // must not start against, say, an unmigrated database.
         if node.kind == "task" {
             ev.running("waiting for exit").await;
             let allowance = budget.tasks.allowance();
-            // Read *before* the wait, not after: waiting until the deadline
-            // exhausts the budget by definition, so asking afterwards would
-            // report every genuine timeout as "never waited on".
+            // Read before the wait: waiting to the deadline exhausts the budget.
             let spent_before_waiting = budget.tasks.is_exhausted();
-            // Unlike the health budget, an exhausted task budget is not a
-            // reason to shrug and continue — see `RunBudget` on why the two
-            // deadlines are separate.
             let outcome = if spent_before_waiting {
                 TaskOutcome::TimedOut
             } else {
                 wait_for_exit(&self.docker, &spec.container_name, allowance).await
             };
-            // Whatever happened, the container is no longer the "running"
-            // that was inspected a moment ago — except on a timeout, where
-            // it demonstrably still is.
             if outcome != TaskOutcome::TimedOut {
                 status = "exited".to_string();
             }
@@ -334,25 +252,13 @@ impl Orchestrator {
         } else if node.healthcheck.is_some() && wait_ready {
             ev.running("waiting for healthcheck").await;
             let allowance = budget.health.allowance();
-            // Same reason as the task branch above: a wait that runs to the
-            // shared deadline leaves the budget exhausted, so this has to be
-            // read before the wait or a real timeout would be reported as a
-            // wait that never happened.
             let spent_before_waiting = budget.health.is_exhausted();
-            // Once the run's budget is spent there is nothing to wait with,
-            // so don't pretend to wait — say so instead of logging a
-            // zero-second "gave up".
             let outcome = if spent_before_waiting {
                 HealthOutcome::TimedOut
             } else {
                 wait_for_healthy(&self.docker, &spec.container_name, allowance).await
             };
-            // A wait that ran out of budget is recorded as such rather than
-            // as a clean pass. The container is still running and the node
-            // still comes up — this is the same best-effort call
-            // `wait_for_healthy` has always made at its own limit — but a
-            // node that fghj never actually saw report healthy should not
-            // look identical in the event stream to one that did.
+            // A truncated wait is recorded as such, not as a clean pass.
             let (status, detail) = match outcome {
                 HealthOutcome::Healthy => ("ok", None),
                 HealthOutcome::Settled => (
@@ -381,17 +287,7 @@ impl Orchestrator {
         Ok(ContainerInfo {
             node_id: node.id.clone(),
             desired: ContainerDesired {
-                // This call *is* the intent: fghj was just asked to run
-                // this container, whatever `status` says about it a
-                // millisecond later.
-                //
-                // Except for a terminating node, whose intent was never for
-                // it to be up: it was asked to *run*, which for a task means
-                // to finish. Reaching here at all means it exited 0 — the
-                // failure paths above all bailed — so `running: true` would
-                // describe a container fghj deliberately let stop as
-                // drifted, and every projection in `state::query` would keep
-                // hunting for a route into it.
+                // A task's intent is to finish, so `running: false` once it has.
                 running: node.kind != "task",
                 container_name: spec.container_name,
                 domain: spec.domain,
@@ -400,9 +296,6 @@ impl Orchestrator {
                 additional_hosts: additional_hosts_active,
                 status_port,
                 config_hash,
-                // Gated on `node.build` exactly as `spec_hash`'s own
-                // `source` is, so the container records a checkout on
-                // precisely the nodes whose hash can move because of one.
                 source: node.build_checkout().map(|c| ContainerSource {
                     branch: c.branch.map(str::to_string),
                     head: c.head.map(str::to_string),
@@ -414,12 +307,8 @@ impl Orchestrator {
             observed: ContainerObserved {
                 status,
                 published_port,
-                // Nothing here inspects the container's network-internal
-                // address; only `Action::ContainerObserved` ever carries one.
                 ip: None,
                 ports: port_host_ports,
-                // Started from the config that was just hashed into
-                // `config_hash`, so it cannot have drifted from it yet.
                 sync: SyncStatus::Synced,
                 exit_code,
             },
@@ -428,32 +317,10 @@ impl Orchestrator {
     }
 }
 
-/// The two things `FGHJ_DEBUG_WAIT` changes about a container, derived from
-/// an already-hashed `spec` rather than written into it.
-///
-/// That ordering is the point. `debug_wait` is an operator action on one
-/// container — "halt this one at startup until I attach" — not a statement
-/// about the node's config, and it is flipped per container from the UI
-/// rather than declared in `.fghj.yaml` (which is committed and shared:
-/// pinning it there would block *every* teammate's start of this node
-/// forever). Folding it into `spec_hash` would therefore mean
-/// `ensure_running`'s drift check (see `orchestrate`'s `top_up_may_skip`)
-/// saw a halted container as drifted and recreated it — destroying the debug
-/// session the switch just set up — and `config_drift` would report a node
-/// as out of sync with a `.fghj.yaml` that never mentioned this.
-///
-/// Keeping it out of the hash gives the opposite, and correct, behaviour: a
-/// top-up leaves a halted container alone, and a recreate for *genuine*
-/// config drift drops the flag — which the UI then honestly reports as the
-/// switch going off, since the new container really doesn't have it.
-///
-/// The healthcheck is dropped because a process halted before line 0 can
-/// never report Docker-healthy, so leaving it in place would make
-/// `wait_for_healthy` burn this node's whole `PER_NODE_LIMIT` and stall
-/// every dependent behind a container that is waiting for a human. It is
-/// also the honest reading: a halted process genuinely has nothing to say
-/// about its own health, so fghj stops asking rather than recording a
-/// failure.
+/// `FGHJ_DEBUG_WAIT`'s changes, applied after `spec_hash`. It's an operator
+/// switch on one container, not config: hashing it would make a top-up see the
+/// halted container as drifted and recreate it. The healthcheck is dropped
+/// because a halted process can never report healthy.
 fn debug_wait_overrides<'a>(
     spec: &super::spec::NodeSpec,
     node: &'a Node,
@@ -519,17 +386,12 @@ mod tests {
         let (env, hc) = debug_wait_overrides(&spec, &node, true);
 
         assert_eq!(env.last().map(String::as_str), Some("FGHJ_DEBUG_WAIT=1"));
-        // A container halted before line 0 can never report healthy, so
-        // asking would burn the node's whole health budget.
         assert!(
             hc.is_none(),
             "a halted container must not be health-checked"
         );
     }
 
-    /// The invariant the whole design rests on: turning the switch on must
-    /// not move the node's `config_hash`, or `ensure_running`'s drift check
-    /// would recreate the very container the switch just halted.
     #[test]
     fn the_switch_does_not_move_the_config_hash() {
         let node = test_node("api", "api", "service");
@@ -539,14 +401,9 @@ mod tests {
         let (env, _) = debug_wait_overrides(&spec, &node, true);
 
         assert_eq!(before, spec_hash(&node, &spec));
-        // ...which only holds because the variable lands in a *new* env, not
-        // in the spec that was hashed.
         assert!(env.len() > spec.env.len());
     }
 
-    /// A `Orchestrator` over a throwaway workspace/db plus a real, uniquely
-    /// named Docker network, torn down on drop along with every container
-    /// this test started on it.
     struct TaskFixture {
         registry: Orchestrator,
         network: String,
@@ -571,16 +428,11 @@ mod tests {
             TaskFixture {
                 registry,
                 network,
-                // A workspace name of its own keeps two concurrently running
-                // test binaries off each other's container names.
                 workspace: format!("t{nonce}"),
                 _tmp: tmp,
             }
         }
 
-        /// A `busybox` task node running `command`. `image` is set, so
-        /// nothing here needs an owning service's build — the inheritance
-        /// path is the resolver's concern and is covered there.
         fn task(&self, id: &str, command: &[&str]) -> crate::resolver::Node {
             let mut node = test_node(id, id, "task");
             node.image = Some("busybox".to_string());
@@ -619,11 +471,6 @@ mod tests {
         }
     }
 
-    /// A finished task is not a stopped service. `running` records what fghj
-    /// wants to be true at rest, and for a task that is "finished" — so it
-    /// must come back `false` even though the start succeeded, or every
-    /// projection in `state::query` would treat the exited container as
-    /// drift and keep looking for a route into it.
     #[tokio::test]
     #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
     async fn a_task_that_exits_zero_comes_back_finished_not_running() {
@@ -635,20 +482,12 @@ mod tests {
         assert!(!info.desired.running);
         assert_eq!(info.observed.status, "exited");
         assert_eq!(info.observed.exit_code, Some(0));
-        // A task declares no ports, so there is nothing to publish and
-        // nothing to route — the absence is what keeps a one-shot container
-        // out of DNS and out of the proxy's routing table.
         assert!(info.desired.routes.is_empty());
         assert!(info.desired.status_port.is_none());
 
         fixture.cleanup("migrate.api").await;
     }
 
-    /// The whole reason the kind exists: a failed migration must fail its
-    /// node, because `ensure_running` stop the start loop on an
-    /// error and the owning service comes *after* its task in
-    /// `topological_start_order`. Succeeding here would start the service
-    /// against an unmigrated database.
     #[tokio::test]
     #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
     async fn a_task_that_exits_nonzero_fails_the_node() {
@@ -664,20 +503,13 @@ mod tests {
         fixture.cleanup("migrate.api").await;
     }
 
-    /// A task that never exits is the failure `#Task`'s required `command`
-    /// exists to prevent, and it must not be waited on forever — the run's
-    /// task budget bounds it, and running out is a failure rather than the
-    /// shrug a truncated health wait gets.
     #[tokio::test]
     #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
     async fn a_task_that_never_exits_fails_once_its_budget_runs_out() {
         let fixture = TaskFixture::new().await;
         let node = fixture.task("hangs.api", &["sleep", "60"]);
         let graph = fixture.graph(&node);
-        // Generous on purpose: the budget's clock starts here, not at the
-        // wait, so pulling/creating the container spends some of it before
-        // `wait_for_exit` is ever reached. Too tight and this would assert
-        // the "budget already spent" branch instead of the timeout one.
+        // Generous: the budget's clock starts before the container is created.
         let budget = super::RunBudget {
             health: super::super::health::HealthBudget::default(),
             tasks: super::super::health::HealthBudget::new(std::time::Duration::from_secs(12)),

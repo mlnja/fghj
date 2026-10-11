@@ -5,11 +5,6 @@ use sha2::{Digest, Sha256};
 
 use crate::resolver::{Healthcheck, Node, NodeBuild};
 
-/// The pure, side-effect-free result of `Orchestrator::resolve_node_spec` —
-/// everything about a node's config that has to be actually computed (as
-/// opposed to read straight off `Node`) before it can be either run for real
-/// (`start_node`) or hashed to check for drift (`spec_hash`,
-/// `config_drift`).
 pub(crate) struct NodeSpec {
     pub(crate) container_name: String,
     pub(crate) domain: String,
@@ -21,17 +16,9 @@ pub(crate) struct NodeSpec {
     pub(crate) env: Vec<String>,
 }
 
-/// Hashes everything about `node` + `spec` that actually affects how the
-/// container runs, for `ContainerInfo::config_hash` /
-/// `Orchestrator::config_drift` to compare against. Deliberately
-/// excludes anything that's either pure identity (`container_name`, `domain`,
-/// `aliases` all derive one-to-one from `node.id` + workspace — never drift
-/// independently of the rest of the spec) or genuinely ephemeral (an
-/// unpinned port's actual host-side binding is chosen fresh by Docker on
-/// every start; hashing it would flag every single restart as "drifted").
-/// Uses `Sha256` rather than `std::hash::DefaultHasher`, which is explicitly
-/// documented as unstable across Rust versions — that would misreport a
-/// clean upgrade of the `fghj` binary itself as config drift.
+/// Hashes what affects how the container runs. Excludes identity (derived from
+/// `node.id`) and Docker-chosen host ports. Sha256 because `DefaultHasher`
+/// isn't stable across Rust versions.
 pub(crate) fn spec_hash(node: &Node, spec: &NodeSpec) -> String {
     #[derive(Serialize)]
     struct DesiredSpec<'a> {
@@ -41,10 +28,6 @@ pub(crate) fn spec_hash(node: &Node, spec: &NodeSpec) -> String {
         ports: &'a [(String, Option<u16>)],
         binds: &'a [String],
         restart: &'a str,
-        /// Both stop knobs are hashed: they are baked into the container at
-        /// create time, so changing either in `.fghj.yaml` has no effect
-        /// until the container is recreated — which is exactly what drift
-        /// means.
         stop_signal: Option<&'a str>,
         stop_grace_period: u64,
         user: Option<&'a str>,
@@ -56,45 +39,17 @@ pub(crate) fn spec_hash(node: &Node, spec: &NodeSpec) -> String {
         extra_hosts: &'a [String],
         healthcheck: Option<&'a Healthcheck>,
         platform: Option<&'a str>,
-        /// The `#Build` block, for a node whose image fghj builds itself.
-        ///
-        /// Included even though the built image's *tag* is already in
-        /// `image` above, because the tag is stable across rebuilds
-        /// (`fghj/<id>:<branch>`): without this, editing `args` or `target`
-        /// changed what the next build produces while leaving the hash
-        /// identical, so nothing downstream ever noticed. This does not
-        /// make the hash content-aware — see `source` below for how much of
-        /// that gap is covered and how.
+        /// The tag is stable across rebuilds, so a changed `args` or `target` would
+        /// otherwise be invisible.
         build: Option<&'a NodeBuild>,
-        /// The state of the checkout the image is built from — `None` for a
-        /// node running a published `image:`, where a commit in the repo that
-        /// happens to declare it says nothing about that container.
-        ///
-        /// This is what makes a new commit visible. The tag fghj builds is
-        /// `fghj/{id}:{branch}`, stable across commits, so before this you
-        /// could commit, pull or rebase on the same branch and the container
-        /// stayed lit as `Synced` while serving a stale image — a branch
-        /// *switch* was caught only incidentally, because the tag changed.
-        ///
-        /// For a git build context it is the clone's state, not the
-        /// declaring repo's: the code is built from the clone, and a commit
-        /// in the declaring repo that changes the definition shows up in the
-        /// rest of the hash anyway.
+        /// The checkout the image is built from (the clone, for a git context); `None`
+        /// for a published image. The tag doesn't change per commit, so this is what
+        /// makes a new commit visible.
         source: Option<SourceState<'a>>,
     }
 
-    /// See `DesiredSpec::source`. Two fields, with quite different
-    /// resolutions.
-    ///
-    /// `head` is exact: every commit, pull, rebase or branch switch moves it.
-    ///
-    /// `dirty` is one bit, and so catches only the clean → dirty transition.
-    /// Edit a file in a clean checkout and the node reads drifted; edit
-    /// another file in an already-dirty checkout and it does not. That is a
-    /// real gap and it is the honest one to leave: closing it means hashing
-    /// build-context contents on every drift tick, and the tool for "I am
-    /// iterating on this file right now" is the per-node Restart button,
-    /// which rebuilds unconditionally — not a drift pill.
+    /// `dirty` is one bit: it catches clean → dirty, not further edits. Restart
+    /// rebuilds unconditionally for that.
     #[derive(Serialize)]
     struct SourceState<'a> {
         head: Option<&'a str>,
@@ -162,9 +117,6 @@ mod tests {
         }
     }
 
-    /// The whole point of putting `build` in the hash: the image *tag* is
-    /// stable across rebuilds, so before this every `#Build` edit produced an
-    /// identical hash and drift detection saw nothing at all.
     #[test]
     fn changing_a_build_arg_changes_the_hash_even_though_the_tag_does_not() {
         let mut node = test_node("api.api", "api", "service");
@@ -193,9 +145,6 @@ mod tests {
         assert_ne!(before, spec_hash(&node, &empty_spec()));
     }
 
-    /// [B13]: the tag is `fghj/<id>:<branch>`, so a commit on the same
-    /// branch left the hash byte-identical while the container served a stale
-    /// image.
     #[test]
     fn a_new_commit_on_the_same_branch_changes_the_hash() {
         let mut node = test_node("api.api", "api", "service");
@@ -207,8 +156,6 @@ mod tests {
         assert_ne!(before, spec_hash(&node, &empty_spec()));
     }
 
-    /// Dirtying a clean checkout is a change to what the next build would
-    /// produce, so it counts.
     #[test]
     fn dirtying_the_checkout_changes_the_hash() {
         let mut node = test_node("api.api", "api", "service");
@@ -234,9 +181,6 @@ mod tests {
         }
     }
 
-    /// A git build context is built from its clone, so the clone's HEAD is
-    /// what drifts it — and a commit in the repo that merely declares it
-    /// doesn't.
     #[test]
     fn a_git_build_context_drifts_with_its_clone_not_the_declaring_repo() {
         let mut node = test_node("geocoder.api", "geocoder", "service");
@@ -251,10 +195,6 @@ mod tests {
         assert_ne!(before, spec_hash(&node, &empty_spec()));
     }
 
-    /// A node running a published image must *not* move when the repo that
-    /// declares it gets a commit — otherwise every `postgres:16` in the
-    /// workspace would read as drifted on every commit, which is a signal
-    /// nobody would read.
     #[test]
     fn a_commit_does_not_drift_a_node_that_runs_a_published_image() {
         let mut node = test_node("db.api", "db", "backing");
@@ -267,10 +207,6 @@ mod tests {
         assert_eq!(before, spec_hash(&node, &empty_spec()));
     }
 
-    /// The stop knobs are baked into the container by `create_container`, so
-    /// editing them in `.fghj.yaml` does nothing at all until the container
-    /// is recreated. That is drift by definition, and it only shows up if
-    /// they are in the hash.
     #[test]
     fn changing_a_stop_knob_changes_the_hash() {
         let node = test_node("db.api", "db", "backing");
@@ -285,9 +221,6 @@ mod tests {
         assert_ne!(before, spec_hash(&signalled, &empty_spec()));
     }
 
-    /// Hashing has to stay a pure function of the config — a node whose
-    /// `#Build` is untouched must hash the same on every call, or every
-    /// reconcile loop would read as drift.
     #[test]
     fn an_unchanged_build_hashes_identically() {
         let mut node = test_node("api.api", "api", "service");
