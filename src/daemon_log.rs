@@ -189,15 +189,17 @@ mod tests {
         assert!(newer.iter().all(|e| e.seq > baseline));
     }
 
+    /// Looks the marker up by seq rather than in a recent-N window: the
+    /// race test above appends hundreds of lines concurrently, and used to
+    /// push the marker out of a `tail(None, 50)` before it was found.
     #[test]
     fn warn_records_the_warn_level() {
+        let baseline = tail(None, 1).last().map(|e| e.seq).unwrap_or(0);
         warn("daemon_log test warn-marker");
-        let baseline_check = tail(None, 50);
-        let found = baseline_check
-            .iter()
-            .rev()
+        let found = tail(Some(baseline), CAPACITY)
+            .into_iter()
             .find(|e| e.message == "daemon_log test warn-marker")
-            .expect("just-pushed warn entry should be in the recent tail");
+            .expect("just-pushed warn entry should be after the baseline");
         assert_eq!(found.level, "warn");
     }
 }
