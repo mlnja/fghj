@@ -26,31 +26,25 @@ pub enum Action {
     /// by `effects::docker::converge`, since real I/O has no place in a
     /// pure reducer.
     RunPlanned {
-        run_id: String,
         plan: RunSpec,
     },
     RunNodeStartRequested {
-        run_id: String,
         node_id: String,
     },
     RunNodeStopRequested {
-        run_id: String,
         node_id: String,
     },
     /// Flip the per-container debug switch and recreate the container to
     /// apply it — see `state::ContainerDesired::debug_wait`.
     RunNodeDebugWaitRequested {
-        run_id: String,
         node_id: String,
         wait: bool,
     },
     RunNodeDeleteRequested {
-        run_id: String,
         node_id: String,
     },
 
     ContainerObserved {
-        run_id: String,
         node_id: String,
         status: String,
         published_port: Option<u16>,
@@ -76,25 +70,23 @@ pub enum Action {
     /// `Ok(())`: this is the only place the real post-action
     /// status/ports/routes reach state.
     ContainerActionSettled {
-        run_id: String,
         node_id: String,
         result: Result<Option<ContainerInfo>, String>,
     },
     /// Reported by `effects::docker::converge` once a `RunPlanned` intent
     /// (`RunState::pending_create`) actually finishes being created/topped
-    /// up against real Docker. `Ok(run)` wholesale-replaces the run's entry
+    /// up against real Docker. `Ok(run)` wholesale-replaces the environment
     /// with the freshly re-observed state (mirroring how
     /// `RunRegistry::ensure_running` returns the whole `RunState` it produced).
     /// `Err` clears `pending_create` and, when the failure left containers
     /// actually running (`RunCreateError::partial` — an `ensure_running`
-    /// top-up that got part way), replaces the run's entry with that partial
+    /// top-up that got part way), replaces the environment with that partial
     /// state rather than guessing. Without it, those containers are running
     /// and persisted but invisible to `GET /environment` and to host routing. With
     /// no partial (nothing started, or a path like `start` that rolled
-    /// itself back) the run's last-known-good state is left untouched, which
+    /// itself back) the environment's last-known-good state is left untouched, which
     /// is still the right answer.
     RunCreateSettled {
-        run_id: String,
         result: Result<RunState, RunCreateError>,
     },
     /// Reported by `effects::docker::converge` for each node that comes up
@@ -112,7 +104,6 @@ pub enum Action {
     /// Deliberately leaves `pending_create` set: the run is still in
     /// flight, and only `RunCreateSettled` ends that.
     RunCreateProgress {
-        run_id: String,
         network: String,
         sidecar_container_name: String,
         sidecar_ip: Option<String>,
@@ -126,12 +117,10 @@ pub enum Action {
     /// already in flight. `RunCreateProgress` and `RunCreateSettled` take the
     /// mark back off.
     RunCreateWorking {
-        run_id: String,
         node_id: String,
         action: Option<PendingAction>,
     },
     VolumeObserved {
-        run_id: String,
         volume_name: String,
         exists: bool,
     },
@@ -139,7 +128,6 @@ pub enum Action {
     /// `RunRegistry::config_drift` computes drift per container, and this
     /// updates that container's `ContainerObserved::sync`.
     ConfigDriftObserved {
-        run_id: String,
         node_id: String,
         drift: SyncStatus,
     },
@@ -156,10 +144,9 @@ pub enum ActionRejected {
     /// `container.pending_action.is_some()` already, or a whole-environment
     /// create is still running; see `reducer::run`'s module doc.
     AlreadyInFlight,
-    /// The action named a `run_id` this workspace doesn't currently have a
-    /// `RunState` for.
+    /// The workspace has no environment yet, so there is no node to act on.
     RunNotFound,
-    /// The action named a `node_id` that isn't a key of the run's
+    /// The action named a `node_id` that isn't a key of the environment's
     /// `containers` map.
     NodeNotFound,
 }
@@ -168,7 +155,7 @@ impl std::fmt::Display for ActionRejected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ActionRejected::AlreadyInFlight => write!(f, "an action is already in flight"),
-            ActionRejected::RunNotFound => write!(f, "no such run"),
+            ActionRejected::RunNotFound => write!(f, "no environment yet"),
             ActionRejected::NodeNotFound => write!(f, "no such node"),
         }
     }

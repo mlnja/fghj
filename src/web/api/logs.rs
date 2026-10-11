@@ -25,16 +25,15 @@ pub(crate) async fn get_run_logs(
     WorkspaceExtractor(state): WorkspaceExtractor,
     ActorExtractor(actor): ActorExtractor,
 ) -> Response {
-    let run_id = runs::DEFAULT_RUN_ID.to_string();
     let tail = q.tail.unwrap_or(200);
-    match actor.current().runs.get(&run_id) {
+    match actor.current().env.as_ref() {
         Some(s) => match runs::logs_for_tail(&state.docker, s, &node_id, tail).await {
             Ok(text) => Json(serde_json::json!({ "logs": text })).into_response(),
             Err(e) => err_response(e),
         },
         None => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": format!("no such run: {run_id}") })),
+            Json(serde_json::json!({ "error": "no environment yet" })),
         )
             .into_response(),
     }
@@ -45,13 +44,12 @@ pub(crate) async fn get_run_logs_stream(
     WorkspaceExtractor(state): WorkspaceExtractor,
     ActorExtractor(actor): ActorExtractor,
 ) -> Response {
-    let run_id = runs::DEFAULT_RUN_ID.to_string();
-    let run_state = match actor.current().runs.get(&run_id).cloned() {
+    let run_state = match actor.current().env.clone() {
         Some(s) => s,
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": format!("no such run: {run_id}") })),
+                Json(serde_json::json!({ "error": "no environment yet" })),
             )
                 .into_response();
         }

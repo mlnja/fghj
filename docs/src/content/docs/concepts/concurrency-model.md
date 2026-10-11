@@ -25,8 +25,8 @@ fghj coordinates them, and nothing needs to.
 ## Per-node locks, not a workspace lock
 
 Restarting, stopping, and removing a container each take the lock for **their
-node only** — a `tokio::sync::Mutex` created on first use and keyed by
-`(run_id, node_id)`.
+node only** — a `tokio::sync::Mutex` created on first use and keyed by the
+node id.
 
 Two calls for the *same* node genuinely cannot interleave: each stops and
 removes the container, then recreates one with the same fixed name, and Docker

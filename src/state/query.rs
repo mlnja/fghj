@@ -28,7 +28,7 @@ pub fn running_containers(
 ) -> impl Iterator<Item = &ContainerInfo> {
     states
         .values()
-        .flat_map(|state| state.runs.values())
+        .flat_map(|state| state.env.iter())
         .flat_map(|run| run.containers.values())
         .filter(|container| container.observed.status == "running")
 }

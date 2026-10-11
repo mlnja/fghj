@@ -20,10 +20,10 @@ pub struct WorkspaceState {
     /// real Docker state once, here, at the moment this workspace is
     /// constructed. Read exactly once — by `daemon::WorkspaceRegistry::wire_actor`,
     /// to seed the actor — and never consulted again: from that point the
-    /// actor's published `WorkspaceState` is the only record of what runs
-    /// exist. It lives here rather than inside `RunRegistry` because
+    /// actor's published `WorkspaceState` is the only record of the
+    /// environment. It lives here rather than inside `RunRegistry` because
     /// `RunRegistry` deliberately holds no run state at all.
-    pub rehydrated: std::collections::BTreeMap<String, crate::state::RunState>,
+    pub rehydrated: Option<crate::state::RunState>,
 }
 
 impl WorkspaceState {

@@ -1,6 +1,6 @@
-//! Renders every run's sidecar route table from workspace state.
+//! Renders the environment's sidecar route table from workspace state.
 //!
-//! Each run's sidecar proxy polls a `routes.json` naming every domain it
+//! The sidecar proxy polls a `routes.json` naming every domain it
 //! should answer for and where to connect. That file is a pure function of
 //! `RunState::containers`, so it belongs here rather than being written by
 //! hand at the end of each lifecycle call — which is what `runs/` used to
@@ -12,24 +12,21 @@
 //! mistake: the table is rewritten whenever the state it is derived from
 //! changes, from whatever the state actually says at that moment.
 
-use std::collections::BTreeMap;
-
 use crate::runs::route_table::{sidecar_routes_dir, write_route_table};
 use crate::state::{RunState, WorkspaceState};
 
 use super::Effect;
 
-/// Keyed by run id so a removed run's directory can be cleaned up, and
-/// carrying the whole `RunState` because `write_route_table` derives the
-/// network path and the entries from it together.
-pub type Snapshot = BTreeMap<String, RunState>;
+/// The whole `RunState`, because `write_route_table` derives the network
+/// path and the entries from it together.
+pub type Snapshot = Option<RunState>;
 
 #[derive(Default)]
 pub struct RouteTableEffect {
-    /// Networks whose directories exist because this effect wrote them.
-    /// Kept so a run that disappears has its table removed rather than
-    /// left behind for a sidecar to keep serving.
-    written: BTreeMap<String, String>,
+    /// The network whose directory exists because this effect wrote it.
+    /// Kept so an environment that disappears has its table removed rather
+    /// than left behind for a sidecar to keep serving.
+    written: Option<String>,
 }
 
 impl RouteTableEffect {
@@ -42,30 +39,28 @@ impl Effect for RouteTableEffect {
     type Snapshot = Snapshot;
 
     fn extract(&self, state: &WorkspaceState) -> Self::Snapshot {
-        state.runs.clone()
+        state.env.clone()
     }
 
     fn converge(&mut self, snapshot: &Self::Snapshot) -> anyhow::Result<()> {
-        for (run_id, run) in snapshot {
-            if run.network.is_empty() {
-                // A run that has been planned but not yet created has no
-                // network to write a table into. Nothing to do until it
-                // does.
-                continue;
-            }
-            write_route_table(run)?;
-            self.written.insert(run_id.clone(), run.network.clone());
+        // An environment that has been planned but not yet created has no
+        // network to write a table into. Nothing to do until it does.
+        let network = snapshot
+            .as_ref()
+            .filter(|env| !env.network.is_empty())
+            .map(|env| env.network.clone());
+        if let Some(env) = snapshot.as_ref().filter(|_| network.is_some()) {
+            write_route_table(env)?;
         }
-        // A run that is gone from state takes its route table with it.
-        // Leaving the file would let a sidecar keep answering for domains
-        // that no longer resolve to anything.
-        self.written.retain(|run_id, network| {
-            if snapshot.contains_key(run_id) {
-                return true;
-            }
-            let _ = std::fs::remove_dir_all(sidecar_routes_dir(network));
-            false
-        });
+        // An environment that is gone from state takes its route table with
+        // it. Leaving the file would let a sidecar keep answering for
+        // domains that no longer resolve to anything.
+        if let Some(old) = self.written.take()
+            && network.as_ref() != Some(&old)
+        {
+            let _ = std::fs::remove_dir_all(sidecar_routes_dir(&old));
+        }
+        self.written = network;
         Ok(())
     }
 }
@@ -74,8 +69,9 @@ impl Effect for RouteTableEffect {
 mod tests {
     use super::*;
     use crate::state::{ContainerDesired, ContainerInfo, PortRoute};
+    use std::collections::BTreeMap;
 
-    fn run_with_route(run_id: &str, network: &str, domain: &str) -> RunState {
+    fn env_with_route(network: &str, domain: &str) -> RunState {
         let mut containers = BTreeMap::new();
         containers.insert(
             "web".to_string(),
@@ -105,42 +101,33 @@ mod tests {
             },
         );
         RunState {
-            run_id: run_id.to_string(),
             network: network.to_string(),
             containers,
             ..Default::default()
         }
     }
 
-    /// The snapshot is the run map itself, so any change to any run's
+    /// The snapshot is the environment itself, so any change to its
     /// containers re-triggers a write — that is what makes this effect a
     /// replacement for the hand-placed calls it removes.
     #[test]
-    fn the_snapshot_tracks_the_runs_map() {
+    fn the_snapshot_tracks_the_environment() {
         let effect = RouteTableEffect::new();
         let mut state = WorkspaceState::default();
-        assert!(effect.extract(&state).is_empty());
-        state
-            .runs
-            .insert("default".into(), run_with_route("default", "net", "a.test"));
-        assert_eq!(effect.extract(&state).len(), 1);
+        assert!(effect.extract(&state).is_none());
+        state.env = Some(env_with_route("net", "a.test"));
+        assert!(effect.extract(&state).is_some());
     }
 
-    /// A planned-but-not-yet-created run has no network, so there is no
-    /// directory to write into. It must be skipped rather than producing a
-    /// path like `.../runs//routes.json`.
+    /// A planned-but-not-yet-created environment has no network, so there
+    /// is no directory to write into. It must be skipped rather than
+    /// producing a path like `.../runs//routes.json`.
     #[test]
-    fn a_run_without_a_network_yet_is_skipped() {
+    fn an_environment_without_a_network_yet_is_skipped() {
         let mut effect = RouteTableEffect::new();
-        let mut snapshot = Snapshot::new();
-        snapshot.insert(
-            "default".into(),
-            RunState {
-                run_id: "default".into(),
-                ..Default::default()
-            },
-        );
-        effect.converge(&snapshot).expect("must not fail");
-        assert!(effect.written.is_empty());
+        effect
+            .converge(&Some(RunState::default()))
+            .expect("must not fail");
+        assert!(effect.written.is_none());
     }
 }

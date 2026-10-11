@@ -125,7 +125,6 @@ mod tests {
         let handle = spawn(WorkspaceState::default());
         let result = handle
             .dispatch(Action::RunNodeStopRequested {
-                run_id: "missing".into(),
                 node_id: "web".into(),
             })
             .await;

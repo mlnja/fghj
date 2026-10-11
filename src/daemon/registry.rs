@@ -193,7 +193,7 @@ impl WorkspaceRegistry {
     /// Spawns the actor for `id`, seeded with a one-shot snapshot of
     /// `old.rehydrated` — what a previous `fghjd` lifetime left running,
     /// reconciled against real Docker once when the workspace was
-    /// constructed — so a freshly-wired workspace with pre-existing runs
+    /// constructed — so a freshly-wired workspace with a pre-existing environment
     /// doesn't start out looking empty, then starts the
     /// `DockerConvergeEffect` task that's the only thing driving real
     /// Docker calls from here on. From here the actor is the only store.
@@ -204,7 +204,7 @@ impl WorkspaceRegistry {
     /// right at the exact place its `Arc<WorkspaceState>` is born.
     fn wire_actor(&self, id: &str, old: &Arc<WorkspaceState>) {
         let seed = state::WorkspaceState {
-            runs: old.rehydrated.clone(),
+            env: old.rehydrated.clone(),
             ..Default::default()
         };
         let handle = actor::spawn(seed);
@@ -398,21 +398,20 @@ impl WorkspaceRegistry {
         let removed = self.by_id.lock().unwrap().remove(id);
         match removed {
             Some(state) => {
-                // Read the run states *before* deregistering: the actor's
+                // Read the environment *before* deregistering: the actor's
                 // published `WorkspaceState` is the only record of what is
                 // running, so dropping the handle first would leave nothing
                 // to tear down and strand the containers.
-                let runs = self
+                let env = self
                     .actors
                     .get(id)
-                    .map(|handle| handle.actor.current().runs.clone())
-                    .unwrap_or_default();
+                    .and_then(|handle| handle.actor.current().env.clone());
                 self.actors.remove(id);
                 if let Some(task) = self.docker_converge_tasks.lock().unwrap().remove(id) {
                     task.abort();
                 }
-                for run in runs.values() {
-                    let _ = state.runs.stop(&run.run_id, run).await;
+                if let Some(env) = env {
+                    let _ = state.runs.stop(&env).await;
                 }
                 let mut index = persistence::load_index(&self.index_path);
                 index.remove(id);

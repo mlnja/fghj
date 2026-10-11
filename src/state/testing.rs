@@ -1,7 +1,6 @@
 //! Shared fixtures for tests that build `WorkspaceState` by hand.
 
 use super::{ContainerDesired, ContainerInfo, RunState, WorkspaceState};
-use crate::runs::DEFAULT_RUN_ID;
 
 /// A running, settled container with every name derived from `node_id`.
 /// Tests tweak the one field they care about on the result.
@@ -24,7 +23,6 @@ pub fn container(node_id: &str) -> ContainerInfo {
 /// The environment holding `containers`, keyed by node id.
 pub fn run_state(containers: Vec<ContainerInfo>) -> RunState {
     RunState {
-        run_id: DEFAULT_RUN_ID.into(),
         network: "fghj-net".into(),
         containers: containers
             .into_iter()
@@ -37,9 +35,8 @@ pub fn run_state(containers: Vec<ContainerInfo>) -> RunState {
 
 /// A workspace whose one environment holds `containers`.
 pub fn workspace(containers: Vec<ContainerInfo>) -> WorkspaceState {
-    let mut state = WorkspaceState::default();
-    state
-        .runs
-        .insert(DEFAULT_RUN_ID.into(), run_state(containers));
-    state
+    WorkspaceState {
+        env: Some(run_state(containers)),
+        ..WorkspaceState::default()
+    }
 }

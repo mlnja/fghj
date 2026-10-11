@@ -1,9 +1,11 @@
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
 use crate::persistence::workspace_owner::WorkspaceOwner;
+use crate::runs::DEFAULT_RUN_ID;
 use crate::state::{ContainerDesired, ContainerInfo, ContainerObserved, RunState, SyncStatus};
 
 use super::WorkspaceDb;
@@ -13,7 +15,7 @@ use super::WorkspaceDb;
 /// row written before it existed *and* for a blob that no longer parses
 /// into the current shape. Both are recoverable the next time the owning
 /// container is started through fghj, which rebuilds them from scratch —
-/// failing the whole load instead would lose every other run in the db too.
+/// failing the whole load instead would lose every other container too.
 fn json_column<T: serde::de::DeserializeOwned + Default>(raw: Option<String>) -> T {
     raw.and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
@@ -87,7 +89,7 @@ impl WorkspaceDb {
         .context("load_owner task panicked")?
     }
 
-    pub async fn save_run(self: Arc<Self>, state: RunState) -> Result<()> {
+    pub async fn save_env(self: Arc<Self>, state: RunState) -> Result<()> {
         tokio::task::spawn_blocking(move || {
             let mut conn = self.conn.lock().unwrap();
             let tx = conn.transaction()?;
@@ -99,19 +101,19 @@ impl WorkspaceDb {
                 "INSERT INTO runs (run_id, overrides_json, network, sidecar_container_name, sidecar_ip) VALUES (?1, '{}', ?2, ?3, ?4)
                  ON CONFLICT(run_id) DO UPDATE SET network = excluded.network, sidecar_container_name = excluded.sidecar_container_name, sidecar_ip = excluded.sidecar_ip",
                 rusqlite::params![
-                    state.run_id,
+                    DEFAULT_RUN_ID,
                     state.network,
                     state.sidecar_container_name,
                     state.sidecar_ip,
                 ],
             )?;
-            tx.execute("DELETE FROM containers WHERE run_id = ?1", rusqlite::params![state.run_id])?;
+            tx.execute("DELETE FROM containers WHERE run_id = ?1", rusqlite::params![DEFAULT_RUN_ID])?;
             for c in state.containers.values() {
                 tx.execute(
                     "INSERT INTO containers (run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running, terminating, exit_code, debug_wait, source_json)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                     rusqlite::params![
-                        state.run_id,
+                        DEFAULT_RUN_ID,
                         c.node_id,
                         c.desired.container_name,
                         c.observed.status,
@@ -136,63 +138,55 @@ impl WorkspaceDb {
             Ok(())
         })
         .await
-        .context("save_run task panicked")?
+        .context("save_env task panicked")?
     }
 
-    pub async fn delete_run(self: Arc<Self>, run_id: String) -> Result<()> {
+    pub async fn delete_env(self: Arc<Self>) -> Result<()> {
         tokio::task::spawn_blocking(move || {
             let conn = self.conn.lock().unwrap();
             conn.execute(
                 "DELETE FROM containers WHERE run_id = ?1",
-                rusqlite::params![run_id],
+                rusqlite::params![DEFAULT_RUN_ID],
             )?;
             conn.execute(
                 "DELETE FROM runs WHERE run_id = ?1",
-                rusqlite::params![run_id],
+                rusqlite::params![DEFAULT_RUN_ID],
             )?;
             Ok(())
         })
         .await
-        .context("delete_run task panicked")?
+        .context("delete_env task panicked")?
     }
 
-    pub async fn load_runs(self: Arc<Self>) -> Result<BTreeMap<String, RunState>> {
+    pub async fn load_env(self: Arc<Self>) -> Result<Option<RunState>> {
         tokio::task::spawn_blocking(move || {
             let conn = self.conn.lock().unwrap();
-            let mut runs = BTreeMap::new();
-            let mut stmt = conn.prepare(
-                "SELECT run_id, network, sidecar_container_name, sidecar_ip FROM runs",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            })?;
-            for row in rows {
-                let (run_id, network, sidecar_container_name, sidecar_ip) = row?;
-                runs.insert(
-                    run_id.clone(),
-                    RunState {
-                        run_id,
-                        network,
-                        sidecar_container_name: sidecar_container_name.unwrap_or_default(),
-                        sidecar_ip,
+            let env = conn.query_row(
+                "SELECT network, sidecar_container_name, sidecar_ip FROM runs WHERE run_id = ?1",
+                rusqlite::params![DEFAULT_RUN_ID],
+                |row| {
+                    Ok(RunState {
+                        network: row.get(0)?,
+                        sidecar_container_name: row
+                            .get::<_, Option<String>>(1)?
+                            .unwrap_or_default(),
+                        sidecar_ip: row.get(2)?,
                         ..Default::default()
-                    },
-                );
-            }
-            drop(stmt);
+                    })
+                },
+            );
+            let mut env = match env {
+                Ok(env) => env,
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+                Err(e) => return Err(e.into()),
+            };
 
             let mut stmt = conn.prepare(
-                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running, terminating, exit_code, debug_wait, source_json FROM containers",
+                "SELECT run_id, node_id, container_name, status, published_port, domain, routes_json, additional_hosts_json, ports_json, status_port, config_hash, synced, raw_domain, desired_running, terminating, exit_code, debug_wait, source_json FROM containers WHERE run_id = ?1",
             )?;
-            let rows = stmt.query_map([], |row| {
+            let rows = stmt.query_map(rusqlite::params![DEFAULT_RUN_ID], |row| {
                 let status: String = row.get(3)?;
-                Ok((
-                    row.get::<_, String>(0)?,
+                Ok(
                     ContainerInfo {
                         node_id: row.get(1)?,
                         desired: ContainerDesired {
@@ -241,18 +235,17 @@ impl WorkspaceDb {
                         // in flight across a restart.
                         pending_action: None,
                     },
-                ))
+                )
             })?;
             for row in rows {
-                let (run_id, container) = row?;
-                if let Some(run) = runs.get_mut(&run_id) {
-                    run.containers.insert(container.node_id.clone(), container);
-                }
+                let container = row?;
+                env.containers.insert(container.node_id.clone(), container);
             }
-            Ok(runs)
+            drop(stmt);
+            Ok(Some(env))
         })
         .await
-        .context("load_runs task panicked")?
+        .context("load_env task panicked")?
     }
 }
 
@@ -317,21 +310,19 @@ mod tests {
             .unwrap();
 
         let state = RunState {
-            run_id: "default".to_string(),
             network: "fghj-demo-default".to_string(),
             containers: BTreeMap::from([("svc-a".to_string(), container())]),
             sidecar_container_name: "fghj-demo-default-sidecar".to_string(),
             sidecar_ip: Some("172.20.0.5".to_string()),
             ..Default::default()
         };
-        db.clone().save_run(state.clone()).await.unwrap();
+        db.clone().save_env(state.clone()).await.unwrap();
 
-        let loaded = db.clone().load_runs().await.unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded["default"], state);
+        let loaded = db.clone().load_env().await.unwrap();
+        assert_eq!(loaded, Some(state));
 
-        db.clone().delete_run("default".to_string()).await.unwrap();
-        assert!(db.load_runs().await.unwrap().is_empty());
+        db.clone().delete_env().await.unwrap();
+        assert!(db.load_env().await.unwrap().is_none());
     }
 
     /// Persisted so an `fghjd` restart doesn't silently drop someone out of
@@ -345,16 +336,19 @@ mod tests {
         let mut c = container();
         c.desired.debug_wait = true;
         let state = RunState {
-            run_id: "default".to_string(),
             network: "fghj-demo-default".to_string(),
             containers: BTreeMap::from([("svc-a".to_string(), c)]),
             sidecar_container_name: "fghj-demo-default-sidecar".to_string(),
             ..Default::default()
         };
-        db.clone().save_run(state).await.unwrap();
+        db.clone().save_env(state).await.unwrap();
 
-        let loaded = db.load_runs().await.unwrap();
-        assert!(loaded["default"].containers["svc-a"].desired.debug_wait);
+        let loaded = db.load_env().await.unwrap();
+        assert!(
+            loaded.as_ref().unwrap().containers["svc-a"]
+                .desired
+                .debug_wait
+        );
     }
 
     /// The commit a container was built from has to survive a restart, or the
@@ -375,16 +369,15 @@ mod tests {
             dirty: false,
         });
         db.clone()
-            .save_run(RunState {
-                run_id: "default".to_string(),
+            .save_env(RunState {
                 containers: BTreeMap::from([("svc-a".to_string(), c)]),
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let loaded = db.load_runs().await.unwrap();
-        let source = loaded["default"].containers["svc-a"]
+        let loaded = db.load_env().await.unwrap();
+        let source = loaded.as_ref().unwrap().containers["svc-a"]
             .desired
             .source
             .clone()
@@ -408,8 +401,7 @@ mod tests {
         let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
 
         db.clone()
-            .save_run(RunState {
-                run_id: "default".to_string(),
+            .save_env(RunState {
                 containers: BTreeMap::from([("svc-a".to_string(), container())]),
                 ..Default::default()
             })
@@ -423,8 +415,11 @@ mod tests {
             .execute("UPDATE containers SET source_json = NULL", [])
             .unwrap();
 
-        let loaded = db.load_runs().await.unwrap();
-        assert_eq!(loaded["default"].containers["svc-a"].desired.source, None);
+        let loaded = db.load_env().await.unwrap();
+        assert_eq!(
+            loaded.as_ref().unwrap().containers["svc-a"].desired.source,
+            None
+        );
     }
 
     /// The whole reason `desired` and `observed` are stored in separate
@@ -442,15 +437,14 @@ mod tests {
         crashed.observed.status = "exited".to_string();
         crashed.observed.sync = SyncStatus::Drifted;
         db.clone()
-            .save_run(RunState {
-                run_id: "default".to_string(),
+            .save_env(RunState {
                 containers: BTreeMap::from([("svc-a".to_string(), crashed)]),
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let restored = &db.load_runs().await.unwrap()["default"].containers["svc-a"];
+        let restored = &db.load_env().await.unwrap().unwrap().containers["svc-a"];
         assert!(restored.desired.running);
         assert_eq!(restored.observed.status, "exited");
         assert_eq!(restored.observed.sync, SyncStatus::Drifted);
@@ -463,8 +457,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
         db.clone()
-            .save_run(RunState {
-                run_id: "default".to_string(),
+            .save_env(RunState {
                 containers: BTreeMap::from([("svc-a".to_string(), container())]),
                 ..Default::default()
             })
@@ -476,7 +469,7 @@ mod tests {
             .execute("UPDATE containers SET desired_running = NULL", [])
             .unwrap();
 
-        let restored = &db.load_runs().await.unwrap()["default"].containers["svc-a"];
+        let restored = &db.load_env().await.unwrap().unwrap().containers["svc-a"];
         assert!(restored.desired.running);
         assert_eq!(restored.observed.status, "running");
     }

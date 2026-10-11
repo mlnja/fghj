@@ -17,7 +17,7 @@ pub(super) fn reduce(
     action: Action,
 ) -> Result<WorkspaceState, ActionRejected> {
     match action {
-        Action::RunPlanned { run_id, plan } => {
+        Action::RunPlanned { plan } => {
             // Turning a `RunSpec` into real `ContainerInfo`/`VolumeInfo`
             // entries requires resolving the `.fghj.yaml` graph and calling
             // Docker, which is real I/O a pure reducer can't do — this just
@@ -25,18 +25,15 @@ pub(super) fn reduce(
             // `effects::docker::converge` picks it up and reports the
             // result back via `Action::RunCreateSettled`.
             //
-            // A run already known under this id keeps its existing
-            // `containers`/`volumes` rather than being wiped back to empty:
+            // An existing environment keeps its `containers`/`volumes`
+            // rather than being wiped back to empty:
             // a switch is an idempotent top-up of whatever's already
             // running, and clobbering it here
             // would make already-live containers flicker to "gone" for as
             // long as convergence takes, even though nothing is actually
             // being torn down.
             let mut next = state.clone();
-            let run = next.runs.entry(run_id.clone()).or_insert_with(|| RunState {
-                run_id,
-                ..Default::default()
-            });
+            let run = next.env.get_or_insert_with(RunState::default);
             if run.pending_create.is_some() {
                 return Err(ActionRejected::AlreadyInFlight);
             }
@@ -44,23 +41,21 @@ pub(super) fn reduce(
             Ok(next)
         }
 
-        Action::RunNodeStartRequested { run_id, node_id } => start_node(state, &run_id, &node_id),
-        Action::RunNodeDebugWaitRequested {
-            run_id,
-            node_id,
-            wait,
-        } => set_debug_wait(state, &run_id, &node_id, wait),
-        Action::RunNodeStopRequested { run_id, node_id } => {
-            set_pending(state, &run_id, &node_id, PendingAction::Stopping, false)
+        Action::RunNodeStartRequested { node_id } => start_node(state, &node_id),
+        Action::RunNodeDebugWaitRequested { node_id, wait } => {
+            set_debug_wait(state, &node_id, wait)
         }
-        Action::RunNodeDeleteRequested { run_id, node_id } => {
+        Action::RunNodeStopRequested { node_id } => {
+            set_pending(state, &node_id, PendingAction::Stopping, false)
+        }
+        Action::RunNodeDeleteRequested { node_id } => {
             // `desired.running` is left as-is: `Removing` is the signal an
             // effect needs to actually stop-then-remove the container,
             // and `reducer::observation::reduce` deletes it from
             // `containers` outright once that settles successfully — no
             // "desired to not exist" state is needed in between.
             let mut next = state.clone();
-            let container = lookup_mut(&mut next, &run_id, &node_id)?;
+            let container = lookup_mut(&mut next, &node_id)?;
             if container.pending_action.is_some() {
                 return Err(ActionRejected::AlreadyInFlight);
             }
@@ -74,13 +69,9 @@ pub(super) fn reduce(
 
 fn lookup_mut<'a>(
     state: &'a mut WorkspaceState,
-    run_id: &str,
     node_id: &str,
 ) -> Result<&'a mut ContainerInfo, ActionRejected> {
-    let run = state
-        .runs
-        .get_mut(run_id)
-        .ok_or(ActionRejected::RunNotFound)?;
+    let run = state.env.as_mut().ok_or(ActionRejected::RunNotFound)?;
     // A create/switch owns every container until it settles — the same rule
     // `start_node` applies. A stop or delete slipped in mid-switch would race
     // the switch's own Docker work on the same container.
@@ -107,15 +98,11 @@ fn lookup_mut<'a>(
 /// one switch. Start the node first.
 fn set_debug_wait(
     state: &WorkspaceState,
-    run_id: &str,
     node_id: &str,
     wait: bool,
 ) -> Result<WorkspaceState, ActionRejected> {
     let mut next = state.clone();
-    let run = next
-        .runs
-        .get_mut(run_id)
-        .ok_or(ActionRejected::RunNotFound)?;
+    let run = next.env.as_mut().ok_or(ActionRejected::RunNotFound)?;
     let container = run
         .containers
         .get_mut(node_id)
@@ -142,25 +129,17 @@ fn set_debug_wait(
 /// `Action::ContainerActionSettled` replaces this placeholder wholesale once
 /// that call reports back — so nothing here needs to be a real value, only
 /// present.
-fn start_node(
-    state: &WorkspaceState,
-    run_id: &str,
-    node_id: &str,
-) -> Result<WorkspaceState, ActionRejected> {
+fn start_node(state: &WorkspaceState, node_id: &str) -> Result<WorkspaceState, ActionRejected> {
     let mut next = state.clone();
     // No environment yet: this start is what creates it. Its network and
     // sidecar have to exist before any container can, so the start goes
     // through the same create/top-up `RunPlanned` does, scoped to this node
     // and what it can't start without.
-    let Some(run) = next.runs.get_mut(run_id) else {
-        next.runs.insert(
-            run_id.to_string(),
-            RunState {
-                run_id: run_id.to_string(),
-                pending_create: Some(RunSpec::Node(node_id.to_string())),
-                ..Default::default()
-            },
-        );
+    let Some(run) = next.env.as_mut() else {
+        next.env = Some(RunState {
+            pending_create: Some(RunSpec::Node(node_id.to_string())),
+            ..Default::default()
+        });
         return Ok(next);
     };
     // Still being created or switched: the network may not be there yet,
@@ -219,13 +198,12 @@ pub(super) fn starting_placeholder(node_id: &str) -> ContainerInfo {
 
 fn set_pending(
     state: &WorkspaceState,
-    run_id: &str,
     node_id: &str,
     pending: PendingAction,
     desired_running: bool,
 ) -> Result<WorkspaceState, ActionRejected> {
     let mut next = state.clone();
-    let container = lookup_mut(&mut next, run_id, node_id)?;
+    let container = lookup_mut(&mut next, node_id)?;
     if container.pending_action.is_some() {
         return Err(ActionRejected::AlreadyInFlight);
     }
@@ -257,14 +235,13 @@ mod tests {
         let next = reduce(
             &state,
             Action::RunNodeDebugWaitRequested {
-                run_id: "default".into(),
                 node_id: "api".into(),
                 wait: true,
             },
         )
         .unwrap();
 
-        let c = next.runs["default"].containers["api"].clone();
+        let c = next.env.as_ref().unwrap().containers["api"].clone();
         assert!(c.desired.debug_wait);
         // The container has to come back up for the flag to mean anything:
         // a halted-at-startup container is still a *running* container.
@@ -276,8 +253,8 @@ mod tests {
     fn debug_wait_can_be_turned_back_off() {
         let mut state = workspace(vec![container("api")]);
         state
-            .runs
-            .get_mut("default")
+            .env
+            .as_mut()
             .unwrap()
             .containers
             .get_mut("api")
@@ -288,16 +265,19 @@ mod tests {
         let next = reduce(
             &state,
             Action::RunNodeDebugWaitRequested {
-                run_id: "default".into(),
                 node_id: "api".into(),
                 wait: false,
             },
         )
         .unwrap();
 
-        assert!(!next.runs["default"].containers["api"].desired.debug_wait);
+        assert!(
+            !next.env.as_ref().unwrap().containers["api"]
+                .desired
+                .debug_wait
+        );
         assert_eq!(
-            next.runs["default"].containers["api"].pending_action,
+            next.env.as_ref().unwrap().containers["api"].pending_action,
             Some(PendingAction::Starting)
         );
     }
@@ -312,7 +292,6 @@ mod tests {
         let err = reduce(
             &state,
             Action::RunNodeDebugWaitRequested {
-                run_id: "default".into(),
                 node_id: "worker".into(),
                 wait: true,
             },
@@ -326,8 +305,8 @@ mod tests {
     fn debug_wait_is_rejected_while_another_action_is_in_flight() {
         let mut state = workspace(vec![container("api")]);
         state
-            .runs
-            .get_mut("default")
+            .env
+            .as_mut()
             .unwrap()
             .containers
             .get_mut("api")
@@ -337,7 +316,6 @@ mod tests {
         let err = reduce(
             &state,
             Action::RunNodeDebugWaitRequested {
-                run_id: "default".into(),
                 node_id: "api".into(),
                 wait: true,
             },
@@ -351,15 +329,8 @@ mod tests {
     fn run_planned_creates_an_empty_run_with_pending_create_set() {
         let state = WorkspaceState::default();
         let plan = crate::state::RunSpec::Flow("app/main".into());
-        let next = reduce(
-            &state,
-            Action::RunPlanned {
-                run_id: "default".into(),
-                plan: plan.clone(),
-            },
-        )
-        .unwrap();
-        let run = next.runs.get("default").unwrap();
+        let next = reduce(&state, Action::RunPlanned { plan: plan.clone() }).unwrap();
+        let run = next.env.as_ref().unwrap();
         assert!(run.containers.is_empty());
         assert_eq!(run.pending_create, Some(plan));
     }
@@ -370,12 +341,11 @@ mod tests {
         let next = reduce(
             &state,
             Action::RunPlanned {
-                run_id: "default".into(),
                 plan: crate::state::RunSpec::Flow("app/main".into()),
             },
         )
         .unwrap();
-        let run = next.runs.get("default").unwrap();
+        let run = next.env.as_ref().unwrap();
         assert!(run.containers.contains_key("web"));
         assert!(run.pending_create.is_some());
     }
@@ -386,7 +356,6 @@ mod tests {
         let first = reduce(
             &state,
             Action::RunPlanned {
-                run_id: "default".into(),
                 plan: crate::state::RunSpec::Flow("app/main".into()),
             },
         )
@@ -394,7 +363,6 @@ mod tests {
         let err = reduce(
             &first,
             Action::RunPlanned {
-                run_id: "default".into(),
                 plan: crate::state::RunSpec::Flow("app/main".into()),
             },
         )
@@ -408,12 +376,11 @@ mod tests {
         let next = reduce(
             &state,
             Action::RunNodeStartRequested {
-                run_id: "default".into(),
                 node_id: "web".into(),
             },
         )
         .unwrap();
-        let c = &next.runs["default"].containers["web"];
+        let c = &next.env.as_ref().unwrap().containers["web"];
         assert_eq!(c.pending_action, Some(PendingAction::Starting));
         assert!(c.desired.running);
     }
@@ -426,7 +393,6 @@ mod tests {
         let err = reduce(
             &state,
             Action::RunNodeStartRequested {
-                run_id: "default".into(),
                 node_id: "web".into(),
             },
         )
@@ -439,12 +405,11 @@ mod tests {
         let next = reduce(
             &WorkspaceState::default(),
             Action::RunNodeStartRequested {
-                run_id: "default".into(),
                 node_id: "web".into(),
             },
         )
         .unwrap();
-        let run = next.runs.get("default").unwrap();
+        let run = next.env.as_ref().unwrap();
         assert_eq!(run.pending_create, Some(RunSpec::Node("web".into())));
         assert!(run.containers.is_empty());
     }
@@ -452,12 +417,10 @@ mod tests {
     #[test]
     fn node_start_waits_for_an_environment_still_being_created() {
         let mut state = workspace(vec![]);
-        state.runs.get_mut("default").unwrap().pending_create =
-            Some(RunSpec::Flow("app/main".into()));
+        state.env.as_mut().unwrap().pending_create = Some(RunSpec::Flow("app/main".into()));
         let err = reduce(
             &state,
             Action::RunNodeStartRequested {
-                run_id: "default".into(),
                 node_id: "web".into(),
             },
         )
@@ -478,12 +441,11 @@ mod tests {
         let next = reduce(
             &state,
             Action::RunNodeStartRequested {
-                run_id: "default".into(),
                 node_id: "missing".into(),
             },
         )
         .unwrap();
-        let c = &next.runs["default"].containers["missing"];
+        let c = &next.env.as_ref().unwrap().containers["missing"];
         assert_eq!(c.pending_action, Some(PendingAction::Starting));
         assert!(c.desired.running);
     }
@@ -496,12 +458,11 @@ mod tests {
         let next = reduce(
             &state,
             Action::RunNodeStopRequested {
-                run_id: "default".into(),
                 node_id: "web".into(),
             },
         )
         .unwrap();
-        let c = &next.runs["default"].containers["web"];
+        let c = &next.env.as_ref().unwrap().containers["web"];
         assert_eq!(c.pending_action, Some(PendingAction::Stopping));
         assert!(!c.desired.running);
     }
@@ -509,12 +470,10 @@ mod tests {
     #[test]
     fn node_stop_requested_waits_for_an_in_flight_create() {
         let mut state = workspace(vec![container("web")]);
-        state.runs.get_mut("default").unwrap().pending_create =
-            Some(RunSpec::Flow("app/main".into()));
+        state.env.as_mut().unwrap().pending_create = Some(RunSpec::Flow("app/main".into()));
         let err = reduce(
             &state,
             Action::RunNodeStopRequested {
-                run_id: "default".into(),
                 node_id: "web".into(),
             },
         )
@@ -530,12 +489,11 @@ mod tests {
         let next = reduce(
             &state,
             Action::RunNodeDeleteRequested {
-                run_id: "default".into(),
                 node_id: "web".into(),
             },
         )
         .unwrap();
-        let c = &next.runs["default"].containers["web"];
+        let c = &next.env.as_ref().unwrap().containers["web"];
         assert_eq!(c.pending_action, Some(PendingAction::Removing));
         assert!(c.desired.running);
     }

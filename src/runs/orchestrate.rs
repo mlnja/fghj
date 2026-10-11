@@ -183,7 +183,6 @@ impl RunRegistry {
             .await?;
 
         let mut state = prior.cloned().unwrap_or_else(|| RunState {
-            run_id: run_id.clone(),
             network: network.clone(),
             sidecar_container_name: sidecar_container_name.clone(),
             sidecar_ip: Some(sidecar_ip.clone()),
@@ -194,7 +193,7 @@ impl RunRegistry {
         state.sidecar_ip = Some(sidecar_ip);
 
         if matches!(spec, RunSpec::Flow(_)) {
-            self.stop_outside(&run_id, graph, &target_ids, &mut state, progress)
+            self.stop_outside(graph, &target_ids, &mut state, progress)
                 .await;
         }
 
@@ -275,7 +274,7 @@ impl RunRegistry {
                 self.record_event(&run_id, &node.id, "create", &why, "ok", None)
                     .await;
             }
-            working(progress, &run_id, node_id, Some(PendingAction::Starting));
+            working(progress, node_id, Some(PendingAction::Starting));
 
             let info = match self
                 .start_node(
@@ -298,7 +297,7 @@ impl RunRegistry {
             {
                 Ok(info) => info,
                 Err(e) => {
-                    working(progress, &run_id, node_id, None);
+                    working(progress, node_id, None);
                     outcomes.fail(node_id, format!("{e:#}"));
                     continue;
                 }
@@ -329,7 +328,6 @@ impl RunRegistry {
     /// switch over it would also leave the flow itself not started.
     async fn stop_outside(
         &self,
-        run_id: &str,
         graph: &Graph,
         keep: &[String],
         state: &mut RunState,
@@ -346,14 +344,14 @@ impl RunRegistry {
             .rev()
         {
             let container = state.containers[&node_id].clone();
-            working(progress, run_id, &node_id, Some(PendingAction::Stopping));
-            match self.stop_container(run_id, &node_id, &container).await {
+            working(progress, &node_id, Some(PendingAction::Stopping));
+            match self.stop_container(&node_id, &container).await {
                 Ok(info) => {
                     report_done(progress, state, info.clone());
                     state.containers.insert(node_id, info);
                 }
                 Err(e) => {
-                    working(progress, run_id, &node_id, None);
+                    working(progress, &node_id, None);
                     daemon_log::warn(format!(
                         "fghjd: stopping {node_id}, which isn't in the flow, failed: {e:#}"
                     ));
@@ -363,16 +361,10 @@ impl RunRegistry {
     }
 }
 
-fn working(
-    progress: Option<&ProgressSink>,
-    run_id: &str,
-    node_id: &str,
-    action: Option<PendingAction>,
-) {
+fn working(progress: Option<&ProgressSink>, node_id: &str, action: Option<PendingAction>) {
     report(
         progress,
         RunProgress::Working {
-            run_id: run_id.to_string(),
             node_id: node_id.to_string(),
             action,
         },
@@ -383,7 +375,6 @@ fn report_done(progress: Option<&ProgressSink>, state: &RunState, info: Containe
     report(
         progress,
         RunProgress::Done(Box::new(NodeDone {
-            run_id: state.run_id.clone(),
             network: state.network.clone(),
             sidecar_container_name: state.sidecar_container_name.clone(),
             sidecar_ip: state.sidecar_ip.clone(),

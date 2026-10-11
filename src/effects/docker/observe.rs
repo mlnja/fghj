@@ -33,20 +33,20 @@ use crate::state::ContainerObserved;
 use super::volumes;
 
 /// Re-inspects every container the actor currently records and reports
-/// what Docker actually says about it — plus each run's real volumes —
+/// what Docker actually says about it — plus the environment's real volumes —
 /// back into the actor's state: the inspection takes the actor's state as
 /// its input and its results go straight out as actions — one read, one
 /// writer.
 pub async fn report(runs: &RunRegistry, actor: &ActorHandle) {
-    let state = actor.current();
-    for (run_id, observed) in runs.inspect_containers(&state.runs).await {
-        for (node_id, observed) in observed {
-            let _ = actor
-                .dispatch(container_observed(&run_id, &node_id, &observed))
-                .await;
-        }
-        volumes::observe_run_volumes(runs, actor, &run_id).await;
+    let Some(env) = actor.current().env.clone() else {
+        return;
+    };
+    for (node_id, observed) in runs.inspect_containers(&env).await {
+        let _ = actor
+            .dispatch(container_observed(&node_id, &observed))
+            .await;
     }
+    volumes::observe_volumes(runs, actor).await;
 }
 
 /// The config-drift counterpart to [`report`], driven on its own much
@@ -59,8 +59,10 @@ pub async fn report(runs: &RunRegistry, actor: &ActorHandle) {
 /// into the *old* state only, so `ContainerObserved::sync` stayed `Unknown`
 /// forever and the UI's "desired ≠ actual" badge never lit up.
 pub async fn report_config_drift(runs: &RunRegistry, actor: &ActorHandle, graph: &Graph) {
-    let state = actor.current();
-    for report in runs.config_drift(graph, &state.runs).await {
+    let Some(env) = actor.current().env.clone() else {
+        return;
+    };
+    for report in runs.config_drift(graph, &env).await {
         let _ = actor.dispatch(config_drift_observed(&report)).await;
     }
 }
@@ -70,7 +72,6 @@ pub async fn report_config_drift(runs: &RunRegistry, actor: &ActorHandle, graph:
 /// reason `container_observed` is split out from `report`.
 fn config_drift_observed(report: &DriftReport) -> Action {
     Action::ConfigDriftObserved {
-        run_id: report.run_id.clone(),
         node_id: report.node_id.clone(),
         drift: report.sync,
     }
@@ -83,9 +84,8 @@ fn config_drift_observed(report: &DriftReport) -> Action {
 /// incapable of carrying anything from `desired`: this is an observation,
 /// and the reducer must never learn what fghj wants from something
 /// claiming to say what Docker did.
-fn container_observed(run_id: &str, node_id: &str, observed: &ContainerObserved) -> Action {
+fn container_observed(node_id: &str, observed: &ContainerObserved) -> Action {
     Action::ContainerObserved {
-        run_id: run_id.to_string(),
         node_id: node_id.to_string(),
         status: observed.status.clone(),
         published_port: observed.published_port,
@@ -115,10 +115,9 @@ mod tests {
     #[test]
     fn container_observed_translates_status_and_ports_without_touching_desired() {
         let c = container("web", "running");
-        let action = container_observed("default", &c.node_id, &c.observed);
+        let action = container_observed(&c.node_id, &c.observed);
         match action {
             Action::ContainerObserved {
-                run_id,
                 node_id,
                 status,
                 published_port,
@@ -126,7 +125,6 @@ mod tests {
                 ports,
                 exit_code: _,
             } => {
-                assert_eq!(run_id, "default");
                 assert_eq!(node_id, "web");
                 assert_eq!(status, "running");
                 assert_eq!(published_port, Some(8080));
@@ -144,7 +142,6 @@ mod tests {
     fn config_drift_observed_carries_every_verdict_through() {
         use crate::state::SyncStatus;
         let verdict = |sync| match config_drift_observed(&DriftReport {
-            run_id: "default".into(),
             node_id: "web".into(),
             sync,
         }) {
@@ -169,11 +166,11 @@ mod tests {
         let handle = crate::actor::spawn(state);
 
         let observed = container("web", "exited");
-        let action = container_observed("default", &observed.node_id, &observed.observed);
+        let action = container_observed(&observed.node_id, &observed.observed);
         handle.dispatch(action).await.unwrap();
 
         let current = handle.current();
-        let web = &current.runs["default"].containers["web"];
+        let web = &current.env.as_ref().unwrap().containers["web"];
         // Drift is now visible in `observed`...
         assert_eq!(web.observed.status, "exited");
         // ...but `desired.running` — what `converge`'s `extract()` actually

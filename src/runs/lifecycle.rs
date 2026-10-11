@@ -7,6 +7,7 @@ use crate::resolver::Graph;
 use crate::state::{ContainerInfo, RunState};
 
 use super::health::RunBudget;
+use super::naming::DEFAULT_RUN_ID;
 use super::registry::RunRegistry;
 use super::route_table::sidecar_routes_dir;
 use super::start_node::StartContext;
@@ -19,7 +20,8 @@ impl RunRegistry {
     /// Takes the run rather than looking it up: the reducer owns the only
     /// copy, and the caller (`daemon::WorkspaceRegistry::stop`, as the
     /// workspace's actor goes away) already has it.
-    pub async fn stop(&self, run_id: &str, state: &RunState) -> Result<()> {
+    pub async fn stop(&self, state: &RunState) -> Result<()> {
+        let run_id = DEFAULT_RUN_ID;
         for c in state.containers.values() {
             self.begin_event_cycle(run_id, &c.node_id, "stop").await;
             self.record_event(
@@ -52,13 +54,13 @@ impl RunRegistry {
     pub async fn restart_container(
         &self,
         graph: &Graph,
-        run_id: &str,
         node_id: &str,
         network: &str,
         sidecar_ip: Option<&str>,
         debug_wait: bool,
     ) -> Result<ContainerInfo> {
-        let lock = self.node_lock(run_id, node_id);
+        let run_id = DEFAULT_RUN_ID;
+        let lock = self.node_lock(node_id);
         let _guard = lock.lock().await;
         let Some(node) = graph.nodes.iter().find(|n| n.id == node_id) else {
             bail!("no such node: {node_id}");
@@ -95,11 +97,11 @@ impl RunRegistry {
     /// from a second copy of the run to disagree with.
     pub async fn stop_container(
         &self,
-        run_id: &str,
         node_id: &str,
         container: &ContainerInfo,
     ) -> Result<ContainerInfo> {
-        let lock = self.node_lock(run_id, node_id);
+        let run_id = DEFAULT_RUN_ID;
+        let lock = self.node_lock(node_id);
         let _guard = lock.lock().await;
         let container_name = container.desired.container_name.clone();
         self.begin_event_cycle(run_id, node_id, "stop").await;
@@ -138,13 +140,9 @@ impl RunRegistry {
     /// (same reasoning as `stop`'s default-run carve-out: a volume's whole
     /// point is to outlive any one container), so a later "Start" click
     /// picks the data back up in a fresh container.
-    pub async fn remove_container(
-        &self,
-        run_id: &str,
-        node_id: &str,
-        container: &ContainerInfo,
-    ) -> Result<()> {
-        let lock = self.node_lock(run_id, node_id);
+    pub async fn remove_container(&self, node_id: &str, container: &ContainerInfo) -> Result<()> {
+        let run_id = DEFAULT_RUN_ID;
+        let lock = self.node_lock(node_id);
         let _guard = lock.lock().await;
         let container_name = container.desired.container_name.clone();
         self.begin_event_cycle(run_id, node_id, "stop").await;

@@ -7,10 +7,10 @@ use axum::response::{IntoResponse, Response};
 
 use crate::web::api::error::{action_rejected_response, bad_request};
 use crate::web::api::extract::ActorExtractor;
-use crate::{action, actor, runs, state};
+use crate::{action, actor, state};
 
 /// Builds the 200 response for a successful node-lifecycle dispatch: the
-/// freshly-published `state::ContainerInfo` for `run_id`/`node_id`,
+/// freshly-published `state::ContainerInfo` for `node_id`,
 /// serialized as-is. There is exactly one container type in the codebase
 /// now, so every endpoint that returns a container returns the same
 /// `{node_id, desired, observed, pending_action}` shape without a view
@@ -18,16 +18,12 @@ use crate::{action, actor, runs, state};
 /// (practically unreachable, since `reduce` always leaves a container that
 /// hasn't been removed by `ContainerActionSettled` in place) case the
 /// container isn't found right after a successful dispatch.
-pub(crate) fn container_response(
-    actor: &actor::ActorHandle,
-    run_id: &str,
-    node_id: &str,
-) -> Response {
+pub(crate) fn container_response(actor: &actor::ActorHandle, node_id: &str) -> Response {
     let current = actor.current();
     match current
-        .runs
-        .get(run_id)
-        .and_then(|run| run.containers.get(node_id))
+        .env
+        .as_ref()
+        .and_then(|env| env.containers.get(node_id))
     {
         Some(container) => Json(container).into_response(),
         None => Json(serde_json::json!({ "ok": true })).into_response(),
@@ -37,7 +33,7 @@ pub(crate) fn container_response(
 /// The workspace's environment — every container fghj knows about — or
 /// `null` before anything has been started.
 pub(crate) async fn get_environment(ActorExtractor(actor): ActorExtractor) -> Response {
-    Json(actor.current().runs.get(runs::DEFAULT_RUN_ID)).into_response()
+    Json(&actor.current().env).into_response()
 }
 
 /// Switches the environment to a flow: body `{"flow": "repo/flow"}`. Starts
@@ -54,28 +50,26 @@ pub(crate) async fn post_switch(ActorExtractor(actor): ActorExtractor, body: Byt
         Err(e) => return bad_request(e),
     };
     let action = action::Action::RunPlanned {
-        run_id: runs::DEFAULT_RUN_ID.to_string(),
         plan: state::RunSpec::Flow(body.flow),
     };
     match actor.dispatch(action).await {
-        Ok(()) => Json(actor.current().runs.get(runs::DEFAULT_RUN_ID)).into_response(),
+        Ok(()) => Json(&actor.current().env).into_response(),
         Err(e) => action_rejected_response(e),
     }
 }
 
-/// Dispatches `action` against `actor` for `run_id`/`node_id` and replies
+/// Dispatches `action` against `actor` for `node_id` and replies
 /// as soon as the (pure, in-memory) reducer has recorded the
 /// intent, not once Docker has actually finished; `effects::docker::converge`
 /// (wired per-workspace in `daemon::WorkspaceRegistry::wire_actor`) is what
 /// actually performs the Docker call afterwards, asynchronously.
 pub(crate) async fn dispatch_node_action(
     actor: &actor::ActorHandle,
-    run_id: String,
     node_id: String,
     action: action::Action,
 ) -> Response {
     match actor.dispatch(action).await {
-        Ok(()) => container_response(actor, &run_id, &node_id),
+        Ok(()) => container_response(actor, &node_id),
         Err(e) => action_rejected_response(e),
     }
 }
@@ -84,12 +78,10 @@ pub(crate) async fn post_run_node_start(
     AxumPath(node_id): AxumPath<String>,
     ActorExtractor(actor): ActorExtractor,
 ) -> Response {
-    let run_id = runs::DEFAULT_RUN_ID.to_string();
     let action = action::Action::RunNodeStartRequested {
-        run_id: run_id.clone(),
         node_id: node_id.clone(),
     };
-    dispatch_node_action(&actor, run_id, node_id, action).await
+    dispatch_node_action(&actor, node_id, action).await
 }
 
 /// The per-container debug switch (`FGHJ_DEBUG_WAIT`) — see
@@ -105,7 +97,6 @@ pub(crate) async fn post_run_node_debug_wait(
     ActorExtractor(actor): ActorExtractor,
     body: Bytes,
 ) -> Response {
-    let run_id = runs::DEFAULT_RUN_ID.to_string();
     #[derive(serde::Deserialize)]
     struct Body {
         wait: bool,
@@ -125,33 +116,28 @@ pub(crate) async fn post_run_node_debug_wait(
         }
     };
     let action = action::Action::RunNodeDebugWaitRequested {
-        run_id: run_id.clone(),
         node_id: node_id.clone(),
         wait,
     };
-    dispatch_node_action(&actor, run_id, node_id, action).await
+    dispatch_node_action(&actor, node_id, action).await
 }
 
 pub(crate) async fn post_run_node_stop(
     AxumPath(node_id): AxumPath<String>,
     ActorExtractor(actor): ActorExtractor,
 ) -> Response {
-    let run_id = runs::DEFAULT_RUN_ID.to_string();
     let action = action::Action::RunNodeStopRequested {
-        run_id: run_id.clone(),
         node_id: node_id.clone(),
     };
-    dispatch_node_action(&actor, run_id, node_id, action).await
+    dispatch_node_action(&actor, node_id, action).await
 }
 
 pub(crate) async fn post_run_node_delete(
     AxumPath(node_id): AxumPath<String>,
     ActorExtractor(actor): ActorExtractor,
 ) -> Response {
-    let run_id = runs::DEFAULT_RUN_ID.to_string();
     let action = action::Action::RunNodeDeleteRequested {
-        run_id: run_id.clone(),
         node_id: node_id.clone(),
     };
-    dispatch_node_action(&actor, run_id, node_id, action).await
+    dispatch_node_action(&actor, node_id, action).await
 }

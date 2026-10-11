@@ -39,7 +39,6 @@ pub enum RunSpec {
 /// `desired` and `observed` silently disagree before they were unified.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct RunState {
-    pub run_id: String,
     pub network: String,
     pub containers: BTreeMap<String, ContainerInfo>,
     pub volumes: BTreeMap<String, VolumeInfo>,
@@ -112,7 +111,6 @@ mod tests {
     #[test]
     fn fresh_run_state_has_no_containers_or_volumes() {
         let state = RunState {
-            run_id: "default".into(),
             network: "fghj-net-default".into(),
             containers: BTreeMap::new(),
             volumes: BTreeMap::new(),
@@ -127,7 +125,6 @@ mod tests {
     #[test]
     fn pending_create_serializes_as_the_intent() {
         let state = RunState {
-            run_id: "default".into(),
             network: "fghj-net-default".into(),
             containers: BTreeMap::new(),
             volumes: BTreeMap::new(),

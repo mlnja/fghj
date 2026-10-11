@@ -20,7 +20,7 @@ use crate::state::WorkspaceState;
 fn extract_hosts(states: &BTreeMap<String, Arc<WorkspaceState>>) -> Vec<String> {
     let mut hosts: Vec<String> = states
         .values()
-        .flat_map(|state| state.runs.values())
+        .flat_map(|state| state.env.iter())
         .flat_map(|run| run.containers.values())
         .filter(|container| container.observed.status == "running")
         .flat_map(|container| container.desired.additional_hosts.iter().cloned())

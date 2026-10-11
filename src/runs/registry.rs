@@ -16,7 +16,7 @@ pub struct RunRegistry {
     pub(super) workspace: std::path::PathBuf,
     pub(super) db: Arc<WorkspaceDb>,
     pub(super) docker: Arc<bollard::Docker>,
-    /// One lock per `(run_id, node_id)`, serializing that node's lifecycle
+    /// One lock per node, serializing that node's lifecycle
     /// calls — `restart_container` / `stop_container` / `remove_container`.
     ///
     /// Per node, not per workspace. Two concurrent calls for the *same* node
@@ -96,11 +96,11 @@ impl RunRegistry {
     /// The lifecycle lock for one node, created on first use. Held across
     /// the whole of a `restart`/`stop`/`remove` so that node's Docker calls
     /// never interleave with themselves — see `node_locks`.
-    pub(super) fn node_lock(&self, run_id: &str, node_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    pub(super) fn node_lock(&self, node_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.node_locks
             .lock()
             .unwrap()
-            .entry(format!("{run_id}:{node_id}"))
+            .entry(node_id.to_string())
             .or_default()
             .clone()
     }
@@ -126,21 +126,11 @@ mod tests {
     #[tokio::test]
     async fn the_same_node_gets_the_same_lock_and_a_different_node_does_not() {
         let (_tmp, registry) = empty_registry().await;
-        let a1 = registry.node_lock("default", "api.svc");
-        let a2 = registry.node_lock("default", "api.svc");
-        let b = registry.node_lock("default", "db.svc");
+        let a1 = registry.node_lock("api.svc");
+        let a2 = registry.node_lock("api.svc");
+        let b = registry.node_lock("db.svc");
         assert!(Arc::ptr_eq(&a1, &a2));
         assert!(!Arc::ptr_eq(&a1, &b));
-    }
-
-    /// The same node id in two different runs is two different containers,
-    /// so it must not share a lock either.
-    #[tokio::test]
-    async fn the_same_node_in_two_runs_gets_two_locks() {
-        let (_tmp, registry) = empty_registry().await;
-        let a = registry.node_lock("default", "api.svc");
-        let b = registry.node_lock("preview", "api.svc");
-        assert!(!Arc::ptr_eq(&a, &b));
     }
 
     /// B12 itself: one node stuck in a long lifecycle call must not hold up
@@ -150,10 +140,10 @@ mod tests {
     #[tokio::test]
     async fn a_node_held_for_a_long_time_does_not_block_a_different_node() {
         let (_tmp, registry) = empty_registry().await;
-        let slow = registry.node_lock("default", "slow.svc");
+        let slow = registry.node_lock("slow.svc");
         let held = slow.lock_owned().await;
 
-        let other = registry.node_lock("default", "other.svc");
+        let other = registry.node_lock("other.svc");
         let free = tokio::time::timeout(Duration::from_secs(1), other.lock())
             .await
             .expect("a different node's lock must be free while one node is busy");
@@ -167,10 +157,10 @@ mod tests {
     #[tokio::test]
     async fn two_calls_for_one_node_still_take_turns() {
         let (_tmp, registry) = empty_registry().await;
-        let first = registry.node_lock("default", "api.svc");
+        let first = registry.node_lock("api.svc");
         let held = first.lock_owned().await;
 
-        let second = registry.node_lock("default", "api.svc");
+        let second = registry.node_lock("api.svc");
         let blocked = tokio::time::timeout(Duration::from_millis(200), second.lock()).await;
         assert!(blocked.is_err(), "same node must serialize");
         drop(held);

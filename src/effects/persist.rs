@@ -4,7 +4,6 @@
 //! published is what lands in the database, and the reducer is the only
 //! thing that decides what that is.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::persistence::WorkspaceDb;
@@ -12,21 +11,19 @@ use crate::state::{RunState, WorkspaceState};
 
 use super::AsyncEffect;
 
-pub type Snapshot = BTreeMap<String, RunState>;
+pub type Snapshot = Option<RunState>;
 
 pub struct PersistEffect {
     db: Arc<WorkspaceDb>,
-    /// Run ids this effect has written, so one that disappears from state
-    /// gets deleted rather than lingering to be rehydrated on next start.
-    known: Vec<String>,
+    /// Whether this effect has written an environment, so one that
+    /// disappears from state gets deleted rather than lingering to be
+    /// rehydrated on next start.
+    written: bool,
 }
 
 impl PersistEffect {
     pub fn new(db: Arc<WorkspaceDb>) -> Self {
-        Self {
-            db,
-            known: Vec::new(),
-        }
+        Self { db, written: false }
     }
 }
 
@@ -34,25 +31,25 @@ impl AsyncEffect for PersistEffect {
     type Snapshot = Snapshot;
 
     fn extract(&self, state: &WorkspaceState) -> Self::Snapshot {
-        state.runs.clone()
+        state.env.clone()
     }
 
     async fn converge(&mut self, snapshot: Self::Snapshot) -> anyhow::Result<()> {
-        for run in snapshot.values() {
-            // A run with no containers and no network has not been created
-            // yet — persisting it would resurrect an empty shell on the
-            // next daemon start.
-            if run.network.is_empty() && run.containers.is_empty() {
-                continue;
+        match snapshot {
+            // An environment with no containers and no network has not been
+            // created yet — persisting it would resurrect an empty shell on
+            // the next daemon start.
+            Some(env) if env.network.is_empty() && env.containers.is_empty() => {}
+            Some(env) => {
+                self.db.clone().save_env(env).await?;
+                self.written = true;
             }
-            self.db.clone().save_run(run.clone()).await?;
-        }
-        for run_id in std::mem::take(&mut self.known) {
-            if !snapshot.contains_key(&run_id) {
-                self.db.clone().delete_run(run_id).await?;
+            None if self.written => {
+                self.db.clone().delete_env().await?;
+                self.written = false;
             }
+            None => {}
         }
-        self.known = snapshot.keys().cloned().collect();
         Ok(())
     }
 }
@@ -67,68 +64,55 @@ mod tests {
         (tmp, db)
     }
 
-    fn created_run(run_id: &str) -> RunState {
+    fn created_env() -> RunState {
         RunState {
-            run_id: run_id.to_string(),
-            network: format!("fghj-net-{run_id}"),
+            network: "fghj-net".to_string(),
             ..Default::default()
         }
     }
 
     #[tokio::test]
-    async fn a_created_run_is_written_and_reloads() {
+    async fn a_created_environment_is_written_and_reloads() {
         let (_tmp, db) = db();
         let mut effect = PersistEffect::new(db.clone());
-        let mut snapshot = Snapshot::new();
-        snapshot.insert("default".into(), created_run("default"));
-        effect.converge(snapshot).await.unwrap();
+        effect.converge(Some(created_env())).await.unwrap();
 
-        let loaded = db.clone().load_runs().await.unwrap();
-        assert!(loaded.contains_key("default"), "{loaded:?}");
+        let loaded = db.clone().load_env().await.unwrap();
+        assert_eq!(loaded, Some(created_env()));
     }
 
-    /// A run that has been planned but never created has nothing worth
-    /// remembering — writing it would make the next daemon start rehydrate
-    /// an empty run that never existed.
+    /// An environment that has been planned but never created has nothing
+    /// worth remembering — writing it would make the next daemon start
+    /// rehydrate an empty environment that never existed.
     #[tokio::test]
-    async fn an_uncreated_run_is_not_written() {
+    async fn an_uncreated_environment_is_not_written() {
         let (_tmp, db) = db();
         let mut effect = PersistEffect::new(db.clone());
-        let mut snapshot = Snapshot::new();
-        snapshot.insert(
-            "default".into(),
-            RunState {
-                run_id: "default".into(),
-                ..Default::default()
-            },
-        );
-        effect.converge(snapshot).await.unwrap();
-        assert!(db.clone().load_runs().await.unwrap().is_empty());
+        effect.converge(Some(RunState::default())).await.unwrap();
+        assert!(db.clone().load_env().await.unwrap().is_none());
     }
 
-    /// Stopping a run removes it from state; the database has to follow, or
-    /// the next start would rehydrate a run the user just tore down.
+    /// An environment that leaves state has to leave the database too, or
+    /// the next start would rehydrate one the user just tore down.
     #[tokio::test]
-    async fn a_run_that_leaves_state_is_deleted_from_the_database() {
+    async fn an_environment_that_leaves_state_is_deleted_from_the_database() {
         let (_tmp, db) = db();
         let mut effect = PersistEffect::new(db.clone());
 
-        let mut snapshot = Snapshot::new();
-        snapshot.insert("default".into(), created_run("default"));
-        effect.converge(snapshot).await.unwrap();
-        assert!(!db.clone().load_runs().await.unwrap().is_empty());
+        effect.converge(Some(created_env())).await.unwrap();
+        assert!(db.clone().load_env().await.unwrap().is_some());
 
-        effect.converge(Snapshot::new()).await.unwrap();
-        assert!(db.clone().load_runs().await.unwrap().is_empty());
+        effect.converge(None).await.unwrap();
+        assert!(db.clone().load_env().await.unwrap().is_none());
     }
 
-    /// Only runs this effect actually wrote get deleted — it must not issue
-    /// a delete for every id it has never seen.
+    /// Only an environment this effect actually wrote gets deleted — an
+    /// idle workspace must not issue a delete on every change.
     #[tokio::test]
-    async fn deletion_is_limited_to_runs_this_effect_wrote() {
+    async fn deletion_is_limited_to_what_this_effect_wrote() {
         let (_tmp, db) = db();
         let mut effect = PersistEffect::new(db.clone());
-        effect.converge(Snapshot::new()).await.unwrap();
-        assert!(effect.known.is_empty());
+        effect.converge(None).await.unwrap();
+        assert!(!effect.written);
     }
 }

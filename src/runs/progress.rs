@@ -33,7 +33,6 @@ pub enum RunProgress {
     /// failed, so it doesn't read as still in progress for the rest of the
     /// create.
     Working {
-        run_id: String,
         node_id: String,
         action: Option<PendingAction>,
     },
@@ -41,13 +40,12 @@ pub enum RunProgress {
     Done(Box<NodeDone>),
 }
 
-/// One node having come up (or been stopped), plus the run-level facts
-/// that are only known once the run's network and sidecar exist. Carrying
+/// One node having come up (or been stopped), plus the environment-level
+/// facts that are only known once its network and sidecar exist. Carrying
 /// them on every report (rather than once up front) keeps the receiver from
 /// having to sequence two different kinds of message.
 #[derive(Debug, Clone)]
 pub struct NodeDone {
-    pub run_id: String,
     pub network: String,
     pub sidecar_container_name: String,
     pub sidecar_ip: Option<String>,

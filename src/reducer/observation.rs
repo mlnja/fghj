@@ -23,7 +23,6 @@ pub(super) fn reduce(
 ) -> Result<WorkspaceState, ActionRejected> {
     match action {
         Action::ContainerObserved {
-            run_id,
             node_id,
             status,
             published_port,
@@ -33,8 +32,8 @@ pub(super) fn reduce(
         } => {
             let mut next = state.clone();
             if let Some(container) = next
-                .runs
-                .get_mut(&run_id)
+                .env
+                .as_mut()
                 .and_then(|run| run.containers.get_mut(&node_id))
             {
                 container.observed.status = status;
@@ -46,13 +45,9 @@ pub(super) fn reduce(
             Ok(next)
         }
 
-        Action::ContainerActionSettled {
-            run_id,
-            node_id,
-            result,
-        } => {
+        Action::ContainerActionSettled { node_id, result } => {
             let mut next = state.clone();
-            if let Some(run) = next.runs.get_mut(&run_id) {
+            if let Some(run) = next.env.as_mut() {
                 match result {
                     // A freshly re-observed container replaces whatever was
                     // there wholesale — this is the only place that ever
@@ -91,18 +86,18 @@ pub(super) fn reduce(
             Ok(next)
         }
 
-        Action::RunCreateSettled { run_id, result } => {
+        Action::RunCreateSettled { result } => {
             let mut next = state.clone();
             // Every branch writes through the entry `RunPlanned` created
             // rather than inserting: a report describes work on an
             // environment the reducer already knows about, and never brings
             // one into existence on its own.
-            let present = next.runs.contains_key(&run_id);
+            let present = next.env.is_some();
             match result {
                 Ok(mut run) => {
                     if present {
                         clear_create_marks(&mut run);
-                        next.runs.insert(run_id, run);
+                        next.env = Some(run);
                     }
                 }
                 // A top-up that failed partway still left containers
@@ -118,11 +113,11 @@ pub(super) fn reduce(
                     if present {
                         run.pending_create = None;
                         clear_create_marks(&mut run);
-                        next.runs.insert(run_id, *run);
+                        next.env = Some(*run);
                     }
                 }
                 Err(_) => {
-                    if let Some(run) = next.runs.get_mut(&run_id) {
+                    if let Some(run) = next.env.as_mut() {
                         run.pending_create = None;
                         clear_create_marks(run);
                     }
@@ -131,14 +126,10 @@ pub(super) fn reduce(
             Ok(next)
         }
 
-        Action::RunCreateWorking {
-            run_id,
-            node_id,
-            action,
-        } => {
+        Action::RunCreateWorking { node_id, action } => {
             let mut next = state.clone();
             // Same write-through rule as `RunCreateSettled` above.
-            if let Some(run) = next.runs.get_mut(&run_id) {
+            if let Some(run) = next.env.as_mut() {
                 match (action, run.containers.get_mut(&node_id)) {
                     (Some(action), Some(container)) => container.pending_action = Some(action),
                     (Some(_), None) => {
@@ -156,7 +147,6 @@ pub(super) fn reduce(
         }
 
         Action::RunCreateProgress {
-            run_id,
             network,
             sidecar_container_name,
             sidecar_ip,
@@ -164,8 +154,8 @@ pub(super) fn reduce(
         } => {
             let mut next = state.clone();
             // Same write-through rule as `RunCreateSettled` above — hence
-            // `get_mut` rather than `entry`.
-            if let Some(run) = next.runs.get_mut(&run_id) {
+            // `as_mut` rather than `get_or_insert`.
+            if let Some(run) = next.env.as_mut() {
                 run.network = network;
                 run.sidecar_container_name = sidecar_container_name;
                 run.sidecar_ip = sidecar_ip;
@@ -178,12 +168,11 @@ pub(super) fn reduce(
         }
 
         Action::VolumeObserved {
-            run_id,
             volume_name,
             exists,
         } => {
             let mut next = state.clone();
-            if let Some(run) = next.runs.get_mut(&run_id) {
+            if let Some(run) = next.env.as_mut() {
                 run.volumes
                     .entry(volume_name.clone())
                     .or_insert_with(|| VolumeInfo {
@@ -196,15 +185,11 @@ pub(super) fn reduce(
             Ok(next)
         }
 
-        Action::ConfigDriftObserved {
-            run_id,
-            node_id,
-            drift,
-        } => {
+        Action::ConfigDriftObserved { node_id, drift } => {
             let mut next = state.clone();
             if let Some(container) = next
-                .runs
-                .get_mut(&run_id)
+                .env
+                .as_mut()
                 .and_then(|run| run.containers.get_mut(&node_id))
             {
                 container.observed.sync = drift;
@@ -249,7 +234,6 @@ mod tests {
         let next = reduce(
             &state,
             Action::ContainerObserved {
-                run_id: "default".into(),
                 node_id: "web".into(),
                 status: "running".into(),
                 published_port: Some(54321),
@@ -259,7 +243,7 @@ mod tests {
             },
         )
         .unwrap();
-        let c = &next.runs["default"].containers["web"];
+        let c = &next.env.as_ref().unwrap().containers["web"];
         assert_eq!(c.observed.status, "running");
         assert_eq!(c.observed.published_port, Some(54321));
         assert_eq!(c.observed.ip.as_deref(), Some("172.20.0.5"));
@@ -273,7 +257,6 @@ mod tests {
         let next = reduce(
             &state,
             Action::ContainerObserved {
-                run_id: "default".into(),
                 node_id: "ghost".into(),
                 status: "running".into(),
                 published_port: None,
@@ -283,16 +266,15 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(next.runs["default"].containers.is_empty());
+        assert!(next.env.as_ref().unwrap().containers.is_empty());
     }
 
     #[test]
-    fn container_observed_for_unknown_run_is_a_silent_no_op() {
+    fn container_observed_with_no_environment_is_a_silent_no_op() {
         let state = WorkspaceState::default();
         let next = reduce(
             &state,
             Action::ContainerObserved {
-                run_id: "missing".into(),
                 node_id: "web".into(),
                 status: "running".into(),
                 published_port: None,
@@ -302,7 +284,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(next.runs.is_empty());
+        assert!(next.env.is_none());
     }
 
     #[test]
@@ -316,13 +298,12 @@ mod tests {
         let next = reduce(
             &state,
             Action::ContainerActionSettled {
-                run_id: "default".into(),
                 node_id: "web".into(),
                 result: Ok(Some(fresh)),
             },
         )
         .unwrap();
-        let c = &next.runs["default"].containers["web"];
+        let c = &next.env.as_ref().unwrap().containers["web"];
         assert!(c.pending_action.is_none());
         assert_eq!(c.observed.status, "running");
         assert_eq!(c.observed.published_port, Some(54321));
@@ -345,13 +326,12 @@ mod tests {
         let next = reduce(
             &state,
             Action::ContainerActionSettled {
-                run_id: "default".into(),
                 node_id: "web".into(),
                 result: Ok(Some(settled)),
             },
         )
         .unwrap();
-        let c = &next.runs["default"].containers["web"];
+        let c = &next.env.as_ref().unwrap().containers["web"];
         assert!(c.pending_action.is_none());
         assert_eq!(c.observed.status, "exited");
         assert!(!c.desired.running);
@@ -365,14 +345,13 @@ mod tests {
         let next = reduce(
             &state,
             Action::ContainerActionSettled {
-                run_id: "default".into(),
                 node_id: "web".into(),
                 result: Err("docker daemon unreachable".into()),
             },
         )
         .unwrap();
         assert!(
-            next.runs["default"].containers["web"]
+            next.env.as_ref().unwrap().containers["web"]
                 .pending_action
                 .is_none()
         );
@@ -386,13 +365,12 @@ mod tests {
         let next = reduce(
             &state,
             Action::ContainerActionSettled {
-                run_id: "default".into(),
                 node_id: "web".into(),
                 result: Ok(None),
             },
         )
         .unwrap();
-        assert!(!next.runs["default"].containers.contains_key("web"));
+        assert!(!next.env.as_ref().unwrap().containers.contains_key("web"));
     }
 
     #[test]
@@ -403,13 +381,12 @@ mod tests {
         let next = reduce(
             &state,
             Action::ContainerActionSettled {
-                run_id: "default".into(),
                 node_id: "web".into(),
                 result: Err("container in use".into()),
             },
         )
         .unwrap();
-        let c = &next.runs["default"].containers["web"];
+        let c = &next.env.as_ref().unwrap().containers["web"];
         assert!(c.pending_action.is_none());
     }
 
@@ -421,7 +398,6 @@ mod tests {
     fn run_create_settled_replaces_the_planned_entry_on_success() {
         let state = workspace(vec![]);
         let created = RunState {
-            run_id: "default".into(),
             network: "fghj-net-default".into(),
             containers: BTreeMap::from([("web".to_string(), container("web"))]),
             volumes: BTreeMap::new(),
@@ -432,28 +408,26 @@ mod tests {
         let next = reduce(
             &state,
             Action::RunCreateSettled {
-                run_id: "default".into(),
                 result: Ok(created),
             },
         )
         .unwrap();
-        assert!(next.runs["default"].containers.contains_key("web"));
+        assert!(next.env.as_ref().unwrap().containers.contains_key("web"));
     }
 
     #[test]
     fn run_create_settled_clears_pending_create_without_touching_containers_on_failure() {
         let mut existing = workspace(vec![container("web")]);
-        existing.runs.get_mut("default").unwrap().pending_create =
+        existing.env.as_mut().unwrap().pending_create =
             Some(crate::state::RunSpec::Flow("app/main".into()));
         let next = reduce(
             &existing,
             Action::RunCreateSettled {
-                run_id: "default".into(),
                 result: Err(RunCreateError::bare("docker daemon unreachable")),
             },
         )
         .unwrap();
-        let run = &next.runs["default"];
+        let run = &next.env.as_ref().unwrap();
         assert!(run.pending_create.is_none());
         assert!(run.containers.contains_key("web"));
     }
@@ -465,13 +439,12 @@ mod tests {
     #[test]
     fn run_create_settled_adopts_the_partial_state_of_a_failed_top_up() {
         let mut existing = workspace(vec![container("web")]);
-        existing.runs.get_mut("default").unwrap().pending_create =
+        existing.env.as_mut().unwrap().pending_create =
             Some(crate::state::RunSpec::Flow("app/main".into()));
 
         // `web` was already up; `api` came up during this top-up before
         // `worker` failed.
         let partial = RunState {
-            run_id: "default".into(),
             network: "fghj-net-default".into(),
             containers: BTreeMap::from([
                 ("web".to_string(), container("web")),
@@ -488,7 +461,6 @@ mod tests {
         let next = reduce(
             &existing,
             Action::RunCreateSettled {
-                run_id: "default".into(),
                 result: Err(RunCreateError {
                     message: "worker: image pull failed".into(),
                     partial: Some(Box::new(partial)),
@@ -497,7 +469,7 @@ mod tests {
         )
         .unwrap();
 
-        let run = &next.runs["default"];
+        let run = &next.env.as_ref().unwrap();
         assert!(run.pending_create.is_none());
         assert!(run.containers.contains_key("web"));
         assert!(
@@ -512,13 +484,12 @@ mod tests {
         let next = reduce(
             &state,
             Action::VolumeObserved {
-                run_id: "default".into(),
                 volume_name: "fghj-vol-web".into(),
                 exists: true,
             },
         )
         .unwrap();
-        let volume = &next.runs["default"].volumes["fghj-vol-web"];
+        let volume = &next.env.as_ref().unwrap().volumes["fghj-vol-web"];
         assert_eq!(volume.desired.name, "fghj-vol-web");
         assert!(volume.observed.exists);
     }
@@ -529,7 +500,6 @@ mod tests {
         let created = reduce(
             &state,
             Action::VolumeObserved {
-                run_id: "default".into(),
                 volume_name: "fghj-vol-web".into(),
                 exists: true,
             },
@@ -538,18 +508,17 @@ mod tests {
         let updated = reduce(
             &created,
             Action::VolumeObserved {
-                run_id: "default".into(),
                 volume_name: "fghj-vol-web".into(),
                 exists: false,
             },
         )
         .unwrap();
         assert!(
-            !updated.runs["default"].volumes["fghj-vol-web"]
+            !updated.env.as_ref().unwrap().volumes["fghj-vol-web"]
                 .observed
                 .exists
         );
-        assert_eq!(updated.runs["default"].volumes.len(), 1);
+        assert_eq!(updated.env.as_ref().unwrap().volumes.len(), 1);
     }
 
     #[test]
@@ -558,14 +527,13 @@ mod tests {
         let next = reduce(
             &state,
             Action::ConfigDriftObserved {
-                run_id: "default".into(),
                 node_id: "web".into(),
                 drift: SyncStatus::Drifted,
             },
         )
         .unwrap();
         assert_eq!(
-            next.runs["default"].containers["web"].observed.sync,
+            next.env.as_ref().unwrap().containers["web"].observed.sync,
             SyncStatus::Drifted
         );
     }
@@ -581,7 +549,6 @@ mod tests {
         let next = reduce(
             &state,
             Action::RunCreateProgress {
-                run_id: "default".into(),
                 network: "fghj-default".into(),
                 sidecar_container_name: "fghj-default-sidecar".into(),
                 sidecar_ip: Some("172.30.0.2".into()),
@@ -589,7 +556,7 @@ mod tests {
             },
         )
         .unwrap();
-        let run = &next.runs["default"];
+        let run = &next.env.as_ref().unwrap();
         assert_eq!(run.network, "fghj-default");
         assert_eq!(run.sidecar_ip.as_deref(), Some("172.30.0.2"));
         assert!(run.containers.contains_key("web"));
@@ -605,7 +572,6 @@ mod tests {
         let after_progress = reduce(
             &state,
             Action::RunCreateProgress {
-                run_id: "default".into(),
                 network: "fghj-default".into(),
                 sidecar_container_name: "fghj-default-sidecar".into(),
                 sidecar_ip: None,
@@ -613,41 +579,36 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(after_progress.runs.is_empty());
+        assert!(after_progress.env.is_none());
 
         let after_ok = reduce(
             &state,
             Action::RunCreateSettled {
-                run_id: "default".into(),
                 result: Ok(RunState {
-                    run_id: "default".into(),
                     ..Default::default()
                 }),
             },
         )
         .unwrap();
-        assert!(after_ok.runs.is_empty());
+        assert!(after_ok.env.is_none());
 
         let after_partial = reduce(
             &state,
             Action::RunCreateSettled {
-                run_id: "default".into(),
                 result: Err(RunCreateError {
                     message: "node 2 of 3 failed".into(),
                     partial: Some(Box::new(RunState {
-                        run_id: "default".into(),
                         ..Default::default()
                     })),
                 }),
             },
         )
         .unwrap();
-        assert!(after_partial.runs.is_empty());
+        assert!(after_partial.env.is_none());
     }
 
     fn working(node_id: &str, action: Option<PendingAction>) -> Action {
         Action::RunCreateWorking {
-            run_id: "default".into(),
             node_id: node_id.into(),
             action,
         }
@@ -661,7 +622,7 @@ mod tests {
         let state = workspace(vec![container("web")]);
         let next = reduce(&state, working("web", Some(PendingAction::Stopping))).unwrap();
         let next = reduce(&next, working("db", Some(PendingAction::Starting))).unwrap();
-        let run = &next.runs["default"];
+        let run = &next.env.as_ref().unwrap();
         assert_eq!(
             run.containers["web"].pending_action,
             Some(PendingAction::Stopping)
@@ -681,7 +642,7 @@ mod tests {
         let next = reduce(&next, working("db", Some(PendingAction::Starting))).unwrap();
         let next = reduce(&next, working("web", None)).unwrap();
         let next = reduce(&next, working("db", None)).unwrap();
-        let run = &next.runs["default"];
+        let run = &next.env.as_ref().unwrap();
         assert_eq!(run.containers["web"].pending_action, None);
         assert!(!run.containers.contains_key("db"));
     }
@@ -695,7 +656,6 @@ mod tests {
         let next = reduce(
             &next,
             Action::RunCreateProgress {
-                run_id: "default".into(),
                 network: "fghj-net".into(),
                 sidecar_container_name: "fghj-sidecar".into(),
                 sidecar_ip: None,
@@ -703,7 +663,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(next.runs["default"].containers["web"].pending_action, None);
+        assert_eq!(
+            next.env.as_ref().unwrap().containers["web"].pending_action,
+            None
+        );
     }
 
     /// However the create ends, nothing it marked may stay marked: every
@@ -711,19 +674,18 @@ mod tests {
     #[test]
     fn run_create_settled_err_clears_every_working_mark() {
         let mut state = workspace(vec![container("web")]);
-        state.runs.get_mut("default").unwrap().pending_create =
+        state.env.as_mut().unwrap().pending_create =
             Some(crate::state::RunSpec::Flow("app/main".into()));
         let next = reduce(&state, working("web", Some(PendingAction::Stopping))).unwrap();
         let next = reduce(&next, working("db", Some(PendingAction::Starting))).unwrap();
         let next = reduce(
             &next,
             Action::RunCreateSettled {
-                run_id: "default".into(),
                 result: Err(RunCreateError::bare("boom")),
             },
         )
         .unwrap();
-        let run = &next.runs["default"];
+        let run = &next.env.as_ref().unwrap();
         assert_eq!(run.pending_create, None);
         assert_eq!(run.containers["web"].pending_action, None);
         assert!(!run.containers.contains_key("db"));

@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -24,7 +23,9 @@ use crate::persistence::WorkspaceOwner;
 pub struct WorkspaceState {
     pub path: PathBuf,
     pub owner: Option<WorkspaceOwner>,
-    pub runs: BTreeMap<String, RunState>,
+    /// The workspace's one environment — `None` until something first
+    /// creates it.
+    pub env: Option<RunState>,
 }
 
 #[cfg(test)]
@@ -32,9 +33,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_workspace_state_has_no_runs_and_no_owner() {
+    fn default_workspace_state_has_no_env_and_no_owner() {
         let state = WorkspaceState::default();
-        assert!(state.runs.is_empty());
+        assert!(state.env.is_none());
         assert!(state.owner.is_none());
     }
 }
