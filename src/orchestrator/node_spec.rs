@@ -48,106 +48,93 @@ impl Orchestrator {
         platform: Option<&str>,
     ) -> Result<()> {
         let ev = self.events(node_id, "start");
-        // A git build context builds from its clone, which only pull creates.
-        let build_dir = match &build.source {
-            Some(source) if !source.downloaded => {
-                let e = anyhow::anyhow!(
+        let started = std::time::Instant::now();
+        let built: Result<docker::BuildReport> = async {
+            // A git build context builds from its clone, which only pull creates.
+            let build_dir = match &build.source {
+                Some(source) if !source.downloaded => bail!(
                     "source not pulled: {} is built from {}, which isn't cloned into {} yet; \
                      pull this node, its flow or the whole workspace first",
                     node_id,
                     source.url,
                     source.path
-                );
-                ev.failed("building image", &e).await;
-                return Err(e);
+                ),
+                Some(source) => self.workspace.join(&source.path).join(&build.context),
+                None => repo_root.join(&build.context),
+            };
+            let dockerfile = match &build.dockerfile_inline {
+                Some(_) => docker::INLINE_DOCKERFILE,
+                None => build.dockerfile.as_str(),
+            };
+            let owner = self.db.clone().load_owner().await.ok().flatten();
+            // Read from the owner's home: `fghjd` is root, whose buildx config is empty.
+            let builder = owner
+                .as_ref()
+                .and_then(|o| crate::buildx::default_builder(std::path::Path::new(&o.home)));
+            let mut what = format!("{tag}  ·  {}", build_dir.display());
+            if let Some(source) = &build.source {
+                what.push_str(&format!("  ·  from {}", source.url));
             }
-            Some(source) => self.workspace.join(&source.path).join(&build.context),
-            None => repo_root.join(&build.context),
-        };
-        let dockerfile = match &build.dockerfile_inline {
-            Some(_) => docker::INLINE_DOCKERFILE,
-            None => build.dockerfile.as_str(),
-        };
-        let owner = self.db.clone().load_owner().await.ok().flatten();
-        // Read from the owner's home: `fghjd` is root, whose buildx config is empty.
-        let builder = owner
-            .as_ref()
-            .and_then(|o| crate::buildx::default_builder(std::path::Path::new(&o.home)));
-        let mut what = format!("{tag}  ·  {}", build_dir.display());
-        if let Some(source) = &build.source {
-            what.push_str(&format!("  ·  from {}", source.url));
-        }
-        if build.dockerfile_inline.is_some() {
-            what.push_str("  ·  inline Dockerfile");
-        } else if build.dockerfile != "Dockerfile" {
-            what.push_str(&format!("  ·  -f {}", build.dockerfile));
-        }
-        if let Some(target) = build.target.as_deref() {
-            what.push_str(&format!("  ·  --target {target}"));
-        }
-        if let Some(platform) = platform {
-            what.push_str(&format!("  ·  {platform}"));
-        }
-        what.push_str(&match &builder {
-            Some(b) => format!("  ·  buildkit: {}", b.builder),
-            None => String::from("  ·  buildkit: dockerd"),
-        });
-        ev.record("building image", "running", Some(what)).await;
-        let secrets = match resolve_build_secrets(repo_root, &build.secrets) {
-            Ok(secrets) => secrets,
-            Err(e) => {
-                ev.failed("building image", &e).await;
-                return Err(e);
+            if build.dockerfile_inline.is_some() {
+                what.push_str("  ·  inline Dockerfile");
+            } else if build.dockerfile != "Dockerfile" {
+                what.push_str(&format!("  ·  -f {}", build.dockerfile));
             }
-        };
-        // Re-derived on every build so a restarted agent is picked up.
-        let ssh_auth_sock = if build.ssh {
-            match owner.as_ref().and_then(|o| o.live_ssh_auth_sock()) {
-                Some(sock) => Some(sock),
-                None => {
-                    let e = anyhow::anyhow!(
-                        "build.ssh is set but no live ssh-agent was found for the workspace owner; \
-                         run `fghj wire` from a shell with a running agent"
-                    );
-                    ev.failed("building image", &e).await;
-                    return Err(e);
-                }
+            if let Some(target) = build.target.as_deref() {
+                what.push_str(&format!("  ·  --target {target}"));
             }
-        } else {
-            None
-        };
-        let opts = docker::BuildOpts {
-            context_dir: &build_dir,
-            dockerfile,
-            dockerfile_inline: build.dockerfile_inline.as_deref(),
-            skip_git_dir: build.source.is_some(),
-            tag,
-            platform,
-            args: &build.args,
-            target: build.target.as_deref(),
-            secrets: &secrets,
-            ssh_auth_sock: ssh_auth_sock.as_deref(),
-            builder: builder.as_ref(),
-        };
-        let started = std::time::Instant::now();
-        let report = match docker::build_image(&self.docker, &opts).await {
-            Ok(report) => report,
-            Err(e) => {
-                ev.failed("building image", &e).await;
-                return Err(e);
+            if let Some(platform) = platform {
+                what.push_str(&format!("  ·  {platform}"));
             }
-        };
-        ev.record(
-            "building image",
-            "ok",
-            Some(format!(
-                "{} in {}",
-                human_bytes(report.context_bytes),
-                human_duration(started.elapsed())
-            )),
-        )
+            what.push_str(&match &builder {
+                Some(b) => format!("  ·  buildkit: {}", b.builder),
+                None => String::from("  ·  buildkit: dockerd"),
+            });
+            ev.record("building image", "running", Some(what)).await;
+            let secrets = resolve_build_secrets(repo_root, &build.secrets)?;
+            // Re-derived on every build so a restarted agent is picked up.
+            let ssh_auth_sock = if build.ssh {
+                Some(owner.as_ref().and_then(|o| o.live_ssh_auth_sock()).context(
+                    "build.ssh is set but no live ssh-agent was found for the workspace owner; \
+                     run `fghj wire` from a shell with a running agent",
+                )?)
+            } else {
+                None
+            };
+            docker::build_image(
+                &self.docker,
+                &docker::BuildOpts {
+                    context_dir: &build_dir,
+                    dockerfile,
+                    dockerfile_inline: build.dockerfile_inline.as_deref(),
+                    skip_git_dir: build.source.is_some(),
+                    tag,
+                    platform,
+                    args: &build.args,
+                    target: build.target.as_deref(),
+                    secrets: &secrets,
+                    ssh_auth_sock: ssh_auth_sock.as_deref(),
+                    builder: builder.as_ref(),
+                },
+            )
+            .await
+        }
         .await;
-        Ok(())
+        match built {
+            Ok(report) => {
+                let took = format!(
+                    "{} in {}",
+                    human_bytes(report.context_bytes),
+                    human_duration(started.elapsed())
+                );
+                ev.record("building image", "ok", Some(took)).await;
+                Ok(())
+            }
+            Err(e) => {
+                ev.failed("building image", &e).await;
+                Err(e)
+            }
+        }
     }
 
     /// `side_effects: false` only computes the spec (for drift checks): no build,
@@ -166,7 +153,6 @@ impl Orchestrator {
 
         // Relative `host` / `env_file` paths resolve against the declaring repo's root.
         let repo_root = node.local_path.as_ref().map(|p| self.workspace.join(p));
-        let volume_base = repo_root.clone();
 
         let image = match (&node.build, &node.image) {
             (Some(build), _) => {
@@ -244,7 +230,7 @@ impl Orchestrator {
                     let host_path = if Path::new(host).is_absolute() {
                         PathBuf::from(host)
                     } else {
-                        volume_base
+                        repo_root
                             .as_ref()
                             .expect("node with volumes has a resolved checkout root")
                             .join(host)
@@ -283,7 +269,7 @@ impl Orchestrator {
             let file_path = if Path::new(path).is_absolute() {
                 PathBuf::from(path)
             } else {
-                volume_base
+                repo_root
                     .as_ref()
                     .expect("node with env_file has a resolved checkout root")
                     .join(path)
