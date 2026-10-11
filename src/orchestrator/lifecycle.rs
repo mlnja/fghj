@@ -37,7 +37,7 @@ impl Orchestrator {
         ev.begin().await;
         ev.running("stopping container").await;
         docker::stop_container(&self.docker, &container_name).await;
-        let status = match docker::inspect_status(&self.docker, &container_name, "").await {
+        let status = match docker::inspect_status(&self.docker, &container_name).await {
             Ok(Some(s)) => s.status,
             _ => "exited".to_string(),
         };

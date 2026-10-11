@@ -5,8 +5,8 @@ use anyhow::{Context, Result, bail};
 use bollard::Docker;
 use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::models::{
-    ContainerCreateBody, EndpointSettings, HealthConfig, HostConfig, NetworkingConfig, PortBinding,
-    RestartPolicy, RestartPolicyNameEnum,
+    ContainerCreateBody, ContainerInspectResponse, EndpointSettings, HealthConfig, HostConfig,
+    NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, InspectContainerOptionsBuilder, LogsOptionsBuilder,
@@ -206,34 +206,48 @@ pub async fn stop_and_remove(docker: &Docker, name: &str) {
         .await;
 }
 
-pub struct ContainerStatus {
-    pub status: String,
-    pub published_port: Option<u16>,
-    /// `None` while running.
-    pub exit_code: Option<i64>,
-}
-
-/// Status and the host port bound to `container_port`. `Ok(None)` if the
-/// container doesn't exist.
-pub async fn inspect_status(
-    docker: &Docker,
-    name: &str,
-    container_port: &str,
-) -> Result<Option<ContainerStatus>> {
-    let inspected = match docker
+/// `Ok(None)` if the container doesn't exist.
+async fn inspect(docker: &Docker, name: &str) -> Result<Option<ContainerInspectResponse>> {
+    match docker
         .inspect_container(
             name,
             Some(InspectContainerOptionsBuilder::default().build()),
         )
         .await
     {
-        Ok(entry) => entry,
+        Ok(entry) => Ok(Some(entry)),
         Err(bollard::errors::Error::DockerResponseServerError {
             status_code: 404, ..
-        }) => return Ok(None),
-        Err(e) => return Err(e).context("docker inspect_container failed"),
-    };
+        }) => Ok(None),
+        Err(e) => Err(e).context("docker inspect_container failed"),
+    }
+}
 
+pub struct ContainerStatus {
+    pub status: String,
+    /// `None` while running.
+    pub exit_code: Option<i64>,
+    host_ports: HashMap<String, u16>,
+}
+
+impl ContainerStatus {
+    /// The host port Docker bound to `container_port`; a bare number means tcp.
+    pub fn host_port(&self, container_port: &str) -> Option<u16> {
+        if container_port.contains('/') {
+            self.host_ports.get(container_port).copied()
+        } else {
+            self.host_ports
+                .get(&format!("{container_port}/tcp"))
+                .copied()
+        }
+    }
+}
+
+/// `Ok(None)` if the container doesn't exist.
+pub async fn inspect_status(docker: &Docker, name: &str) -> Result<Option<ContainerStatus>> {
+    let Some(inspected) = inspect(docker, name).await? else {
+        return Ok(None);
+    };
     let (status, exit_code) = match &inspected.state {
         Some(state) => (
             state
@@ -245,24 +259,21 @@ pub async fn inspect_status(
         ),
         None => ("unknown".to_string(), None),
     };
-
-    let port_key = if container_port.contains('/') {
-        container_port.to_string()
-    } else {
-        format!("{container_port}/tcp")
-    };
-    let published_port = inspected
+    let host_ports = inspected
         .network_settings
         .and_then(|n| n.ports)
-        .and_then(|p| p.get(&port_key).cloned().flatten())
-        .and_then(|bindings| bindings.into_iter().next())
-        .and_then(|b| b.host_port)
-        .and_then(|p| p.parse::<u16>().ok());
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(key, bindings)| {
+            let port = bindings?.into_iter().next()?.host_port?.parse().ok()?;
+            Some((key, port))
+        })
+        .collect();
 
     Ok(Some(ContainerStatus {
         status,
-        published_port,
         exit_code,
+        host_ports,
     }))
 }
 
@@ -272,22 +283,9 @@ pub async fn inspect_network_ip(
     name: &str,
     network: &str,
 ) -> Result<Option<String>> {
-    let inspected = match docker
-        .inspect_container(
-            name,
-            Some(InspectContainerOptionsBuilder::default().build()),
-        )
-        .await
-    {
-        Ok(entry) => entry,
-        Err(bollard::errors::Error::DockerResponseServerError {
-            status_code: 404, ..
-        }) => return Ok(None),
-        Err(e) => return Err(e).context("docker inspect_container failed"),
-    };
-
-    Ok(inspected
-        .network_settings
+    Ok(inspect(docker, name)
+        .await?
+        .and_then(|i| i.network_settings)
         .and_then(|n| n.networks)
         .and_then(|mut networks| networks.remove(network))
         .and_then(|endpoint| endpoint.ip_address)
@@ -297,22 +295,9 @@ pub async fn inspect_network_ip(
 /// `Ok(None)` both when the container doesn't exist and when it has no
 /// healthcheck.
 pub async fn inspect_health(docker: &Docker, name: &str) -> Result<Option<String>> {
-    let inspected = match docker
-        .inspect_container(
-            name,
-            Some(InspectContainerOptionsBuilder::default().build()),
-        )
-        .await
-    {
-        Ok(entry) => entry,
-        Err(bollard::errors::Error::DockerResponseServerError {
-            status_code: 404, ..
-        }) => return Ok(None),
-        Err(e) => return Err(e).context("docker inspect_container failed"),
-    };
-
-    Ok(inspected
-        .state
+    Ok(inspect(docker, name)
+        .await?
+        .and_then(|i| i.state)
         .and_then(|s| s.health)
         .and_then(|h| h.status)
         .map(|s| s.to_string()))

@@ -97,7 +97,7 @@ pub(crate) async fn wait_for_exit(
     const POLL: Duration = Duration::from_millis(500);
     let deadline = Instant::now() + allowance;
     loop {
-        match docker::inspect_status(docker, container_name, "").await {
+        match docker::inspect_status(docker, container_name).await {
             Ok(None) => return TaskOutcome::Failed { exit_code: None },
             Ok(Some(status)) if status.status != "running" && status.status != "created" => {
                 return match status.exit_code {

@@ -40,10 +40,7 @@ fn top_up_may_skip(
     existing: Option<&ContainerInfo>,
     fresh_hash: Option<&str>,
 ) -> bool {
-    let Some(existing) = existing else {
-        return false;
-    };
-    alive && fresh_hash.is_none_or(|hash| hash == existing.desired.config_hash)
+    alive && existing.is_some_and(|e| fresh_hash.is_none_or(|hash| hash == e.desired.config_hash))
 }
 
 /// The first requirement this top-up recreated: `node` may hold connections to
@@ -189,12 +186,7 @@ impl Orchestrator {
         let (sidecar_container_name, sidecar_ip) =
             self.ensure_sidecar(&graph.workspace_name, &network).await?;
 
-        let mut state = prior.cloned().unwrap_or_else(|| EnvState {
-            network: network.clone(),
-            sidecar_container_name: sidecar_container_name.clone(),
-            sidecar_ip: Some(sidecar_ip.clone()),
-            ..Default::default()
-        });
+        let mut state = prior.cloned().unwrap_or_default();
         state.network = network.clone();
         state.sidecar_container_name = sidecar_container_name;
         state.sidecar_ip = Some(sidecar_ip);
@@ -217,7 +209,6 @@ impl Orchestrator {
             let node = node_map[node_id.as_str()];
             let forced = restart == Some(node_id.as_str());
             let container_name = container_name(&graph.workspace_name, &node.id);
-            // `run: once` skips a task only on a clean exit fghj can still see.
             let existing = state.containers.get(&node.id);
             if !forced {
                 if restart.is_some() {
@@ -232,7 +223,7 @@ impl Orchestrator {
                 }
             }
             let alive = matches!(
-                docker::inspect_status(&self.docker, &container_name, "").await,
+                docker::inspect_status(&self.docker, &container_name).await,
                 Ok(Some(s)) if s.status == "running"
             );
             // Alive isn't enough to skip — see `top_up_may_skip`. Resolved only when it

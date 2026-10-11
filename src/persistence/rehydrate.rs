@@ -21,7 +21,7 @@ pub async fn rehydrate(
     let mut alive = BTreeMap::new();
     for (node_id, mut c) in state.containers {
         if let Ok(Some(status)) =
-            crate::docker::inspect_status(&docker, &c.desired.container_name, "").await
+            crate::docker::inspect_status(&docker, &c.desired.container_name).await
         {
             // Only `observed` moves, so a container that died while fghjd was down still
             // reads as drifted.

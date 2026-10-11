@@ -21,7 +21,7 @@ impl Orchestrator {
         let name = sidecar_name(workspace_name);
 
         let alive = matches!(
-            docker::inspect_status(&self.docker, &name, "").await,
+            docker::inspect_status(&self.docker, &name).await,
             Ok(Some(s)) if s.status == "running"
         );
         if alive && let Some(ip) = docker::inspect_network_ip(&self.docker, &name, network).await? {

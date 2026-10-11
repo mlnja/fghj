@@ -15,27 +15,20 @@ impl Orchestrator {
         let mut updated = BTreeMap::new();
         for (node_id, c) in &env.containers {
             let name = &c.desired.container_name;
-            let inspected = match c.desired.status_port.as_deref() {
-                Some(p) => docker::inspect_status(&self.docker, name, p).await,
-                None => docker::inspect_status(&self.docker, name, "").await,
-            };
-            let (status, published_port, exit_code) = match inspected {
-                Ok(Some(s)) => (s.status, s.published_port, s.exit_code),
-                _ => ("removed".to_string(), None, None),
-            };
-
+            let inspected = docker::inspect_status(&self.docker, name)
+                .await
+                .ok()
+                .flatten();
+            let host_port = |port: &str| inspected.as_ref().and_then(|s| s.host_port(port));
+            let published_port = c.desired.status_port.as_deref().and_then(host_port);
             let mut ports = c.observed.ports.clone();
-            for (port, host_port) in ports.iter_mut() {
-                *host_port = if c.desired.status_port.as_deref() == Some(port.as_str()) {
-                    published_port
-                } else {
-                    docker::inspect_status(&self.docker, name, port)
-                        .await
-                        .ok()
-                        .flatten()
-                        .and_then(|s| s.published_port)
-                };
+            for (port, host) in ports.iter_mut() {
+                *host = host_port(port);
             }
+            let (status, exit_code) = match inspected {
+                Some(s) => (s.status, s.exit_code),
+                None => ("removed".to_string(), None),
+            };
 
             updated.insert(
                 node_id.clone(),
@@ -150,10 +143,10 @@ mod tests {
     async fn inspect_reports_the_real_port_after_docker_moves_the_published_one() {
         let container = DriftingPortContainer::start();
         let docker = Arc::new(crate::daemon::connect_docker().expect("docker client"));
-        let real_port = docker::inspect_status(&docker, &container.name, "8080")
+        let real_port = docker::inspect_status(&docker, &container.name)
             .await
             .expect("inspect_status failed")
-            .and_then(|s| s.published_port)
+            .and_then(|s| s.host_port("8080"))
             .expect("container must have a real published port");
 
         let tmp = tempfile::tempdir().unwrap();

@@ -120,32 +120,19 @@ impl Orchestrator {
             .find(|(_, cfg)| cfg.primary)
             .map(|(port, _)| port.clone())
             .or_else(|| node.ports.keys().next().cloned());
-        let inspected = match &status_port {
-            Some(p) => docker::inspect_status(&self.docker, &spec.container_name, p).await?,
-            None => docker::inspect_status(&self.docker, &spec.container_name, "").await?,
-        };
-        let (mut status, published_port) = match inspected {
-            Some(s) => (s.status, s.published_port),
-            None => ("unknown".to_string(), None),
-        };
-        let mut exit_code: Option<i64> = None;
-
+        let inspected = docker::inspect_status(&self.docker, &spec.container_name).await?;
+        let host_port = |port: &str| inspected.as_ref().and_then(|s| s.host_port(port));
+        let published_port = status_port.as_deref().and_then(host_port);
         // Every published port, routed or not: the UI shows a connection string for
         // plain TCP services, and raw_net NATs exactly these. Keyed off
         // `spec.port_list` so the `debug` port is included.
-        let mut port_host_ports: BTreeMap<String, Option<u16>> = BTreeMap::new();
-        for (port, _) in &spec.port_list {
-            let host_port = if status_port.as_deref() == Some(port.as_str()) {
-                published_port
-            } else {
-                docker::inspect_status(&self.docker, &spec.container_name, port)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|s| s.published_port)
-            };
-            port_host_ports.insert(port.clone(), host_port);
-        }
+        let port_host_ports: BTreeMap<String, Option<u16>> = spec
+            .port_list
+            .iter()
+            .map(|(port, _)| (port.clone(), host_port(port)))
+            .collect();
+        let mut status = inspected.map_or_else(|| "unknown".to_string(), |s| s.status);
+        let mut exit_code: Option<i64> = None;
 
         // `fghjd` runs on the host and can't use Docker's DNS, so each domain routes
         // to the host port Docker published.
@@ -259,28 +246,20 @@ impl Orchestrator {
                 wait_for_healthy(&self.docker, &spec.container_name, allowance).await
             };
             // A truncated wait is recorded as such, not as a clean pass.
-            let (status, detail) = match outcome {
-                HealthOutcome::Healthy => ("ok", None),
-                HealthOutcome::Settled => (
-                    "ok",
-                    Some("container settled without reporting healthy; continuing".to_string()),
+            let detail = match outcome {
+                HealthOutcome::Healthy => None,
+                HealthOutcome::Settled => {
+                    Some("container settled without reporting healthy; continuing".to_string())
+                }
+                HealthOutcome::TimedOut if spent_before_waiting => Some(
+                    "the run's health-wait budget is spent; not waiting on this node".to_string(),
                 ),
-                HealthOutcome::TimedOut if spent_before_waiting => (
-                    "ok",
-                    Some(
-                        "the run's health-wait budget is spent; not waiting on this node"
-                            .to_string(),
-                    ),
-                ),
-                HealthOutcome::TimedOut => (
-                    "ok",
-                    Some(format!(
-                        "gave up after {}s without a healthy report; continuing",
-                        allowance.as_secs()
-                    )),
-                ),
+                HealthOutcome::TimedOut => Some(format!(
+                    "gave up after {}s without a healthy report; continuing",
+                    allowance.as_secs()
+                )),
             };
-            ev.record("waiting for healthcheck", status, detail).await;
+            ev.record("waiting for healthcheck", "ok", detail).await;
         }
         ev.ok("ready").await;
 
