@@ -251,6 +251,7 @@
       class:not-downloaded={n.downloaded === false}
       class:in-flow={inFlow}
       class:dimmed={dimmed}
+      class:debug-wait={live?.desired.debug_wait}
       style="left:{p.x}px;top:{p.y}px"
       onclick={() => onSelectNode(n)}
     >
@@ -380,6 +381,8 @@
   .node.in-flow { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .node.not-downloaded { border-style: dashed; opacity: 0.7; background: transparent; }
   .node.dimmed { opacity: 0.35; }
+  /* Outside the border, so it stacks with `in-flow`'s box-shadow. */
+  .node.debug-wait { outline: 2px solid color-mix(in srgb, orange 55%, transparent); outline-offset: 1px; }
   /* The card's footer. Still in normal flow rather than absolutely pinned —
      an absolutely-positioned bar sat at a fixed height regardless of how
      much text was above it and overlapped whatever was there. `margin-top:
