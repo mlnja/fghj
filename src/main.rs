@@ -132,23 +132,9 @@ fn validate(path: &Path) -> Result<()> {
     }
 }
 
-/// Turns the optional `--workspace` flag into an absolute, canonical path.
-///
-/// An explicit flag always wins. When it is absent we ask `fghjd` which
-/// workspaces are wired and take the one the current directory sits inside,
-/// so every workspace-scoped command works from anywhere in a workspace —
-/// including several levels down inside one of its repos — instead of only
-/// from the workspace root itself.
-///
-/// Canonical because that is what makes the comparison in
-/// `enclosing_workspace` meaningful, and because `wire` registers the path
-/// that `exec` later has to match exactly. Resolving both ends the same way
-/// here is what keeps `/var` and `/private/var` from being two different
-/// workspaces.
-///
-/// `canonicalize` failing is not fatal: `graph` is allowed to name a
-/// workspace directory that doesn't exist yet (it creates it), so we fall
-/// back to the merely-absolute path rather than erroring.
+/// An explicit flag wins; otherwise the wired workspace containing the current
+/// directory. Canonical, so `/var` and `/private/var` match. Falls back to the
+/// absolute path: `graph` may name a directory that doesn't exist yet.
 fn workspace_root(flag: Option<PathBuf>) -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     if let Some(flag) = flag {
@@ -162,11 +148,8 @@ fn workspace_root(flag: Option<PathBuf>) -> Result<PathBuf> {
 
     let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
     match derive_workspace(&cwd) {
-        // Announced on stderr, not stdout: `fghj graph` pipes JSON to
-        // stdout, and silently operating on a directory the user never
-        // named is exactly the kind of helpfulness that needs to be
-        // visible. Suppressed when it derived the directory you were
-        // already standing in, which tells you nothing.
+        // On stderr, so `fghj graph`'s JSON stays clean. Silent when it's the
+        // directory you're in.
         Some(derived) if derived != cwd => {
             eprintln!(
                 "using workspace {} (derived from the current directory)",
@@ -179,16 +162,8 @@ fn workspace_root(flag: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-/// The wired workspace containing `cwd`, according to `fghjd`.
-///
-/// Goes through the control API rather than reading `workspaces.json`
-/// directly because that file lives under root-only `/var/lib/fghjd` and
-/// this is the unprivileged CLI.
-///
-/// Every failure is `None`, never an error. The daemon may legitimately be
-/// down — `fghj graph` resolves a workspace without one at all — and an
-/// unreachable daemon should degrade to the old "current directory"
-/// behaviour, not turn a working command into a failing one.
+/// Via the API, since `workspaces.json` is root-only. Every failure is `None`:
+/// `graph` works without a daemon.
 fn derive_workspace(cwd: &Path) -> Option<PathBuf> {
     if !probe_daemon() {
         return None;
@@ -214,10 +189,7 @@ fn probe_daemon() -> bool {
     UnixStream::connect(fghj::daemon::socket_path()).is_ok()
 }
 
-/// Sends a bare-bones HTTP request (no body for `GET`) over `fghjd`'s Unix
-/// control socket and parses the JSON response body. The API has tiny
-/// bodies and no need for keep-alive, so a hand-rolled request avoids
-/// pulling in an HTTP client crate for these few call sites.
+/// Hand-rolled: tiny bodies, no keep-alive, no HTTP client dependency.
 fn http_request_json(
     method: &str,
     path: &str,
@@ -264,11 +236,7 @@ fn wire(entry: String, workspace: Option<PathBuf>) -> Result<()> {
 
     let absolute_workspace = workspace_root(workspace)?;
 
-    // `fghjd` runs as root and has no credentials of its own for private
-    // remotes — captured here (as the real, unprivileged user) so the daemon
-    // can later drop privileges back to this user before shelling out to
-    // `git clone`. Only sent when HOME is known; the daemon falls back to
-    // its old (root-only) behavior otherwise.
+    // Sent so root `fghjd` can clone as this user.
     let owner = std::env::var("HOME").ok().map(|home| {
         serde_json::json!({
             "uid": unsafe { libc::getuid() },
@@ -294,12 +262,7 @@ fn wire(entry: String, workspace: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// `fghjd` itself is meant to run for the life of the machine, supervised by
-/// launchd/systemd — these commands never touch that process's lifecycle.
-/// They talk to its always-on control API to toggle whether it's actively
-/// serving 80/443 on its own loopback alias, `*.fghj.internal` DNS, and
-/// `/etc/hosts`, or sitting
-/// idle out of the way (see `fghj::daemon::DaemonControl`).
+/// Toggles whether `fghjd` is active; never touches the process itself.
 fn daemon_start() -> Result<()> {
     if !probe_daemon() {
         bail!(
@@ -331,20 +294,13 @@ fn daemon_stop() -> Result<()> {
     Ok(())
 }
 
-/// Reads a yes/no answer from stdin. Requires a full `y`/`yes` — anything
-/// else, including a bare Enter or a closed stdin (piped, CI), is "no".
-/// Defaulting an irreversible delete to "no" is the only safe direction.
+/// Only an explicit `y`/`yes`: the delete can't be undone.
 fn confirmed(answer: &str) -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
-/// `fghj uninstall` — the counterpart to the Homebrew caveats that used to
-/// just *print* these steps and leave them to the user.
-///
-/// Needs root for all three of its jobs (the System keychain, `/etc/*`, and
-/// `/var/lib/fghjd`), and deliberately does not re-exec itself under `sudo`:
-/// a command that silently escalates to delete a trusted root certificate is
-/// the wrong shape. It refuses and tells the user what to run instead.
+/// Needs root, and won't re-exec under `sudo`: silently escalating to delete a
+/// trusted root is the wrong shape.
 fn uninstall(yes: bool, keep_ca: bool, keep_state: bool) -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         bail!(
@@ -445,11 +401,8 @@ fn daemon_restart() -> Result<()> {
     daemon_start()
 }
 
-/// Puts `fd` (expected to be `STDIN_FILENO`) into raw mode for the lifetime
-/// of the guard — no line buffering, no local echo, no signal generation
-/// from Ctrl-C/Ctrl-Z (so those bytes forward to the *remote* process
-/// instead, matching `docker exec -it`). Restores the original termios on
-/// drop, covering early return and error paths alike.
+/// Ctrl-C/Ctrl-Z go to the remote process, as with `docker exec -it`.
+/// Restored on drop.
 struct RawModeGuard {
     fd: i32,
     original: libc::termios,
@@ -476,9 +429,7 @@ impl Drop for RawModeGuard {
     }
 }
 
-/// The local terminal's current size, in columns/rows — falls back to 80x24
-/// if stdout isn't actually a terminal (e.g. `TIOCGWINSZ` fails), which is
-/// harmless since that only happens when `tty` is already false.
+/// 80x24 when stdout isn't a terminal, which only happens with `tty` off.
 fn terminal_size() -> (u16, u16) {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0;
@@ -489,12 +440,8 @@ fn terminal_size() -> (u16, u16) {
     }
 }
 
-/// `fghj exec` — proxies a real `docker exec` full duplex over `fghjd`'s
-/// control socket (see `daemon::get_node_exec_ws`/`docker::ExecSession`).
-/// TTY allocation auto-detects the same way `docker compose exec` does: on
-/// when both local stdin and stdout are real terminals, off (plain
-/// bidirectional byte relay, no local raw mode/resize forwarding) otherwise
-/// — `-T` forces it off even in a real terminal.
+/// TTY when both stdin and stdout are terminals, like `docker compose exec`;
+/// `-T` forces it off.
 async fn exec_cmd(
     node: String,
     workspace: Option<PathBuf>,
@@ -563,9 +510,6 @@ async fn exec_cmd(
         .await
         .context("failed to send exec start message")?;
 
-    // Only constructed (and only ever restored) when a TTY was actually
-    // allocated — leaving the local terminal in cooked mode for a plain,
-    // non-interactive command.
     let _raw_guard = if tty {
         Some(RawModeGuard::enable(libc::STDIN_FILENO)?)
     } else {
@@ -588,12 +532,8 @@ async fn exec_cmd(
     let mut failure: Option<String> = None;
 
     loop {
-        // `select!`'s `if` precondition only skips *polling* a branch — the
-        // async expression that builds its future is still evaluated even
-        // when disabled, so `resize_signal.as_mut().unwrap()` would panic
-        // here on every non-TTY `exec` the moment `resize_signal` is `None`.
-        // Routing through a future that resolves to `pending()` in that case
-        // sidesteps the unwrap entirely and needs no precondition.
+        // `select!` still builds a disabled branch's future, so `unwrap()` on `None`
+        // would panic; resolve to `pending()` instead.
         let resize_wait = async {
             match resize_signal.as_mut() {
                 Some(sig) => {
@@ -607,8 +547,7 @@ async fn exec_cmd(
                 match n {
                     Ok(0) => {
                         stdin_eof = true;
-                        // Empty binary frame is the client's "stdin EOF"
-                        // signal — see `daemon::handle_exec_socket`.
+                        // An empty binary frame means stdin EOF.
                         if write.send(WsMessage::Binary(Vec::new().into())).await.is_err() {
                             break;
                         }
@@ -683,9 +622,7 @@ fn daemon_status() -> Result<()> {
     Ok(())
 }
 
-/// Renders one `doctor::Check` as a line, with its hint indented under it.
-/// The mark is a character rather than a color so the output survives a pipe,
-/// a CI log and a pasted bug report intact.
+/// A mark, not a color, so it survives a pipe.
 fn print_check(check: &fghj::doctor::Check) {
     let mark = match check.verdict {
         Verdict::Pass => "\u{2713}",
@@ -698,10 +635,7 @@ fn print_check(check: &fghj::doctor::Check) {
     }
 }
 
-/// `fghj doctor` — the two client-side checks, then the daemon's full
-/// report. Deliberately prints the client checks *before* asking the daemon
-/// for anything: when the socket is the thing that's broken, the first line
-/// of output is already the answer, and there's nothing to ask.
+/// Client checks first: when the socket is what's broken, that's the answer.
 fn doctor() -> Result<()> {
     let client = fghj::doctor::client_checks();
     for check in &client {
@@ -716,10 +650,7 @@ fn doctor() -> Result<()> {
         );
     }
 
-    // A `fghjd` that predates this subcommand has no `/daemon/doctor` route,
-    // and the router's fallback serves the embedded UI — so the failure there
-    // is "that isn't JSON", which on its own reads like a daemon bug rather
-    // than a version skew.
+    // An old `fghjd` serves the UI for unknown routes, so the error is "not JSON".
     let resp = http_get_json("/daemon/doctor").context(
         "could not get a doctor report from fghjd — if the response above is HTML, the \
          running fghjd is older than this CLI and has no doctor endpoint; restart it on \
@@ -742,16 +673,12 @@ fn doctor() -> Result<()> {
         println!("all clear");
         return Ok(());
     }
-    // Non-zero exit without an `anyhow` message: the failures were already
-    // printed in place, each next to its own hint, and re-stating them as a
-    // trailing error would just say the same thing twice.
+    // The failures were already printed with their hints.
     println!("{failures} check(s) failed");
     std::process::exit(1);
 }
 
-// Only `exec` is genuinely async (it needs a live duplex WebSocket) — every
-// other subcommand is plain blocking I/O, called directly from here same as
-// before `main` grew a runtime.
+// Only `exec` needs async.
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -785,11 +712,6 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Guards the direction of the default on `fghj uninstall`'s prompt.
-    /// The action it gates — deleting a trusted root CA and its private
-    /// key — cannot be undone, so every answer that isn't an explicit yes
-    /// has to read as no, including the empty string a bare Enter or a
-    /// closed stdin produces.
     #[test]
     fn only_an_explicit_yes_confirms_an_irreversible_uninstall() {
         for yes in ["y", "Y", "yes", "YES", " yes \n", "Yes\n"] {

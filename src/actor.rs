@@ -1,8 +1,5 @@
-//! The per-workspace actor: owns one `state::WorkspaceState` for its whole
-//! life, applies the pure `reducer::reduce` to every dispatched `Action`
-//! serially, and publishes the result for effects to observe. It is the
-//! only store of environment state in the daemon: everything else
-//! (`orchestrator::Orchestrator`, the effects) reads it and reports back to it.
+//! The per-workspace actor: applies `reducer::reduce` to every `Action`
+//! serially and publishes the result. The only store of environment state.
 
 use std::sync::Arc;
 
@@ -15,9 +12,6 @@ use crate::supervisor;
 
 type Reply = oneshot::Sender<Result<(), ActionRejected>>;
 
-/// A cheap, `Clone`-able handle to a running workspace actor — the only
-/// way anything outside this module talks to a workspace's state. Cloning
-/// it never clones the state itself, just the two channel ends.
 #[derive(Clone)]
 pub struct ActorHandle {
     actions: mpsc::UnboundedSender<(Action, Reply)>,
@@ -25,48 +19,29 @@ pub struct ActorHandle {
 }
 
 impl ActorHandle {
-    /// Dispatches `action` and waits for the reducer to apply it. Returns
-    /// as soon as the (pure, in-memory) reducer has run — not once any
-    /// effect has converged reality to match. That is the deliberate, fast
-    /// contract every mutating endpoint relies on; the UI follows the rest
-    /// through `pending_action`/`pending_create`.
+    /// Returns once the reducer has run, not once effects have converged.
     pub async fn dispatch(&self, action: Action) -> Result<(), ActionRejected> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self.actions.send((action, reply_tx)).is_err() {
-            // The actor task is gone (workspace deregistered, or the
-            // daemon is shutting down) — there's no reducer left to
-            // accept or reject this, which reads the same to a caller as
-            // "the thing you asked about doesn't exist any more."
+            // The actor is gone: reads the same as the environment not existing.
             return Err(ActionRejected::NoEnvironment);
         }
         reply_rx.await.unwrap_or(Err(ActionRejected::NoEnvironment))
     }
 
-    /// A fresh, independent `watch::Receiver`. Cloning this (rather than
-    /// handing out the one this handle already holds) matters:
-    /// `watch::Receiver::changed` is stateful per-receiver ("have I seen
-    /// the latest value yet"), so two unrelated callers sharing one
-    /// receiver would silently steal wakeups from each other.
+    /// Fresh per caller: `changed()` is per-receiver, so shared receivers would
+    /// steal each other's wakeups.
     pub fn subscribe(&self) -> watch::Receiver<Arc<WorkspaceState>> {
         self.state.clone()
     }
 
-    /// The latest published state, without waiting for a change.
     pub fn current(&self) -> Arc<WorkspaceState> {
         self.state.borrow().clone()
     }
 }
 
-/// Spawns the actor task that owns `initial` for the rest of its life,
-/// returning a handle to talk to it. The task runs until every
-/// `ActorHandle` (the one returned here, and every clone of it) is
-/// dropped — at that point `actions.recv()` returns `None` and the loop,
-/// and the task, exit.
-///
-/// The action channel is unbounded: the reducer is pure and in-memory, so
-/// it's never the slow part of the system. A sender that ever needed backpressure
-/// here would itself indicate a misbehaving observer, better caught by
-/// logging an unexpectedly large channel than by blocking on `send`.
+/// Runs until every handle is dropped. Unbounded: the reducer is pure and
+/// never the slow part.
 pub fn spawn(initial: WorkspaceState) -> ActorHandle {
     let (action_tx, mut action_rx) = mpsc::unbounded_channel::<(Action, Reply)>();
     let (state_tx, state_rx) = watch::channel(Arc::new(initial));
@@ -76,18 +51,12 @@ pub fn spawn(initial: WorkspaceState) -> ActorHandle {
             let current = state_tx.borrow().clone();
             let outcome = match reduce(&current, action) {
                 Ok(next) => {
-                    // `send` only errors when every receiver has been
-                    // dropped, i.e. nobody currently cares about this
-                    // workspace's state — not a reason to stop processing
-                    // its actions.
+                    // Errors only when nobody is subscribed, which is fine.
                     let _ = state_tx.send(Arc::new(next));
                     Ok(())
                 }
                 Err(rejected) => Err(rejected),
             };
-            // Ignored for the same reason: the caller may have stopped
-            // waiting (dropped its `oneshot::Receiver`) without that being
-            // this actor's problem.
             let _ = reply.send(outcome);
         }
     });
@@ -154,8 +123,6 @@ mod tests {
             .dispatch(Action::OwnerSet { owner: owner() })
             .await
             .unwrap();
-        // Draining `first` doesn't affect a second, freshly-subscribed
-        // receiver's ability to observe the already-published change.
         first.changed().await.unwrap();
         let second = handle.subscribe();
         assert_eq!(second.borrow().owner.as_ref().unwrap().uid, 501);
@@ -163,9 +130,6 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_reports_not_found_once_the_actor_is_gone() {
-        // Simulates the actor task having already exited (e.g. workspace
-        // deregistered) by dropping its receiving end directly, rather
-        // than spawning a real actor and racing its shutdown.
         let (action_tx, action_rx) = mpsc::unbounded_channel::<(Action, Reply)>();
         drop(action_rx);
         let orphaned = ActorHandle {

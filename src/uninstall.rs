@@ -1,19 +1,5 @@
-//! Everything `fghj uninstall` removes, and the order it has to happen in.
-//!
-//! Two of fghj's artifacts outlive `brew uninstall` and neither is
-//! discoverable: a trusted root in the **System keychain**, and the daemon's
-//! state directory under `/var/lib/fghjd` — which holds that CA's private
-//! key. Homebrew's caveats used to just print the two `sudo` commands and
-//! hope; this module runs them, so "I removed fghj" doesn't quietly leave a
-//! trusted CA behind.
-//!
-//! Ordering is the only subtle part. The daemon has to be stood down
-//! *before* the state directory goes, because a live `fghjd` would keep
-//! writing to it and would re-mint and re-trust a CA on its next reconcile —
-//! undoing the keychain deletion that just happened. `purge` therefore
-//! unwinds system config first, then trust, then disk.
-//!
-//! Docker resources are deliberately **not** touched — see [`purge`].
+//! Everything `fghj uninstall` removes. The daemon is stood down before the
+//! state directory goes, or it would re-mint and re-trust a CA.
 
 use std::path::PathBuf;
 
@@ -22,44 +8,24 @@ use anyhow::{Context, Result};
 use crate::web::trust;
 use crate::{dns, hosts_file, persistence, raw_net};
 
-/// What to leave behind. Both default to `false` (remove everything); the
-/// flags exist for the "reinstalling, not leaving" case, where re-trusting a
-/// freshly minted CA costs an interactive Authorization Services prompt and
-/// re-wiring every workspace costs real work.
+/// For reinstalling: keeps the trusted CA and wired workspaces.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Options {
     pub keep_ca: bool,
     pub keep_state: bool,
 }
 
-/// What actually happened, for the caller to report. Counts rather than
-/// booleans because "removed 0 certificates" and "removed 3" are different
-/// facts to a user who just asked for the CA to be gone.
 #[derive(Debug, Default)]
 pub struct Outcome {
     pub daemon_was_running: bool,
     pub certificates_removed: usize,
     pub state_dir_removed: Option<PathBuf>,
-    /// Non-fatal problems. Uninstall keeps going after these on purpose: a
-    /// half-uninstall that stops at the first error is worse than one that
-    /// removes what it can and says what it couldn't.
+    /// Keeps going: remove what it can, say what it couldn't.
     pub warnings: Vec<String>,
 }
 
-/// Removes every fghj artifact except Docker resources and the binaries
-/// themselves.
-///
-/// `stop_daemon` is injected rather than called directly so this stays
-/// testable without a live `fghjd`: `main` passes a closure that POSTs to
-/// the control socket, tests pass one that records the call. It returns
-/// whether a daemon was actually there to stop.
-///
-/// Docker containers, networks, volumes and images are left alone, and that
-/// is not an oversight. A named volume is *designed* to outlive its
-/// containers — it can hold a database the user still wants — and fghj identifies
-/// its Docker resources by an `fghj-` name prefix, which is a filter, not
-/// proof of ownership. Deleting data on a name match during an uninstall is
-/// not a call this command gets to make; it reports them instead.
+/// Docker resources are left alone: a volume may hold data the user wants, and
+/// the `fghj-` prefix is a filter, not proof of ownership.
 pub fn purge(opts: Options, stop_daemon: impl FnOnce() -> Result<bool>) -> Outcome {
     let mut outcome = Outcome::default();
 
@@ -70,11 +36,7 @@ pub fn purge(opts: Options, stop_daemon: impl FnOnce() -> Result<bool>) -> Outco
             .push(format!("could not stop fghjd cleanly: {e:#}")),
     }
 
-    // Belt and braces after the stop: if `fghjd` was killed uncleanly at
-    // some point it never ran its own teardown, so the managed `/etc/hosts`
-    // block, the resolver files, the `lo0` aliases and the pf anchor can all
-    // still be installed with no daemon alive to unwind them. Every one of
-    // these is idempotent and a no-op when there's nothing to remove.
+    // In case `fghjd` died without tearing these down. All idempotent.
     if let Err(e) = hosts_file::sync(&hosts_file::hosts_path(), &[]) {
         outcome
             .warnings
@@ -93,9 +55,8 @@ pub fn purge(opts: Options, stop_daemon: impl FnOnce() -> Result<bool>) -> Outco
         ));
     }
 
-    // Trust before disk: the private key under `ca/` is worthless once the
-    // certificate is no longer trusted, but a trusted certificate whose key
-    // we deleted is still a trusted root.
+    // Trust before disk: a trusted cert whose key we deleted is still a trusted
+    // root.
     if !opts.keep_ca {
         outcome.certificates_removed = trust::remove();
     }
@@ -114,8 +75,6 @@ pub fn purge(opts: Options, stop_daemon: impl FnOnce() -> Result<bool>) -> Outco
     outcome
 }
 
-/// `Ok(false)` when there was nothing there — uninstalling twice, or
-/// uninstalling something that never started, is not an error.
 fn remove_state_dir(root: &std::path::Path) -> Result<bool> {
     if !root.exists() {
         return Ok(false);
@@ -148,9 +107,6 @@ mod tests {
         assert!(!root.exists());
     }
 
-    /// The guarantee that makes `purge` safe to run on a machine whose
-    /// daemon has already been killed: a failure to stop it is recorded and
-    /// stepped over, not propagated, so the CA and state removal still run.
     #[test]
     fn a_failure_to_stop_the_daemon_does_not_abort_the_rest() {
         let opts = Options {
@@ -169,9 +125,6 @@ mod tests {
         );
     }
 
-    /// `--keep-ca` and `--keep-state` are the whole reason `Options` exists;
-    /// if either were ignored, a reinstall-in-place would silently throw
-    /// away the trusted CA and every wired workspace.
     #[test]
     fn keep_flags_suppress_both_destructive_steps() {
         let opts = Options {

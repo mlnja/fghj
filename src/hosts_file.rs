@@ -5,12 +5,7 @@ use anyhow::{Context, Result};
 
 use crate::web::proxy::PROXY_IP;
 
-/// Marks the block `sync` owns inside `/etc/hosts` — everything else in the
-/// file (the user's own entries, macOS's default `127.0.0.1 localhost` line,
-/// etc.) is left exactly as found. Exported so `main.rs`'s `daemon_stop`
-/// (which runs unprivileged and shells out via `sudo` the same way it does
-/// for the pidfile/resolver-file cleanup) can strip the block without fghjd
-/// itself being alive to do it.
+/// Exported so `uninstall` can strip the block without fghjd running.
 pub const BEGIN_MARKER: &str = "# fghj-managed-begin";
 pub const END_MARKER: &str = "# fghj-managed-end";
 
@@ -18,17 +13,8 @@ pub fn hosts_path() -> PathBuf {
     PathBuf::from("/etc/hosts")
 }
 
-/// Rewrites the managed block inside `path` to contain exactly one
-/// `<PROXY_IP> <host>` line per entry in `hosts` — every other line in the
-/// file, including anything outside the markers, is preserved untouched.
-/// Called with the full set of `additional_hosts` declared by every
-/// currently-*running* container across every wired workspace (see
-/// `effects::hosts::HostsEffect`), so a host stops being claimed here the
-/// moment its container stops, same lifecycle as a `state::PortRoute`.
-/// `hosts` need not be sorted or deduped — `sync` does
-/// both, so repeated calls with the same logical set never produce a
-/// spurious rewrite (mirrors `dns::macos::sync_resolver`'s idempotent
-/// full-file rewrite).
+/// `hosts` comes from running containers only; sorted and deduped so
+/// identical sets don't rewrite.
 pub fn sync(path: &Path, hosts: &[String]) -> Result<()> {
     let mut hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
     hosts.sort_unstable();
@@ -53,9 +39,7 @@ pub fn sync(path: &Path, hosts: &[String]) -> Result<()> {
         out.push_str(BEGIN_MARKER);
         out.push('\n');
         for host in hosts {
-            // These names are served by the same proxy as `*.fghj.internal`,
-            // so they have to point at the same address it binds — see
-            // `web::proxy::PROXY_IP` for why that isn't `127.0.0.1`.
+            // Same proxy as `*.fghj.internal`, so the same address.
             out.push_str(&PROXY_IP.to_string());
             out.push(' ');
             out.push_str(host);
@@ -71,11 +55,7 @@ pub fn sync(path: &Path, hosts: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Reads back exactly what `sync` last wrote into the managed block. The
-/// on-disk file is the source of truth here — this re-parses it rather than
-/// tracking a separate list — so it reflects what's actually installed, not
-/// merely what was last computed as desired. Backs the telemetry drawer's
-/// network-status tab (`daemon/`'s `/daemon/net-status`).
+/// Reads the file, so it reflects what's installed, not what's desired.
 pub fn managed_hosts(path: &Path) -> Vec<String> {
     let existing = fs::read_to_string(path).unwrap_or_default();
     let mut in_block = false;
@@ -85,9 +65,7 @@ pub fn managed_hosts(path: &Path) -> Vec<String> {
             _ if line.trim() == BEGIN_MARKER => in_block = true,
             _ if line.trim() == END_MARKER => in_block = false,
             trimmed if in_block => {
-                // `127.0.0.1 ` is accepted as well as the current address so
-                // that upgrading from a version that wrote loopback doesn't
-                // under-report the block until the next `sync` rewrites it.
+                // `127.0.0.1` too, as older versions wrote, until the next `sync`.
                 if let Some(host) = trimmed
                     .strip_prefix(&format!("{PROXY_IP} "))
                     .or_else(|| trimmed.strip_prefix("127.0.0.1 "))
@@ -122,8 +100,6 @@ mod tests {
             "{BEGIN_MARKER}\n{PROXY_IP} aikido.local\n{PROXY_IP} demo.example.com\n{END_MARKER}\n"
         )));
 
-        // Removing every host must drop the block entirely, leaving the
-        // original untouched lines exactly as they were.
         sync(&path, &[]).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
@@ -152,8 +128,6 @@ mod tests {
             format!("{BEGIN_MARKER}\n{PROXY_IP} a.local\n{PROXY_IP} b.local\n{END_MARKER}\n")
         );
 
-        // Re-syncing with the same logical set (different input order) must
-        // not touch the file's mtime-worthy content a second time.
         sync(&path, &["a.local".to_string(), "b.local".to_string()]).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), first);
     }
@@ -175,9 +149,7 @@ mod tests {
         );
     }
 
-    /// The whole point of the address change: an entry fghj claims must not
-    /// be pinned to `127.0.0.1`, or it would shadow whatever the developer
-    /// is already running there.
+    /// Not `127.0.0.1`, which would shadow the developer's own services.
     #[test]
     fn managed_entries_point_at_the_proxy_address_not_plain_loopback() {
         let tmp = tempfile::tempdir().unwrap();
@@ -197,9 +169,6 @@ mod tests {
         );
     }
 
-    /// Upgrading from a build that wrote `127.0.0.1` must not make the
-    /// existing block invisible to the telemetry drawer in the window before
-    /// the next `sync` rewrites it.
     #[test]
     fn managed_hosts_still_reads_a_block_written_by_an_older_version() {
         let tmp = tempfile::tempdir().unwrap();

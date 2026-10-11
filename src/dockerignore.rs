@@ -1,31 +1,10 @@
-//! `.dockerignore`, applied to the context tarball `fghj` builds itself.
-//!
-//! The Docker CLI filters a build context *client-side* before uploading it,
-//! so `.dockerignore` is not something the daemon or BuildKit will do on
-//! fghj's behalf. A client that tars the directory itself — which fghj does,
-//! since the Engine API has no "build from this path" call — has to implement
-//! the file's semantics or silently not honour it.
-//!
-//! Not honouring it is not a cosmetic difference. The bug that prompted this
-//! module: a repo whose `.dockerignore` excluded `.git` built on the command
-//! line and failed under fghj, because Go stamps VCS information into a binary
-//! whenever it finds a `.git` directory beside the source, and `git` inside
-//! the builder exits 128. The Dockerfile was fine; the context wasn't. The
-//! same repo also shipped 572 MB of `.local` jars — and a private key and a
-//! production JWT — into image layers on every build.
-//!
-//! The pattern language is Go's `filepath.Match` as extended by
-//! `moby/patternmatcher`, not gitignore's, and the two disagree. Ported
-//! faithfully enough for real `.dockerignore` files, with one documented
-//! deviation (see [`Pattern::matches`]).
+//! `.dockerignore`, applied to the context tarball fghj builds itself: the
+//! Docker CLI filters client-side, so the daemon never does it for us. The
+//! pattern language is `moby/patternmatcher`'s, not gitignore's.
 
 use std::path::Path;
 
-/// A parsed `.dockerignore`.
-///
-/// An empty one (no file, or nothing but comments) excludes nothing, which is
-/// the pre-existing behaviour and so the safe failure mode: a `.dockerignore`
-/// fghj cannot read ships more than it should, never less.
+/// Empty when unreadable: shipping too much beats losing sources.
 #[derive(Debug, Default)]
 pub struct Dockerignore {
     patterns: Vec<Pattern>,
@@ -33,14 +12,11 @@ pub struct Dockerignore {
 
 #[derive(Debug)]
 struct Pattern {
-    /// `!`-prefixed: re-includes a path an earlier pattern excluded.
     exclusion: bool,
     segments: Vec<String>,
 }
 
 impl Dockerignore {
-    /// Reads `<context_dir>/.dockerignore`, treating an unreadable or absent
-    /// file as empty.
     pub fn load(context_dir: &Path) -> Self {
         match std::fs::read_to_string(context_dir.join(".dockerignore")) {
             Ok(text) => Self::parse(&text),
@@ -52,8 +28,6 @@ impl Dockerignore {
         let mut patterns = Vec::new();
         for line in text.lines() {
             let line = line.trim();
-            // `#` is a comment only at the start of a line; a `#` inside a
-            // pattern is a literal character in a filename.
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
@@ -61,9 +35,7 @@ impl Dockerignore {
                 Some(rest) => (true, rest.trim()),
                 None => (false, line),
             };
-            // Leading `/` is dropped rather than anchoring: every pattern is
-            // already relative to the context root, so `/foo` and `foo` are
-            // the same pattern.
+            // Every pattern is relative to the root already.
             let body = body.trim_start_matches('/');
             let segments: Vec<String> = body
                 .split('/')
@@ -81,13 +53,7 @@ impl Dockerignore {
         Self { patterns }
     }
 
-    /// Whether any pattern can re-include something under an excluded
-    /// directory.
-    ///
-    /// This is what decides whether an excluded directory can be skipped
-    /// without being walked. Without a `!` pattern anywhere — the overwhelmingly
-    /// common case, and the one that matters for speed — `.git` and a 572 MB
-    /// `.local` are never opened at all.
+    /// Without a `!` pattern, excluded directories are never walked.
     pub fn has_exclusions(&self) -> bool {
         self.patterns.iter().any(|p| p.exclusion)
     }
@@ -96,19 +62,11 @@ impl Dockerignore {
         self.patterns.is_empty()
     }
 
-    /// Whether `path` is excluded, counting a match on any ancestor directory.
-    ///
-    /// `path` is relative to the context root, `/`-separated, no leading `./`.
-    ///
-    /// Last match wins, so `**/*.jar` followed by `!keep/one.jar` keeps that
-    /// one file. Ancestors are tested too, because `.git` must exclude
-    /// everything beneath it without the file needing to list `.git/**`.
+    /// Last match wins. Ancestors count, so `.git` excludes everything beneath it.
     pub fn excludes(&self, path: &str) -> bool {
         let mut excluded = false;
         for pattern in &self.patterns {
-            // An exclusion pattern can only ever flip a path that is currently
-            // excluded; an ordinary one only a path that isn't. Skipping the
-            // rest is what makes last-match-wins cheap.
+            // Only patterns that could flip the current verdict matter.
             if pattern.exclusion != excluded {
                 continue;
             }
@@ -133,16 +91,9 @@ impl Pattern {
         false
     }
 
-    /// Segment-wise glob match.
-    ///
-    /// `*` and `?` stay within one path segment, as in Go's `filepath.Match`;
-    /// a segment of exactly `**` matches zero or more segments.
-    ///
-    /// **Deviation:** `moby` lets `**` cross separators even when glued to
-    /// other characters in a segment (`a**b`), because it compiles patterns to
-    /// a regex. Here such a `**` behaves as a single `*`. Real `.dockerignore`
-    /// files write `**` as its own segment, and matching that shape exactly
-    /// matters more than matching a form nobody writes.
+    /// `*` and `?` stay within a segment; a `**` segment matches zero or more.
+    /// Deviation: `**` glued to other characters (`a**b`) acts as `*`; nobody
+    /// writes that.
     fn matches(&self, path: &str) -> bool {
         let parts: Vec<&str> = path.split('/').collect();
         matches_segments(&self.segments, &parts)
@@ -151,12 +102,10 @@ impl Pattern {
 
 fn matches_segments(pattern: &[String], path: &[&str]) -> bool {
     match pattern.split_first() {
-        // A pattern that runs out matches only a path that also has: `foo`
-        // does not match `foo/bar` on its own — that is the ancestor check's
-        // job, which keeps `!` able to re-include inside an excluded tree.
+        // `foo` doesn't match `foo/bar` here; the ancestor check does that, which
+        // keeps `!` able to re-include inside an excluded tree.
         None => path.is_empty(),
         Some((head, rest)) if head == "**" => {
-            // Zero or more segments: try every split point.
             (0..=path.len()).any(|skip| matches_segments(rest, &path[skip..]))
         }
         Some((head, rest)) => match path.split_first() {
@@ -166,13 +115,10 @@ fn matches_segments(pattern: &[String], path: &[&str]) -> bool {
     }
 }
 
-/// Glob within a single path segment: `*` any run of characters, `?` exactly
-/// one. Backtracking rather than regex, which keeps the module dependency-free.
 fn matches_one(pattern: &str, name: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let n: Vec<char> = name.chars().collect();
-    // `star` remembers the last `*` so a failed tail can resume one character
-    // later, which is what makes `*b` match `aab`.
+    // `star` lets a failed tail resume one character later.
     let (mut pi, mut ni) = (0usize, 0usize);
     let mut star: Option<(usize, usize)> = None;
     while ni < n.len() {
@@ -197,7 +143,6 @@ fn matches_one(pattern: &str, name: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The exact file from the repo whose build this module was written to fix.
     fn aikifactory() -> Dockerignore {
         Dockerignore::parse(".local\n.git\n.env\n*.test\n")
     }
@@ -205,8 +150,7 @@ mod tests {
     #[test]
     fn a_named_directory_excludes_everything_beneath_it() {
         let ignore = aikifactory();
-        // The whole point: `.git` as a bare name has to take the tree with it,
-        // or Go still finds a repository to stamp from.
+        // Go stamps VCS info whenever `.git` is present, and fails without git.
         assert!(ignore.excludes(".git"));
         assert!(ignore.excludes(".git/HEAD"));
         assert!(ignore.excludes(".git/objects/ab/cdef"));
@@ -232,14 +176,11 @@ mod tests {
     fn a_star_stays_inside_one_path_segment() {
         let ignore = Dockerignore::parse("*.test\n");
         assert!(ignore.excludes("handler.test"));
-        // `*` must not eat the separator, or `*.test` would also match
-        // `pkg/handler.test` — which Docker's own matcher does not.
         assert!(!ignore.excludes("pkg/handler.test"));
 
         let deep = Dockerignore::parse("**/*.test\n");
         assert!(deep.excludes("pkg/handler.test"));
         assert!(deep.excludes("a/b/c/handler.test"));
-        // `**` matches zero segments too.
         assert!(deep.excludes("handler.test"));
     }
 
@@ -253,16 +194,13 @@ mod tests {
 
     #[test]
     fn order_decides_and_not_specificity() {
-        // Reversed, the exception is overruled: Docker is last-match-wins, not
-        // most-specific-wins, and a file relying on the other reading would
-        // silently ship a key.
+        // Last match wins, not most specific.
         let ignore = Dockerignore::parse("!secrets/public.pem\nsecrets\n");
         assert!(ignore.excludes("secrets/public.pem"));
     }
 
     #[test]
     fn the_common_file_needs_no_directory_walk() {
-        // What lets `.local`'s 572 MB be skipped without being opened.
         assert!(!aikifactory().has_exclusions());
         assert!(Dockerignore::parse("a\n!a/b\n").has_exclusions());
     }
@@ -273,7 +211,6 @@ mod tests {
         assert!(ignore.excludes("build/out.o"));
         assert!(ignore.excludes("dist/app.js"));
         assert!(!ignore.excludes("src/main.go"));
-        // A `#` mid-pattern is a filename character, not a comment.
         assert!(Dockerignore::parse("a#b\n").excludes("a#b"));
     }
 
@@ -287,8 +224,6 @@ mod tests {
 
     #[test]
     fn an_absent_or_empty_file_excludes_nothing() {
-        // The safe direction: a context fghj cannot filter ships too much, a
-        // build that silently lost its sources would be far harder to diagnose.
         let dir = tempfile::tempdir().unwrap();
         let ignore = Dockerignore::load(dir.path());
         assert!(ignore.is_empty());
@@ -305,17 +240,9 @@ mod tests {
         assert!(matches_one("**", "treated-as-star-here"));
     }
 
-    /// The semantic that rules out the `ignore` crate, and the reason this
-    /// module is hand-rolled rather than borrowed.
-    ///
-    /// `.dockerignore` patterns are anchored at the context root: a bare
-    /// `node_modules` excludes the top-level one and *not* `pkg/node_modules`.
-    /// gitignore matches a bare name at any depth, so `ignore` — the obvious
-    /// crate to reach for, and a far better-tested one than this — would filter
-    /// contexts differently from `docker build`. Verified against a real daemon
-    /// before relying on it: a build whose `.dockerignore` held only
-    /// `node_modules` received `pkg/node_modules/n.txt` and not
-    /// `node_modules/r.txt`.
+    /// Why this isn't the `ignore` crate: a bare `node_modules` is anchored at the
+    /// root here, but matches at any depth in gitignore. Verified against a real
+    /// daemon.
     #[test]
     fn patterns_anchor_at_the_context_root_unlike_gitignore() {
         let ignore = Dockerignore::parse("node_modules\n");
@@ -323,7 +250,6 @@ mod tests {
         assert!(ignore.excludes("node_modules/r.txt"));
         assert!(!ignore.excludes("pkg/node_modules"));
         assert!(!ignore.excludes("pkg/node_modules/n.txt"));
-        // Reaching nested copies is opt-in, and this is how a file asks.
         let deep = Dockerignore::parse("**/node_modules\n");
         assert!(deep.excludes("node_modules/r.txt"));
         assert!(deep.excludes("pkg/node_modules/n.txt"));

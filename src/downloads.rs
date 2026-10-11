@@ -23,14 +23,7 @@ pub struct DownloadJob {
     pub log: String,
 }
 
-/// Tracks background `git clone` jobs kicked off from the UI, keyed by
-/// `"node:<id>"` for a single-node download or `"pull-all"` for the
-/// fixpoint pull-everything job, so the UI can poll for live progress
-/// instead of blocking the request until the clone finishes.
-///
-/// Backed by a `Vec` rather than a map so iteration order reflects the order
-/// jobs were first started (a "queue"), not key sort order — the operations
-/// drawer in the UI lists jobs in this order.
+/// Background `git clone` jobs the UI polls, in start order.
 #[derive(Default)]
 pub struct DownloadRegistry {
     jobs: Mutex<Vec<(String, Arc<Mutex<DownloadState>>)>>,
@@ -50,7 +43,6 @@ impl DownloadRegistry {
             .map(|(_, s)| s.lock().unwrap().clone())
     }
 
-    /// All known jobs, most-recently-started first, for the operations queue view.
     pub fn list(&self) -> Vec<DownloadJob> {
         self.jobs
             .lock()
@@ -68,9 +60,6 @@ impl DownloadRegistry {
             .collect()
     }
 
-    /// Starts `run` in a background thread under `key`, unless a job with
-    /// that key is already running. Returns the (possibly pre-existing)
-    /// state so the caller can respond immediately.
     fn spawn(
         &self,
         key: String,
@@ -110,10 +99,7 @@ impl DownloadRegistry {
         })
     }
 
-    /// `flow`, when given, scopes the pull to nodes reachable from that flow
-    /// (see `Node::flows`) instead of the whole graph, and tracks it under
-    /// its own queue entry (`pull-flow:<flow>`) so a flow-scoped pull and the
-    /// whole-graph "Pull all" can run and be polled independently.
+    /// `flow` scopes the pull and gets its own job key.
     pub fn start_pull_all(
         &self,
         workspace: PathBuf,
@@ -128,9 +114,6 @@ impl DownloadRegistry {
     }
 }
 
-/// The `DownloadRegistry` job key for a "pull all" run, shared by
-/// `start_pull_all` and the daemon's status-lookup handler so both agree on
-/// how a flow name turns into a key.
 pub fn pull_all_key(flow: Option<&str>) -> String {
     match flow {
         Some(flow) => format!("pull-flow:{flow}"),
@@ -159,8 +142,6 @@ fn stream_to_log(mut pipe: impl Read, state: Arc<Mutex<DownloadState>>) {
         match pipe.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                // git's progress meter uses \r to overwrite a line in a real
-                // terminal; rendered in a <pre> block \n reads better.
                 let chunk = String::from_utf8_lossy(&buf[..n]).replace('\r', "\n");
                 append_log(&state, &chunk);
             }
@@ -169,15 +150,8 @@ fn stream_to_log(mut pipe: impl Read, state: Arc<Mutex<DownloadState>>) {
     }
 }
 
-/// Confirms a checkout already sitting at the requested folder really is the
-/// requested repo, comparing `origin` under `normalize_repo_url` so the same
-/// repo spelled `git@host:org/x.git` and `https://host/org/x` still matches.
-///
-/// Returns `Ok(())` for a match — the clone is genuinely already done and the
-/// caller can skip it — and an error for anything else. "Anything else"
-/// includes a directory with no readable `origin` at all: an empty folder or a
-/// half-finished clone can't be vouched for either, and treating it as the
-/// requested repo is the same mistake in a quieter form.
+/// Compared via `normalize_repo_url`. A folder with no readable `origin` can't
+/// be vouched for, so it's an error too.
 fn ensure_checkout_is(dest: &Path, repo: &str) -> Result<()> {
     let (origin, _) = resolver::git_remote_and_branch(dest);
     let Some(origin) = origin else {
@@ -209,14 +183,8 @@ fn run_git_clone_logged(
 ) -> Result<()> {
     let dest = workspace.join(local_path);
     if dest.exists() {
-        // A workspace folder is named after the last path segment of the repo
-        // URL, so `org-a/api` and `org-b/api` both want `<ws>/api`. This used
-        // to return `Ok(())` on sight of an existing folder, which meant
-        // pulling the second one *reported success* and the resolver then read
-        // the first one's `.fghj.yaml` as though it were the second's — a
-        // silently wrong graph that `pull_all`'s fixpoint converges on
-        // confidently, because `downloaded` does flip true. Refusing is the
-        // only honest answer: fghj has no way to hold both under one name.
+        // `org-a/api` and `org-b/api` both want `<ws>/api`; the resolver would read
+        // the wrong `.fghj.yaml`, so refuse.
         return ensure_checkout_is(&dest, repo);
     }
 
@@ -229,13 +197,7 @@ fn run_git_clone_logged(
     cmd.args(["clone", "--progress", "--branch", branch, "--single-branch"])
         .arg(repo)
         .arg(&dest)
-        // fghjd runs as root (via sudo), which has no credentials of its own
-        // for a user's private remotes. If we know which real user wired
-        // this workspace (captured by the unprivileged `fghj` CLI at `wire`
-        // time), drop the child back to that user so it picks up their own
-        // known_hosts, git config, and ssh-agent — root bypasses the usual
-        // file permission checks on the agent's unix socket, so this works
-        // even though the socket is owned by that user, not root.
+        // As the owner, for their credentials (see `WorkspaceOwner`).
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -243,8 +205,6 @@ fn run_git_clone_logged(
         .with_context(|| format!("git clone failed for {repo} (branch {branch})"))
 }
 
-/// Runs a git command as the workspace owner, streaming its output into the
-/// job's log, and fails if it exits non-zero.
 fn run_git_logged(
     mut cmd: Command,
     owner: Option<&WorkspaceOwner>,
@@ -257,7 +217,6 @@ fn run_git_logged(
 
     let mut child = cmd.spawn().context("failed to spawn git")?;
 
-    // git clone writes its progress meter to stderr, not stdout.
     let stderr = child.stderr.take().expect("piped stderr");
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr_state = state.clone();
@@ -275,10 +234,7 @@ fn run_git_logged(
     Ok(())
 }
 
-/// Clones a git build context into `.fghj/sources/`. An existing clone is
-/// left exactly as it is — never fetched, never reset — so a pinned version
-/// stays pinned and a patch made in the clone survives. See
-/// `concepts/git-build-sources.md`.
+/// An existing clone is never fetched or reset, so pins and local patches stay.
 fn clone_source_logged(
     workspace: &Path,
     source: &BuildSource,
@@ -289,8 +245,7 @@ fn clone_source_logged(
     if dest.exists() {
         return ensure_checkout_is(&dest, &source.url);
     }
-    // `.fghj` is the daemon's, so the folder the owner clones into is made
-    // here and handed to them.
+    // `.fghj` is the daemon's, so this folder is made here and handed over.
     let sources = workspace.join(resolver::build_source::SOURCES_DIR);
     std::fs::create_dir_all(&sources)
         .with_context(|| format!("failed to create {}", sources.display()))?;
@@ -306,8 +261,6 @@ fn clone_source_logged(
     let mut cmd = Command::new("git");
     cmd.args(["clone", "--progress"]);
     match (&source.reference, commit) {
-        // `--branch` takes branches and tags only; a commit needs the whole
-        // history, then a checkout.
         (Some(_), Some(_)) | (None, _) => {}
         (Some(reference), None) => {
             cmd.args(["--branch", reference, "--single-branch"]);
@@ -341,8 +294,7 @@ fn clone_source_logged(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if let Err(e) = run_git_logged(cmd, owner, state) {
-            // A clone left at the default branch would read as pulled and be
-            // built as the wrong version.
+            // Left at the default branch it would build the wrong version.
             let _ = std::fs::remove_dir_all(&dest);
             return Err(e.context(format!("{} has no commit {commit}", source.url)));
         }
@@ -350,7 +302,6 @@ fn clone_source_logged(
     Ok(())
 }
 
-/// The sources `node` builds from that aren't cloned yet.
 fn missing_source(node: &Node) -> Option<&BuildSource> {
     node.build
         .as_ref()
@@ -415,8 +366,6 @@ fn pull_all_logged(
             .filter(|n| wanted.contains(&n.id))
             .collect();
         let missing: Vec<&Node> = wanted.iter().copied().filter(|n| !n.downloaded).collect();
-        // Deduplicated by clone path: services building from the same URL and
-        // ref share one clone.
         let mut sources: Vec<&BuildSource> =
             wanted.iter().filter_map(|n| missing_source(n)).collect();
         sources.sort_by(|a, b| a.path.cmp(&b.path));
@@ -471,16 +420,12 @@ mod tests {
         ensure_checkout_is(tmp.path(), "https://github.com/org-a/api.git").unwrap();
     }
 
-    /// The whole point of normalizing: the same repo wired once over SSH and
-    /// once over HTTPS must not read as two repos fighting over one folder.
     #[test]
     fn spelling_of_the_url_does_not_matter() {
         let tmp = checkout_with_origin(Some("git@github.com:org-a/api.git"));
         ensure_checkout_is(tmp.path(), "https://github.com/org-a/api").unwrap();
     }
 
-    /// E6: `github.com/org-a/api` and `github.com/org-b/api` both derive the
-    /// folder `api`. This used to be a silent `Ok(())` and a wrong graph.
     #[test]
     fn a_different_repo_in_the_same_folder_is_refused() {
         let tmp = checkout_with_origin(Some("https://github.com/org-a/api.git"));
@@ -506,15 +451,11 @@ mod tests {
         assert!(ensure_checkout_is(tmp.path(), "https://github.com/org-a/api.git").is_err());
     }
 
-    /// Pulling, end to end, against real git remotes on disk: which repos
-    /// get cloned, in which round, and that the loop always ends.
     mod pull {
         use super::super::*;
         use std::fs;
 
-        /// A scratch area with bare remotes under `remotes/` and the
-        /// workspace under `ws/`. `{remotes}` in a config is replaced by the
-        /// remotes' path, so an `include:` can point at them.
+        /// `{remotes}` in a config becomes the remotes' path.
         struct World {
             root: tempfile::TempDir,
         }
@@ -564,7 +505,6 @@ mod tests {
                     .to_string()
             }
 
-            /// Publishes `yaml` as the `main` branch of remote `name`.
             fn remote(&self, name: &str, yaml: &str) -> &Self {
                 let src = self.root.path().join("src").join(name);
                 fs::create_dir_all(&src).unwrap();
@@ -586,13 +526,11 @@ mod tests {
                 self
             }
 
-            /// Clones remote `name` into the workspace, as the user would.
             fn checkout(&self, name: &str) -> &Self {
                 git(&self.ws(), &["clone", "-q", &self.url(name), name]);
                 self
             }
 
-            /// Runs a pull and returns the folders it cloned, in order.
             fn pull(&self, flow: Option<&str>) -> Result<Vec<String>> {
                 let state = Arc::new(Mutex::new(DownloadState {
                     status: "running".into(),
@@ -666,8 +604,6 @@ flows:
             w
         }
 
-        /// Each round clones what the last one revealed: shop names
-        /// billing and analytics, billing then names ledger and search.
         #[test]
         fn pull_all_clones_layer_by_layer_until_nothing_is_missing() {
             let w = world();
@@ -688,10 +624,6 @@ flows:
             assert!(graph.warnings.is_empty(), "{:#?}", graph.warnings);
         }
 
-        /// A flow pulls only what it would start: billing (for pricing)
-        /// and ledger (for billing's api) — not analytics, which only
-        /// another flow names, nor search, which only billing's indexer
-        /// needs.
         #[test]
         fn a_flow_pulls_only_what_it_would_start() {
             let w = world();
@@ -702,14 +634,12 @@ flows:
             assert!(!w.on_disk("analytics"));
             assert!(!w.on_disk("search"));
 
-            // A later full pull picks up the rest, and nothing twice.
             let rest = w.pull(None).unwrap();
             let mut rest_sorted = rest.clone();
             rest_sorted.sort();
             assert_eq!(rest_sorted, ["analytics", "search"], "{rest:?}");
         }
 
-        /// Tags remote `name`'s `main` as `tag` and returns the commit.
         fn tag(w: &World, name: &str, tag: &str) -> String {
             let bare = PathBuf::from(w.url(name));
             git(&bare, &["-c", "tag.gpgsign=false", "tag", tag, "main"]);
@@ -721,7 +651,6 @@ flows:
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         }
 
-        /// A service of `shop` built from remote `geocoder` at `reference`.
         fn sourced_shop(w: &World, reference: &str) {
             w.remote(
                 "shop",
@@ -756,8 +685,6 @@ flows:
                 .unwrap()
         }
 
-        /// `concepts/git-build-sources.md`: a flow's pull clones the sources
-        /// of what it starts, once per URL and ref, and never again.
         #[test]
         fn a_pull_clones_the_sources_of_what_it_would_start() {
             let w = World::new();
@@ -777,14 +704,11 @@ flows:
             assert!(source.downloaded);
             assert_eq!(source.head.as_deref(), Some(commit.as_str()));
             assert!(!source.dirty);
-            // The clone's own `.fghj.yaml` is not a repo of the workspace.
             assert!(graph.nodes.iter().all(|n| !n.id.ends_with(".geocoder")));
 
             assert!(w.pull(None).unwrap().is_empty());
         }
 
-        /// `--branch` takes branches and tags only, so a pinned commit is
-        /// cloned whole and checked out.
         #[test]
         fn a_commit_ref_is_checked_out() {
             let w = World::new();
@@ -814,8 +738,6 @@ flows:
             assert!(w.pull(None).unwrap().is_empty());
         }
 
-        /// Two repos including the same third one: it's one stub, so one
-        /// clone.
         #[test]
         fn a_repo_two_others_include_is_cloned_once() {
             let w = World::new();
@@ -856,8 +778,6 @@ services:
             );
         }
 
-        /// Repos including each other: the one already on disk is never a
-        /// stub, so the pull ends instead of chasing its tail.
         #[test]
         fn mutual_includes_terminate() {
             let w = World::new();
@@ -889,8 +809,6 @@ services:
             assert!(w.graph().warnings.is_empty(), "{:#?}", w.graph().warnings);
         }
 
-        /// A remote that doesn't exist fails the pull, naming it, instead
-        /// of retrying forever.
         #[test]
         fn an_unreachable_remote_fails_the_pull() {
             let w = World::new();
@@ -910,7 +828,6 @@ services:
             assert!(err.contains("gone"), "{err}");
         }
 
-        /// An unknown flow is refused before anything is cloned.
         #[test]
         fn pulling_an_unknown_flow_clones_nothing() {
             let w = world();

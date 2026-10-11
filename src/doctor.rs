@@ -1,26 +1,7 @@
-//! The preflight self-check behind `fghj doctor` and the UI's "Doctor" tab.
-//!
-//! fghj reaches into more of the host than a typical dev tool: a Docker
-//! daemon with BuildKit, two privileged ports on a loopback alias that
-//! doesn't exist by default, `/etc/resolver` files pointing at an *ephemeral*
-//! DNS port, and a root CA in the System keychain. Each of those can go
-//! missing independently — a Docker Desktop upgrade, a `sudo ifconfig lo0
-//! -alias`, an OS update that resets the resolver directory, a keychain
-//! reset — and when one does, the symptom is almost never the cause. A
-//! browser showing `ERR_CONNECTION_REFUSED` looks the same whether the
-//! alias is gone, the proxy isn't bound, or DNS is answering from somewhere
-//! else entirely.
-//!
-//! So rather than inferring from desired state, every check here reads the
-//! real thing, and the DNS check reads it the way a browser would: through
-//! the OS resolver, end to end. That one matters most because the port in
-//! `/etc/resolver/fghj.internal` is assigned fresh on every `fghjd` start and
-//! recorded nowhere else — a resolver file left behind by a previous process
-//! looks perfectly healthy on disk and resolves nothing at all.
-//!
-//! Checks never mutate. A doctor that fixes things is a doctor you can't
-//! trust to tell you what was wrong; the hints say which existing command to
-//! run instead.
+//! The preflight self-check behind `fghj doctor` and the UI's Doctor tab. Every
+//! check reads the real thing; DNS is resolved end to end through the OS,
+//! since a stale resolver file looks fine on disk. Checks never mutate; hints
+//! say what to run.
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, ToSocketAddrs};
 use std::os::unix::net::UnixStream;
@@ -39,43 +20,30 @@ use crate::{dns, raw_net, web};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
-    /// Checked, and it's the way it should be.
     Pass,
-    /// Not how it should be, but nothing is broken *yet* — either it only
-    /// affects a subset of features, or fghj will fix it on the next start.
+    /// Not broken yet: affects some features, or fghj fixes it on next start.
     Warn,
-    /// Something fghj needs is missing or wrong, and it will visibly
-    /// misbehave until it's fixed.
     Fail,
 }
 
-/// One probe and what it found. `detail` is always populated, including on a
-/// pass — "resolved to 127.222.0.1" is the useful part of a green check, and
-/// a report you can paste into a bug is worth more than a column of ticks.
+/// `detail` is populated on a pass too, so the report is pasteable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Check {
-    /// Stable machine-readable id, never shown as a heading.
     pub name: String,
-    /// One-line human summary of what was checked.
     pub title: String,
     pub verdict: Verdict,
     pub detail: String,
-    /// What to do about it — a concrete command wherever one exists. `None`
-    /// on a pass.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
 }
 
-/// The `/daemon/doctor` response body, and what `fghj doctor` deserializes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
     pub checks: Vec<Check>,
 }
 
 impl Report {
-    /// Whether anything failed outright — `fghj doctor`'s exit code, so it
-    /// can gate a shell script or a CI step. A `Warn` deliberately doesn't
-    /// count: those are "some feature is unavailable", not "fghj is broken".
+    /// `Warn` doesn't count: that's a feature unavailable, not fghj broken.
     pub fn has_failures(&self) -> bool {
         self.checks.iter().any(|c| c.verdict == Verdict::Fail)
     }
@@ -113,16 +81,11 @@ impl Check {
     }
 }
 
-/// Docker Engine API 1.39 (Engine 18.09) is where the `/session` endpoint
-/// BuildKit's gRPC driver needs first appears — the honest capability
-/// signal, since nothing in `/version` or `/info` reports "BuildKit" as a
-/// server feature. `docker::build_image` has no fallback path anymore, so a
-/// daemon below this builds nothing at all.
+/// API 1.39 adds the `/session` endpoint BuildKit needs; nothing in `/info`
+/// reports BuildKit directly.
 const BUILDKIT_MIN_API: (u32, u32) = (1, 39);
 
-/// `"1.47"` -> `(1, 47)`. Tolerates a trailing patch segment (`"1.47.0"`)
-/// and anything else that parses; returns `None` on anything that doesn't,
-/// so an unexpected format reads as "can't tell" rather than "too old".
+/// `None` reads as "can't tell", not "too old".
 fn parse_api_version(v: &str) -> Option<(u32, u32)> {
     let mut parts = v.trim().split('.');
     let major = parts.next()?.parse().ok()?;
@@ -142,9 +105,6 @@ async fn docker_checks(docker: &Docker) -> Vec<Check> {
                     "start Docker (Docker Desktop, OrbStack, colima…) and make sure \
                      `docker ps` works, then restart fghjd",
                 ),
-                // Reported rather than skipped: a tab with a check missing
-                // reads as a UI bug, where an explicit "couldn't tell" reads
-                // as what it is.
                 Check::warn(
                     "buildkit",
                     "BuildKit available",
@@ -203,10 +163,8 @@ fn daemon_check(daemon: &DaemonControl) -> Check {
     } else {
         "idle — activation failed or hasn't happened yet".to_string()
     };
-    // Warn, not Fail: idle is a state the operator can legitimately ask for,
-    // and every check below it is *expected* to fail while it holds. Calling
-    // that a failure would mean `fghj daemon stop` leaves a doctor full of
-    // red for a machine that is doing exactly what it was told.
+    // Idle is something the operator can ask for, and everything below is
+    // expected to fail while it holds.
     Check::warn(
         "daemon",
         "fghjd is active",
@@ -215,9 +173,6 @@ fn daemon_check(daemon: &DaemonControl) -> Check {
     )
 }
 
-/// How long to wait for the proxy's own loopback address to accept a
-/// connection. It's on this machine, behind no network: either something is
-/// listening or nothing is, and a second is already generous.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn proxy_port_check(port: u16, name: &str, title: &str) -> Check {
@@ -235,16 +190,11 @@ fn proxy_port_check(port: u16, name: &str, title: &str) -> Check {
     }
 }
 
-/// `present` is `raw_net::loopback_alias_present(PROXY_IP)`, taken as a
-/// parameter so the verdicts are testable without a loopback interface to
-/// probe.
 fn loopback_alias_check(present: Option<Result<bool>>) -> Check {
     let name = "loopback-alias";
     let title = "proxy loopback alias";
     match present {
-        // Only macOS needs the alias: everywhere else the whole of 127/8
-        // already routes to loopback, so there is nothing to check and
-        // nothing that can be missing. See `raw_net::add_loopback_alias`.
+        // Only macOS needs it; elsewhere 127/8 already routes to loopback.
         None => Check::pass(
             name,
             title,
@@ -267,8 +217,6 @@ fn loopback_alias_check(present: Option<Result<bool>>) -> Check {
     }
 }
 
-/// `routing` is `dns::os_routing_status()`, taken as a parameter for the
-/// same reason as `loopback_alias_check`'s.
 fn resolver_files_check(routing: Option<dns::OsRouting>) -> Check {
     let name = "resolver-files";
     let Some(routing) = routing else {
@@ -305,21 +253,12 @@ fn resolver_files_check(routing: Option<dns::OsRouting>) -> Check {
     )
 }
 
-/// The one check that proves the whole DNS path rather than its parts: ask
-/// the OS to resolve a name in fghj's zone, exactly as a browser would, and
-/// see whether the answer is the proxy.
-///
-/// This is where a stale `/etc/resolver` file shows up. The port in that
-/// file is assigned fresh on each `fghjd` start and stored nowhere else, so a
-/// file written by a previous process points at a port nobody is listening
-/// on — `resolver_files_check` passes, and every name in the zone silently
-/// fails to resolve. Going through `getaddrinfo` catches that, and costs
-/// nothing but a lookup.
+/// The port in the resolver file changes on each start, so a stale file
+/// passes `resolver_files_check` and resolves nothing.
 fn dns_resolution_check() -> Check {
     let name = "dns";
     let title = "fghj.internal resolves through the OS";
-    // Any name under the zone works: the server answers `dns::ANSWER` for
-    // the whole zone regardless of whether a workspace has claimed the name.
+    // The whole zone answers, claimed or not.
     let probe = format!("doctor.{}", dns::ZONE);
     match (probe.as_str(), 0u16).to_socket_addrs() {
         Ok(addrs) => {
@@ -362,9 +301,6 @@ fn dns_resolution_check() -> Check {
     }
 }
 
-/// `is_trusted` is `web::trust::is_trusted`, injected so the verdicts are
-/// testable without touching the real trust store. Only called once `cert`
-/// is known to exist.
 fn ca_trust_check(cert: &Path, is_trusted: impl FnOnce(&Path) -> Option<bool>) -> Check {
     let name = "ca-trust";
     let title = "root CA trusted by the system";
@@ -406,11 +342,7 @@ fn ca_trust_check(cert: &Path, is_trusted: impl FnOnce(&Path) -> Option<bool>) -
     }
 }
 
-/// Everything the daemon can check about this host. Blocking probes
-/// (`ifconfig`, `security`, `getaddrinfo`, TCP connects) are moved off the
-/// async runtime wholesale rather than one at a time — nothing here is
-/// concurrent anyway, and the whole set is well under a second on a healthy
-/// machine.
+/// Off the async runtime wholesale; the set takes well under a second.
 fn host_checks() -> Vec<Check> {
     vec![
         loopback_alias_check(raw_net::loopback_alias_present(PROXY_IP)),
@@ -425,9 +357,7 @@ fn host_checks() -> Vec<Check> {
     ]
 }
 
-/// The full daemon-side report, in the order a failure cascades: Docker,
-/// then whether fghjd is active at all, then the host integrations that only
-/// mean anything once it is.
+/// In cascade order: Docker, then whether fghjd is active, then the rest.
 pub async fn daemon_report(docker: &Docker, daemon: &DaemonControl) -> Report {
     let mut checks = docker_checks(docker).await;
     checks.push(daemon_check(daemon));
@@ -443,10 +373,7 @@ pub async fn daemon_report(docker: &Docker, daemon: &DaemonControl) -> Report {
     Report { checks }
 }
 
-/// The two things `fghj` can only check from where the CLI itself runs: that
-/// there's a daemon to ask, and that the one external binary the CLI shells
-/// out to is present. Everything else is the daemon's to report — it's the
-/// process that owns the ports, the resolver files and the CA.
+/// Only what the CLI can check from where it runs.
 pub fn client_checks() -> Vec<Check> {
     let socket = crate::daemon::socket_path();
     let daemon = match UnixStream::connect(&socket) {
@@ -463,8 +390,7 @@ pub fn client_checks() -> Vec<Check> {
         ),
     };
 
-    // Warn, not Fail: `cue` is only needed by `fghj validate`. The daemon
-    // resolves and runs workspaces without it.
+    // `cue` is only needed by `fghj validate`.
     let cue = match Command::new("cue").arg("version").output() {
         Ok(o) if o.status.success() => Check::pass(
             "cue",
@@ -502,9 +428,7 @@ mod tests {
         assert_eq!(parse_api_version(""), None);
     }
 
-    /// The comparison is on the pair, not the string: `"1.9"` must not read
-    /// as newer than `"1.39"`, which is exactly what a lexical compare would
-    /// have done.
+    /// Compared as a pair: lexically `"1.9"` > `"1.39"`.
     #[test]
     fn buildkit_threshold_compares_numerically_not_lexically() {
         assert!(parse_api_version("1.39").unwrap() >= BUILDKIT_MIN_API);
@@ -525,8 +449,6 @@ mod tests {
         assert_eq!(missing.verdict, Verdict::Fail);
         assert!(missing.hint.unwrap().contains("fghj daemon start"));
 
-        // Couldn't read the interface: that's "can't tell", not "broken",
-        // and the probe's own error is the detail.
         let unreadable = loopback_alias_check(Some(Err(anyhow::anyhow!("`ifconfig lo0` failed"))));
         assert_eq!(unreadable.verdict, Verdict::Warn);
         assert!(unreadable.detail.contains("ifconfig lo0"));
@@ -558,8 +480,6 @@ mod tests {
         assert!(check.detail.contains("myservice.local -> 127.0.0.1:5353"));
     }
 
-    /// A wildcard zone doesn't stand in for a fixed one: the raw zone alone
-    /// missing is a failure, and the message says which.
     #[test]
     fn resolver_check_fails_naming_each_missing_fixed_zone() {
         let check = resolver_files_check(routing(&[(dns::ZONE, 5353), ("myservice.local", 5353)]));
@@ -611,10 +531,6 @@ mod tests {
         assert!(report.has_failures());
     }
 
-    /// An unreachable Docker daemon is the one failure that can't be
-    /// diagnosed any further, so it has to still report *both* Docker
-    /// checks — a report that silently drops the BuildKit row reads as a
-    /// broken doctor rather than as "couldn't tell".
     #[tokio::test]
     async fn an_unreachable_docker_still_reports_both_of_its_checks() {
         let checks = docker_checks(&crate::docker::undialled_client()).await;
@@ -625,9 +541,6 @@ mod tests {
         assert!(checks.iter().all(|c| c.hint.is_some()));
     }
 
-    /// The CLI-side checks run with no daemon and no assumptions about the
-    /// machine, so they must always produce a verdict for both rather than
-    /// erroring out or returning an empty report.
     #[test]
     fn client_checks_always_report_both_items() {
         let checks = client_checks();
