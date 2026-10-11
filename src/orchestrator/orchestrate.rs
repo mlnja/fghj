@@ -163,15 +163,11 @@ impl Orchestrator {
     /// Narrates a node a start skipped because something it can't start
     /// without failed.
     pub(super) async fn record_blocked(&self, node_id: &str, by: &str) {
-        self.begin_event_cycle(node_id, "start").await;
-        self.record_event(
-            node_id,
-            "start",
+        let ev = self.events(node_id, "start");
+        ev.begin().await;
+        ev.failed(
             "blocked",
-            "error",
-            Some(format!(
-                "blocked by {by}: it failed, and this can't start without it"
-            )),
+            format!("blocked by {by}: it failed, and this can't start without it"),
         )
         .await;
     }
@@ -409,8 +405,7 @@ impl Orchestrator {
                     ),
                     None => "recreating container: config changed since it was started".into(),
                 };
-                self.record_event(&node.id, "create", &why, "ok", None)
-                    .await;
+                self.events(&node.id, "create").ok(&why).await;
             }
             working(progress, node_id, Some(PendingAction::Starting));
 

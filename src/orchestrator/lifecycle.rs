@@ -19,12 +19,11 @@ impl Orchestrator {
     /// workspace's actor goes away) already has it.
     pub async fn stop(&self, state: &EnvState) -> Result<()> {
         for c in state.containers.values() {
-            self.begin_event_cycle(&c.node_id, "stop").await;
-            self.record_event(&c.node_id, "stop", "stopping container", "running", None)
-                .await;
+            let ev = self.events(&c.node_id, "stop");
+            ev.begin().await;
+            ev.running("stopping container").await;
             docker::stop_and_remove(&self.docker, &c.desired.container_name).await;
-            self.record_event(&c.node_id, "stop", "stopping container", "ok", None)
-                .await;
+            ev.ok("stopping container").await;
         }
         if !state.sidecar_container_name.is_empty() {
             docker::stop_and_remove(&self.docker, &state.sidecar_container_name).await;
@@ -50,16 +49,15 @@ impl Orchestrator {
         let lock = self.node_lock(node_id);
         let _guard = lock.lock().await;
         let container_name = container.desired.container_name.clone();
-        self.begin_event_cycle(node_id, "stop").await;
-        self.record_event(node_id, "stop", "stopping container", "running", None)
-            .await;
+        let ev = self.events(node_id, "stop");
+        ev.begin().await;
+        ev.running("stopping container").await;
         docker::stop_container(&self.docker, &container_name).await;
         let status = match docker::inspect_status(&self.docker, &container_name, "").await {
             Ok(Some(s)) => s.status,
             _ => "exited".to_string(),
         };
-        self.record_event(node_id, "stop", "stopping container", "ok", None)
-            .await;
+        ev.ok("stopping container").await;
         let mut updated = container.clone();
         // Stopping is itself the recorded intent, so `desired` moves too —
         // this is the one place a stopped container is *supposed* to be
@@ -83,12 +81,11 @@ impl Orchestrator {
         let lock = self.node_lock(node_id);
         let _guard = lock.lock().await;
         let container_name = container.desired.container_name.clone();
-        self.begin_event_cycle(node_id, "stop").await;
-        self.record_event(node_id, "stop", "removing container", "running", None)
-            .await;
+        let ev = self.events(node_id, "stop");
+        ev.begin().await;
+        ev.running("removing container").await;
         docker::stop_and_remove(&self.docker, &container_name).await;
-        self.record_event(node_id, "stop", "removing container", "ok", None)
-            .await;
+        ev.ok("removing container").await;
         Ok(())
     }
 }

@@ -55,9 +55,9 @@ impl Orchestrator {
             debug_wait,
             wait_ready,
         } = start;
-        self.begin_event_cycle(&node.id, "start").await;
-        self.record_event(&node.id, "start", "resolving config", "running", None)
-            .await;
+        let ev = self.events(&node.id, "start");
+        ev.begin().await;
+        ev.running("resolving config").await;
         let spec = match self.resolve_node_spec(graph, node, true).await {
             Ok(spec) => spec,
             Err(e) => {
@@ -66,18 +66,11 @@ impl Orchestrator {
                 // the step that actually broke — recording again would put
                 // the same text in the events pane a second time under
                 // `resolving config`, which is not what failed.
-                self.record_error_unless_reported(
-                    &node.id,
-                    "start",
-                    "resolving config",
-                    format!("{e:#}"),
-                )
-                .await;
+                ev.failed_unless_reported("resolving config", &e).await;
                 return Err(e);
             }
         };
-        self.record_event(&node.id, "start", "resolving config", "ok", None)
-            .await;
+        ev.ok("resolving config").await;
         let config_hash = spec_hash(node, &spec);
         let mut labels = node.labels.clone();
         labels.insert("fghj.config_hash".to_string(), config_hash.clone());
@@ -115,8 +108,7 @@ impl Orchestrator {
             .map(|ip| vec![ip.to_string(), "127.0.0.11".to_string()])
             .unwrap_or_default();
 
-        self.record_event(&node.id, "start", "creating container", "running", None)
-            .await;
+        ev.running("creating container").await;
         if let Err(e) = docker::run_container(
             &self.docker,
             &docker::RunOpts {
@@ -147,18 +139,10 @@ impl Orchestrator {
         )
         .await
         {
-            self.record_event(
-                &node.id,
-                "start",
-                "creating container",
-                "error",
-                Some(format!("{e:#}")),
-            )
-            .await;
+            ev.failed("creating container", &e).await;
             return Err(e);
         }
-        self.record_event(&node.id, "start", "creating container", "ok", None)
-            .await;
+        ev.ok("creating container").await;
 
         self.spawn_log_capture(&node.id, &spec.container_name);
 
@@ -300,8 +284,7 @@ impl Orchestrator {
         // `healthcheck` field at all, because a container that has exited
         // can never report Docker-healthy.
         if node.kind == "task" {
-            self.record_event(&node.id, "start", "waiting for exit", "running", None)
-                .await;
+            ev.running("waiting for exit").await;
             let allowance = budget.tasks.allowance();
             // Read *before* the wait, not after: waiting until the deadline
             // exhausts the budget by definition, so asking afterwards would
@@ -344,27 +327,12 @@ impl Orchestrator {
                 )),
             };
             if let Some(failure) = failure {
-                self.record_event(
-                    &node.id,
-                    "start",
-                    "waiting for exit",
-                    "error",
-                    Some(failure.clone()),
-                )
-                .await;
+                ev.failed("waiting for exit", &failure).await;
                 bail!("task {} failed: {failure}", node.id);
             }
-            self.record_event(&node.id, "start", "waiting for exit", "ok", None)
-                .await;
+            ev.ok("waiting for exit").await;
         } else if node.healthcheck.is_some() && wait_ready {
-            self.record_event(
-                &node.id,
-                "start",
-                "waiting for healthcheck",
-                "running",
-                None,
-            )
-            .await;
+            ev.running("waiting for healthcheck").await;
             let allowance = budget.health.allowance();
             // Same reason as the task branch above: a wait that runs to the
             // shared deadline leaves the budget exhausted, so this has to be
@@ -406,11 +374,9 @@ impl Orchestrator {
                     )),
                 ),
             };
-            self.record_event(&node.id, "start", "waiting for healthcheck", status, detail)
-                .await;
+            ev.record("waiting for healthcheck", status, detail).await;
         }
-        self.record_event(&node.id, "start", "ready", "ok", None)
-            .await;
+        ev.ok("ready").await;
 
         Ok(ContainerInfo {
             node_id: node.id.clone(),

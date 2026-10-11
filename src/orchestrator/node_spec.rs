@@ -62,6 +62,7 @@ impl Orchestrator {
         tag: &str,
         platform: Option<&str>,
     ) -> Result<()> {
+        let ev = self.events(node_id, "start");
         // A git build context builds from its clone in `.fghj/sources/`,
         // which pull makes and start never does — see
         // `concepts/git-build-sources.md`.
@@ -74,14 +75,7 @@ impl Orchestrator {
                     source.url,
                     source.path
                 );
-                self.record_event(
-                    node_id,
-                    "start",
-                    "building image",
-                    "error",
-                    Some(format!("{e:#}")),
-                )
-                .await;
+                ev.failed("building image", &e).await;
                 return Err(e);
             }
             Some(source) => self.workspace.join(&source.path).join(&build.context),
@@ -130,19 +124,11 @@ impl Orchestrator {
             Some(b) => format!("  ·  buildkit: {}", b.builder),
             None => String::from("  ·  buildkit: dockerd"),
         });
-        self.record_event(node_id, "start", "building image", "running", Some(what))
-            .await;
+        ev.record("building image", "running", Some(what)).await;
         let secrets = match resolve_build_secrets(repo_root, &build.secrets) {
             Ok(secrets) => secrets,
             Err(e) => {
-                self.record_event(
-                    node_id,
-                    "start",
-                    "building image",
-                    "error",
-                    Some(format!("{e:#}")),
-                )
-                .await;
+                ev.failed("building image", &e).await;
                 return Err(e);
             }
         };
@@ -159,14 +145,7 @@ impl Orchestrator {
                         "build.ssh is set but no live ssh-agent was found for the workspace owner; \
                          run `fghj wire` from a shell with a running agent"
                     );
-                    self.record_event(
-                        node_id,
-                        "start",
-                        "building image",
-                        "error",
-                        Some(format!("{e:#}")),
-                    )
-                    .await;
+                    ev.failed("building image", &e).await;
                     return Err(e);
                 }
             }
@@ -190,14 +169,7 @@ impl Orchestrator {
         let report = match docker::build_image(&self.docker, &opts).await {
             Ok(report) => report,
             Err(e) => {
-                self.record_event(
-                    node_id,
-                    "start",
-                    "building image",
-                    "error",
-                    Some(format!("{e:#}")),
-                )
-                .await;
+                ev.failed("building image", &e).await;
                 return Err(e);
             }
         };
@@ -207,9 +179,7 @@ impl Orchestrator {
         // and uploaded whole on every build, so a `node_modules` or a `.git`
         // that should have been in `.dockerignore` shows up here as a cost
         // paid on every single start, and nowhere else.
-        self.record_event(
-            node_id,
-            "start",
+        ev.record(
             "building image",
             "ok",
             Some(format!(
