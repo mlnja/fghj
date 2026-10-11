@@ -76,23 +76,7 @@ impl Orchestrator {
         )
         .await;
         let spec = match self.resolve_node_spec(graph, node, run_id, true).await {
-            Ok(Some(spec)) => spec,
-            Ok(None) => {
-                let msg = format!(
-                    "resolve_node_spec returned no spec for {} despite side_effects being enabled",
-                    node.id
-                );
-                self.record_event(
-                    run_id,
-                    &node.id,
-                    "start",
-                    "resolving config",
-                    "error",
-                    Some(msg.clone()),
-                )
-                .await;
-                bail!(msg);
-            }
+            Ok(spec) => spec,
             Err(e) => {
                 // The backstop. Most failures in here are a build, a secret
                 // or the ssh-agent, and `resolve_node_spec` already recorded

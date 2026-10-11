@@ -122,7 +122,7 @@ impl Orchestrator {
                     .resolve_node_spec(graph, node, DEFAULT_RUN_ID, false)
                     .await
                 {
-                    Ok(Some(spec)) => {
+                    Ok(spec) => {
                         if spec_hash(node, &spec) == c.desired.config_hash {
                             SyncStatus::Synced
                         } else {
@@ -133,7 +133,7 @@ impl Orchestrator {
                     // inconclusive — the node is still *there*, we just
                     // can't say whether it matches — so it must not read as
                     // `Orphaned`.
-                    Ok(None) | Err(_) => SyncStatus::Unknown,
+                    Err(_) => SyncStatus::Unknown,
                 },
                 // The node is gone from the freshly-resolved graph while its
                 // container is still running. Reported as its own verdict

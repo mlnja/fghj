@@ -376,12 +376,12 @@ impl Orchestrator {
             // whole graph walk per node otherwise.
             let fresh_hash = match (alive, existing) {
                 (true, Some(_)) if restart.is_none() => {
-                    match self.resolve_node_spec(graph, node, &run_id, false).await {
-                        Ok(Some(spec)) => Some(spec_hash(node, &spec)),
-                        // Inconclusive. Re-resolving failed, so nothing here can
-                        // say the running container is wrong.
-                        Ok(None) | Err(_) => None,
-                    }
+                    // A failed re-resolve is inconclusive: it can't say the
+                    // running container is wrong.
+                    self.resolve_node_spec(graph, node, &run_id, false)
+                        .await
+                        .ok()
+                        .map(|spec| spec_hash(node, &spec))
                 }
                 _ => None,
             };

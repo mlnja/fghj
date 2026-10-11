@@ -248,7 +248,7 @@ impl Orchestrator {
         node: &Node,
         run_id: &str,
         side_effects: bool,
-    ) -> Result<Option<NodeSpec>> {
+    ) -> Result<NodeSpec> {
         let container_name = container_name(&graph.workspace_name, run_id, &node.id);
         // Every node's domain is derived the same way, unconditionally —
         // there's no CUE-declared override for any node kind (services
@@ -480,7 +480,7 @@ impl Orchestrator {
         // `spec_hash`, because it is runtime state rather than config. See
         // `state::ContainerDesired::debug_wait`.
 
-        Ok(Some(NodeSpec {
+        Ok(NodeSpec {
             container_name,
             domain,
             raw_domain,
@@ -489,7 +489,7 @@ impl Orchestrator {
             port_list,
             binds,
             env,
-        }))
+        })
     }
 }
 
@@ -639,7 +639,6 @@ mod tests {
             .resolve_node_spec(&graph, node, "default", false)
             .await
             .expect("resolving an image-backed node is pure")
-            .expect("side_effects: false still yields a spec")
     }
 
     /// The whole of `debug:`, in one assertion: the port joins the published
