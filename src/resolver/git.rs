@@ -1,31 +1,12 @@
-//! The git facts read off a checkout: its remote, branch, and dirtiness.
-
 use std::ffi::CStr;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
-/// A `git -C <dir>` invocation that runs as the user who **owns** `dir`,
-/// rather than as whoever is asking.
-///
-/// `fghjd` runs as root (it binds 80/443, installs a CA, writes
-/// `/etc/resolver` — see `concepts/preflight-checks.md`), while the checkouts
-/// it reads belong to the developer. Git refuses to operate on a repository
-/// owned by somebody else since 2.35.2 ("detected dubious ownership"), exiting
-/// non-zero, which silently turned every read below into its failure case: no
-/// remote, no branch, no commit, and — because `git_status_dirty` cannot
-/// vouch for a tree it failed to read — *every* node reported permanently
-/// dirty. The daemon and the CLI resolved the same workspace into different
-/// graphs, which is the kind of bug that looks like a UI problem for a while.
-///
-/// Dropping to the owner is the fix rather than `-c safe.directory`: that flag
-/// would leave root running git against a config file an unprivileged user can
-/// write, and git config can name a pager, a hook and a filter to execute. The
-/// repo's owner is the right identity to read the repo with.
-///
-/// No-ops unless we are actually root and the directory belongs to someone
-/// else — `uid()` on a `Command` would otherwise just make the spawn fail.
+/// Runs git as the owner of `dir`: fghjd is root, and git refuses repos owned
+/// by someone else ("dubious ownership"). Not `-c safe.directory`, which would
+/// have root honour a user-writable config that can name hooks and pagers.
 fn git_in(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(dir);
@@ -42,9 +23,7 @@ fn git_in(dir: &Path) -> Command {
     }
 
     cmd.uid(uid).gid(gid);
-    // Without this, git inherits root's `HOME` and dies trying to read a
-    // `/var/root/.gitconfig` the dropped uid cannot open — which would
-    // reintroduce the very failure this function exists to remove.
+    // Otherwise git reads root's `HOME` and fails on its config.
     match home_dir_of(uid) {
         Some(home) => {
             cmd.env("HOME", home);
@@ -56,14 +35,8 @@ fn git_in(dir: &Path) -> Command {
     cmd
 }
 
-/// A uid's home directory, from the passwd database.
-///
-/// `getpwuid` rather than the `HOME` already in the environment: the whole
-/// point is that the environment belongs to root and the uid does not.
 fn home_dir_of(uid: u32) -> Option<String> {
-    // SAFETY: `getpwuid` returns a pointer into a static buffer owned by libc,
-    // which is read (and copied out of) before any other libc call that could
-    // overwrite it. A null return means "no such user", handled below.
+    // SAFETY: the static buffer is copied out before any other libc call.
     unsafe {
         let pw = libc::getpwuid(uid as libc::uid_t);
         if pw.is_null() || (*pw).pw_dir.is_null() {
@@ -76,10 +49,6 @@ fn home_dir_of(uid: u32) -> Option<String> {
     }
 }
 
-/// Reads the `origin` remote URL and checked-out branch of a real git working
-/// tree, if any — used so a downloaded node still carries the `repo`/`branch`
-/// info the UI displays per node (see `Node::repo`/`Node::branch`), even
-/// though resolution itself no longer needs it to find the node on disk.
 pub fn git_remote_and_branch(dir: &Path) -> (Option<String>, Option<String>) {
     let repo = git_in(dir)
         .args(["remote", "get-url", "origin"])
@@ -96,19 +65,8 @@ pub fn git_remote_and_branch(dir: &Path) -> (Option<String>, Option<String>) {
     (repo, branch)
 }
 
-/// The commit a checkout currently has checked out, as a full SHA.
-///
-/// This is what makes a new commit visible to drift detection. The image tag
-/// fghj builds is `fghj/{id}:{branch}`, which is stable across commits — so
-/// without this, committing (or pulling, or rebasing) on the same branch left
-/// the drift hash byte-identical while the running container served a stale
-/// image. See `orchestrator::spec_hash` and `concepts/config-drift.md`.
-///
-/// `None` when the directory isn't a git working tree, or git can't be run at
-/// all. Deliberately not "treated as changed" the way `git_status_dirty`
-/// treats an unreadable status as dirty: an unknown *commit* is constant
-/// across calls, so folding it into the hash as `None` is stable, whereas
-/// inventing a value would report drift on every single tick.
+/// In the drift hash because the image tag `fghj/{id}:{branch}` doesn't change
+/// between commits. `None` stays stable across calls, unlike guessing would.
 pub fn git_head_sha(dir: &Path) -> Option<String> {
     git_in(dir)
         .args(["rev-parse", "HEAD"])
@@ -119,8 +77,7 @@ pub fn git_head_sha(dir: &Path) -> Option<String> {
         .filter(|sha| !sha.is_empty())
 }
 
-/// Whether a git working tree has uncommitted changes (or its status can't be
-/// read at all — treated as dirty since we can't vouch for it being clean).
+/// Unreadable status counts as dirty.
 pub fn git_status_dirty(dir: &Path) -> bool {
     git_in(dir)
         .args(["status", "--porcelain"])
@@ -152,17 +109,12 @@ mod tests {
         git(dir, &["init", "-q"]);
         git(dir, &["config", "user.email", "t@example.invalid"]);
         git(dir, &["config", "user.name", "t"]);
-        // The developer running these tests may well have `commit.gpgsign`
-        // on globally; a test fixture must not try to reach a keyring.
         git(dir, &["config", "commit.gpgsign", "false"]);
         std::fs::write(dir.join("a"), "one").unwrap();
         git(dir, &["add", "."]);
         git(dir, &["commit", "-qm", "one"]);
     }
 
-    /// The fact drift detection depends on: two commits on the *same branch*
-    /// must give two different answers, because the image tag does not
-    /// change between them.
     #[test]
     fn head_moves_with_a_commit_on_the_same_branch() {
         let tmp = tempfile::tempdir().unwrap();
@@ -176,8 +128,6 @@ mod tests {
         assert_ne!(first, git_head_sha(tmp.path()).unwrap());
     }
 
-    /// `None`, not a made-up value: an unknown commit has to be *stable*
-    /// across calls, or every reconcile tick would report drift.
     #[test]
     fn a_directory_that_is_not_a_git_tree_has_no_head() {
         let tmp = tempfile::tempdir().unwrap();

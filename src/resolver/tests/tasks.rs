@@ -1,6 +1,3 @@
-//! Tasks — a service something waits on with
-//! `condition: service_completed_successfully`. See `concepts/flows-v2.md`.
-
 use super::write_yaml;
 use crate::resolver::*;
 
@@ -32,8 +29,6 @@ fn blocking(graph: &Graph, needle: &str) -> bool {
         .any(|w| w.is_blocking() && w.message.contains(needle))
 }
 
-/// A migration is the repo's own code with another command: it declares
-/// the same `build`, and the waiter's condition is what makes it a task.
 #[test]
 fn completed_successfully_makes_the_target_a_task() {
     let tmp = task_repo(
@@ -52,7 +47,6 @@ fn completed_successfully_makes_the_target_a_task() {
     assert_eq!(task.run_policy.as_deref(), Some("on_start"));
     assert!(graph.warnings.is_empty(), "{:?}", graph.warnings);
 
-    // db -> migrate -> api is the start order.
     let ids: Vec<String> = graph.nodes.iter().map(|n| n.id.clone()).collect();
     let order = crate::orchestrator::topological_start_order(&ids, &graph.edges);
     let pos = |id: &str| order.iter().position(|o| o == id).unwrap();
@@ -103,9 +97,6 @@ fn a_task_with_a_healthcheck_or_restart_is_blocking() {
     assert!(blocking(&graph, "sets `restart`"), "{:?}", graph.warnings);
 }
 
-/// `run` only means something for a task, so declaring it makes one: the
-/// way a seed nothing waits on — only listed in a flow — is still read as
-/// a task, and its clean exit as success.
 #[test]
 fn run_alone_makes_a_service_a_task() {
     let tmp = tempfile::tempdir().unwrap();
@@ -127,8 +118,6 @@ services:
     assert!(graph.blocking_warnings().is_empty(), "{:?}", graph.warnings);
 }
 
-/// Exit 0 is success for a task and drift for anything else, so one
-/// service can't be waited on both ways.
 #[test]
 fn waiting_on_a_task_any_other_way_is_blocking() {
     let tmp = tempfile::tempdir().unwrap();

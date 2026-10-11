@@ -1,5 +1,3 @@
-//! `depends_on` and hostname references. See `concepts/flows-v2.md`.
-
 use super::{git_init, write_yaml};
 use crate::resolver::*;
 
@@ -17,8 +15,6 @@ fn edge<'g>(graph: &'g Graph, from: &str, to: &str, kind: &str) -> Option<&'g Ed
         .find(|e| e.from == from && e.to == to && e.kind == kind)
 }
 
-/// The shape B — billing — has in the proposal: a database, a cache it can
-/// start without, an api, and two published flows.
 const BILLING: &str = r#"version: "2.0"
 services:
   postgres:
@@ -163,8 +159,6 @@ flows:
     );
 }
 
-/// Case 4: waiting on another repo's flow is one edge per member, labelled
-/// with the flow it came from.
 #[test]
 fn depending_on_another_repos_flow_waits_on_its_members() {
     let tmp = tempfile::tempdir().unwrap();
@@ -188,9 +182,7 @@ services:
     assert!(graph.warnings.is_empty(), "{:?}", graph.warnings);
 }
 
-/// Waiting on a whole repo is its own services, not what it includes —
-/// two repos including each other and waiting on each other's repo is the
-/// mutual wait, not each waiting on itself.
+/// Waiting on a whole repo is its own services, not what it includes.
 #[test]
 fn depending_on_a_repo_waits_on_its_own_services_only() {
     let tmp = tempfile::tempdir().unwrap();
@@ -223,8 +215,6 @@ services:
     assert!(graph.warnings.is_empty(), "{:?}", graph.warnings);
 }
 
-/// The encapsulation rule: B's services are B's internals, and the error
-/// says what B does publish.
 #[test]
 fn naming_another_repos_service_is_blocking_and_lists_its_flows() {
     let tmp = tempfile::tempdir().unwrap();
@@ -277,7 +267,6 @@ services:
     );
 }
 
-/// Case 6: A waits on B's flow and B waits on A's — it can never start.
 #[test]
 fn a_cross_repo_wait_cycle_is_blocking() {
     let tmp = tempfile::tempdir().unwrap();
@@ -313,8 +302,6 @@ flows:
     assert!(blocking(&graph, "dependency cycle"), "{:?}", graph.warnings);
 }
 
-/// An include resolves by the repo's real git remote, so the folder can be
-/// called anything.
 #[test]
 fn an_include_finds_a_repo_checked_out_under_another_name() {
     let tmp = tempfile::tempdir().unwrap();
@@ -337,8 +324,6 @@ services:
     assert!(!graph.nodes.iter().any(|n| !n.downloaded));
 }
 
-/// A repo not on disk is one stub, however many repos include it, and
-/// nothing can be checked against what it declares.
 #[test]
 fn an_included_repo_not_on_disk_is_one_stub() {
     let tmp = tempfile::tempdir().unwrap();
@@ -391,9 +376,6 @@ services:
     );
 }
 
-/// Rule 8: a hostname is sugar, not an edge — two services naming each
-/// other's hostnames (case 5) have no dependency at all until they declare
-/// one.
 #[test]
 fn hostname_references_are_not_edges() {
     let tmp = tempfile::tempdir().unwrap();

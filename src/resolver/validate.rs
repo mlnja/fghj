@@ -1,6 +1,3 @@
-//! Declared-config validation: the warnings a component earns for a `ports`
-//! block or a `#RunOptions` field that cannot be carried out as written.
-
 use std::collections::BTreeMap;
 
 use super::build_source::{RemoteContext, parse_remote, subdir_is_contained};
@@ -13,8 +10,6 @@ use super::visit::ResolveCtx;
 use super::warning::Warning;
 
 impl<'a> ResolveCtx<'a> {
-    /// Checks a `build` block and returns its remote context, if the context
-    /// is a git URL. See `concepts/git-build-sources.md`.
     pub(crate) fn check_build(&mut self, id: &str, build: &Build) -> Option<RemoteContext> {
         if build.dockerfile_inline.is_some() && build.dockerfile != default_dockerfile() {
             self.warnings.push(Warning::blocking(format!(
@@ -35,9 +30,7 @@ impl<'a> ResolveCtx<'a> {
         Some(remote)
     }
 
-    /// Two different URLs whose clones would share one `.fghj/sources`
-    /// folder: `acme/geocoder#main` and `fork/geocoder#main`. Same URL and
-    /// ref is fine, and shares the clone.
+    /// Same URL and ref is fine, and shares the clone.
     pub(crate) fn check_source_paths(&mut self) {
         let mut by_path: BTreeMap<&str, BTreeMap<String, Vec<&str>>> = BTreeMap::new();
         for node in self.nodes.values() {
@@ -65,14 +58,6 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    /// Warns (non-fatally) when a node declares more than one `primary` port
-    /// — at most one port can sit at the node's own derived domain — or a
-    /// `wildcard` port that's neither `primary` nor `name`d, so there's no
-    /// domain for the wildcard to apply to. Shared between services and
-    /// backing dependencies, since both use the same `ports` map shape.
-    /// Everything `check_http_routes` used to check (a route naming a port
-    /// the service never declared) is now structurally impossible: port and
-    /// role are one `ports` map entry, not two lists to keep in sync.
     pub(crate) fn check_port_config(&mut self, id: &str, ports: &BTreeMap<String, PortConfig>) {
         let primaries: Vec<&str> = ports
             .iter()
@@ -80,10 +65,7 @@ impl<'a> ResolveCtx<'a> {
             .map(|(port, _)| port.as_str())
             .collect();
         if primaries.len() > 1 {
-            // Blocking: exactly one port can sit at the node's own domain,
-            // so a second `primary` is an instruction that cannot be carried
-            // out — and which of the two wins is not something the author
-            // chose.
+            // Blocking: which of two primaries wins is not something the author chose.
             self.warnings.push(Warning::blocking(format!(
                 "'{id}' declares more than one primary port ({}); only one can sit at its own domain",
                 primaries.join(", ")
@@ -98,17 +80,8 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    /// Warns (blockingly) when `stop_signal` isn't a signal name Docker will
-    /// accept. Docker also takes a bare number or an unprefixed name
-    /// ("TERM"), but `#RunOptions.stop_signal` requires the `SIG` form and so
-    /// does this check — the two agree exactly, and an author who writes
-    /// "TERM" gets told what to write instead rather than having CUE and the
-    /// daemon disagree about it.
-    ///
-    /// Blocking rather than advisory: Docker fails `create_container`
-    /// outright on an unknown signal, so the node would not start either way
-    /// — this just says so before a container is attempted, with the field
-    /// name in the message instead of Docker's own bare "invalid signal".
+    /// Requires the `SIG` form, matching `#RunOptions.stop_signal`. Blocking:
+    /// Docker would fail `create_container` anyway, with a worse message.
     pub(crate) fn check_stop_signal(&mut self, id: &str, stop_signal: Option<&str>) {
         let Some(signal) = stop_signal else { return };
         let well_formed = signal.starts_with("SIG")
@@ -124,17 +97,8 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    /// Warns (blockingly) when a `healthcheck` block is present but its
-    /// `test` list is empty. Docker reads an empty `Test` as "inherit
-    /// whatever the image declares", so writing `test: []` silently gets a
-    /// node *no* healthcheck of its own — and since a healthcheck is what
-    /// the run-wide health budget waits on, "silently no healthcheck" is the
-    /// opposite of what someone typing a healthcheck block wants.
-    ///
-    /// `#Healthcheck.test` in CUE already says `[_, ...]` (non-empty), and
-    /// the two have to agree: the Rust types are the enforcing boundary, so
-    /// without this check the schema would reject a file the daemon happily
-    /// accepted. See `resolver::name`'s module doc on that split.
+    /// Blocking: Docker reads an empty `Test` as "inherit the image's", so the
+    /// node silently gets no healthcheck of its own. CUE says `[_, ...]` too.
     pub(crate) fn check_healthcheck(&mut self, id: &str, healthcheck: Option<&Healthcheck>) {
         let Some(hc) = healthcheck else { return };
         if hc.test.is_empty() {

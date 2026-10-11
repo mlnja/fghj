@@ -1,8 +1,3 @@
-//! `#Service` — one entry under `services:`. Your own code (`build`), a
-//! backing service (`image` only), or a task (something waits on it with
-//! `service_completed_successfully`) all share this one shape, as they do in
-//! Compose.
-
 use std::collections::BTreeMap;
 
 use super::config::{Build, Environment, Healthcheck, default_restart, default_stop_grace_period};
@@ -15,12 +10,9 @@ use serde::Deserialize;
 pub struct ServiceConfig {
     #[serde(default)]
     pub(crate) build: Option<Build>,
-    /// A published image to run instead of building one. Exactly one of
-    /// `build`/`image` is required: fghj names the images it builds itself,
-    /// so Compose's "both" (tag the build) has nothing to mean here.
+    /// Exactly one of `build`/`image`: fghj names the images it builds itself.
     #[serde(default)]
     pub(crate) image: Option<String>,
-    /// A bare list of container ports, or a map of port to `#Port`.
     #[serde(default)]
     pub(crate) ports: BackingPorts,
     #[serde(default)]
@@ -33,8 +25,8 @@ pub struct ServiceConfig {
     pub(crate) volumes: Vec<VolumeMount>,
     #[serde(default)]
     pub(crate) additional_hosts: Vec<HostAliasConfig>,
-    /// `None` means "not written": a service gets `"no"`, and a task must
-    /// not set anything else — see `visit::check_task`.
+    /// `None` means "not written": a service gets `"no"`, and a task must not set
+    /// anything else — see `visit::check_task`.
     #[serde(default)]
     pub(crate) restart: Option<String>,
     #[serde(default)]
@@ -61,7 +53,6 @@ pub struct ServiceConfig {
     pub(crate) platform: Option<String>,
     #[serde(default)]
     pub(crate) debug: Option<u16>,
-    /// Tasks only: "on_start" (the default) or "once".
     #[serde(default)]
     pub(crate) run: Option<String>,
     #[serde(default)]

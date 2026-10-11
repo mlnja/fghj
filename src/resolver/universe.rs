@@ -1,7 +1,3 @@
-//! `resolve_universe` — the orchestrator that scans the workspace, runs the
-//! [`super::visit`] phases over every component, expands flows, then
-//! annotates the result with domains.
-
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -12,24 +8,16 @@ use super::visit::ResolveCtx;
 use super::workspace_scan::scan_workspace;
 use anyhow::Result;
 
-/// [`resolve_universe`] for async callers: it walks the filesystem and
-/// shells out to git, so it runs on the blocking pool.
+/// Walks the filesystem and shells out to git, so on the blocking pool.
 pub async fn resolve_universe_async(workspace: std::path::PathBuf) -> Result<Graph> {
     tokio::task::spawn_blocking(move || resolve_universe(&workspace))
         .await
         .map_err(|e| anyhow::anyhow!("resolve_universe task panicked: {e}"))?
 }
 
-/// Resolves every repo currently on disk in the workspace into one shared
-/// graph — the "static full universe" the UI lays out once. Any repo can
-/// declare `flows`; there is no distinguished "root" repo. An included repo
-/// that isn't on disk is rendered as a `downloaded: false` stub instead of
-/// blocking resolution — call `pull_all` to clone everything reachable and
-/// try again.
+/// An included repo that isn't on disk becomes a `downloaded: false` stub.
 pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     let scanned = scan_workspace(workspace)?;
-    // Held aside and folded in at the end alongside every other finding —
-    // a repo fghj could not read is a graph problem, not a scan crash.
     let scan_warnings = scanned.warnings;
     let scanned = scanned.components;
 
@@ -44,10 +32,7 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     }
 
     let mut ctx = ResolveCtx::new(workspace, &scanned, repo_index);
-    // Each phase reads what the one before produced for *every* repo — an
-    // include resolves against every repo's nodes, a `depends_on` on another
-    // repo's flow against its includes — so they run repo-by-repo inside,
-    // phase-by-phase outside.
+    // Each phase reads what the previous one produced for *every* repo.
     for (local_path, component) in &scanned {
         ctx.add_repo_nodes(local_path, component);
     }
@@ -66,16 +51,10 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
 
     let workspace_name = workspace_name(workspace);
 
-    // Sorted by id so node order — and therefore the frontend's computed
-    // layout — is stable across polls. `ctx.nodes` is a HashMap, so without
-    // this, each `resolve_universe` call could hand back the same nodes in a
-    // different order and make the graph visibly jump on every 3s refresh,
-    // for reasons unrelated to which flow is selected.
+    // Sorted so node order, and the UI layout, is stable across polls.
     let mut nodes: Vec<Node> = ctx.nodes.into_values().collect();
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
     for node in &mut nodes {
-        // Always known once a node's id is — see the field's own doc
-        // comment for why this isn't just set at construction time.
         node.domain = crate::orchestrator::derive_domain(
             &node.id,
             &workspace_name,
@@ -85,11 +64,6 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
 
     let edges = ctx.edges;
 
-    // Node ids are unique by construction; the names *derived* from them
-    // are not. This pass runs here rather than inside the traversal because
-    // it needs `node.domain`, which isn't known until the workspace name is.
-    // It subsumes the duplicate-`wildcard_hosts` check that used to live
-    // inline here — that was one special case of the same collision.
     let mut warnings = scan_warnings;
     warnings.extend(ctx.warnings);
     warnings.extend(super::uniqueness::check_derived_name_collisions(&nodes));
@@ -104,14 +78,7 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     })
 }
 
-// Pulling (`git clone`)-ing missing nodes now happens through
-// `downloads::DownloadRegistry`, which runs clones in a background thread and
-// streams their output to the UI instead of blocking the request. See
-// `src/downloads.rs`.
-
-/// The name every Docker object of `workspace` is derived from — the
-/// checkout directory's own name. Shared so that the code finding those
-/// objects again agrees with the code that named them.
+/// Shared so code finding Docker objects agrees with the code that named them.
 pub(crate) fn workspace_name(workspace: &Path) -> String {
     workspace
         .canonicalize()

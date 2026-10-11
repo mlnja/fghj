@@ -1,19 +1,6 @@
-//! `ResolveCtx` — turns every repo's parsed config into graph nodes and
-//! edges, in phases that each need the previous one complete:
-//!
-//! 1. [`ResolveCtx::add_repo_nodes`] — one node per `services:` entry.
-//! 2. [`ResolveCtx::add_includes`] — each `include:` alias resolved to a
-//!    folder on disk, or a stub node for a repo not pulled yet.
-//! 3. [`ResolveCtx::mark_tasks`] — which services are tasks, which is only
-//!    knowable once every `depends_on` in the repo has been read.
-//! 4. [`ResolveCtx::add_dependency_edges`] — `depends_on`, including waits on
-//!    another repo's flow.
-//! 5. [`ResolveCtx::check_references`] — every `${FGHJ_SERVICE_FQDN:…}`
-//!    names a service. Not an edge: a hostname is sugar, see
-//!    `concepts/dependency-kinds.md`.
-//!
-//! Flows are expanded afterwards, in [`super::flows`], over the finished
-//! node and edge set.
+//! `ResolveCtx` — turns every repo's config into nodes and edges, in phases
+//! that each need the previous one complete for every repo. Flows are expanded
+//! afterwards in [`super::flows`].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -30,24 +17,17 @@ use super::warning::Warning;
 pub struct ResolveCtx<'a> {
     pub(crate) workspace: &'a Path,
     pub(crate) scanned: &'a BTreeMap<String, ComponentConfig>,
-    /// normalized repo url -> local_path, for every repo actually on disk
-    /// (keyed by its real git remote, not by the folder name a URL would
-    /// conventionally clone to).
+    /// Keyed by the real git remote, not the folder name.
     pub(crate) repo_index: HashMap<String, String>,
-    /// normalized repo url -> stub node id, for included repos not yet on
-    /// disk, so two repos including the same missing one share one stub.
+    /// Shared, so two repos including the same missing one get one stub.
     pub(crate) stub_repo_ids: HashMap<String, String>,
-    /// local_path -> alias -> the folder (or stub id) that alias points at.
     pub(crate) includes: BTreeMap<String, BTreeMap<String, String>>,
     pub(crate) nodes: HashMap<String, Node>,
     pub(crate) edges: Vec<Edge>,
     pub(crate) warnings: Vec<Warning>,
 }
 
-/// A node's id: the service name, then the repo folder it is declared in.
-/// Leaf-first, like the domain built from it. Every service, backing service
-/// and task is keyed this way — they all belong to the repo, not to each
-/// other.
+/// Leaf-first, like the domain built from it.
 pub(crate) fn node_id(name: &str, local_path: &str) -> String {
     format!("{name}.{local_path}")
 }
@@ -70,20 +50,18 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    /// Whether `local_path` is a repo on disk (as opposed to a stub).
     pub(crate) fn is_scanned(&self, local_path: &str) -> bool {
         self.scanned.contains_key(local_path)
     }
 
-    /// Phase 1. A service with `build` is `kind: "service"`; one with only
-    /// `image` is `"backing"` — until [`Self::mark_tasks`] says otherwise.
+    /// Phase 1. `build` makes `"service"`, `image` only `"backing"` — until
+    /// [`Self::mark_tasks`] says otherwise.
     pub(crate) fn add_repo_nodes(&mut self, local_path: &str, component: &ComponentConfig) {
         if component.services.is_empty() {
             self.warnings.push(Warning::advisory(format!(
                 "'{local_path}' declares no services"
             )));
         }
-        // Read once per repo: every node declared here shares the checkout.
         let dir = self.workspace.join(local_path);
         let (repo, branch) = git_remote_and_branch(&dir);
         let dirty = git_status_dirty(&dir);
@@ -188,14 +166,11 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    /// Phase 2. Resolves each alias to the repo's folder — by its real git
-    /// remote if it's on disk under another name, else by the folder name
-    /// the URL clones to — or registers a stub node for a repo not pulled
-    /// yet. Never clones.
+    /// Phase 2. By the real git remote if on disk under another name, else by the
+    /// folder the URL clones to; a stub otherwise. Never clones.
     pub(crate) fn add_includes(&mut self, local_path: &str, component: &ComponentConfig) {
         let mut resolved = BTreeMap::new();
         for (alias, include) in &component.include {
-            // A bare name in `depends_on` or a flow could then mean either.
             if component.services.contains_key(alias.as_str())
                 || component.flows.contains_key(alias.as_str())
             {
@@ -234,10 +209,6 @@ impl<'a> ResolveCtx<'a> {
         self.includes.insert(local_path.to_string(), resolved);
     }
 
-    /// A `downloaded: false` placeholder for an included repo that isn't on
-    /// disk: you can see it, see which flows reach it, and pull it. Its id is
-    /// the folder it will be cloned into; what it declares is unknown until
-    /// then.
     fn stub(
         &mut self,
         norm: &str,
@@ -290,14 +261,9 @@ impl<'a> ResolveCtx<'a> {
         stub_id
     }
 
-    /// Phase 3. A service is a task when something in its repo waits on it
-    /// with `service_completed_successfully` — Compose's own idiom for a
-    /// one-shot container — or when it declares `run:`, which only a task
-    /// has. The second is how a seed nothing waits on (only listed in a
-    /// flow) is still read as a task. It has to be a kind, not just a
-    /// condition on the edge, because "exited" means success for a task and
-    /// drift for anything else, and the reconciler and UI have to tell them
-    /// apart.
+    /// Phase 3. Waited on with `service_completed_successfully`, or declares
+    /// `run:`. A kind, not an edge condition, because "exited" is success for a
+    /// task and drift for anything else.
     pub(crate) fn mark_tasks(&mut self, local_path: &str, component: &ComponentConfig) {
         let mut tasks: BTreeSet<&str> = BTreeSet::new();
         for service in component.services.values() {
@@ -314,11 +280,8 @@ impl<'a> ResolveCtx<'a> {
             if !tasks.contains(name.as_str()) && service.run.is_none() {
                 continue;
             }
-            // A task's completion predicate is its exit code: an exited
-            // container can never report Docker-`healthy`, and a restart
-            // policy on a container whose purpose is to exit would restart
-            // it forever. Refused rather than ignored, so the file never
-            // reads as if they were honoured.
+            // An exited container can never be healthy, and a restart policy would
+            // restart it forever. Refused so the file never reads as honoured.
             if service.healthcheck.is_some() {
                 self.warnings.push(Warning::blocking(format!(
                     "task '{id}' declares a healthcheck — a task is done when it exits 0, \
@@ -331,8 +294,7 @@ impl<'a> ResolveCtx<'a> {
                      would be restarted forever; leave it unset"
                 )));
             }
-            // Without one, it would re-run the image's own long-running
-            // `CMD` and never exit, hanging the run until the budget expires.
+            // Otherwise it runs the image's long-running `CMD` and never exits.
             if service.command.is_empty() {
                 self.warnings.push(Warning::blocking(format!(
                     "task '{id}' declares no `command` — a task is its command, and one \
@@ -353,10 +315,8 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    /// Phase 4. Within a repo, a `depends_on` key names a service. Across
-    /// repos it names a flow (`billing/db`) or the whole repo (`billing`),
-    /// never a service — those are the other repo's internals. A wait on a
-    /// flow becomes one edge per member of it.
+    /// Phase 4. Across repos a key names a flow or the whole repo, never a
+    /// service. A wait on a flow becomes one edge per member.
     pub(crate) fn add_dependency_edges(&mut self, local_path: &str, component: &ComponentConfig) {
         for (name, service) in &component.services {
             let from = node_id(name, local_path);
@@ -446,9 +406,6 @@ impl<'a> ResolveCtx<'a> {
         });
     }
 
-    /// The condition must be one the target can meet. fghj doesn't change
-    /// how long it waits per edge — see [`Condition`] — so a mismatch is a
-    /// statement about the target that isn't true, and is refused.
     fn check_condition(&mut self, from: &str, to: &str, condition: Condition) {
         let Some(target) = self.nodes.get(to) else {
             return;
@@ -473,11 +430,8 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    /// A `required: false` edge waits on nothing, so a condition on it is
-    /// either a contradiction or ignored. `service_completed_successfully`
-    /// is the contradiction: "must have finished" is a statement about
-    /// starting, and this dependency isn't needed to start. The other two
-    /// are Compose syntax fghj can't honour here, said rather than silently
+    /// `service_completed_successfully` contradicts not being needed to start;
+    /// the other two are Compose syntax fghj can't honour here, said rather than
     /// dropped.
     fn check_runtime_condition(&mut self, from: &str, key: &str, condition: Condition) {
         match condition {
@@ -505,7 +459,6 @@ impl<'a> ResolveCtx<'a> {
             .is_some_and(|m| m.contains_key(alias))
     }
 
-    /// The folder (or stub id) `alias` points at from `local_path`.
     pub(crate) fn alias_target(&self, local_path: &str, alias: &str) -> Option<&str> {
         self.includes
             .get(local_path)
@@ -513,8 +466,7 @@ impl<'a> ResolveCtx<'a> {
             .map(String::as_str)
     }
 
-    /// `billing/db` as written, made canonical: the alias replaced by the
-    /// folder it points at, since two repos can alias one repo differently.
+    /// The alias replaced by its folder: two repos can alias one repo differently.
     pub(crate) fn flow_label(&self, local_path: &str, target: Target<'_>) -> String {
         match target {
             Target::Bare(alias) => self
@@ -528,18 +480,9 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    /// Phase 5. Every `${FGHJ_SERVICE_FQDN:…}` in a node's `environment`
-    /// must name a service, or it couldn't expand — an error now rather
-    /// than a literal left in the container's environment.
-    ///
-    /// The path is `name` (a service in this repo) or `alias/name` (a
-    /// service in an included repo). Naming another repo's *service* is
-    /// allowed here and nowhere else: the address is the network contract,
-    /// which production has in its config too.
-    ///
-    /// No edge comes of it. A hostname is sugar for an address the author
-    /// could just as well have hardcoded, so it says nothing about what
-    /// depends on what; that is `depends_on`'s job alone.
+    /// Phase 5. Every `${FGHJ_SERVICE_FQDN:…}` must name a service. Another
+    /// repo's *service* is allowed here and nowhere else. No edge comes of it:
+    /// see `concepts/dependency-kinds.md`.
     pub(crate) fn check_references(&mut self) {
         let mut ids: Vec<&String> = self.nodes.keys().collect();
         ids.sort();
@@ -567,8 +510,6 @@ impl<'a> ResolveCtx<'a> {
                     };
                     match self.nodes.get(&to) {
                         Some(_) => {}
-                        // The repo isn't pulled yet, so nothing can be said
-                        // about what it declares.
                         None if target_repo_is_stub(self, &node.includes, &path) => {}
                         None => self.warnings.push(Warning::blocking(format!(
                             "'{id}' references '{path}' in a ${{FGHJ_SERVICE_FQDN:…}} template, \
@@ -594,9 +535,6 @@ fn target_repo_is_stub(
     }
 }
 
-/// The node id a `${FGHJ_SERVICE_FQDN:path}` names, from a node in
-/// `local_path` whose repo includes `includes`. `None` when the alias isn't
-/// one — whether the id exists is the caller's to check.
 pub(crate) fn reference_target_id(
     local_path: &str,
     includes: &BTreeMap<String, String>,

@@ -1,34 +1,6 @@
-//! The check that the four namespaces fghj *derives* from `node.id` are as
-//! injective as `node.id` itself is.
-//!
-//! `resolver::visit_local_service`/`visit_dependency` go to real trouble to
-//! make ids unique: leaf-first, unconditionally qualified by the owning
-//! scope. That uniqueness then gets projected into several flat codomains —
-//! a DNS name, a Docker container name — and **the projections are not
-//! injective**, so two distinct ids can land on one string. Nothing
-//! downstream notices: `state::query::resolve_route` is a `find_map` over a
-//! `BTreeMap` (first match by key order wins, silently), and Docker just
-//! refuses the second container with an error that says nothing about
-//! naming.
-//!
-//! The two ways it happens are structurally different and both are checked
-//! here:
-//!
-//! - **Concatenation without a discriminator.** A backing dependency's
-//!   domain is `{dep.name}.{owner_domain}` and a named port's alias is
-//!   `{port.name}.{node_domain}` — the same shape, built independently, in
-//!   one shared DNS codomain. A service with a backing dep `minio` *and* a
-//!   port named `minio` claims one name twice.
-//! - **Escaping that destroys the separator.** `derive_domain` keeps the
-//!   id's dots (injectivity preserved); `container_name` runs it through
-//!   `sanitize_label`, which collapses every non-alphanumeric run to `-`.
-//!   Service names may contain hyphens, so `a-b.c` and `a.b.c` both become
-//!   `a-b-c`.
-//!
-//! Both are [`Severity::Blocking`]: the config names something that cannot
-//! be carried out, and starting anyway gives a run that is quietly not the
-//! one the config describes — a service reachable at somebody else's domain,
-//! or a node with no container at all. See `concepts/AUDIT.md` B1/B2.
+//! Checks that the names derived from `node.id` (DNS names, container names)
+//! stay as unique as the ids: concatenation (`{dep}.{owner}` vs
+//! `{port}.{node}`) and `sanitize_label` (`a-b.c` vs `a.b.c`) both collide.
 
 use std::collections::BTreeMap;
 
@@ -36,18 +8,12 @@ use super::graph::Node;
 use super::warning::Warning;
 use crate::util::label::sanitize_label;
 
-/// What made a node claim a name — carried so the warning can say *why* two
-/// nodes want the same string, which is the part that is otherwise
-/// impossible to guess from the string alone.
+/// Carried so the warning can say *why* two nodes want one name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Claim {
-    /// The node's own derived domain (`derive_domain`).
     Domain,
-    /// A `{name}.{node domain}` alias from a named port.
     NamedPort,
-    /// A literal author-declared `additional_hosts` entry.
     AdditionalHost,
-    /// An `additional_hosts` entry that also claims every subdomain.
     WildcardHost,
 }
 
@@ -62,11 +28,7 @@ impl Claim {
     }
 }
 
-/// Every warning the derived namespaces earn. Returns them rather than
-/// pushing into `ResolveCtx` because this runs in `resolve_universe`'s final
-/// pass, after `Node.domain` has been filled in — the claims can't be
-/// computed during the traversal, since a node's domain isn't known until
-/// the workspace name is.
+/// Runs after `Node.domain` is filled in, so not during the traversal.
 pub(crate) fn check_derived_name_collisions(nodes: &[Node]) -> Vec<Warning> {
     let mut warnings = Vec::new();
     warnings.extend(check_domains(nodes));
@@ -74,15 +36,12 @@ pub(crate) fn check_derived_name_collisions(nodes: &[Node]) -> Vec<Warning> {
     warnings
 }
 
-/// The DNS codomain `state::query::resolve_route` actually scans: a node's
-/// own domain, its named-port aliases, and its literal host aliases, all in
-/// one flat map. Anything claimed twice is a silent first-match-wins
-/// misroute.
+/// Everything `state::query::resolve_route` scans; a duplicate is a silent
+/// first-match-wins misroute.
 fn check_domains(nodes: &[Node]) -> Vec<Warning> {
     let mut claims: BTreeMap<String, Vec<(&str, Claim)>> = BTreeMap::new();
     for node in nodes {
-        // A stub node has no resolved config yet, so it has nothing to
-        // claim beyond a domain it will only really own once pulled.
+        // A stub only owns its domain once pulled.
         if !node.downloaded && node.kind == "service" {
             continue;
         }
@@ -129,10 +88,6 @@ fn check_domains(nodes: &[Node]) -> Vec<Warning> {
         .collect()
 }
 
-/// `orchestrator::node_spec` names a container
-/// `fghj-{workspace}-{run}-{sanitize_label(node.id)}`. Two ids that sanitize
-/// alike mean the second container fails to be created at all, with a Docker
-/// name-conflict error that never mentions the node ids involved.
 fn check_container_names(nodes: &[Node]) -> Vec<Warning> {
     let mut by_label: BTreeMap<String, Vec<&str>> = BTreeMap::new();
     for node in nodes {
@@ -217,8 +172,6 @@ mod tests {
         assert!(check_derived_name_collisions(&nodes).is_empty());
     }
 
-    /// B1: the backing node `minio.cart.shop` and `cart.shop`'s port named
-    /// `minio` derive the identical domain from two independent formulas.
     #[test]
     fn a_named_port_colliding_with_a_backing_dependency_is_caught() {
         let mut cart = node("cart.shop", "cart.shop.ws.fghj.internal");
@@ -241,8 +194,6 @@ mod tests {
         );
     }
 
-    /// B2: `a-b.c` and `a.b.c` are distinct ids with distinct domains, and
-    /// the same container name.
     #[test]
     fn ids_that_sanitize_alike_are_caught_even_though_their_domains_differ() {
         let nodes = vec![
@@ -254,8 +205,6 @@ mod tests {
         assert!(warnings[0].message.contains("a-b-c"), "{warnings:?}");
     }
 
-    /// The pass this one replaces only compared wildcard suffixes to each
-    /// other; the same suffix declared twice must still be caught.
     #[test]
     fn two_nodes_declaring_one_wildcard_suffix_are_still_caught() {
         let mut a = node("a.r", "a.r.ws.fghj.internal");
@@ -271,9 +220,6 @@ mod tests {
         );
     }
 
-    /// A literal alias colliding with a derived domain was previously
-    /// checked nowhere at all — neither name is a wildcard, so the old pass
-    /// never looked.
     #[test]
     fn an_additional_host_colliding_with_a_derived_domain_is_caught() {
         let mut a = node("a.r", "a.r.ws.fghj.internal");
@@ -288,9 +234,6 @@ mod tests {
         );
     }
 
-    /// A not-yet-pulled service is a placeholder — warning that its
-    /// unresolved domain collides would fire on every workspace with two
-    /// stubs before anyone had written a line of config.
     #[test]
     fn stub_services_are_not_held_to_the_check() {
         let mut a = node("a.r", "same.ws.fghj.internal");

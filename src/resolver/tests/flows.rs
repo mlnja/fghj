@@ -1,5 +1,3 @@
-//! Flows — public start lists. See `concepts/flows-v2.md`.
-
 use super::write_yaml;
 use crate::resolver::*;
 
@@ -62,8 +60,6 @@ fn workspace() -> (tempfile::TempDir, Graph) {
     (tmp, graph)
 }
 
-/// Case 1: the flow starts its members and what they can't start without —
-/// and nothing that's only optional, so billing's search stays stopped.
 #[test]
 fn a_flow_starts_its_members_and_their_required_dependencies() {
     let (_tmp, graph) = workspace();
@@ -74,14 +70,12 @@ fn a_flow_starts_its_members_and_their_required_dependencies() {
     );
 }
 
-/// Case 2: no flow is everything, as in production.
 #[test]
 fn no_flow_starts_everything() {
     let (_tmp, graph) = workspace();
     assert_eq!(start(&graph, None).len(), graph.nodes.len());
 }
 
-/// A bare alias is all of that repo.
 #[test]
 fn an_alias_in_a_flow_is_the_whole_repo() {
     let (_tmp, graph) = workspace();
@@ -126,8 +120,6 @@ fn an_unknown_flow_is_an_error_not_an_empty_run() {
     assert!(err.contains("shop/checkout"), "{err}");
 }
 
-/// Case 3: a runtime dependency the run doesn't start is said before it
-/// starts — once, as the flow, not once per member.
 #[test]
 fn a_runtime_dependency_outside_the_run_is_an_advisory() {
     let tmp = tempfile::tempdir().unwrap();
@@ -158,7 +150,6 @@ flows:
         advisories[0].contains("'web.shop' needs 'billing/pricing' at runtime"),
         "{advisories:?}"
     );
-    // In the full run it is started, so nothing to say.
     assert!(
         graph
             .start_advisories(&graph.start_ids(None).unwrap())
@@ -166,8 +157,6 @@ flows:
     );
 }
 
-/// Case 14: flows naming each other across repos terminate, and each is
-/// expanded fully.
 #[test]
 fn flows_referencing_each_other_across_repos_terminate() {
     let tmp = tempfile::tempdir().unwrap();
@@ -203,8 +192,6 @@ flows:
     assert_eq!(start(&graph, Some("b/g")), ["x.a", "y.b"]);
 }
 
-/// A bad entry is reported once, by the flow that contains it, however
-/// many flows reach it.
 #[test]
 fn a_bad_flow_entry_is_reported_once_by_its_own_flow() {
     let tmp = tempfile::tempdir().unwrap();
@@ -258,7 +245,6 @@ flows:
     );
 }
 
-/// Case 11: a flow the checked-out branch doesn't have.
 #[test]
 fn a_missing_foreign_flow_lists_what_the_repo_has() {
     let tmp = tempfile::tempdir().unwrap();
@@ -287,7 +273,6 @@ flows:
     );
 }
 
-/// An empty flow still exists — naming it isn't a typo.
 #[test]
 fn an_empty_flow_is_known() {
     let tmp = tempfile::tempdir().unwrap();

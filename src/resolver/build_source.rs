@@ -1,16 +1,13 @@
 //! A git URL as a build context: `<url>#<ref>:<subdir>`, Compose's spelling.
-//! The service stays the declaring repo's; only the code comes from the URL,
-//! cloned into `.fghj/sources/` by pull. See `concepts/git-build-sources.md`.
+//! See `concepts/git-build-sources.md`.
 
 use std::path::Path;
 
 use super::git::{git_head_sha, git_status_dirty};
 use super::graph::BuildSource;
 
-/// Where every source is cloned, relative to the workspace.
 pub const SOURCES_DIR: &str = ".fghj/sources";
 
-/// A `build.context` that names a remote rather than a folder of the repo.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RemoteContext {
     pub url: String,
@@ -18,16 +15,14 @@ pub struct RemoteContext {
     pub subdir: Option<String>,
 }
 
-/// Whether `context` is a git URL. Anything else is a path in the repo.
 pub fn is_remote(context: &str) -> bool {
     ["https://", "http://", "ssh://", "git@", "file://"]
         .iter()
         .any(|p| context.starts_with(p))
 }
 
-/// Splits `<url>#<ref>:<subdir>`, or `None` for a context that isn't a URL.
-/// The fragment is split on its first `:`, so the colon of `git@host:org/x`
-/// is never mistaken for a subdir.
+/// The fragment is split on its first `:`, so the colon of `git@host:org/x` is
+/// never mistaken for a subdir.
 pub fn parse_remote(context: &str) -> Option<RemoteContext> {
     if !is_remote(context) {
         return None;
@@ -48,9 +43,7 @@ pub fn parse_remote(context: &str) -> Option<RemoteContext> {
     })
 }
 
-/// The workspace-relative folder a source is cloned into:
-/// `.fghj/sources/<name>@<ref>`, or `<name>` without a ref. A `/` in a branch
-/// name becomes `-`, so the clone is always one folder deep.
+/// `.fghj/sources/<name>@<ref>`; a `/` in a branch becomes `-`.
 pub fn source_path(url: &str, reference: Option<&str>) -> String {
     let name = url
         .trim_end_matches('/')
@@ -64,19 +57,17 @@ pub fn source_path(url: &str, reference: Option<&str>) -> String {
     }
 }
 
-/// Whether `reference` can only be a commit: `git clone --branch` takes
-/// branches and tags, so a commit is cloned whole and then checked out.
+/// `git clone --branch` takes only branches and tags, so a commit is cloned
+/// whole and then checked out.
 pub fn looks_like_commit(reference: &str) -> bool {
     (7..=40).contains(&reference.len()) && reference.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// A subdir that stays inside the clone: relative, and no `..`.
 pub fn subdir_is_contained(subdir: &str) -> bool {
     !subdir.starts_with('/') && !subdir.split('/').any(|seg| seg == "..")
 }
 
 impl BuildSource {
-    /// The source `remote` names, with what's on disk at its clone path.
     pub fn read(workspace: &Path, remote: &RemoteContext) -> Self {
         let path = source_path(&remote.url, remote.reference.as_deref());
         let dir = workspace.join(&path);

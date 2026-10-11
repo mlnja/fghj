@@ -39,9 +39,6 @@ fn build_inputs_round_trip_into_the_graph_node() {
     assert_eq!(build.secrets[0].file, ".npmrc");
 }
 
-/// Every field added by `concepts/build-inputs.md` is optional, so a config
-/// written before they existed has to keep resolving to the same build it
-/// always did — no target, no forwarded agent, no secrets.
 #[test]
 fn a_build_block_without_the_new_fields_keeps_its_old_meaning() {
     let tmp = tempfile::tempdir().unwrap();
@@ -74,8 +71,6 @@ fn build_of(graph: &Graph, id: &str) -> NodeBuild {
         .unwrap()
 }
 
-/// `concepts/git-build-sources.md`: the code comes from the URL, the service
-/// is still this repo's.
 #[test]
 fn a_git_context_builds_this_repos_service_from_a_clone() {
     let tmp = tempfile::tempdir().unwrap();
@@ -148,8 +143,6 @@ fn a_subdir_outside_the_clone_is_blocking() {
     );
 }
 
-/// Same URL and ref share one clone; two repos named alike would fight over
-/// one folder.
 #[test]
 fn two_repos_wanting_the_same_clone_folder_is_blocking() {
     let tmp = tempfile::tempdir().unwrap();

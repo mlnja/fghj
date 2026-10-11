@@ -1,43 +1,13 @@
-//! `version:` — what a `.fghj.yaml` claims to be written against.
-//!
-//! The audit (E8) put it sharply: the CUE pins `version` to the literal
-//! `"1.0"`, and the whole premise of the design is that no repo owns the
-//! config — every repo is a peer, each ships its own `.fghj.yaml`, and they
-//! resolve into one graph. Those two facts are incompatible. There is no
-//! way for one repo to adopt a v1.1 feature while its peers are still on
-//! v1.0, because they must all resolve together, so any evolution requires
-//! every repo in every workspace to change at once — reintroducing exactly
-//! the central-coordination problem the federated model exists to abolish.
-//!
-//! At runtime it was moot in the worst way: serde never checked the value
-//! at all, so `version` was decoration.
-//!
-//! So: **major is a compatibility barrier, minor is not.**
-//!
-//! - A *different major* is rejected outright. It means the file says
-//!   something this build cannot correctly interpret, and guessing at it
-//!   would be worse than refusing.
-//! - Any *minor* is accepted, including one newer than this build knows.
-//!   That is what makes staggered adoption possible: a repo can start using
-//!   a 1.1 feature while its peers stay on 1.0, and they still resolve
-//!   together.
-//!
-//! Accepting a newer minor silently would be its own failure, though — the
-//! features added after this build's minor are simply not there, and the
-//! symptom would be config that reads as if it were honoured. So
-//! `scan_workspace` pairs acceptance with an advisory warning naming the
-//! repo and both versions.
-//!
-//! 2.0 is the one major bump so far (`concepts/flows-v2.md`); the 1.x
-//! format is gone, and a 1.x file is refused like any other major.
+//! `version:` — major is a compatibility barrier, minor is not, so peer repos
+//! can adopt a newer minor without a flag day. A newer minor is accepted with
+//! an advisory warning.
 
 use std::fmt;
 
 use serde::{Deserialize, Deserializer};
 
-/// The schema version this build implements. Bump `minor` when adding a
-/// backwards-compatible field; bump `major` only for a change that would
-/// make an older file mean something different.
+/// Bump `minor` for backwards-compatible fields, `major` only when an older
+/// file would mean something different.
 pub const SCHEMA_VERSION: Version = Version { major: 2, minor: 0 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -47,7 +17,6 @@ pub struct Version {
 }
 
 impl Version {
-    /// `Err` carries a ready-to-show explanation.
     pub fn parse(s: &str) -> Result<Self, String> {
         let (major, minor) = s.split_once('.').ok_or_else(|| {
             format!("version '{s}' is not major.minor (expected something like \"2.0\")")
@@ -71,8 +40,6 @@ impl Version {
         Ok(version)
     }
 
-    /// True when the file was written against a newer minor than this build
-    /// implements — accepted, but worth saying out loud.
     pub fn is_newer_minor_than_supported(&self) -> bool {
         self.minor > SCHEMA_VERSION.minor
     }
@@ -100,8 +67,6 @@ mod tests {
         assert_eq!(Version::parse("2.0").unwrap(), SCHEMA_VERSION);
     }
 
-    /// The point of E8: a peer adopting a newer minor must still resolve
-    /// alongside repos that have not, with no flag day.
     #[test]
     fn a_newer_minor_is_accepted_and_flagged() {
         let v = Version::parse("2.7").unwrap();
@@ -117,8 +82,6 @@ mod tests {
         );
     }
 
-    /// Major is the barrier: refusing beats guessing, since the same file
-    /// would mean something different.
     #[test]
     fn a_different_major_is_refused_and_says_what_is_supported() {
         let err = Version::parse("3.0").unwrap_err();
@@ -138,12 +101,7 @@ mod tests {
         }
     }
 
-    /// Same contract as `name::rust_and_cue_agree_on_what_a_name_is`: the
-    /// schema is the author's self-check, so it must not reject a file the
-    /// daemon would accept. A literal `"1.0"` there — which is what it used
-    /// to say — would fail `fghj validate` on a repo that had legitimately
-    /// moved to 1.1, reintroducing the flag day this split exists to
-    /// remove.
+    /// The schema must not reject a newer minor the daemon would accept.
     #[test]
     fn the_schema_accepts_the_same_majors_this_build_does() {
         let schema = include_str!("../../schema/component.cue");
@@ -155,8 +113,6 @@ mod tests {
         );
     }
 
-    /// `version` used to be an unchecked `String` — decoration. It is now
-    /// the one field a component cannot get wrong quietly.
     #[test]
     fn deserializing_rejects_an_unsupported_version() {
         let err = serde_yaml::from_str::<Version>("\"3.4\"").unwrap_err();

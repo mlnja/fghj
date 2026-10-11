@@ -1,13 +1,4 @@
 //! Flows — a repo's public start lists. See `concepts/flows-v2.md`.
-//!
-//! An entry is a service or flow of the same repo, `alias/flow` (another
-//! repo's flow), or `alias` (all of another repo, and everything it
-//! includes). Another repo's *services* are never named: they're its
-//! internals, and its flows are the contract.
-//!
-//! A flow's id is `{local_path}/{flow}`. What a run of it starts is its
-//! members plus everything they can't start without — the closure over
-//! required "depends-on" edges ([`super::graph::required_closure`]).
 
 use std::collections::BTreeSet;
 
@@ -17,15 +8,9 @@ use super::visit::{ResolveCtx, node_id};
 use super::warning::Warning;
 
 impl<'a> ResolveCtx<'a> {
-    /// The node ids a cross-repo `depends_on` target stands for: the
-    /// included repo's own nodes (`alias`), or one of its flows
-    /// (`alias/flow`). `Err` says why the target names nothing, to follow
-    /// the dependent's id.
-    ///
-    /// Unlike `alias` in a flow, waiting on a repo doesn't reach through
-    /// what *it* includes: its services already wait on what they need from
-    /// there, and an include pointing back at the dependent would make it
-    /// wait on itself.
+    /// `Err` says why the target names nothing. Unlike `alias` in a flow, this
+    /// doesn't reach through what the repo includes: an include pointing back at
+    /// the dependent would make it wait on itself.
     pub(crate) fn foreign_members(
         &self,
         local_path: &str,
@@ -37,7 +22,6 @@ impl<'a> ResolveCtx<'a> {
                 let repo = self.alias_target(local_path, alias).unwrap_or(alias);
                 let mut seen = BTreeSet::new();
                 if let Some(includes) = self.includes.get(repo) {
-                    // Marked seen, so only `repo` itself is walked.
                     seen.extend(includes.values().cloned());
                 }
                 seen.remove(repo);
@@ -63,8 +47,7 @@ impl<'a> ResolveCtx<'a> {
         Ok(out.into_iter().collect())
     }
 
-    /// `alias/name` must be a flow of the repo `alias` points at. A repo not
-    /// pulled yet can't be checked, so it passes.
+    /// A repo not pulled yet can't be checked, so it passes.
     fn check_foreign_flow(&self, alias: &str, repo: &str, name: &str) -> Result<(), String> {
         let Some(component) = self.scanned.get(repo) else {
             return Ok(());
@@ -94,8 +77,6 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    /// Every node in `repo`, and in every repo it includes, transitively. A
-    /// repo not pulled yet is its stub node.
     fn repo_members(&self, repo: &str, seen: &mut BTreeSet<String>, out: &mut BTreeSet<String>) {
         if !seen.insert(repo.to_string()) {
             return;
@@ -119,10 +100,8 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    /// Adds the members of `repo`'s flow `flow` to `out`. Each `(repo, flow)`
-    /// is expanded once, so flows naming each other — even across repos —
-    /// terminate. A bad entry is reported only at `depth` 0, by the flow
-    /// that contains it, so it's named once however many flows reach it.
+    /// Each `(repo, flow)` is expanded once, so flows naming each other terminate.
+    /// A bad entry is reported only at `depth` 0, so it's named once.
     fn expand_flow(
         &self,
         repo: &str,
@@ -172,8 +151,6 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    /// Phase 6, over the finished node and edge set: every flow's id, with
-    /// `Node.flows` and `Edge.flows` filled in from its start set.
     pub(crate) fn resolve_flows(&mut self) -> Vec<String> {
         let mut flow_ids = Vec::new();
         let mut memberships: Vec<(String, BTreeSet<String>)> = Vec::new();

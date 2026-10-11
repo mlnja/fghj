@@ -1,16 +1,8 @@
-//! Shared fixtures and the per-feature test modules for the resolver.
-
 use std::fs;
 use std::path::Path;
 
-/// Writes a component config with a single service named after
-/// `local_path` (matching every test's own convention) — `service_yaml`
-/// is the body that used to sit directly under a singular `service:`
-/// field (no `name:` line; the map key is the name now), reindented one
-/// level deeper to sit under `services:\n  {local_path}:`.
-///
-/// A body that names neither `build` nor `image` gets `build: .`, so the
-/// node is the repo's own service — which is what nearly every test means.
+/// `service_yaml` is the body under `services:\n  {local_path}:`. One naming
+/// neither `build` nor `image` gets `build: .`.
 pub fn write_component(workspace: &Path, local_path: &str, service_yaml: &str) {
     let dir = workspace.join(local_path);
     fs::create_dir_all(&dir).unwrap();
@@ -35,16 +27,12 @@ pub fn write_component(workspace: &Path, local_path: &str, service_yaml: &str) {
     .unwrap();
 }
 
-/// Writes `yaml` verbatim as `local_path`'s `.fghj.yaml`, for a test that
-/// needs more than one service, an `include:` or `flows:`.
 pub fn write_yaml(workspace: &Path, local_path: &str, yaml: &str) {
     let dir = workspace.join(local_path);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join(".fghj.yaml"), yaml).unwrap();
 }
 
-/// Makes `workspace/local_path` a git checkout whose `origin` is `url`, so
-/// an `include:` of `url` finds it.
 pub fn git_init(workspace: &Path, local_path: &str, url: &str) {
     let dir = workspace.join(local_path);
     fs::create_dir_all(&dir).unwrap();

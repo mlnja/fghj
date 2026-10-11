@@ -1,38 +1,12 @@
-//! Dependency-cycle detection.
-//!
-//! [[branch-ownership-model]] acknowledges outright that real requirement
-//! cycles between repos are possible, and `orchestrator::topological_start_order`
-//! already handles one without hanging: when no node can make progress, the
-//! remainder is appended in sorted order and the run starts anyway. That
-//! fallback is the right call — refusing to bring up an entire environment
-//! over a cycle would be worse than bringing it up in an arbitrary order.
-//!
-//! What was missing is that nobody was ever told. The start order silently
-//! stops being a dependency order, so a service can come up before the
-//! database it declared it needs, and the only symptom is a crash loop with
-//! no explanation. The graph *layout* code defends against cycles (it drops
-//! back-edges so the canvas doesn't grow without bound); the code that
-//! actually starts containers did not even mention them.
-//!
-//! It used to be advisory. With flows v2 it is blocking
-//! (`concepts/flows-v2.md`, case 6): every required edge is something the
-//! author wrote as "can't start before", so a cycle is a contradiction in
-//! the file, not an ambiguity to paper over. Calls in both directions are
-//! `required: false` edges, which never order anything, so the one
-//! legitimate loop — two services calling each other — can't trip this
-//! (`concepts/dependency-kinds.md`).
+//! Dependency-cycle detection. Blocking: a loop of required edges can never
+//! start (`concepts/flows-v2.md`, case 6).
 
 use std::collections::{HashMap, HashSet};
 
 use super::graph::Edge;
 use super::warning::Warning;
 
-/// One warning per distinct cycle, naming the nodes in the order they
-/// depend on each other so the message reads as the loop it is
-/// (`a -> b -> c -> a`) rather than as an unordered set.
-///
-/// Only edges that are [`Edge::needed_to_start`] participate: a
-/// `required: false` one orders nothing, so it can't deadlock anything.
+/// Only [`Edge::needed_to_start`] edges participate.
 pub(crate) fn check_cycles(edges: &[Edge]) -> Vec<Warning> {
     let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
     for edge in edges {
@@ -43,9 +17,7 @@ pub(crate) fn check_cycles(edges: &[Edge]) -> Vec<Warning> {
                 .push(edge.to.as_str());
         }
     }
-    // Sorted so the set of cycles reported — and which node each is rooted
-    // at — is stable across runs, the same reason `topological_start_order`
-    // sorts its fallback.
+    // Sorted so reported cycles are stable across runs.
     for targets in adjacency.values_mut() {
         targets.sort_unstable();
         targets.dedup();
@@ -71,8 +43,7 @@ pub(crate) fn check_cycles(edges: &[Edge]) -> Vec<Warning> {
         }
     }
 
-    // Two back-edges around the same loop describe the same cycle rotated;
-    // canonicalize by sorted node set so it is reported once.
+    // Rotations of one loop are the same cycle; report it once.
     let mut seen: HashSet<Vec<&str>> = HashSet::new();
     cycles
         .into_iter()
@@ -92,8 +63,6 @@ pub(crate) fn check_cycles(edges: &[Edge]) -> Vec<Warning> {
         .collect()
 }
 
-/// Plain iterative-friendly recursive DFS: a back-edge to a node still on
-/// the stack is a cycle, and the cycle is the stack from that node onward.
 fn walk<'a>(
     id: &'a str,
     adjacency: &HashMap<&'a str, Vec<&'a str>>,
@@ -154,23 +123,18 @@ mod tests {
         );
     }
 
-    /// Every required edge is a "can't start before", so a loop of them can
-    /// never start.
     #[test]
     fn cycles_are_blocking() {
         let edges = vec![edge("a", "b", "depends-on"), edge("b", "a", "depends-on")];
         assert!(check_cycles(&edges)[0].is_blocking());
     }
 
-    /// Two services calling each other is normal, and not a start-order
-    /// problem: a runtime dependency never orders anything.
     #[test]
     fn runtime_edges_do_not_form_a_reportable_cycle() {
         let edges = vec![edge("a", "b", "depends-on"), runtime_edge("b", "a")];
         assert!(check_cycles(&edges).is_empty());
     }
 
-    /// Two independent cycles are two findings, not one merged blob.
     #[test]
     fn disjoint_cycles_are_reported_separately() {
         let edges = vec![

@@ -68,10 +68,6 @@ services:
     ));
 }
 
-/// `shared` has to survive the untagged disjunction — it is the field that
-/// decides whether this volume is private to `postgres.myservice`
-/// or workspace-global, so silently defaulting it to `false` on a config
-/// that asked for `true` would quietly un-share storage someone is relying on.
 #[test]
 fn a_shared_named_volume_carries_the_flag_through_resolution() {
     let tmp = tempfile::tempdir().unwrap();

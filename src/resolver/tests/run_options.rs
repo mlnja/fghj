@@ -110,8 +110,6 @@ services:
     assert_eq!(backing.platform.as_deref(), Some("linux/amd64"));
     assert_eq!(backing.env_file, vec![".env.postgres"]);
     assert_eq!(backing.restart, "unless-stopped");
-    // The case this knob exists for: a database that needs longer than
-    // Docker's 10s to flush before it is killed.
     assert!(backing.stop_signal.is_none());
     assert_eq!(backing.stop_grace_period, 120);
     let hc = backing.healthcheck.as_ref().unwrap();
@@ -136,16 +134,10 @@ fn run_options_default_to_compose_equivalent_no_ops() {
     assert!(service.labels.is_empty());
     assert!(!service.privileged);
     assert!(service.healthcheck.is_none());
-    // Docker's own default grace period, and no signal override — so a
-    // config that says nothing about stopping behaves exactly as it did
-    // before these fields existed.
     assert!(service.stop_signal.is_none());
     assert_eq!(service.stop_grace_period, 10);
 }
 
-/// A task has no `restart` and no `healthcheck`, but it does get the stop
-/// knobs — a migration caught mid-run by a teardown is precisely the thing
-/// that should not be SIGKILLed.
 #[test]
 fn a_task_carries_the_stop_knobs_even_though_it_has_no_restart_policy() {
     let tmp = tempfile::tempdir().unwrap();
@@ -178,9 +170,6 @@ services:
     assert_eq!(task.restart, "no");
 }
 
-/// CUE's `stop_signal` pattern and the Rust check must agree, so an author
-/// who writes the unprefixed name Docker itself would have taken gets one
-/// clear answer rather than two different ones.
 #[test]
 fn an_unprefixed_stop_signal_is_a_blocking_warning() {
     let tmp = tempfile::tempdir().unwrap();
@@ -210,13 +199,6 @@ fn a_well_formed_stop_signal_earns_no_warning() {
     );
 }
 
-/// `#Healthcheck.test` is `[_, ...]` in CUE — non-empty. The Rust side is the
-/// enforcing boundary, so if it silently accepted `test: []` the schema would
-/// be rejecting a file the daemon runs, which is the one asymmetry the two are
-/// not allowed to have. Blocking, because the failure mode is silent: Docker
-/// reads an empty `Test` as "inherit the image's healthcheck", so the node
-/// ends up with no healthcheck at all — and the run-wide health budget then
-/// waits on nothing.
 #[test]
 fn warns_when_a_healthcheck_declares_an_empty_test() {
     let tmp = tempfile::tempdir().unwrap();
@@ -238,8 +220,6 @@ fn warns_when_a_healthcheck_declares_an_empty_test() {
     assert!(w.message.contains("myservice.myservice"));
 }
 
-/// The same check applies to a backing service's healthcheck, which is the
-/// far more common place to write one (a `pg_isready` on a database).
 #[test]
 fn warns_when_a_backing_healthcheck_declares_an_empty_test() {
     let tmp = tempfile::tempdir().unwrap();

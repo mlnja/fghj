@@ -1,41 +1,16 @@
-//! `Name` — the one identifier shape fghj accepts, enforced where the
-//! bytes actually enter the process.
-//!
-//! The audit's framing of this (B8) was that `schema/*.cue` is a linter,
-//! not a type system: it is enforced only by `fghj validate`, an opt-in CLI
-//! command shelling out to an external `cue` binary that may not be
-//! installed, and which the daemon never invokes. The real runtime boundary
-//! is serde, and serde was strictly more permissive. A service named
-//! `"My Service!"` parsed fine, flowed unsanitized into `node.id`, and from
-//! there into a DNS name and a Docker network alias that are simply invalid
-//! — while the *container* name, which goes through `sanitize_label`,
-//! worked. Three namespaces, three different escaping disciplines, one
-//! unvalidated input.
-//!
-//! So the constraint lives here, in the type, and `Deserialize` is where it
-//! is checked. CUE remains a convenience for the person writing the file
-//! (and for their editor, agent, or CI); it is not what the daemon trusts.
-//! What CUE must *not* do is tell an author something is fine that fghj
-//! will then reject — see `rust_and_cue_agree_on_what_a_name_is`, which
-//! reads the schemas and fails if they ever disagree.
+//! `Name` — the one identifier shape fghj accepts, checked at deserialize time.
+//! CUE is only the author's lint; serde is the real boundary.
+//! `rust_and_cue_agree_on_what_a_name_is` keeps the two in step.
 
 use std::fmt;
 
 use serde::{Deserialize, Deserializer};
 
-/// The literal the schemas spell as `=~"^[a-z0-9][a-z0-9-]*$"`. Kept as a
-/// string so the drift test can compare it against the schema text
-/// verbatim; the actual check is [`is_valid`], hand-written because the
-/// pattern is small and a bespoke check can say *why* a name was rejected,
-/// which a regex mismatch cannot.
+/// Kept as a string for the drift test; [`is_valid`] is the actual check.
 pub const NAME_PATTERN: &str = "^[a-z0-9][a-z0-9-]*$";
 
-/// Lowercase alphanumerics and dashes, starting with an alphanumeric.
-///
-/// This is deliberately the intersection of what every downstream
-/// namespace accepts rather than the union: a DNS label, a Docker network
-/// alias, and a container name all tolerate it unchanged, so nothing
-/// downstream has to escape and no two escapings can disagree.
+/// The intersection of DNS label, network alias and container name, so nothing
+/// downstream has to escape.
 pub fn is_valid(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
@@ -45,8 +20,6 @@ pub fn is_valid(s: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// Explains the *first* thing wrong with `s`, in the words an author can
-/// act on. Returns `None` when `s` is a valid name.
 fn why_invalid(s: &str) -> Option<String> {
     if s.is_empty() {
         return Some("a name cannot be empty".into());
@@ -72,14 +45,10 @@ fn why_invalid(s: &str) -> Option<String> {
     None
 }
 
-/// A validated identifier. Constructible only by deserializing or via
-/// [`Name::parse`], so holding one is proof it is safe to put in a domain,
-/// a network alias and a container name without further escaping.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct Name(String);
 
 impl Name {
-    /// `Err` carries a ready-to-show explanation, not just a bool.
     pub fn parse(s: impl Into<String>) -> Result<Self, String> {
         let s = s.into();
         match why_invalid(&s) {
@@ -143,7 +112,6 @@ mod tests {
         }
     }
 
-    /// The exact example B8 names.
     #[test]
     fn the_name_that_used_to_reach_dns_unsanitized_is_rejected() {
         let err = Name::parse("My Service!").unwrap_err();
@@ -167,8 +135,6 @@ mod tests {
         }
     }
 
-    /// A dash may not *start* a name (it would make an invalid DNS label)
-    /// but is fine anywhere else, including at the end.
     #[test]
     fn a_leading_dash_is_the_only_positional_rule() {
         assert!(Name::parse("-x").is_err());
@@ -182,21 +148,10 @@ mod tests {
         assert!(err.to_string().contains("uppercase"), "{err}");
     }
 
-    /// CUE is the author's self-check, not what the daemon trusts — but it
-    /// must never tell an author their file is fine when fghj will reject
-    /// it. Every identifier constraint in the schemas therefore has to be
-    /// exactly the pattern this module implements; a schema that is *more
-    /// permissive* would lie to the person running `fghj validate`.
-    ///
-    /// Checked by reading the schema text rather than by convention,
-    /// because a comment saying "keep these in sync" is precisely the thing
-    /// that does not stay in sync.
     #[test]
     fn rust_and_cue_agree_on_what_a_name_is() {
-        // Every `=~"..."` in the schemas, with the ones that constrain
-        // things that are not names (image refs, env vars, host aliases,
-        // numeric port keys, git URLs, dotted domains) filtered out by
-        // their own distinctive syntax.
+        // Every `=~"..."` in the schemas, minus non-name ones (image refs, env vars,
+        // host aliases, port keys, git URLs, domains).
         let schemas = [
             include_str!("../../schema/component.cue"),
             include_str!("../../schema/dependency.cue"),
@@ -207,8 +162,6 @@ mod tests {
                 let rest = &text[idx + 3..];
                 let end = rest.find('"').expect("unterminated =~ pattern in schema");
                 let pattern = &rest[..end];
-                // Only the identifier constraints are this module's
-                // business; the others describe different codomains.
                 if !pattern.starts_with("^[a-z0-9][a-z0-9-]") {
                     continue;
                 }
@@ -220,8 +173,7 @@ mod tests {
                 found += 1;
             }
         }
-        // Guards against the filter silently matching nothing and the
-        // assertion above never running.
+        // Guards against the filter matching nothing.
         assert!(
             found >= 6,
             "expected the schemas to constrain names, found {found}"

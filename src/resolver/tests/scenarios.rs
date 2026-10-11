@@ -1,11 +1,6 @@
-//! Whole-workspace scenarios: several `.fghj.yaml` files resolved together,
-//! checked for what a run starts, in which order, and which contradictions
-//! refuse it. The per-feature modules test one rule each; these test the
-//! rules composing.
-//!
-//! A start plan is asserted as *waves*: the run starts exactly the nodes
-//! listed, and everything in one wave starts before anything in the next.
-//! Order inside a wave is deliberately unspecified.
+//! Whole-workspace scenarios. A start plan is asserted as *waves*: everything
+//! in one wave starts before anything in the next; order inside a wave is
+//! unspecified.
 
 use super::write_yaml;
 use crate::orchestrator::topological_start_order;
@@ -20,7 +15,6 @@ fn workspace(repos: &[(&str, &str)]) -> (tempfile::TempDir, Graph) {
     (tmp, graph)
 }
 
-/// The order a run of `flow` would start its nodes in.
 fn plan(graph: &Graph, flow: Option<&str>) -> Vec<String> {
     let ids = graph.start_ids(flow).unwrap();
     topological_start_order(&ids, &graph.edges)
@@ -46,8 +40,6 @@ fn assert_waves(plan: &[String], waves: &[&[&str]]) {
     }
 }
 
-/// `id` starts after every one of `deps`, for a node that isn't in one
-/// wave with anything else.
 fn assert_after(plan: &[String], id: &str, deps: &[&str]) {
     let pos = |id: &str| plan.iter().position(|p| p == id).unwrap();
     for dep in deps {
@@ -62,7 +54,6 @@ fn assert_clean(graph: &Graph) {
     assert!(graph.warnings.is_empty(), "{:#?}", graph.warnings);
 }
 
-/// Every reported cycle, as its `a -> b -> a` text.
 fn cycles(graph: &Graph) -> Vec<String> {
     graph
         .warnings
@@ -81,10 +72,6 @@ fn blocking(graph: &Graph, needle: &str) -> bool {
 
 // ---------------------------------------------------------------- one repo
 
-/// A typical app: two databases, a migration, a seed that needs the
-/// migrated schema (a task by `run:`, only one journey wants it), an API
-/// and a worker sharing the database, and a web front that waits on the
-/// API.
 const SHOP: &str = r#"version: "2.0"
 services:
   db:
@@ -158,8 +145,6 @@ fn tasks_are_marked_and_services_are_not() {
     assert_ne!(kind("worker.shop"), "task");
 }
 
-/// Nothing needs `seed` to start, so the storefront flow leaves it out, and
-/// the worker, which nothing in the flow needs either.
 #[test]
 fn a_flow_drops_optional_dependencies_and_unrelated_services() {
     let (_tmp, graph) = workspace(&[("shop", SHOP)]);
@@ -174,8 +159,6 @@ fn a_flow_drops_optional_dependencies_and_unrelated_services() {
     );
 }
 
-/// Listing the seed in a flow brings it in, after what *it* needs. It's
-/// not ordered against `api`: nothing declared that one needs the other.
 #[test]
 fn a_seed_listed_in_a_flow_starts_after_what_it_needs() {
     let (_tmp, graph) = workspace(&[("shop", SHOP)]);
@@ -193,9 +176,6 @@ fn a_seed_listed_in_a_flow_starts_after_what_it_needs() {
     );
 }
 
-/// A runtime dependency orders nothing and brings nothing in. Listed in
-/// the flow, it starts with no ordering against its dependent; left out,
-/// the start says so.
 #[test]
 fn a_runtime_dependency_is_started_only_when_listed_and_never_ordered() {
     let (_tmp, graph) = workspace(&[(
@@ -222,15 +202,12 @@ flows:
         vec!["'api.app' needs 'hooks.app' at runtime, but this run doesn't start it"]
     );
 
-    // Sorted, not dependency-ordered: "api" < "hooks" alphabetically, so a
-    // runtime edge that ordered anything would have put hooks first.
+    // Sorted, not dependency-ordered: a runtime edge would have put hooks first.
     let full = plan(&graph, Some("app/full"));
     assert_eq!(full, vec!["api.app", "hooks.app"]);
     assert!(graph.start_advisories(&full).is_empty());
 }
 
-/// "Must have finished" is a start-time statement, so a runtime
-/// dependency can't say it.
 #[test]
 fn a_runtime_dependency_that_must_complete_is_blocking() {
     let (_tmp, graph) = workspace(&[(
@@ -262,8 +239,6 @@ fn a_flow_of_one_leaf_service_starts_its_dependencies_only() {
     );
 }
 
-/// The start set is the same whichever member a flow lists first, and a
-/// flow can name another flow of its own repo.
 #[test]
 fn flows_compose_within_a_repo() {
     let (_tmp, graph) = workspace(&[(
@@ -293,9 +268,6 @@ flows:
     );
 }
 
-/// Two services that call each other: `required: false` in both
-/// directions, never a cycle, and both still wait on what they need to
-/// start. Their hostname templates add nothing to the graph.
 #[test]
 fn services_calling_each_other_are_not_a_cycle() {
     let (_tmp, graph) = workspace(&[(
@@ -329,8 +301,6 @@ services:
     assert_eq!(runtime, 2, "{:?}", graph.edges);
 }
 
-/// Nodes with no dependencies at all start in a stable (sorted) order, so
-/// two runs of the same graph start the same way.
 #[test]
 fn independent_services_start_in_a_stable_order() {
     let yaml = r#"version: "2.0"
@@ -396,11 +366,9 @@ services:
         found[0].contains("a.app -> b.app -> c.app -> a.app"),
         "{found:?}"
     );
-    // `d` hangs off the ring without being part of it.
     assert!(!found[0].contains("d.app"), "{found:?}");
 }
 
-/// Two separate loops are two warnings, so both get fixed in one go.
 #[test]
 fn independent_cycles_are_reported_separately() {
     let (_tmp, graph) = workspace(&[(
@@ -424,8 +392,6 @@ services:
     assert_eq!(cycles(&graph).len(), 2, "{:?}", graph.warnings);
 }
 
-/// A runtime dependency orders nothing, so a loop through one deadlocks
-/// nothing and isn't a cycle.
 #[test]
 fn a_loop_through_a_runtime_dependency_is_not_a_cycle() {
     let (_tmp, graph) = workspace(&[(
@@ -445,7 +411,6 @@ services:
     assert_eq!(plan(&graph, None), vec!["a.app", "b.app"]);
 }
 
-/// The classic mistake: the migration waits on the API it migrates for.
 #[test]
 fn a_task_waiting_on_its_own_waiter_is_a_cycle() {
     let (_tmp, graph) = workspace(&[(
@@ -465,7 +430,6 @@ services:
     assert_eq!(cycles(&graph).len(), 1, "{:?}", graph.warnings);
 }
 
-/// A diamond converges but doesn't loop.
 #[test]
 fn a_diamond_is_not_a_cycle() {
     let (_tmp, graph) = workspace(&[(
@@ -494,8 +458,6 @@ services:
 
 // --------------------------------------------------------------- many repos
 
-/// shop -> billing -> ledger, each through a flow. Each repo exposes only
-/// a slice of itself, so a checkout run starts only those slices.
 const LEDGER: &str = r#"version: "2.0"
 services:
   ledger-db:
@@ -556,7 +518,6 @@ fn a_flow_reaches_through_two_repos_and_starts_deepest_first() {
     let (_tmp, graph) = three_tiers();
     assert_clean(&graph);
     let mut checkout = plan(&graph, Some("storefront/checkout"));
-    // Storefront's own database waits on nothing; only web needs it.
     assert_after(&checkout, "web.storefront", &["db.storefront"]);
     checkout.retain(|id| id != "db.storefront");
     assert_waves(
@@ -580,8 +541,6 @@ fn the_full_run_includes_what_no_flow_reaches() {
     assert_eq!(all.len(), graph.nodes.len());
 }
 
-/// Cross-repo waits are recorded per member, with the flow they came
-/// through, so the UI and the start order see the same thing.
 #[test]
 fn a_cross_repo_wait_is_an_edge_per_flow_member() {
     let (_tmp, graph) = three_tiers();
@@ -597,8 +556,6 @@ fn a_cross_repo_wait_is_an_edge_per_flow_member() {
     );
 }
 
-/// Each flow of the deepest repo is its own start set: one flow doesn't
-/// pull in the others.
 #[test]
 fn a_repos_own_flows_stay_independent() {
     let (_tmp, graph) = three_tiers();
@@ -612,8 +569,6 @@ fn a_repos_own_flows_stay_independent() {
     );
 }
 
-/// Two repos depending on one shared repo get one copy of it, started
-/// once, before either of them.
 #[test]
 fn two_dependents_share_one_instance() {
     let admin = r#"version: "2.0"
@@ -668,9 +623,6 @@ flows:
     );
 }
 
-/// Waiting on a whole repo waits on its own services but not on what it
-/// includes — those are its services' business — while a flow entry for
-/// the whole repo starts everything it pulls in.
 #[test]
 fn a_bare_alias_waits_shallow_but_a_flow_alias_starts_deep() {
     let (_tmp, graph) = workspace(&[
@@ -705,8 +657,6 @@ flows:
     assert!(all.iter().any(|p| p == "audit.ledger"), "{all:?}");
 }
 
-/// Repos that call each other and include each other are fine as long as
-/// only one direction waits.
 #[test]
 fn mutual_includes_with_one_way_waits_resolve() {
     let (_tmp, graph) = workspace(&[
@@ -745,7 +695,6 @@ flows:
     );
 }
 
-/// A ring across three repos, each waiting on the next one's flow.
 #[test]
 fn a_three_repo_ring_is_a_cycle() {
     let repo = |next: &str| {
@@ -771,8 +720,6 @@ flows:
     }
 }
 
-/// A flow that waits on another repo's flow through a third repo's flow:
-/// all three slices start, in order.
 #[test]
 fn flows_nest_across_repos() {
     let (_tmp, graph) = workspace(&[
@@ -795,8 +742,6 @@ flows:
     ]);
     assert_clean(&graph);
     let mut smoke = plan(&graph, Some("qa/smoke"));
-    // Listed in the flow but needed by nothing in it: it only waits on its
-    // own database.
     assert_after(&smoke, "audit.ledger", &["ledger-db.ledger"]);
     smoke.retain(|id| id != "audit.ledger");
     assert_waves(
@@ -812,8 +757,6 @@ flows:
 
 // ------------------------------------------------------------ not pulled yet
 
-/// Before billing is cloned, it's one stub node: the flow reaches it,
-/// waits on it, and it's first in line.
 #[test]
 fn an_unpulled_repo_is_a_stub_ordered_before_its_dependents() {
     let (_tmp, graph) = workspace(&[("storefront", STOREFRONT)]);
@@ -826,8 +769,6 @@ fn an_unpulled_repo_is_a_stub_ordered_before_its_dependents() {
     );
 }
 
-/// Once billing is on disk, its own includes become the next stubs —
-/// which is how pulling walks a workspace one layer at a time.
 #[test]
 fn pulling_one_layer_reveals_the_next() {
     let (_tmp, graph) = workspace(&[("storefront", STOREFRONT), ("billing", BILLING)]);
@@ -851,8 +792,6 @@ fn pulling_one_layer_reveals_the_next() {
 
 // ------------------------------------------------------------ contradictions
 
-/// Every independent mistake in one workspace is reported, not just the
-/// first, and the start is refused listing all of them.
 #[test]
 fn several_mistakes_are_all_reported_at_once() {
     let (_tmp, graph) = workspace(&[
@@ -888,8 +827,6 @@ services:
     }
 }
 
-/// A workspace with a mistake in one repo still resolves the rest, so the
-/// UI can show it, and a flow elsewhere still has its start set.
 #[test]
 fn a_broken_repo_does_not_hide_the_rest() {
     let (_tmp, graph) = workspace(&[
