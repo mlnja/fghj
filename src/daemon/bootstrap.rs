@@ -45,11 +45,19 @@ pub fn connect_docker() -> Result<bollard::Docker> {
 /// Runs until SIGTERM/SIGINT, deactivating first. `fghj daemon stop`/`start`
 /// toggle the active state without ending the process.
 pub async fn run_control_api() -> Result<()> {
-    let docker = connect_docker()?;
-    docker
-        .ping()
-        .await
-        .context("failed to reach the Docker daemon over its socket — is Docker running?")?;
+    // Docker trouble never stops the daemon: the UI's doctor reports it.
+    let docker = match connect_docker() {
+        Ok(docker) => docker,
+        Err(e) => {
+            daemon_log::warn(format!(
+                "fghjd: no Docker client, restart once Docker is up: {e:#}"
+            ));
+            crate::docker::undialled_client()
+        }
+    };
+    if let Err(e) = docker.ping().await {
+        daemon_log::warn(format!("fghjd: Docker is not answering: {e}"));
+    }
     let docker = Arc::new(docker);
 
     // Only the HTTPS proxy dials this, for the zone apex. Bound first so the
@@ -109,11 +117,14 @@ pub async fn run_control_api() -> Result<()> {
         ));
     }
 
-    // Last: it is the one step that can fail outside fghj's control (no session
-    // to prompt in), and the steps above must not depend on it.
-    tokio::task::spawn_blocking(move || trust::install(&cert_path))
+    // Last: it can fail outside fghj's control (no session to prompt in). The
+    // doctor's `ca-trust` check reports it.
+    if let Err(e) = tokio::task::spawn_blocking(move || trust::install(&cert_path))
         .await
-        .context("CA trust install task panicked")??;
+        .context("CA trust install task panicked")?
+    {
+        daemon_log::warn(format!("fghjd: failed to trust the root CA: {e:#}"));
+    }
 
     // Best-effort prefetch, so the first run doesn't pay for the pull or build;
     // `ensure_sidecar` surfaces a real error if it's needed.

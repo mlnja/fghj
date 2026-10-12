@@ -17,17 +17,18 @@ pub async fn rehydrate(
     let Some(mut state) = db.clone().load_env().await? else {
         return Ok(None);
     };
-    // Per container: one missing container doesn't mean the rest are gone.
+    // Only a container Docker says is gone is dropped; an unreachable Docker
+    // keeps them all.
     let mut alive = BTreeMap::new();
     for (node_id, mut c) in state.containers {
-        if let Ok(Some(status)) =
-            crate::docker::inspect_status(&docker, &c.desired.container_name).await
-        {
+        match crate::docker::inspect_status(&docker, &c.desired.container_name).await {
+            Ok(None) => continue,
             // Only `observed` moves, so a container that died while fghjd was down still
             // reads as drifted.
-            c.observed.status = status.status;
-            alive.insert(node_id, c);
+            Ok(Some(status)) => c.observed.status = status.status,
+            Err(_) => {}
         }
+        alive.insert(node_id, c);
     }
     state.containers = alive;
     if state.containers.is_empty() {
@@ -80,5 +81,28 @@ mod tests {
 
         assert!(reconciled.is_none());
         assert!(db.load_env().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_docker_keeps_every_container() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
+        let state = EnvState {
+            containers: BTreeMap::from([(
+                "svc".to_string(),
+                ContainerInfo {
+                    node_id: "svc".to_string(),
+                    desired: ContainerDesired::default(),
+                    observed: ContainerObserved::default(),
+                    pending_action: None,
+                },
+            )]),
+            ..Default::default()
+        };
+        db.clone().save_env(state.clone()).await.unwrap();
+
+        let docker = Arc::new(crate::docker::undialled_client());
+        assert_eq!(rehydrate(db.clone(), docker).await.unwrap(), Some(state));
+        assert!(db.load_env().await.unwrap().is_some());
     }
 }

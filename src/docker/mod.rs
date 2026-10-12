@@ -10,9 +10,8 @@ pub use image::*;
 pub use network::*;
 pub use volume::*;
 
-/// Never dials Docker. `connect_with_local_defaults` fails without a socket;
-/// port 1 makes an accidental request fail loudly.
-#[cfg(test)]
+/// Never reaches Docker: every request fails. Stands in when there is no socket
+/// to connect to, since `connect_with_local_defaults` refuses to build without one.
 pub(crate) fn undialled_client() -> bollard::Docker {
     bollard::Docker::connect_with_http("http://127.0.0.1:1", 1, bollard::API_DEFAULT_VERSION)
         .expect("constructing an http transport cannot fail")
