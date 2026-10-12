@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -7,9 +6,9 @@ use crate::state::EnvState;
 
 use super::sqlite::WorkspaceDb;
 
-/// Reads the persisted environment and reconciles it against Docker: live
-/// containers get fresh statuses, gone ones are dropped, and an environment
-/// left empty is deleted.
+/// Reads the persisted environment and refreshes each container's status from
+/// Docker. A container Docker no longer has reads as `removed`, for the user to
+/// recreate or forget; an unreachable Docker leaves the status as it was.
 pub async fn rehydrate(
     db: Arc<WorkspaceDb>,
     docker: Arc<bollard::Docker>,
@@ -17,23 +16,17 @@ pub async fn rehydrate(
     let Some(mut state) = db.clone().load_env().await? else {
         return Ok(None);
     };
-    // Only a container Docker says is gone is dropped; an unreachable Docker
-    // keeps them all.
-    let mut alive = BTreeMap::new();
-    for (node_id, mut c) in state.containers {
+    // Only `observed` moves, so a container that died while fghjd was down still
+    // reads as crashed.
+    for c in state.containers.values_mut() {
         match crate::docker::inspect_status(&docker, &c.desired.container_name).await {
-            Ok(None) => continue,
-            // Only `observed` moves, so a container that died while fghjd was down still
-            // reads as drifted.
-            Ok(Some(status)) => c.observed.status = status.status,
+            // A deleted `run: once` task must not keep reading as a clean exit.
+            Ok(Some(status)) => {
+                (c.observed.status, c.observed.exit_code) = (status.status, status.exit_code)
+            }
+            Ok(None) => (c.observed.status, c.observed.exit_code) = ("removed".to_string(), None),
             Err(_) => {}
         }
-        alive.insert(node_id, c);
-    }
-    state.containers = alive;
-    if state.containers.is_empty() {
-        let _ = db.clone().delete_env().await;
-        return Ok(None);
     }
     Ok(Some(state))
 }
@@ -41,11 +34,13 @@ pub async fn rehydrate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
     use crate::state::{ContainerDesired, ContainerInfo, ContainerObserved, EnvState};
 
     #[tokio::test]
     #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
-    async fn drops_dead_containers_and_prunes_a_now_empty_environment() {
+    async fn a_container_docker_no_longer_has_reads_as_removed() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
         let docker = Arc::new(
@@ -66,7 +61,8 @@ mod tests {
                         ..Default::default()
                     },
                     observed: ContainerObserved {
-                        status: "running".to_string(),
+                        status: "exited".to_string(),
+                        exit_code: Some(0),
                         ..Default::default()
                     },
                     pending_action: None,
@@ -77,10 +73,10 @@ mod tests {
         };
         db.clone().save_env(dead_state).await.unwrap();
 
-        let reconciled = rehydrate(db.clone(), docker).await.unwrap();
-
-        assert!(reconciled.is_none());
-        assert!(db.load_env().await.unwrap().is_none());
+        let reconciled = rehydrate(db, docker).await.unwrap().unwrap();
+        let observed = &reconciled.containers["svc"].observed;
+        assert_eq!(observed.status, "removed");
+        assert_eq!(observed.exit_code, None);
     }
 
     #[tokio::test]

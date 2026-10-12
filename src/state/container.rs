@@ -98,8 +98,8 @@ pub struct ContainerInfo {
 }
 
 /// What a container's `desired`/`observed` pair means, in one word. Derived,
-/// never stored. `Crashed` is the one that matters: nothing converges it, so
-/// the user has to be told.
+/// never stored. `Crashed` and `Missing` are the ones that matter: nothing
+/// converges them, so the user has to be told.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeCondition {
@@ -113,12 +113,17 @@ pub enum NodeCondition {
     Failed,
     /// Exited, but not re-inspected yet: no exit code, no verdict.
     Finishing,
+    /// Deleted outside fghj. The user picks: recreate it, or forget it.
+    Missing,
 }
 
 impl ContainerInfo {
     /// Ignores `pending_action`; consumers layer that on top.
     pub fn condition(&self) -> NodeCondition {
         let status = self.observed.status.as_str();
+        if status == "removed" {
+            return NodeCondition::Missing;
+        }
         if self.desired.terminating {
             return match (status, self.observed.exit_code) {
                 ("running", _) => NodeCondition::Running,
@@ -214,7 +219,7 @@ mod tests {
 
     #[test]
     fn every_not_up_status_reads_the_same_way() {
-        for status in ["exited", "dead", "removed", "created"] {
+        for status in ["exited", "dead", "created"] {
             assert_eq!(
                 info(status, true).condition(),
                 NodeCondition::Crashed,
@@ -226,6 +231,13 @@ mod tests {
                 "{status} while not desired-running"
             );
         }
+    }
+
+    #[test]
+    fn a_deleted_container_is_missing_whatever_was_asked() {
+        assert_eq!(info("removed", true).condition(), NodeCondition::Missing);
+        assert_eq!(info("removed", false).condition(), NodeCondition::Missing);
+        assert_eq!(task("removed", None).condition(), NodeCondition::Missing);
     }
 
     #[test]

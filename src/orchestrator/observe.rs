@@ -15,10 +15,10 @@ impl Orchestrator {
         let mut updated = BTreeMap::new();
         for (node_id, c) in &env.containers {
             let name = &c.desired.container_name;
-            let inspected = docker::inspect_status(&self.docker, name)
-                .await
-                .ok()
-                .flatten();
+            // Docker not answering says nothing about the container.
+            let Ok(inspected) = docker::inspect_status(&self.docker, name).await else {
+                continue;
+            };
             let host_port = |port: &str| inspected.as_ref().and_then(|s| s.host_port(port));
             let published_port = c.desired.status_port.as_deref().and_then(host_port);
             let mut ports = c.observed.ports.clone();

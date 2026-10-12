@@ -69,17 +69,19 @@
   // ever been started), which is exactly "absent"; a live `pending_action`
   // always wins over `status` since Docker hasn't settled yet.
   //   absent    -> only Start (create + start fresh)
+  //   missing   -> Recreate (Start) or Forget (Delete); deleted outside fghj
   //   stopped   -> Start or Delete
   //   running   -> Stop, Delete, or Reset (force a fresh container)
   //   starting/stopping/removing -> nothing; show the in-flight action instead
   // `state::NodeCondition`, snake_case. The ones that mean "this will not
   // fix itself" get the same loud pill as drifted config, because they call
   // for the same thing: the user has to do something.
-  const STUCK_CONDITIONS = new Set(['crashed', 'failed', 'paused']);
+  const STUCK_CONDITIONS = new Set(['crashed', 'missing', 'failed', 'paused']);
   const CONDITION_TITLE = {
     running: 'up, and reachable at the domains above',
     stopped: 'down, and fghj was not asked to keep it up — expected after a Stop',
-    crashed: 'fghj was asked to keep this up and Docker says it is down. Nothing reconciles this on its own: press Start',
+    crashed: 'fghj was asked to keep this up and Docker says it is down — fghj restarts it, backing off between tries',
+    missing: 'the container was deleted outside fghj. Recreate it, or forget it',
     restarting: "Docker is bouncing it under this node's restart policy — not reachable while it does",
     paused: 'paused from outside fghj (docker pause). Start will not help — docker unpause will',
     completed: 'this node is a task: it ran and exited 0, which is success, not drift',
@@ -90,6 +92,7 @@
   function nodeLifecycle(info) {
     if (!info) return 'absent';
     if (info.pending_action) return info.pending_action;
+    if (info.condition === 'missing') return 'missing';
     return info.observed.status === 'running' ? 'running' : 'stopped';
   }
   // Persisted log history (see `store::WorkspaceDb`'s `logs` table): a
@@ -302,6 +305,10 @@
       <div class="controls">
         {#if lifecycle === 'starting' || lifecycle === 'stopping' || lifecycle === 'removing'}
           <span class="ctrl-status"><span class="spinner"></span> {lifecycle}…</span>
+        {:else if lifecycle === 'missing'}
+          <span class="ctrl-status">Deleted outside fghj.</span>
+          <button class="ctrl-btn" onclick={startNode} disabled={busy} title="Create the container again from .fghj.yaml">Recreate</button>
+          <button class="ctrl-btn danger" onclick={deleteNode} disabled={busy} title="Drop it from fghj's environment">Forget</button>
         {:else}
           {#if lifecycle === 'absent' || lifecycle === 'stopped'}
             <button class="ctrl-btn" onclick={startNode} disabled={busy}>Start</button>

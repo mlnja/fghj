@@ -128,7 +128,7 @@ arrived" is not a reason to re-run something they marked as unsafe to re-run
 — if it were, they'd have left it `on_start`.
 
 The evidence is the container itself and nothing else. Rehydration on daemon
-startup drops any container Docker no longer has, so a task whose container
+startup forgets the exit code of any container Docker no longer has, so a task whose container
 was removed out-of-band runs again rather than being assumed finished on the
 strength of a record of it. And `once` means "succeed once", not "be
 attempted once": a task that exited non-zero is never treated as done, or the

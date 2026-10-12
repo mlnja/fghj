@@ -47,7 +47,8 @@
     failed: 'task exited non-zero; everything that depends on it was not started',
     finishing: 'task has exited but has not been re-inspected yet — no exit code read, so no verdict',
     stopped: 'stopped, and fghj was not asked to keep it up — expected',
-    crashed: 'fghj was asked to keep this up and Docker says it is down. Nothing will restart it on its own — press Start',
+    crashed: 'fghj was asked to keep this up and Docker says it is down — fghj restarts it, backing off between tries',
+    missing: 'the container was deleted outside fghj — open it to recreate or forget it',
     restarting: "Docker is bouncing it under this node's own restart policy — not reachable while it does",
     paused: 'paused from outside fghj (docker pause) — not reachable, and Start will not help; docker unpause will',
   };
@@ -401,6 +402,11 @@
      something". A stopped container is a state the user chose; this one
      nobody chose. */
   .status-bar.state-crashed { background: var(--danger); color: #ffffff; }
+  /* As loud as `crashed`, striped: there is no container behind it at all. */
+  .status-bar.state-missing {
+    background: repeating-linear-gradient(135deg, var(--danger) 0 6px, color-mix(in srgb, var(--danger) 75%, black) 6px 12px);
+    color: #ffffff;
+  }
   /* Pulsing like an in-flight action, because that is what it is — Docker's
      own restart loop rather than one of fghj's, but equally "wait". */
   .status-bar.state-restarting {

@@ -125,8 +125,8 @@ means "at most once per run", and an author reaches for it exactly when
 re-running the task is expensive or destructive. "New code arrived" is not a
 reason to re-run something they marked as unsafe to re-run — if it were, they
 would have left it `on_start`. The evidence is the container
-itself and nothing else: `persistence::rehydrate` drops any container Docker
-no longer has, so a task whose container was removed out-of-band runs again
+itself and nothing else: `persistence::rehydrate` clears the exit code of any
+container Docker no longer has, so a task whose container was removed out-of-band runs again
 rather than being assumed finished on the strength of a record of it. And
 `once` means "succeed once", not "be attempted once" — a task that exited
 non-zero is never treated as done, or the service behind it would be
