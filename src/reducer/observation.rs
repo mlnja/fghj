@@ -74,14 +74,12 @@ pub(super) fn reduce(
                     ..
                 }) => {
                     if present {
-                        run.pending_create = None;
                         clear_create_marks(&mut run);
                         next.env = Some(*run);
                     }
                 }
                 Err(_) => {
                     if let Some(run) = next.env.as_mut() {
-                        run.pending_create = None;
                         clear_create_marks(run);
                     }
                 }
@@ -166,8 +164,10 @@ fn is_placeholder(container: &ContainerInfo) -> bool {
 }
 
 /// Clears every create mark once the create is over, and drops placeholders
-/// that never got a container.
+/// that never got a container. The settled state is a copy taken mid-create,
+/// so it still carries `pending_create`.
 fn clear_create_marks(run: &mut EnvState) {
+    run.pending_create = None;
     run.containers.retain(|_, c| !is_placeholder(c));
     for container in run.containers.values_mut() {
         container.pending_action = None;
@@ -353,6 +353,25 @@ mod tests {
         )
         .unwrap();
         assert!(next.env.as_ref().unwrap().containers.contains_key("web"));
+    }
+
+    #[test]
+    fn a_successful_create_clears_the_pending_create_its_result_was_copied_with() {
+        let mut state = workspace(vec![]);
+        let plan = crate::state::EnvSpec::Flow("app/main".into());
+        state.env.as_mut().unwrap().pending_create = Some(plan.clone());
+        let mut created = state.env.clone().unwrap();
+        created.containers.insert("web".into(), container("web"));
+        let next = reduce(
+            &state,
+            Action::EnvCreateSettled {
+                result: Ok(created),
+            },
+        )
+        .unwrap();
+        let env = next.env.unwrap();
+        assert!(env.pending_create.is_none());
+        assert!(env.containers.contains_key("web"));
     }
 
     #[test]

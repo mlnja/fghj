@@ -495,6 +495,7 @@
     onSwitchFlow={switchFlow}
     envBusy={env?.pending_create != null}
     onOpenOperations={() => (telemetryTab = 'pulls')}
+    onOpenSwitch={() => (telemetryTab = 'switch')}
     onOpenTelemetry={() => (telemetryTab = 'logs')}
     workspaces={workspaces}
     currentWorkspaceId={currentWorkspaceId}
@@ -573,6 +574,8 @@
       onFetchDaemonLogs={fetchDaemonLogs}
       onFetchNetStatus={fetchDaemonNetStatus}
       onFetchDoctor={fetchDaemonDoctor}
+      {env}
+      nodes={universe?.nodes}
     />
   {/if}
 </div>

@@ -1,8 +1,16 @@
 <script>
   import SideDrawer from './SideDrawer.svelte';
 
-  let { initialTab = 'logs', onClose, onFetchDaemonLogs, onFetchNetStatus, onFetchDoctor, onListJobs } =
-    $props();
+  let {
+    initialTab = 'logs',
+    onClose,
+    onFetchDaemonLogs,
+    onFetchNetStatus,
+    onFetchDoctor,
+    onListJobs,
+    env,
+    nodes,
+  } = $props();
 
   let activeTab = $state(initialTab);
 
@@ -98,6 +106,48 @@
 
   let job = $derived(jobs.find((j) => j.key === selectedJob) ?? null);
 
+  // Switch tab: where the switch in flight stands, node by node. Derived from
+  // the same live `env` the graph draws, so it needs no poll of its own: the
+  // flow's members come up, everything else running goes down.
+  const STEPS = {
+    starting: 'starting',
+    stopping: 'stopping',
+    waiting: 'to start',
+    'to-stop': 'to stop',
+    ok: 'up',
+    done: 'done',
+  };
+  const STEP_ORDER = Object.keys(STEPS);
+
+  let switchFlow = $derived(env?.pending_create?.flow ?? null);
+  let switchPlan = $derived.by(() => {
+    if (!switchFlow) return [];
+    const containers = env?.containers ?? {};
+    const inFlow = new Set((nodes ?? []).filter((n) => n.flows?.includes(switchFlow)).map((n) => n.id));
+    const rows = [];
+    for (const id of inFlow) {
+      const c = containers[id];
+      const step =
+        c?.pending_action === 'starting'
+          ? 'starting'
+          : c?.condition === 'running'
+            ? 'ok'
+            : c?.condition === 'completed'
+              ? 'done'
+              : 'waiting';
+      rows.push({ id, step });
+    }
+    for (const [id, c] of Object.entries(containers)) {
+      if (inFlow.has(id)) continue;
+      if (c.pending_action === 'stopping') rows.push({ id, step: 'stopping' });
+      else if (c.observed.status === 'running') rows.push({ id, step: 'to-stop' });
+    }
+    return rows.sort(
+      (a, b) => STEP_ORDER.indexOf(a.step) - STEP_ORDER.indexOf(b.step) || a.id.localeCompare(b.id),
+    );
+  });
+  let switchLeft = $derived(switchPlan.filter((r) => r.step !== 'ok' && r.step !== 'done').length);
+
   function openDoctor() {
     activeTab = 'doctor';
     if (doctorChecks === null) runDoctor();
@@ -152,6 +202,7 @@
     <div class="tab" class:active={activeTab === 'network'} onclick={() => (activeTab = 'network')}>DNS / DNAT</div>
     <div class="tab" class:active={activeTab === 'pulls'} onclick={() => (activeTab = 'pulls')}>Pull queue</div>
     <div class="tab" class:active={activeTab === 'doctor'} onclick={openDoctor}>Doctor</div>
+    <div class="tab" class:active={activeTab === 'switch'} onclick={() => (activeTab = 'switch')}>Switch</div>
   </div>
 
   {#if activeTab === 'logs'}
@@ -256,6 +307,27 @@
           <div class="empty">select a pull to see its log</div>
         {/if}
       </div>
+    </div>
+  {:else if activeTab === 'switch'}
+    <div class="net">
+      {#if !switchFlow}
+        <div class="empty">no switch in flight</div>
+      {:else}
+        <div class="net-meta">
+          switching to <b>{switchFlow}</b>: {switchLeft ? `${switchLeft} left to do` : 'finishing up'}
+        </div>
+        <div class="section">
+          {#each switchPlan as r (r.id)}
+            <div class="row step-{r.step}">
+              <span class="k">{r.id}</span>
+              <span class="v">
+                {#if r.step === 'starting' || r.step === 'stopping'}<span class="dot running"></span>{/if}
+                {STEPS[r.step]}
+              </span>
+            </div>
+          {/each}
+        </div>
+      {/if}
     </div>
   {:else}
     <div class="net">
@@ -382,6 +454,11 @@
   .row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 8px; border-radius: 4px; font: 500 11.5px var(--font-mono); background: var(--panel-2); margin-bottom: 3px; }
   .row .k { color: var(--ink); }
   .row .v { color: var(--ink-dim); word-break: break-all; text-align: right; }
+
+  .row .v .dot { display: inline-block; margin-right: 6px; }
+  .row.step-starting .v, .row.step-stopping .v { color: var(--accent); }
+  .row.step-ok .v, .row.step-done .v { color: #4ac97e; }
+  .row.step-waiting .v, .row.step-to-stop .v { color: var(--ink-faint); }
 
   .doc-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .rerun {

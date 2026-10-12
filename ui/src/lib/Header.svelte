@@ -15,6 +15,7 @@
     onSwitchFlow,
     envBusy,
     onOpenOperations,
+    onOpenSwitch,
     onOpenTelemetry,
     workspaces,
     currentWorkspaceId,
@@ -184,7 +185,15 @@
       >
     {/if}
   {:else if activeTab === 'containers'}
-    <button class="pull-btn" onclick={switchFlow} disabled={!currentFlow || switchingFlow || envBusy} title="start this flow's containers and stop (not remove) every other running one">
+    <!-- While a switch runs, the button opens its plan instead. -->
+    <button
+      class="pull-btn"
+      onclick={switchingFlow || envBusy ? onOpenSwitch : switchFlow}
+      disabled={!currentFlow}
+      title={switchingFlow || envBusy
+        ? "see what the switch has done and what's left"
+        : "start this flow's containers and stop (not remove) every other running one"}
+    >
       {#if switchingFlow || envBusy}<span class="spinner"></span> switching…{:else}Switch to flow{/if}
     </button>
   {/if}
