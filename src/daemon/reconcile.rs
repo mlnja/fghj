@@ -1,9 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::action::Action;
 use crate::daemon::control::DaemonControl;
+use crate::daemon::heal::Healer;
 use crate::util::time::now_ms;
-use crate::{effects, resolver, supervisor};
+use crate::{daemon_log, effects, resolver, supervisor};
 
 /// Matches the UI's poll interval.
 pub(crate) const RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
@@ -12,9 +14,9 @@ pub(crate) const RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 /// for drift that only happens when someone edits a file.
 pub(crate) const SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(15);
 
-/// Read-only toward Docker: reports container status into the actor so
-/// out-of-band stops, removals and port changes show up. Never heals. Hosts,
-/// resolver and raw-net routes belong to `effects::spawn_all`.
+/// Reports container status into the actor so out-of-band stops, removals and
+/// port changes show up, then restarts what crashed (`heal`) while active.
+/// Hosts, resolver and raw-net routes belong to `effects::spawn_all`.
 pub(crate) fn spawn_reconciler(daemon: Arc<DaemonControl>) {
     supervisor::supervise_forever("docker reconciler", reconcile_loop(daemon));
 }
@@ -23,13 +25,26 @@ pub(crate) fn spawn_reconciler(daemon: Arc<DaemonControl>) {
 /// covers.
 async fn reconcile_loop(daemon: Arc<DaemonControl>) {
     let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
+    let mut healer = Healer::default();
     loop {
         interval.tick().await;
         for (id, _) in daemon.registry.list() {
-            if let Some(state) = daemon.registry.get(&id)
-                && let Some(actor) = daemon.registry.actor(&id)
-            {
-                effects::docker::observe::report(&state.orchestrator, &actor).await;
+            let (Some(state), Some(actor)) = (daemon.registry.get(&id), daemon.registry.actor(&id))
+            else {
+                continue;
+            };
+            effects::docker::observe::report(&state.orchestrator, &actor).await;
+            if !daemon.is_active() {
+                continue;
+            }
+            let Some(env) = actor.current().env.clone() else {
+                continue;
+            };
+            if let Some((node_id, attempt)) = healer.pick(&id, &env, std::time::Instant::now()) {
+                daemon_log::info(format!(
+                    "fghjd: {node_id} crashed, restarting it (attempt {attempt})"
+                ));
+                let _ = actor.dispatch(Action::NodeStartRequested { node_id }).await;
             }
         }
         if daemon.is_active() {

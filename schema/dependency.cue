@@ -44,9 +44,9 @@ package fghj
 // Docker Compose–parity knobs, embedded into #Service.
 #RunOptions: {
 	// Compose-equivalent restart policy, passed straight to Docker's
-	// `HostConfig.RestartPolicy`. "no" (the default) leaves a stopped
-	// container stopped — fghj's own `ensure_running` is the usual way a
-	// container comes back, not Docker's own restart machinery.
+	// `HostConfig.RestartPolicy`. Leave it at "no" (the default): fghj
+	// restarts a crashed service itself, in dependency order, which Docker's
+	// own policies don't.
 	restart?: "no" | "always" | "on-failure" | "unless-stopped"
 	// The signal Docker sends to stop this container, and how long it waits
 	// for the process to exit before following up with SIGKILL — Compose's

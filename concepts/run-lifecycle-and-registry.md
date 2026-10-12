@@ -158,7 +158,7 @@ removed — see [[branch-ownership-model]]'s per-run branch pin note for why
 answer for an override branch whose own `.fghj.yaml` doesn't match the live
 graph's shape).
 
-## The reconciler: read-only drift correction
+## The reconciler: drift correction
 
 `daemon::spawn_reconciler` runs a background loop (every `RECONCILE_INTERVAL`
 = 1s, matched to the frontend's own `/environment` poll interval so the UI is
@@ -168,10 +168,32 @@ actor's current state, hands it to `Orchestrator::inspect_containers`, and
 dispatches what Docker actually says back as `Action::ContainerObserved` —
 including flagging a container that's vanished entirely (`docker rm`'d by
 hand, outside fghj) as `"removed"`. This is explicitly analogous to a
-Kubernetes controller's reconcile loop, but **read-only**: it never
-recreates, restarts, or otherwise "heals" anything. If a container dies, the
-UI will show that honestly on the next tick rather than fghj silently
-bringing it back — the user decides whether to restart it.
+Kubernetes controller's reconcile loop. Observing stays read-only; what it
+does with the reading is split by what happened:
+
+- **Down without being asked** (`Crashed`) — a crash, a Docker or OrbStack
+  restart, a reboot, a hand-typed `docker stop`. `daemon::heal` restarts it,
+  by dispatching `NodeStartRequested`, the Start button's own request. The
+  stored intent is the whole test: `desired.running` moves only when the user
+  starts or stops through fghj, so anything down while it's `true` came from
+  outside. One node per workspace at a time and only while nothing is in
+  flight, because a start brings up its requirements and a parallel start of
+  one of them would recreate it underneath. Backoff per node, 5s doubling to
+  5 minutes, reset after a minute up; in memory, so a restarted `fghjd`
+  starts over. Only while active: `fghj daemon stop` stops it too.
+
+  Docker's own `restart: unless-stopped` was the alternative and is not
+  used by default. When the engine comes back it starts everything at once,
+  with no regard for dependency order or health, and nothing reaches the
+  events pane. `restart` stays `"no"` unless a node asks otherwise.
+- **Deleted** (`Missing`) — `docker rm`, a prune. Nothing can tell whether
+  that was meant, so the user is asked: the Drawer offers **Recreate**
+  (Start) or **Forget** (Delete, which is a no-op on Docker's side for a
+  container that's already gone).
+
+A Docker that doesn't answer is no reading at all: `inspect_containers` skips
+the container rather than reporting it gone, so an outage doesn't show every
+node as `Missing`.
 
 Note the direction: `inspect_containers` *reports*, it does not write.
 `observed` is the reducer's to record, and the reducer is the only thing
@@ -215,10 +237,9 @@ See [[config-drift]] for the whole hash and what it still misses.
 
 An orphan is the *desired* side disappearing. The mirror case is the desired
 side being perfectly intact and the observed side falling away:
-`desired.running == true` alongside an `exited` (or `dead`, or `removed`)
-observation. It is reachable in the most ordinary way possible — the process
-crashed, or someone ran `docker rm` — and, consistent with everything above,
-**nothing converges it**. Only an explicit Start does.
+`desired.running == true` alongside an `exited` (or `dead`) observation. It
+is reachable in the most ordinary way possible — the process crashed, or
+the engine restarted — and `daemon::heal` restarts it, above.
 
 That needed the same treatment `Orphaned` got, for the same reason: read-only
 by default only works if the user is *told*, and for a long time this pair
@@ -229,8 +250,11 @@ service that is down and staying down.
 `state::NodeCondition` is the vocabulary — one derived word for what a
 `desired`/`observed` pair means, computed by `ContainerInfo::condition` and
 serialized alongside the pair itself so the UI reads it rather than
-re-deriving it. `Crashed` is the variant the enum exists for. `Restarting`
-and `Paused` are there for a smaller version of the same problem: both are
+re-deriving it. `Crashed` is the variant the enum exists for. `Missing`
+(status `"removed"`, whatever was asked) splits off the case where there is
+no container left to start, so the UI can ask instead of offering Start.
+`Restarting` and `Paused` are there for a smaller version of the same
+problem: both are
 real Docker states, both mean the container is not serving (every route
 lookup filters on `status == "running"`), and before this both read as
 "stopped" too.
@@ -241,25 +265,25 @@ sets `status` without updating it. `ContainerInfo` has a hand-written
 `Serialize` for exactly this reason, which is the only thing in the codebase
 that is not `#[derive]`d there.
 
-Note what did *not* change: nothing acts on `Crashed`. `AutoHeal` is still
-constructed nowhere. The gap was never the policy, it was the vocabulary.
+Only `Crashed` is acted on, and only through the same request a user would
+make. `Missing` waits for the user.
 
 ## Reconciling at startup, not just steady-state
 
 `persistence::rehydrate` runs the same kind of check once, when a workspace
 is constructed, against whatever environment was persisted from a previous
-`fghjd` lifetime. The granularity is **per container, not per
-environment**: each persisted container is inspected, the ones Docker still
-knows about are kept with a freshly-read `observed.status`, the ones it
-doesn't are dropped, and only an environment left with *nothing* alive is
-deleted from the db.
+`fghjd` lifetime. Each persisted container is inspected and **kept**: one
+Docker still has gets a freshly-read status and exit code, one it doesn't
+reads as `"removed"` with no exit code (so it shows as `Missing`, and a
+`run: once` task whose container is gone runs again), and an unreachable
+Docker leaves the record as it was.
 
-That distinction was a real bug, not a style preference. Dropping the whole
-environment's tracked list on a single miss — one container stopped, renamed, or
-caught mid-recreate at exactly the moment `fghjd` restarted — silently
-orphaned every *other* still-running container from `fghjd`'s bookkeeping,
-including from the sidecar route table, which is built from exactly this
-list. The containers kept running; fghj just stopped knowing about them.
+Nothing is dropped, on purpose. It used to drop the containers it couldn't
+find, and before that the whole environment on a single miss, which silently
+orphaned every still-running container from `fghjd`'s bookkeeping and the
+sidecar route table. Dropping also treated an *error* as "gone": `fghjd`
+starting before Docker deleted the whole saved environment. A container
+that's gone is now the user's call, like any other deletion.
 
 Only `observed` moves during rehydration. What the persisted row said fghj
 *wants* the container to be doing survives untouched, which is what lets a

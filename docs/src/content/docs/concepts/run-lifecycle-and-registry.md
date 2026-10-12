@@ -42,25 +42,31 @@ separately from the live checkout. It was removed: see
 real permission bug in the mirror clone, plus no designed answer for an
 override branch whose own config doesn't match the live graph's shape).
 
-## The reconciler: read-only drift correction
+## The reconciler: drift correction
 
 A background loop periodically re-inspects every live run's containers
 against real Docker state and writes back any status that changed —
 including flagging a container that's vanished entirely (removed by hand,
 outside `fghj`) as removed. This is explicitly analogous to a Kubernetes
-controller's reconcile loop, but **read-only**: it never recreates,
-restarts, or otherwise "heals" anything. If a container dies, the UI shows
-that honestly on the next tick rather than `fghj` silently bringing it
-back — you decide whether to restart it.
+controller's reconcile loop.
 
-The same kind of check runs once at daemon startup, against whatever runs
-were persisted from a previous `fghjd` lifetime — one container at a time,
-not one run at a time. Containers Docker still knows about are restored
-with a freshly inspected status; containers that have vanished are dropped
-from the run; and only a run with nothing left alive is forgotten
-entirely. Doing it per-run instead would mean one missing container
-silently orphaned every other container in that run from `fghjd`'s
-bookkeeping — they'd keep running, but nothing would route to them.
+What it does with the reading depends on what happened. A service you
+asked to run that is down without you stopping it through `fghj` (a crash,
+a Docker or OrbStack restart, a reboot, a hand-typed `docker stop`) is
+restarted by `fghj`, through the same path as the Start button: what it
+depends on comes up first, and the node's events show each attempt. Tries
+back off from 5 seconds to 5 minutes, one node at a time. A Stop through
+`fghj` is the one thing it respects. Tasks never restart.
+
+A container deleted outside `fghj` (`docker rm`, a prune) is not something
+Docker can bring back, and nothing can tell whether it was meant. The node
+reads **missing**, and its drawer asks: **Recreate** it, or **Forget** it.
+
+The same kind of check runs once at daemon startup, against whatever was
+persisted from a previous `fghjd` lifetime. Every container is kept:
+containers Docker still knows about get a freshly inspected status, ones
+that have vanished come back as missing, and if Docker can't be reached at
+all the record is left as it was rather than read as "everything's gone".
 
 Only the *observed* half is refreshed. What fghj recorded that it wanted
 the container to be doing survives the restart untouched, which is what

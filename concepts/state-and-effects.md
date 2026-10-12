@@ -171,8 +171,8 @@ Implemented. `src/actor.rs`, `src/action.rs`, `src/reducer/`,
 construction) purely to seed the actor in
 `daemon::WorkspaceRegistry::wire_actor`.
 
-`effects::bridge` and `Action::WorkspaceMirrored` are gone. Relatedly:
-`effects::docker::policy::DockerHealPolicy` exists and is deliberately
-unused — it is the switch that would make `converge` act on `observed`,
-and leaving it off is the "read-only reconciliation" decision in
-[[run-lifecycle-and-registry]].
+`effects::bridge` and `Action::WorkspaceMirrored` are gone. No effect acts on
+`observed`. Bringing a crashed service back is `daemon::heal`, which reads it
+and dispatches an ordinary `NodeStartRequested`, so a restart is a request
+like any other and passes the reducer's busy gate. A deleted container waits
+for the user — see [[run-lifecycle-and-registry]].

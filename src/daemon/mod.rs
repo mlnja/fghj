@@ -6,6 +6,7 @@ use crate::persistence;
 
 pub mod bootstrap;
 pub mod control;
+mod heal;
 pub mod reconcile;
 pub mod registry;
 pub mod routing;

@@ -19,7 +19,8 @@ can't disagree about what a state means.
 |---|---|
 | **running** | Docker reports it up. |
 | **stopped** | Docker reports it down, and fghj was not asked to keep it up. Expected, uninteresting — this is what you get after a Stop. |
-| **crashed** | fghj *was* asked to keep this up and Docker says it is down. Nothing will restart it on its own — press Start. |
+| **crashed** | fghj *was* asked to keep this up and Docker says it is down. fghj restarts it, waiting longer between each try (5 seconds up to 5 minutes); the node's events show why it keeps going down. |
+| **missing** | The container was deleted outside fghj (`docker rm`, a prune). fghj doesn't guess whether you meant it: open the node and **Recreate** it or **Forget** it. |
 | **restarting** | Docker is bouncing it under this node's own `restart` policy. Not reachable while it does, but not stuck either — worth waiting out. |
 | **paused** | `docker pause`, from outside fghj. Not reachable, and Start will not help; `docker unpause` will. |
 | **completed** | A task exited 0. Success, not drift. |
@@ -29,8 +30,9 @@ can't disagree about what a state means.
 The distinction that matters most is **crashed vs. stopped**. They look
 identical to Docker — the container isn't running either way — and they need
 opposite responses from you. One is the expected result of a button you
-pressed; the other is your service dying, and staying dead, because
-`restart` defaults to `"no"` and fghj deliberately doesn't second-guess that.
+pressed; the other is your service down without you asking fghj for it, so
+fghj brings it back: after a crash, a Docker restart, a reboot, or a
+`docker stop` typed in a terminal. Only a Stop through fghj keeps a node down.
 
 On top of that settled reading, a live action wins while it's in flight: a
 node mid-`stopping` shows `stopping`, not the state it's about to leave. That
