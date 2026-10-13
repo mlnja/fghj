@@ -52,9 +52,10 @@
     if (logsPre) logsPre.scrollTop = logsPre.scrollHeight;
   });
 
-  // Network tab: which /etc/hosts lines, /etc/resolver zones, and pf NAT
-  // routes fghjd currently has installed, plus when it last reconciled them.
+  // What fghjd has installed — /etc/hosts lines, /etc/resolver zones, pf NAT
+  // routes — read alongside the doctor, and shown under the check it backs.
   let netStatus = $state(null);
+  let expanded = $state({});
 
   async function pollNetStatus() {
     if (!onFetchNetStatus) return;
@@ -80,7 +81,7 @@
     if (!onFetchDoctor || doctorBusy) return;
     doctorBusy = true;
     try {
-      const report = await onFetchDoctor();
+      const [report] = await Promise.all([onFetchDoctor(), pollNetStatus()]);
       doctorChecks = report?.checks ?? [];
       doctorAt = Date.now();
     } finally {
@@ -164,12 +165,27 @@
       const timer = setInterval(pollJobs, 800);
       return () => clearInterval(timer);
     }
-    if (activeTab === 'network') {
-      pollNetStatus();
-      const timer = setInterval(pollNetStatus, 2000);
-      return () => clearInterval(timer);
-    }
   });
+
+  // The installed entries behind a check, as [name, target] rows; null when
+  // the check has none to show.
+  function netRows(name) {
+    if (!netStatus) return null;
+    if (name === 'dns')
+      return netStatus.hosts.map((h) => [h, netStatus.proxy_ip ?? '127.0.0.1']);
+    if (name === 'resolver-files')
+      return netStatus.resolver_zones.map((z) => [`*.${z.zone}`, `127.0.0.1:${z.port}`]);
+    if (name === 'nat')
+      return netStatus.raw_routes.map((r) => [
+        `${r.raw_domain ?? r.virtual_ip}:${r.container_port}`,
+        `${r.virtual_ip}:${r.container_port} → 127.0.0.1:${r.host_port}`,
+      ]);
+    return null;
+  }
+
+  function toggle(name) {
+    expanded[name] = !expanded[name];
+  }
 
   const MARKS = { pass: '\u2713', warn: '!', fail: '\u2717' };
 
@@ -190,6 +206,16 @@
   }
 </script>
 
+{#snippet netList(rows)}
+  <div class="net-list">
+    {#each rows as [k, v]}
+      <div class="row"><span class="k">{k}</span><span class="v">{v}</span></div>
+    {:else}
+      <div class="empty">nothing installed</div>
+    {/each}
+  </div>
+{/snippet}
+
 <SideDrawer onClose={onClose} width="55vw">
   <div class="head">
     <span class="eyebrow">fghjd telemetry</span>
@@ -199,7 +225,6 @@
 
   <div class="tabs">
     <div class="tab" class:active={activeTab === 'logs'} onclick={() => (activeTab = 'logs')}>Logs</div>
-    <div class="tab" class:active={activeTab === 'network'} onclick={() => (activeTab = 'network')}>DNS / DNAT</div>
     <div class="tab" class:active={activeTab === 'pulls'} onclick={() => (activeTab = 'pulls')}>Pull queue</div>
     <div class="tab" class:active={activeTab === 'doctor'} onclick={openDoctor}>Doctor</div>
     <div class="tab" class:active={activeTab === 'switch'} onclick={() => (activeTab = 'switch')}>Switch</div>
@@ -240,50 +265,6 @@
               <span class="msg">{l.text}</span>
             </div>
           {/each}
-        </div>
-      {/if}
-    </div>
-  {:else if activeTab === 'network'}
-    <div class="net">
-      {#if !netStatus}
-        <div class="empty">loading…</div>
-      {:else}
-        <div class="net-meta">last reconciled: <b>{formatAge(netStatus.last_reconcile_ms)}</b></div>
-
-        <div class="section">
-          <div class="section-title">/etc/hosts</div>
-          {#if !netStatus.hosts.length}
-            <div class="empty">no managed entries</div>
-          {:else}
-            {#each netStatus.hosts as h}
-              <div class="row"><span class="k">{h}</span><span class="v">{netStatus.proxy_ip ?? '127.0.0.1'}</span></div>
-            {/each}
-          {/if}
-        </div>
-
-        <div class="section">
-          <div class="section-title">/etc/resolver zones</div>
-          {#if !netStatus.resolver_zones.length}
-            <div class="empty">no managed zones</div>
-          {:else}
-            {#each netStatus.resolver_zones as z}
-              <div class="row"><span class="k">*.{z.zone}</span><span class="v">127.0.0.1:{z.port}</span></div>
-            {/each}
-          {/if}
-        </div>
-
-        <div class="section">
-          <div class="section-title">raw-zone NAT routes (pf)</div>
-          {#if !netStatus.raw_routes.length}
-            <div class="empty">no active routes</div>
-          {:else}
-            {#each netStatus.raw_routes as r}
-              <div class="row">
-                <span class="k">{r.raw_domain ?? r.virtual_ip}:{r.container_port}</span>
-                <span class="v">{r.virtual_ip}:{r.container_port} → 127.0.0.1:{r.host_port}</span>
-              </div>
-            {/each}
-          {/if}
         </div>
       {/if}
     </div>
@@ -347,17 +328,36 @@
       {:else}
         <div class="section">
           {#each doctorChecks as c}
+            {@const rows = netRows(c.name)}
             <div class="check {c.verdict}">
-              <div class="check-head">
+              <div class="check-head" class:expandable={rows} onclick={() => rows && toggle(c.name)}>
                 <span class="mark">{MARKS[c.verdict] ?? '?'}</span>
                 <span class="check-title">{c.title}</span>
+                {#if rows}<span class="chevron">{expanded[c.name] ? '▾' : '▸'} {rows.length}</span>{/if}
               </div>
               <div class="check-detail">{c.detail}</div>
               {#if c.hint}
                 <div class="check-hint">→ {c.hint}</div>
               {/if}
+              {#if rows && expanded[c.name]}
+                {@render netList(rows)}
+              {/if}
             </div>
           {/each}
+          {#if netStatus}
+            {@const rows = netRows('nat')}
+            <div class="check">
+              <div class="check-head expandable" onclick={() => toggle('nat')}>
+                <span class="mark">·</span>
+                <span class="check-title">raw-zone NAT routes (pf)</span>
+                <span class="chevron">{expanded.nat ? '▾' : '▸'} {rows.length}</span>
+              </div>
+              <div class="check-detail">last reconciled {formatAge(netStatus.last_reconcile_ms)}</div>
+              {#if expanded.nat}
+                {@render netList(rows)}
+              {/if}
+            </div>
+          {/if}
         </div>
       {/if}
     </div>
@@ -483,6 +483,10 @@
   .check.warn .mark { color: #d9a73c; }
   .check.fail .mark { color: #e05c5c; }
   .check-title { font: 700 11.5px var(--font-mono); color: var(--ink); }
+  .check-head.expandable { cursor: pointer; }
+  .chevron { margin-left: auto; font: 600 10.5px var(--font-mono); color: var(--ink-faint); }
+  .net-list { margin: 8px 0 2px 20px; }
+  .net-list .row { background: var(--panel); }
   .check-detail { font: 500 11.5px var(--font-mono); color: var(--ink-dim); margin: 3px 0 0 20px; word-break: break-word; }
   .check-hint { font: 500 11.5px var(--font-mono); color: var(--ink); margin: 4px 0 0 20px; word-break: break-word; }
 </style>
