@@ -181,6 +181,46 @@ fn pf_status_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// The applied routes the kernel isn't actually serving: pf off, the anchor's
+/// `rdr` rule gone, or the virtual IP's `lo0` alias missing.
+pub(super) fn unserved_routes(routes: &[RouteSpec]) -> Result<Vec<RouteSpec>> {
+    if routes.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !pf_status_enabled() {
+        return Ok(routes.to_vec());
+    }
+    let output = Command::new("pfctl")
+        .args(["-a", ANCHOR_NAME, "-s", "nat"])
+        .output()
+        .context("failed to run pfctl -s nat")?;
+    if !output.status.success() {
+        bail!(
+            "pfctl -a {ANCHOR_NAME} -s nat failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let loaded = String::from_utf8_lossy(&output.stdout);
+    let aliases: BTreeSet<Ipv4Addr> = current_pool_aliases().into_iter().collect();
+    Ok(routes
+        .iter()
+        .filter(|r| !aliases.contains(&r.virtual_ip) || !rule_loaded(&loaded, r))
+        .copied()
+        .collect())
+}
+
+/// pfctl prints a single port back as `port = N`. Matched to the line's end, so
+/// port 5432 isn't found inside 54321.
+fn rule_loaded(pfctl_nat: &str, route: &RouteSpec) -> bool {
+    let want = format!(
+        "to {} port {} -> 127.0.0.1 port {}",
+        route.virtual_ip, route.container_port, route.host_port
+    );
+    pfctl_nat
+        .lines()
+        .any(|line| line.trim_end().replace("port = ", "port ").ends_with(&want))
+}
+
 fn disable_pf() -> Result<()> {
     run(Command::new("pfctl").arg("-d"))
 }
@@ -343,6 +383,25 @@ fn run(cmd: &mut Command) -> Result<()> {
 mod tests {
     use super::*;
     use crate::web::proxy::PROXY_IP;
+
+    #[test]
+    fn a_loaded_rule_is_found_in_pfctl_output() {
+        let route = RouteSpec {
+            virtual_ip: Ipv4Addr::new(127, 77, 0, 5),
+            container_port: 5432,
+            host_port: 54321,
+        };
+        let loaded = "no rdr on lo0 inet proto tcp from 127.0.0.0/8 to 127.0.0.0/8\n\
+                      rdr pass on lo0 inet proto tcp from any to 127.77.0.5 port = 5432 -> 127.0.0.1 port 54321\n";
+        assert!(rule_loaded(loaded, &route));
+        assert!(!rule_loaded(
+            loaded,
+            &RouteSpec {
+                host_port: 5432,
+                ..route
+            }
+        ));
+    }
 
     #[test]
     fn lo0_alias_is_found_by_exact_address_not_substring() {

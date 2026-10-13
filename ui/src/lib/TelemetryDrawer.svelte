@@ -175,7 +175,7 @@
       return netStatus.hosts.map((h) => [h, netStatus.proxy_ip ?? '127.0.0.1']);
     if (name === 'resolver-files')
       return netStatus.resolver_zones.map((z) => [`*.${z.zone}`, `127.0.0.1:${z.port}`]);
-    if (name === 'nat')
+    if (name === 'raw-routes')
       return netStatus.raw_routes.map((r) => [
         `${r.raw_domain ?? r.virtual_ip}:${r.container_port}`,
         `${r.virtual_ip}:${r.container_port} → 127.0.0.1:${r.host_port}`,
@@ -329,8 +329,8 @@
         <div class="section">
           {#each doctorChecks as c}
             {@const rows = netRows(c.name)}
-            <div class="check {c.verdict}">
-              <div class="check-head" class:expandable={rows} onclick={() => rows && toggle(c.name)}>
+            <div class="check {c.verdict}" class:expandable={rows} onclick={() => rows && toggle(c.name)}>
+              <div class="check-head">
                 <span class="mark">{MARKS[c.verdict] ?? '?'}</span>
                 <span class="check-title">{c.title}</span>
                 {#if rows}<span class="chevron">{expanded[c.name] ? '▾' : '▸'} {rows.length}</span>{/if}
@@ -344,20 +344,6 @@
               {/if}
             </div>
           {/each}
-          {#if netStatus}
-            {@const rows = netRows('nat')}
-            <div class="check">
-              <div class="check-head expandable" onclick={() => toggle('nat')}>
-                <span class="mark">·</span>
-                <span class="check-title">raw-zone NAT routes (pf)</span>
-                <span class="chevron">{expanded.nat ? '▾' : '▸'} {rows.length}</span>
-              </div>
-              <div class="check-detail">last reconciled {formatAge(netStatus.last_reconcile_ms)}</div>
-              {#if expanded.nat}
-                {@render netList(rows)}
-              {/if}
-            </div>
-          {/if}
         </div>
       {/if}
     </div>
@@ -483,7 +469,7 @@
   .check.warn .mark { color: #d9a73c; }
   .check.fail .mark { color: #e05c5c; }
   .check-title { font: 700 11.5px var(--font-mono); color: var(--ink); }
-  .check-head.expandable { cursor: pointer; }
+  .check.expandable { cursor: pointer; }
   .chevron { margin-left: auto; font: 600 10.5px var(--font-mono); color: var(--ink-faint); }
   .net-list { margin: 8px 0 2px 20px; }
   .net-list .row { background: var(--panel); }

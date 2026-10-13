@@ -256,6 +256,16 @@ pub fn current_routes() -> Vec<RouteSpec> {
     backend().status()
 }
 
+/// The applied routes, and those of them the OS isn't serving. `None` where
+/// raw routing isn't implemented.
+pub fn route_health() -> Option<Result<(Vec<RouteSpec>, Vec<RouteSpec>)>> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let routes = current_routes();
+    Some(macos::unserved_routes(&routes).map(|unserved| (routes, unserved)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

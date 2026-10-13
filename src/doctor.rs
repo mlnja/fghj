@@ -335,6 +335,50 @@ fn ca_trust_check(cert: &Path, is_trusted: impl FnOnce(&Path) -> Option<bool>) -
     }
 }
 
+fn raw_routes_check(
+    health: Option<Result<(Vec<raw_net::RouteSpec>, Vec<raw_net::RouteSpec>)>>,
+) -> Check {
+    let name = "raw-routes";
+    let title = "raw-zone port routes (pf)";
+    match health {
+        None => Check::warn(
+            name,
+            "raw-zone port routes",
+            "not implemented on this platform".to_string(),
+            "use the https domains: *.fghj.raw.internal names resolve, but nothing answers",
+        ),
+        Some(Ok((routes, unserved))) if unserved.is_empty() => Check::pass(
+            name,
+            title,
+            match routes.len() {
+                0 => "no raw ports to route".to_string(),
+                n => format!("{n} loaded in pf anchor fghjd"),
+            },
+        ),
+        Some(Ok((routes, unserved))) => Check::fail(
+            name,
+            title,
+            format!(
+                "{} of {} not loaded: {}",
+                unserved.len(),
+                routes.len(),
+                unserved
+                    .iter()
+                    .map(|r| format!("{}:{}", r.virtual_ip, r.container_port))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            "restart fghjd — it reloads its pf anchor and loopback aliases on start",
+        ),
+        Some(Err(e)) => Check::warn(
+            name,
+            title,
+            format!("{e:#}"),
+            "inspect the anchor by hand: `sudo pfctl -a fghjd -s nat`",
+        ),
+    }
+}
+
 /// Off the async runtime wholesale; the set takes well under a second.
 fn host_checks() -> Vec<Check> {
     vec![
@@ -343,6 +387,7 @@ fn host_checks() -> Vec<Check> {
         proxy_port_check(HTTP_PORT, "proxy-http", "proxy listening on 80"),
         resolver_files_check(dns::os_routing_status()),
         dns_resolution_check(),
+        raw_routes_check(raw_net::route_health()),
         ca_trust_check(
             &web::ca::ca_cert_path(&crate::daemon::ca_dir()),
             web::trust::is_trusted,
@@ -428,6 +473,23 @@ mod tests {
         assert!(parse_api_version("1.47").unwrap() >= BUILDKIT_MIN_API);
         assert!(parse_api_version("1.9").unwrap() < BUILDKIT_MIN_API);
         assert!(parse_api_version("1.38").unwrap() < BUILDKIT_MIN_API);
+    }
+
+    #[test]
+    fn raw_routes_fail_when_one_is_not_loaded() {
+        let route = raw_net::RouteSpec {
+            virtual_ip: std::net::Ipv4Addr::new(127, 77, 0, 5),
+            container_port: 5432,
+            host_port: 54321,
+        };
+        assert_eq!(
+            raw_routes_check(Some(Ok((vec![route], vec![])))).verdict,
+            Verdict::Pass
+        );
+        let broken = raw_routes_check(Some(Ok((vec![route], vec![route]))));
+        assert_eq!(broken.verdict, Verdict::Fail);
+        assert!(broken.detail.contains("127.77.0.5:5432"));
+        assert_eq!(raw_routes_check(None).verdict, Verdict::Warn);
     }
 
     #[test]
