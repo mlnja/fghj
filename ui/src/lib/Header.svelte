@@ -1,6 +1,8 @@
 <script>
   let {
     flows,
+    recentFlows,
+    singleRepoFlows,
     currentFlow,
     hasConflict,
     activeTab,
@@ -118,6 +120,38 @@
     onSelectFlow(flow);
   }
 
+  // Recent first, then flows spanning repos, then single-repo ones, which are
+  // mostly parts of the others. Typing narrows all three.
+  let flowFilter = $state('');
+  let flowSections = $derived.by(() => {
+    const needle = flowFilter.trim().toLowerCase();
+    const shown = (f) => !needle || f.toLowerCase().includes(needle);
+    const recent = (recentFlows ?? []).filter((f) => flows.includes(f));
+    const rest = flows.filter((f) => !recent.includes(f));
+    return [
+      { title: 'recent', flows: recent.filter(shown) },
+      { title: 'flows', flows: rest.filter((f) => !singleRepoFlows?.has(f) && shown(f)) },
+      { title: 'single repo', flows: rest.filter((f) => singleRepoFlows?.has(f) && shown(f)) },
+    ].filter((s) => s.flows.length);
+  });
+
+  function openFlowMenu() {
+    flowFilter = '';
+    menuOpen = !menuOpen;
+  }
+
+  function filterKey(e) {
+    if (e.key === 'Escape') menuOpen = false;
+    if (e.key === 'Enter') {
+      const first = flowSections[0]?.flows[0];
+      if (first) pick(first);
+    }
+  }
+
+  function focus(el) {
+    el.focus();
+  }
+
   function pickWorkspace(id) {
     wsMenuOpen = false;
     onSelectWorkspace(id);
@@ -162,15 +196,31 @@
   <div class="divider"></div>
 
   <div class="flow-picker">
-    <button class="flow-btn" onclick={() => (menuOpen = !menuOpen)}>
+    <button class="flow-btn" onclick={openFlowMenu}>
       <span>{currentFlow ?? '…'}</span>
       <span style="width:6px;height:6px;background:{hasConflict ? 'var(--danger)' : 'var(--success)'}"></span>
     </button>
     {#if menuOpen}
-      <div class="flow-menu">
-        {#each flows as f}
-          <div class="flow-row" onclick={() => pick(f)}>{f}</div>
-        {/each}
+      <div class="flow-menu flows">
+        <input
+          class="flow-filter"
+          type="text"
+          placeholder="filter flows…"
+          bind:value={flowFilter}
+          onkeydown={filterKey}
+          spellcheck="false"
+          use:focus
+        />
+        <div class="flow-list">
+          {#each flowSections as section (section.title)}
+            <div class="flow-section">{section.title}</div>
+            {#each section.flows as f (f)}
+              <div class="flow-row" class:current={f === currentFlow} onclick={() => pick(f)}>{f}</div>
+            {/each}
+          {:else}
+            <div class="flow-empty">nothing matches</div>
+          {/each}
+        </div>
       </div>
     {/if}
   </div>
@@ -257,6 +307,19 @@
   }
   .flow-row { padding: 9px 12px; cursor: pointer; font: 600 12px var(--font-mono); border-bottom: 1px solid var(--line); color: var(--ink); }
   .flow-row:hover { background: var(--panel); }
+  .flow-row.current { color: var(--accent); }
+  .flow-menu.flows { min-width: 260px; }
+  .flow-filter {
+    width: 100%; box-sizing: border-box; padding: 8px 12px; border: none; border-bottom: 1px solid var(--line-strong);
+    background: var(--panel); font: 500 12px var(--font-mono); color: var(--ink);
+  }
+  .flow-filter:focus { outline: none; }
+  .flow-list { max-height: 60vh; overflow-y: auto; }
+  .flow-section {
+    padding: 8px 12px 4px; font: 700 9.5px var(--font-mono); text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--ink-faint); border-bottom: 1px solid var(--line);
+  }
+  .flow-empty { padding: 9px 12px; font: 500 12px var(--font-mono); color: var(--ink-faint); font-style: italic; }
 
   .pull-wrap { position: relative; display: flex; align-items: center; gap: 6px; }
   .pull-btn {

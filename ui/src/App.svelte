@@ -55,7 +55,9 @@
       if (data.error) throw new Error(data.error);
       universe = data;
       const flows = data.flows ?? [];
-      if (!currentFlow || !flows.includes(currentFlow)) currentFlow = flows[0] ?? null;
+      const recent = loadRecentFlows();
+      if (!currentFlow || !flows.includes(currentFlow))
+        currentFlow = recent.find((f) => flows.includes(f)) ?? flows[0] ?? null;
     } catch (e) {
       error = String(e);
     }
@@ -96,7 +98,28 @@
   }
 
   // Starts the flow's containers and stops (not removes) everything else.
+  // The flows switched to last, newest first, per workspace and in this
+  // browser only: what the user actually runs is the best sign of which flows
+  // matter, and nothing in the config has to say so.
+  const RECENT_FLOWS = 5;
+  let recentFlows = $state([]);
+
+  function loadRecentFlows() {
+    try {
+      recentFlows = JSON.parse(localStorage.getItem(`fghj:recent-flows:${currentWorkspaceId}`)) ?? [];
+    } catch {
+      recentFlows = [];
+    }
+    return recentFlows;
+  }
+
+  function rememberFlow(flow) {
+    recentFlows = [flow, ...recentFlows.filter((f) => f !== flow)].slice(0, RECENT_FLOWS);
+    localStorage.setItem(`fghj:recent-flows:${currentWorkspaceId}`, JSON.stringify(recentFlows));
+  }
+
   async function switchFlow(flow) {
+    rememberFlow(flow);
     await fetch(withWs('/switch'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -365,6 +388,19 @@
   // one, which no node would carry.
   let flowNames = $derived(universe?.flows ?? []);
 
+  // Flows whose members all come from one repo: usually a building block
+  // another flow is made of, so the picker ranks them below the rest.
+  let singleRepoFlows = $derived.by(() => {
+    const repos = new Map();
+    for (const n of universe?.nodes ?? []) {
+      for (const f of n.flows ?? []) {
+        if (!repos.has(f)) repos.set(f, new Set());
+        repos.get(f).add(n.repo ?? n.local_path);
+      }
+    }
+    return new Set(flowNames.filter((f) => (repos.get(f)?.size ?? 0) <= 1));
+  });
+
   // Repos tab: which repo requires which other repo. The currently selected
   // flow is highlighted (border/edge color), not filtered — every known repo
   // always renders, per the fog-of-war model.
@@ -481,6 +517,8 @@
 <div style="position:relative;height:100vh;width:100vw;overflow:auto;background:var(--bg);color:var(--ink)">
   <Header
     flows={flowNames}
+    {recentFlows}
+    {singleRepoFlows}
     currentFlow={currentFlow}
     hasConflict={hasWarnings}
     activeTab={activeTab}
