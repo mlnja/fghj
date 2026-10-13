@@ -15,6 +15,12 @@ release:
 
     cargo update --workspace --quiet
 
+    # The crate version feeds the artifact hash, so every bump orphans a full
+    # set of fghj builds (lib, bins, tests, check/clippy/rust-analyzer
+    # variants, ~600 MB of incremental each) that Cargo never collects —
+    # target/ hit 42 GB after 33 releases. Dependencies are left alone.
+    cargo clean -p fghj --quiet
+
     git add Cargo.toml Cargo.lock
     git commit -m "chore: bump version to $next"
 
