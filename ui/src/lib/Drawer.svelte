@@ -117,6 +117,24 @@
   // so there's no generation picker here, just a start/stop toggle.
   let eventsAction = $state('start');
   let events = $state([]);
+  // The backend appends a `running` event when a step begins and an
+  // `ok`/`error` event when it ends. Show them as one row per step: the
+  // outcome replaces the spinner, and the time stays when the step started.
+  let eventRows = $derived.by(() => {
+    const rows = [];
+    const open = new Map(); // step -> index of its still-running row
+    for (const e of events) {
+      const i = open.get(e.step);
+      if (i !== undefined) {
+        rows[i] = { ...e, ts: rows[i].ts, seq: rows[i].seq };
+        if (e.status !== 'running') open.delete(e.step);
+      } else {
+        if (e.status === 'running') open.set(e.step, rows.length);
+        rows.push(e);
+      }
+    }
+    return rows;
+  });
   let loadingEvents = $state(false);
   let eventsPollTimer = null;
   let downloading = $state(false);
@@ -590,7 +608,7 @@
         </div>
         {#if events.length}
           <div class="event-list">
-            {#each events as e (e.seq)}
+            {#each eventRows as e (e.seq)}
               <!-- A detail with newlines in it is a report, not a caption: a build
                    failure names the step, the exit code and the command to run by
                    hand. Inline it would squeeze that against the step label and
