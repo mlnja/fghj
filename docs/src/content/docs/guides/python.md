@@ -11,7 +11,7 @@ Python specifically trips people up here:
 - **Buffered stdout**, which makes a working service look silent.
 - **`healthcheck` with no `curl`**, because the `slim` images don't ship one.
 - **Absolute URLs**, because fghj's proxy terminates TLS and sends plain
-  HTTP to your port with no `X-Forwarded-*` headers.
+  HTTP to your port, and Uvicorn ignores `X-Forwarded-*` by default.
 
 Everything else is the same `.fghj.yaml` any other runtime writes.
 
@@ -83,20 +83,20 @@ declaration.
 ### Absolute URLs
 
 The proxy terminates TLS on the host and relays plain HTTP to your
-container's port. It does **not** add `X-Forwarded-Proto` or
-`X-Forwarded-Host`, so there is nothing for `--proxy-headers` to read and no
-way for your app to infer the scheme from the request. If you mint absolute
-URLs — an OAuth redirect, a password-reset link, a presigned URL — read them
-from the environment instead:
+container's port, adding `X-Forwarded-Proto`, `X-Forwarded-Host` and
+`X-Forwarded-For` to every request. Uvicorn only reads them with
+`--proxy-headers`, and only from the addresses in `--forwarded-allow-ips`,
+which defaults to `127.0.0.1`. The proxy's connection arrives from Docker's
+network, not the container's own loopback, so allow it explicitly:
 
-```yaml
-environment:
-  OWN_URL: https://${FGHJ_SERVICE_FQDN_HTTP}
+```docker
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", \
+     "--proxy-headers", "--forwarded-allow-ips", "*"]
 ```
 
-fghj expands that when the container is created. Your code never computes
-its own hostname, which is right anyway: the hostname depends on the
-workspace directory's name and the run, neither of which the code can know.
+`request.url_for(...)` then returns `https://` URLs. Values a client already
+sent are kept, so a gateway in front of your service can pass along what the
+browser asked for.
 
 ## A database
 
@@ -244,6 +244,6 @@ Python breakpoint catching a request mid-flight.
 | Port connects, nothing answers | Bound to `127.0.0.1`. Use `--host 0.0.0.0`. |
 | No logs at all | Missing `PYTHONUNBUFFERED=1` (or `python -u`). |
 | Healthcheck always fails | No `curl` in the `slim` image — poll with `python -c`. |
-| Redirects go to `http://` | Nothing sets `X-Forwarded-Proto`. Read `${FGHJ_SERVICE_FQDN_HTTP}` from the environment. |
+| Redirects go to `http://` | Uvicorn isn't reading `X-Forwarded-Proto`. Add `--proxy-headers --forwarded-allow-ips '*'`. |
 | `pip install` on every edit | `COPY requirements.txt` before `COPY app`. |
 | Debugger port already in use | Several Python processes ran `sitecustomize.py`. Use the marker variable above. |

@@ -190,8 +190,9 @@ target.
 `fghjd` occupies ports 80 and 443, localhost-only
 (`proxy::bind_http`/`bind_https`):
 
-- **Port 80** does one thing: 301-redirect everything to the same path on
-  `https://`. There is no plaintext serving.
+- **Port 80** 301-redirects to the same path on `https://`, except a routed
+  non-reserved `#AdditionalHost`, which never gets a cert and so is relayed
+  over plain HTTP.
 - **Port 443** TLS-terminates via the resolver above, then dispatches the
   decrypted request based on the SNI name it was negotiated for:
   - The zone apex (`fghj.internal` itself) relays to the control API's
@@ -206,6 +207,24 @@ target.
     (this is also `DynamicCertResolver`'s rejection path — it has no cert
     to offer for a name it doesn't recognize as fghj's).
 
+Both listeners speak HTTP/1.1 (hyper) on both legs instead of splicing bytes,
+because a TLS-terminating proxy owes the backend `X-Forwarded-Proto`: without
+it, every app that builds its own URLs (a registry, phpMyAdmin) links back to
+`http://` and needs its own workaround. Every request on a kept-alive
+connection gets `X-Forwarded-Proto`, `X-Forwarded-Host` (the original `Host`)
+and `X-Forwarded-For`. Values a client already sent are kept, and `For` is
+appended to rather than replaced. The usual edge-proxy rule of overwriting
+them guards against untrusted clients, and fghjd has none: it is reachable
+only from this machine or the run's network. Overwriting would also break a
+gateway node calling another service through the sidecar, whose backend would
+then see the gateway's view of the request instead of the browser's.
+Hop-by-hop headers are dropped per leg, and upgrades (WebSockets) are spliced
+through as raw bytes once both sides have switched. A backend connection is
+reused across one client connection's requests; if the backend drops it just
+as a request goes out (its idle timeout firing), a bodyless `GET`/`HEAD`/
+`OPTIONS` is sent once more on a fresh connection. Anything with a body gets
+a 502 instead: the backend may already have acted on it.
+
 ## `RouteResolver`: routing decoupled from Docker
 
 ```rust
@@ -217,7 +236,7 @@ pub trait RouteResolver {
 This one-method trait is the entire interface `proxy::serve_https` needs to
 turn a hostname into a `127.0.0.1:<port>` to relay to. It's deliberately
 kept separate from `daemon::WorkspaceRegistry`/Docker so `web::proxy`'s own
-test suite can exercise real TLS handshakes and byte-for-byte relaying
+test suite can exercise real TLS handshakes and HTTP relaying
 against a plain in-memory map, instead of needing live containers to test
 routing logic at all (see `routed_in_zone_sni_proxies_to_its_registered_backend`
 in `web::proxy`'s tests).
