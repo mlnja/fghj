@@ -63,7 +63,7 @@ share one clone. Two different URLs that would land in the same folder
 
 - **Not a workspace repo.** The scan only reads top-level folders, so the
   clone is never read as a repo. A `.fghj.yaml` inside it means nothing.
-- **Pulled like a repo.** "Pull all", a flow's pull, and a node's download
+- **Pulled like a repo.** "Download all", a flow's pull, and a node's download
   clone the sources of the nodes they would start. The clone runs as the
   workspace owner, like every other clone.
 - **A commit ref is checked out.** `git clone --branch` takes only branches

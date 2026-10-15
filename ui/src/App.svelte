@@ -2,6 +2,7 @@
   import Header from './lib/Header.svelte';
   import GraphView from './lib/GraphView.svelte';
   import Drawer from './lib/Drawer.svelte';
+  import RepoDrawer from './lib/RepoDrawer.svelte';
   import Placeholder from './lib/Placeholder.svelte';
   import TelemetryDrawer from './lib/TelemetryDrawer.svelte';
   import GraphSkeleton from './lib/GraphSkeleton.svelte';
@@ -15,6 +16,12 @@
   let activeTab = $state('repos');
   let currentFlow = $state(null);
   let selectedNode = $state(null);
+  // A repo card is a group keyed by checkout, not a node, so it gets its own
+  // drawer. Held by id so the drawer follows the graph as it reloads.
+  let selectedRepoId = $state(null);
+  // `GET /repos`: `local_path` to git status, read only while the Repos tab
+  // is open.
+  let repoStatus = $state({});
   // `null` when closed, else the tab it opens on.
   let telemetryTab = $state(null);
   // The workspace's one environment (`GET /environment`), or null before
@@ -49,6 +56,8 @@
     universe = null;
     error = null;
     selectedNode = null;
+    selectedRepoId = null;
+    repoStatus = {};
     env = null;
     load();
   }
@@ -117,6 +126,29 @@
 
   async function onPullAllComplete() {
     await load();
+    await loadRepos();
+  }
+
+  async function loadRepos() {
+    try {
+      const res = await fetch(withWs('/repos'));
+      if (res.ok) repoStatus = await res.json();
+    } catch {
+      // fghjd unreachable: the connection banner already says so.
+    }
+  }
+
+  async function fetchRepo(path) {
+    try {
+      const res = await fetch(withWs(`/repos/${encodeURIComponent(path)}/fetch`), { method: 'POST' });
+      const out = await res.json();
+      if (!res.ok) return { ok: false, output: out.error ?? `HTTP ${res.status}` };
+      return out;
+    } catch (e) {
+      return { ok: false, output: String(e) };
+    } finally {
+      await loadRepos();
+    }
   }
 
   async function pullFlow(flow) {
@@ -381,6 +413,20 @@
       envPoll = setInterval(loadEnv, 1000);
       return () => clearInterval(envPoll);
     }
+    // Slower: here it only feeds the stale-container mark.
+    if (activeTab === 'repos') {
+      loadEnv();
+      envPoll = setInterval(loadEnv, 5000);
+      return () => clearInterval(envPoll);
+    }
+  });
+
+  // Git status is three git calls per repo, so not every second.
+  $effect(() => {
+    if (activeTab !== 'repos' || !currentWorkspaceId) return;
+    loadRepos();
+    const id = setInterval(loadRepos, 10000);
+    return () => clearInterval(id);
   });
 
   // Kept running regardless of which tab is active — not just 'repos' — so
@@ -463,18 +509,34 @@
     for (const [key, members] of groups) {
       for (const m of members) nodeToGroup.set(m.id, key);
       const repr = members[0];
+      // Containers built from an older state of this checkout than it's in
+      // now: the same comparison the Containers tab makes per card.
+      const stale = [];
+      for (const m of members) {
+        const built = runContainers[m.id]?.desired?.source;
+        if (!built) continue;
+        if (built.head && m.head && built.head !== m.head) {
+          stale.push({ id: m.id, label: m.label, built: built.head, now: m.head });
+        } else if (m.dirty && !built.dirty) {
+          stale.push({ id: m.id, label: m.label, built: built.head, now: null });
+        }
+      }
       nodes.push({
         id: key,
         label: key,
-        kind: 'service',
+        kind: 'repo',
         repo: repr.repo,
         branch: repr.branch,
+        head: repr.head,
         dirty: members.some((m) => m.dirty),
         downloaded: members.every((m) => m.downloaded),
         local_path: repr.local_path,
         domain: repr.domain,
         flows: [...new Set(members.flatMap((m) => m.flows))],
         services: members.filter((m) => m.kind === 'service').map((m) => m.label).sort(),
+        members: members.map((m) => ({ id: m.id, label: m.label, kind: m.kind })),
+        git: repr.local_path ? (repoStatus[repr.local_path] ?? null) : null,
+        stale,
       });
     }
 
@@ -498,6 +560,16 @@
 
     return { nodes, edges };
   });
+
+  let selectedRepo = $derived(
+    selectedRepoId ? (reposGraph?.nodes.find((n) => n.id === selectedRepoId) ?? null) : null
+  );
+  let missingAll = $derived(reposGraph ? reposGraph.nodes.filter((n) => !n.downloaded).length : null);
+  let missingInFlow = $derived(
+    reposGraph && currentFlow
+      ? reposGraph.nodes.filter((n) => !n.downloaded && n.flows.includes(currentFlow)).length
+      : null
+  );
 
   // Actual tab: services + infra, everything the daemon would eventually run.
   //
@@ -564,6 +636,8 @@
     onPullFlow={pullFlow}
     onPullFlowStatus={pullFlowStatus}
     onPullFlowComplete={onPullAllComplete}
+    {missingAll}
+    {missingInFlow}
     onSwitchFlow={switchFlow}
     envBusy={env?.pending_create != null}
     onOpenOperations={() => (telemetryTab = 'pulls')}
@@ -612,7 +686,7 @@
       {/if}
 
       {#if activeTab === 'repos'}
-        <GraphView graph={reposGraph} {currentFlow} mode="repos" onSelectNode={(n) => (selectedNode = n)} />
+        <GraphView graph={reposGraph} {currentFlow} mode="repos" onSelectNode={(n) => (selectedRepoId = n.id)} />
       {:else if activeTab === 'containers'}
         <GraphView graph={containersGraph} {currentFlow} mode="containers" {runContainers} {recordingNodes} onSelectNode={(n) => (selectedNode = n)} />
       {:else}
@@ -655,6 +729,25 @@
       onDeleteNode={deleteNode}
       onResetNode={resetNode}
       onSetDebugWait={setDebugWait}
+    />
+  {/if}
+
+  {#if selectedRepo}
+    <RepoDrawer
+      repo={selectedRepo}
+      graph={reposGraph}
+      {currentFlow}
+      workspacePath={workspaces.find((w) => w.id === currentWorkspaceId)?.workspace}
+      onClose={() => (selectedRepoId = null)}
+      onDownload={downloadNode}
+      onPullStatus={pullStatus}
+      onDownloadComplete={onPullAllComplete}
+      onFetch={fetchRepo}
+      onOpenNode={(id) => {
+        selectedRepoId = null;
+        activeTab = 'containers';
+        selectedNode = universe?.nodes.find((n) => n.id === id) ?? null;
+      }}
     />
   {/if}
 

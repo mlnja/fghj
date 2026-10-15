@@ -118,7 +118,7 @@ the one you didn't expect to be there. See
 Two buttons in the header act on the selected flow rather than the whole
 workspace:
 
-- **Pull flow** — clone every not-yet-downloaded repo this flow would start. On a
+- **Download flow** — clone every not-yet-downloaded repo this flow would start. On a
   large workspace this is the difference between fetching four repos and
   fetching forty.
 - **Switch to flow** — make the environment this flow: start its

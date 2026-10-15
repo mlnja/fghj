@@ -14,6 +14,10 @@
     onPullFlow,
     onPullFlowStatus,
     onPullFlowComplete,
+    // Repos not on disk yet, workspace-wide and in `currentFlow`. `null`
+    // until the graph has loaded.
+    missingAll = null,
+    missingInFlow = null,
     onSwitchFlow,
     envBusy,
     onOpenOperations,
@@ -226,8 +230,8 @@
   </div>
 
   {#if activeTab === 'repos'}
-    <button class="pull-btn" onclick={pullFlow} disabled={!currentFlow || flowPulling} title="clone every not-yet-downloaded repo in this flow">
-      {#if flowPulling}<span class="spinner"></span> pulling flow…{:else}Pull flow{/if}
+    <button class="pull-btn" onclick={pullFlow} disabled={!currentFlow || flowPulling || missingInFlow === 0} title="clone every not-yet-downloaded repo in this flow">
+      {#if flowPulling}<span class="spinner"></span> downloading flow…{:else if missingInFlow === 0}Flow downloaded{:else}Download flow{missingInFlow ? ` (${missingInFlow})` : ''}{/if}
     </button>
     {#if flowPullState && flowPullState !== 'running'}
       <span class="pull-result" class:ok={flowPullState === 'done'} class:error={flowPullState === 'error'}
@@ -250,15 +254,15 @@
 
   <div class="divider"></div>
   <div class="pull-wrap">
-    <button class="pull-btn" onclick={pullAll} disabled={pulling}>
-      {#if pulling}<span class="spinner"></span> pulling…{:else}Pull all{/if}
+    <button class="pull-btn" onclick={pullAll} disabled={pulling || missingAll === 0} title="clone every not-yet-downloaded repo">
+      {#if pulling}<span class="spinner"></span> downloading…{:else if missingAll === 0}All downloaded{:else}Download all{missingAll ? ` (${missingAll})` : ''}{/if}
     </button>
     {#if pullState && pullState !== 'running'}
       <span class="pull-result" class:ok={pullState === 'done'} class:error={pullState === 'error'}
         >{pullState === 'done' ? '✓' : '✕'}</span
       >
     {/if}
-    <span class="ops-link" onclick={onOpenOperations} title="pull queue">☰</span>
+    <span class="ops-link" onclick={onOpenOperations} title="download queue">☰</span>
   </div>
 
   <div class="divider"></div>

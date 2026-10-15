@@ -107,7 +107,7 @@ live when it was captured.
 
 `wire` only registers the workspace — it doesn't resolve its graph or
 start any containers. Graph resolution happens separately, either via
-`fghj graph` or when the UI loads the workspace. Use the UI's "Pull all"
+`fghj graph` or when the UI loads the workspace. Use the UI's "Download all"
 and "Switch to flow" (or `fghj graph` to inspect what would be
 resolved) as the next steps; see
 [Quickstart](/getting-started/quickstart/).

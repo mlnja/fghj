@@ -13,6 +13,7 @@ pub mod error;
 pub mod exec;
 pub mod extract;
 pub mod logs;
+pub mod repos;
 pub mod traffic;
 pub mod workspaces;
 
@@ -48,6 +49,8 @@ pub(crate) fn build_router(registry: Arc<WorkspaceRegistry>, daemon: Arc<DaemonC
         .route("/pull/{node_id}", post(post_pull_node))
         .route("/pull/{node_id}/status", get(get_pull_node_status))
         .route("/pull-jobs", get(get_pull_jobs))
+        .route("/repos", get(repos::get_repos))
+        .route("/repos/{path}/fetch", post(repos::post_repo_fetch))
         .route("/environment", get(get_environment))
         .route("/switch", post(post_switch))
         .route("/nodes/{node_id}/start", post(post_node_start))

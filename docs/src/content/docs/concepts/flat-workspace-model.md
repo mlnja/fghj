@@ -27,7 +27,7 @@ dependency whose local folder isn't present in the workspace renders as a
 `downloaded: false` stub node instead of failing the whole resolve — you
 can see it, see which flow it belongs to, and see that it isn't there yet.
 
-**Pull all** clones every missing repo into the workspace by convention,
+**Download all** clones every missing repo into the workspace by convention,
 recursively, until nothing new appears — a fixpoint loop, since a
 newly-cloned repo might declare its *own* flows or dependencies that
 nothing could see before it existed on disk. See

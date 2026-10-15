@@ -216,7 +216,7 @@ streams progress into a growing log buffer the UI polls instead:
 
 A single graph resolution can only see stub nodes for dependencies
 declared by repos *already on disk* — a not-yet-cloned repo's own
-dependencies are, by definition, unknown until it's cloned. "Pull all"
+dependencies are, by definition, unknown until it's cloned. "Download all"
 therefore loops: resolve the graph, clone every currently missing (and,
 if a flow is selected, flow-reachable) service node, then resolve again —
 repeating until a pass finds nothing left to clone. Each pass either makes

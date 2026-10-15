@@ -111,7 +111,7 @@ The stub's id is `catalog`, from the folder name the URL implies. Once the
 real repo lands, the stub is replaced by the nodes its file declares — the
 placeholder stands for a repo whose contents nobody has read yet.
 
-In the normal case you'd click **Pull all** here: the daemon clones what's
+In the normal case you'd click **Download all** here: the daemon clones what's
 missing, re-resolves, and repeats until nothing new turns up — a loop,
 because each clone can reveal dependencies of its own. We're writing
 `catalog` by hand instead, so there's nothing to fetch.

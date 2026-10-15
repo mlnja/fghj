@@ -13,7 +13,18 @@ shared model, not three separately-fetched datasets:
   `local_path`), with cross-repo edges merged from `depends-on` and `uses` —
   `depends-on` wins when both connect the same pair. "Who requires whom,"
   matching [[flat-workspace-model]]/[[fog-of-war-visibility]]'s
-  repo-centric graph. Backed by `GraphView` in `mode="repos"`.
+  repo-centric graph. Backed by `GraphView` in `mode="repos"`. A card is
+  git only: remote, branch, CLEAN/DIRTY with the changed-file count,
+  ahead/behind its upstream as of the last fetch, and a warning when a
+  container built from it is on older code (the same comparison the
+  Actual tab makes per card). Clicking one opens `RepoDrawer`, not the
+  node `Drawer`: a repo has no container to start. It holds Download (for
+  a repo not on disk), Fetch (`git fetch` as the workspace owner, never
+  touching the working tree), Copy path, the last commit, the changed
+  files, the services it declares (each opens on the Actual tab), its
+  flows, and which repos it needs and is needed by. The git detail comes
+  from `GET /repos` (`web/api/repos.rs`, `resolver::git::repo_status`),
+  not from the universe, because it costs three git calls per repo.
 - **Actual** (`containersGraph`): every node and edge — "everything the
   daemon would eventually run," services, images and tasks together,
   overlaid with live container status via `runContainers` (a
@@ -52,6 +63,9 @@ waste requests:
 - `/universe.json` every 3s while the Repos tab is active (`App.svelte`'s
   `graphPoll` effect) — reflects live git state (branch/dirty — see
   [[branch-ownership-model]]) without a manual refresh.
+- `/repos` every 10s while the Repos tab is active, plus right after a
+  Fetch or a download, and `/environment` every 5s there for the
+  older-code warning.
 - `/environment` every 1s while the Actual tab is active (`envPoll`) — matched to
   `daemon::spawn_reconciler`'s own 1s tick (see
   [[run-lifecycle-and-registry]]), so the UI is essentially never stale

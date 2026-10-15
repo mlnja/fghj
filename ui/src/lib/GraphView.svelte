@@ -21,6 +21,7 @@
   // before the name instead of a text pill so it reads at a glance without
   // eating a row.
   const SERVICE_ICON = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M8 1.6 13.8 5v6L8 14.4 2.2 11V5Z"/><path d="M2.2 5 8 8.2 13.8 5M8 8.2v6.2"/></svg>`;
+  const REPO_ICON = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="4.5" cy="3.5" r="1.6"/><circle cx="4.5" cy="12.5" r="1.6"/><circle cx="11.5" cy="5.5" r="1.6"/><path d="M4.5 5.1v5.8M11.5 7.1c0 2.4-2.6 2.6-6.2 4"/></svg>`;
   const BACKING_ICON = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.3"><ellipse cx="8" cy="3.4" rx="5.4" ry="1.9"/><path d="M2.6 3.4v9.2c0 1.05 2.42 1.9 5.4 1.9s5.4-.85 5.4-1.9V3.4"/><path d="M2.6 8c0 1.05 2.42 1.9 5.4 1.9s5.4-.85 5.4-1.9"/></svg>`;
   // A terminating node (a seed, a migration, any one-shot job): declared
   // inline by a service like a backing dependency, but it runs to completion
@@ -260,6 +261,8 @@
         <div class="node-id-wrap">
           {#if n.downloaded === false}
             <span class="badge">not downloaded</span>
+          {:else if mode === 'repos'}
+            <span class="kind-icon service" title="git checkout">{@html REPO_ICON}</span>
           {:else if n.kind === 'backing'}
             <span class="kind-icon backing" title="backing dependency">{@html BACKING_ICON}</span>
           {:else if n.kind === 'task'}
@@ -274,6 +277,42 @@
         </div>
       </div>
 
+      {#if mode === 'repos'}
+        <!-- A repo card says what git says about the checkout and nothing
+             about containers, except the one thing that joins the two: a
+             container built from an older state of it. -->
+        {@const g = n.git}
+        {#if n.repo}
+          <div class="node-repo" title={n.repo}>{shortRepo(n.repo)}</div>
+        {/if}
+        {#if n.downloaded === false}
+          <div class="lane-line empty" title="not downloaded yet, so there is no checkout to read">not downloaded</div>
+        {:else if n.branch || g?.branch}
+          <div class="lane-line" title={g?.branch ?? n.branch}>{g?.branch ?? n.branch}</div>
+          <div class="lane-line pills">
+            <span class="pill" class:dirty={n.dirty} class:clean={!n.dirty} title={g ? `${g.changes_total} changed file${g.changes_total === 1 ? '' : 's'}` : 'git working tree'}>
+              {n.dirty ? 'DIRTY' : 'CLEAN'}{n.dirty && g?.changes_total ? ` ${g.changes_total}` : ''}
+            </span>
+            {#if g?.upstream && (g.ahead || g.behind)}
+              <span class="sha" title="{g.ahead} commit(s) not on {g.upstream}, {g.behind} on {g.upstream} not here, as of the last fetch">
+                {g.ahead ? `↑${g.ahead}` : ''}{g.ahead && g.behind ? ' ' : ''}{g.behind ? `↓${g.behind}` : ''}
+              </span>
+            {:else if g && !g.upstream}
+              <span class="sha" title="this branch tracks no upstream">no upstream</span>
+            {/if}
+            {#if sha}
+              <span class="sha" title={n.head}>{sha}</span>
+            {/if}
+          </div>
+        {:else}
+          <div class="lane-line unreadable" title="fghjd could not read git state for this checkout">branch unreadable</div>
+        {/if}
+        {#if n.stale?.length}
+          <div class="lane-line stale-mark" title={n.stale.map((s) => s.label).join(', ')}>
+            {n.stale.length} container{n.stale.length === 1 ? '' : 's'} on older code
+          </div>
+        {/if}
+      {:else}
       <!-- Identity, full width. Which repo a node came from is neither a git
            *state* nor a docker one, and a whole line keeps `owner/name`
            readable instead of truncating it into a half-width lane. -->
@@ -367,6 +406,7 @@
         <div class="status-bar state-{containerState}" title={STATE_TITLE[containerState] ?? `container: ${containerState}`}>
           {containerState === 'none' ? 'absent' : containerState}
         </div>
+      {/if}
       {/if}
     </div>
   {/each}
@@ -498,6 +538,7 @@
     border-radius: 999px; padding: 2px 7px; flex: 0 0 auto;
   }
   .pill.dirty { background: var(--warning-bg); color: var(--warning); }
+  .stale-mark { color: var(--warning); font-weight: 700; }
   .pill.clean { background: var(--success-bg); color: var(--success); }
   .pill.drifted { background: var(--warning-bg); color: var(--warning); }
   .pill.synced { background: var(--success-bg); color: var(--success); }

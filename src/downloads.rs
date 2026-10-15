@@ -231,18 +231,24 @@ fn run_git_logged(
 
     if !status.success() {
         let output = state.lock().unwrap().log[log_start..].to_string();
-        let as_root = unsafe { libc::geteuid() } == 0;
-        let agent = match owner.map(WorkspaceOwner::live_ssh_auth_sock) {
-            None | Some(None) => Agent::None,
-            Some(Some(sock)) if sock.contains("/com.apple.launchd.") => Agent::Apple,
-            Some(Some(_)) => Agent::Other,
-        };
-        if let Some(hint) = failure_hint(&output, owner.is_some(), as_root, agent) {
+        if let Some(hint) = refusal_hint(&output, owner) {
             append_log(state, &format!("\nhint: {hint}\n"));
         }
         bail!("git exited with {status}");
     }
     Ok(())
+}
+
+/// For a git that ran as `owner` (or as fghjd, when `None`) and failed with
+/// `output`.
+pub(crate) fn refusal_hint(output: &str, owner: Option<&WorkspaceOwner>) -> Option<&'static str> {
+    let as_root = unsafe { libc::geteuid() } == 0;
+    let agent = match owner.map(WorkspaceOwner::live_ssh_auth_sock) {
+        None | Some(None) => Agent::None,
+        Some(Some(sock)) if sock.contains("/com.apple.launchd.") => Agent::Apple,
+        Some(Some(_)) => Agent::Other,
+    };
+    failure_hint(output, owner.is_some(), as_root, agent)
 }
 
 /// Why a remote refused us, when the cause is how fghj ran git.

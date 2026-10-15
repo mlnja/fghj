@@ -10,10 +10,14 @@ just switches which body renders under a fixed header. All three tabs
 read from the same resolved graph — they're different *views* over one
 shared model, not three separately fetched datasets:
 
-- **Repos** — service nodes and their `depends-on` edges only: "who
+- **Repos** — one card per repo and the edges between repos: "who
   requires whom," matching the repo-centric graph described in
   [Flat workspace model](/concepts/flat-workspace-model/) and
-  [Fog-of-war visibility](/concepts/fog-of-war-visibility/).
+  [Fog-of-war visibility](/concepts/fog-of-war-visibility/). A card shows
+  only git: branch, clean or dirty, ahead/behind its upstream, whether it's
+  downloaded, and a warning when a container built from it runs older code.
+  Clicking one opens the repo's drawer, with Download or Fetch, the last
+  commit, the changed files and the services it declares.
 - **Actual** — every node kind, services and backing dependencies
   together, overlaid with live container status from the workspace's one
   environment. The header's **Switch to flow** acts on the selected flow
@@ -98,7 +102,7 @@ the current node/edge set on every render:
   listing of the managed `/etc/hosts` entries, the `/etc/resolver` zones
   with the port each points at, and the NAT routes backing the raw zone;
   the **pull queue** — every clone/download started this daemon lifetime,
-  with its raw Git output (the "☰" next to **Pull all** opens straight
+  with its raw Git output (the "☰" next to **Download all** opens straight
   to it); and **Doctor**. It's how you check the plumbing is up without reading `fghjd`'s
   output — see [Split DNS](/concepts/split-dns/) and
   [Networking: HTTP vs. raw](/guides/networking-http-vs-raw/).
