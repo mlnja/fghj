@@ -11,11 +11,13 @@ use std::time::SystemTime;
 use anyhow::{Context, Result, bail};
 use fghj::dns;
 use fghj::supervisor;
-use fghj::web::{ca, proxy};
+use fghj::web::traffic::TrafficStore;
+use fghj::web::{ca, capture, proxy};
 use serde::Deserialize;
 use tokio::net::{TcpListener, UdpSocket};
 
 const CA_DIR: &str = "/etc/fghj-sidecar/ca";
+const ROUTES_DIR: &str = "/etc/fghj-sidecar/routes";
 const ROUTES_PATH: &str = "/etc/fghj-sidecar/routes/routes.json";
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -28,6 +30,9 @@ struct RouteFileEntry {
     wildcard: bool,
     connect_host: String,
     connect_port: u16,
+    /// Whose log a request to this route is recorded in.
+    #[serde(default)]
+    node_id: String,
 }
 
 /// Polled, not inotify: bind-mount events across the VM boundary are
@@ -35,6 +40,7 @@ struct RouteFileEntry {
 struct FileRoutes {
     own_ip: Ipv4Addr,
     routes: Mutex<Vec<RouteFileEntry>>,
+    traffic: Arc<TrafficStore>,
 }
 
 impl FileRoutes {
@@ -45,10 +51,11 @@ impl FileRoutes {
         serde_json::from_slice(&bytes).unwrap_or_default()
     }
 
-    fn spawn_polling(own_ip: Ipv4Addr) -> Arc<Self> {
+    fn spawn_polling(own_ip: Ipv4Addr, traffic: Arc<TrafficStore>) -> Arc<Self> {
         let this = Arc::new(Self {
             own_ip,
             routes: Mutex::new(Self::load()),
+            traffic,
         });
         supervisor::supervise_forever("routes file watcher", Self::poll_routes(this.clone()));
         this
@@ -88,6 +95,8 @@ impl proxy::RouteResolver for FileRoutes {
             .map(|r| proxy::Backend {
                 host: r.connect_host.clone(),
                 port: r.connect_port,
+                traffic: (!r.node_id.is_empty())
+                    .then(|| self.traffic.log(capture::SIDECAR_WORKSPACE, &r.node_id)),
             })
     }
 }
@@ -123,7 +132,8 @@ async fn main() -> Result<()> {
         .context("failed to load CA from the mounted /etc/fghj-sidecar/ca")?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let own_ip = discover_own_ip().context("failed to discover this sidecar's own IP")?;
-    let file_routes = FileRoutes::spawn_polling(own_ip);
+    let traffic = Arc::new(TrafficStore::default());
+    let file_routes = FileRoutes::spawn_polling(own_ip, traffic.clone());
     let routes: Arc<dyn proxy::RouteResolver> = file_routes.clone();
     let zones: Arc<dyn dns::ZoneSource> = file_routes;
     let cert_resolver = Arc::new(ca::DynamicCertResolver::new(
@@ -151,6 +161,10 @@ async fn main() -> Result<()> {
         .await
         .context("failed to bind sidecar DNS listener on 0.0.0.0:53")?;
     let docker_embedded_dns = SocketAddr::from((Ipv4Addr::new(127, 0, 0, 11), 53));
+
+    let capture_listener = TcpListener::bind(("0.0.0.0", capture::CAPTURE_PORT))
+        .await
+        .context("failed to bind sidecar capture listener")?;
     println!("fghj-sidecar: DNS listening on 0.0.0.0:53, answering recognized names with {own_ip}");
 
     // Never dialed: nothing in a run's network presents the zone apex.
@@ -165,6 +179,11 @@ async fn main() -> Result<()> {
             routes
         ),
         dns::serve(dns_socket, zones, Some(docker_embedded_dns)),
+        capture::serve(
+            capture_listener,
+            traffic,
+            Path::new(ROUTES_DIR).join(capture::TOKEN_FILE)
+        ),
     );
     Ok(())
 }

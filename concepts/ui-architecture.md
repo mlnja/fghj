@@ -64,6 +64,10 @@ container — genuinely pushed, not polled, since log lines arriving late by
 even a second would be a much more noticeable regression than a graph node
 being briefly stale.
 
+The Traffic tab (`TrafficTab.svelte`) is the other one: it follows
+`/nodes/{node}/traffic/stream` over SSE while it's open. The recording
+itself is held by fghjd and only *followed* here. See [[traffic-capture]].
+
 Both `pull`/`pull-all`/`pull-flow` and run-start/stop follow the same
 "kick off, then poll a status endpoint" shape client-side (`Header.svelte`'s
 `pullAll`/`pullFlow`, `Drawer.svelte`'s `download`) — matching

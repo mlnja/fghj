@@ -4,8 +4,11 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 
-use super::route_table::{refresh_sidecar_ca_copy, sidecar_routes_dir, sidecar_routes_path};
+use super::route_table::{
+    refresh_sidecar_ca_copy, sidecar_capture_token, sidecar_routes_dir, sidecar_routes_path,
+};
 use crate::docker;
+use crate::web::capture::CAPTURE_PORT;
 
 use super::naming::sidecar_name;
 use super::registry::Orchestrator;
@@ -37,6 +40,7 @@ impl Orchestrator {
             std::fs::write(&routes_path, b"[]")
                 .with_context(|| format!("failed to create {routes_path:?}"))?;
         }
+        sidecar_capture_token(network)?;
 
         // Canonicalized: OrbStack doesn't follow macOS's `/var` symlink and would
         // mount an empty directory.
@@ -52,6 +56,9 @@ impl Orchestrator {
             format!("{}:/etc/fghj-sidecar/ca:ro", ca_dir.display()),
         ];
 
+        // Docker binds it to the host's 127.0.0.1 on a port of its choosing;
+        // fghjd looks it up when it starts pulling.
+        let ports = [(CAPTURE_PORT.to_string(), None)];
         docker::run_container(
             &self.docker,
             &docker::RunOpts {
@@ -59,7 +66,7 @@ impl Orchestrator {
                 network,
                 aliases: &[],
                 env: &[],
-                ports: &[],
+                ports: &ports,
                 image: &crate::sidecar_image::image_tag(),
                 command: &[],
                 project: network,

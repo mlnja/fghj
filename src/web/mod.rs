@@ -3,8 +3,10 @@
 
 pub mod api;
 pub mod ca;
+pub mod capture;
 pub mod mime;
 pub mod proxy;
 pub mod query;
+pub mod traffic;
 pub mod trust;
 pub mod ui;

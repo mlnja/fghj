@@ -1,7 +1,7 @@
 <script>
   import dagre from '@dagrejs/dagre';
 
-  let { graph, currentFlow, mode, runContainers, onSelectNode } = $props();
+  let { graph, currentFlow, mode, runContainers, recordingNodes, onSelectNode } = $props();
 
   // Widened from 260 so two state lanes fit side by side without truncating
   // a branch name on every card. The gaps keep their old slack (80px across,
@@ -268,6 +268,9 @@
             <span class="kind-icon service" title="service">{@html SERVICE_ICON}</span>
           {/if}
           <span class="node-id">{n.label}</span>
+          {#if recordingNodes?.[n.id]}
+            <span class="rec-dot" title="Recording HTTP traffic. Open the node's Traffic tab to see it or stop."></span>
+          {/if}
         </div>
       </div>
 
@@ -425,6 +428,11 @@
   @keyframes status-pulse { 50% { opacity: 0.55; } }
   .node-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; gap: 8px; }
   .node-id-wrap { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .rec-dot {
+    flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--danger);
+    animation: rec-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes rec-pulse { 50% { opacity: 0.35; } }
   .node-id { font: 600 13.5px var(--font-mono); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* service (git-backed, independently deployable) vs. backing (an inline
      dependency declared by some service, e.g. a database — no repo of its

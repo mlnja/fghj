@@ -32,11 +32,15 @@ use tokio_rustls::server::TlsStream;
 use crate::dns;
 use crate::supervisor;
 use crate::web::ca;
+use crate::web::traffic::{Recording, Side, TrafficLog};
 
 #[derive(Clone)]
 pub struct Backend {
     pub host: String,
     pub port: u16,
+    /// The node's traffic log, checked on every request so recording can be
+    /// switched on under an already-open connection.
+    pub traffic: Option<Arc<TrafficLog>>,
 }
 
 pub trait RouteResolver: Send + Sync {
@@ -232,6 +236,7 @@ async fn handle_https_connection(
         Some(Backend {
             host: "127.0.0.1".to_string(),
             port: control_port,
+            traffic: None,
         })
     } else {
         routes.resolve(&name)
@@ -268,15 +273,24 @@ where
         async move {
             let resp = match route(&req) {
                 Route::Respond(resp) => resp,
-                Route::Forward(backend) => forward(req, &backend, client_ip, proto, &upstream)
-                    .await
-                    .unwrap_or_else(|e| {
-                        eprintln!(
-                            "fghjd: backend proxy error ({}:{}): {e:#}",
-                            backend.host, backend.port
-                        );
-                        bad_gateway_response(&backend)
-                    }),
+                Route::Forward(backend) => {
+                    let rec = backend
+                        .traffic
+                        .as_ref()
+                        .and_then(|log| log.begin(&req, traffic_source(client_ip), proto));
+                    forward(req, &backend, client_ip, proto, &upstream, rec.as_ref())
+                        .await
+                        .unwrap_or_else(|e| {
+                            eprintln!(
+                                "fghjd: backend proxy error ({}:{}): {e:#}",
+                                backend.host, backend.port
+                            );
+                            if let Some(rec) = &rec {
+                                rec.fail(&e);
+                            }
+                            bad_gateway_response(&backend)
+                        })
+                }
             };
             Ok::<_, Infallible>(resp)
         }
@@ -306,6 +320,7 @@ async fn forward(
     client_ip: IpAddr,
     proto: &'static str,
     upstream: &Mutex<Option<Upstream>>,
+    rec: Option<&Recording>,
 ) -> Result<Response<ProxyBody>> {
     let client_upgrade = req
         .headers()
@@ -333,7 +348,11 @@ async fn forward(
     // nginx's `proxy_next_upstream error` does.
     let replay = (reused && is_replayable(&req)).then(|| bodyless_copy(&req));
 
-    let mut resp = match sender.try_send_request(req.map(|body| body.boxed())).await {
+    let req = req.map(|body| match rec {
+        Some(rec) => rec.tap(Side::Request, body).boxed(),
+        None => body.boxed(),
+    });
+    let mut resp = match sender.try_send_request(req).await {
         Ok(resp) => resp,
         Err(mut e) => {
             // A message handed back never reached the backend, so any method
@@ -352,13 +371,16 @@ async fn forward(
 
     let upgraded = resp.status() == StatusCode::SWITCHING_PROTOCOLS;
     strip_hop_by_hop(resp.headers_mut(), upgraded);
+    if let Some(rec) = rec {
+        rec.response(&resp, upgraded);
+    }
     if upgraded {
         // The backend connection now belongs to the upgraded stream.
         if let Some(client_upgrade) = client_upgrade {
             let backend_upgrade = hyper::upgrade::on(&mut resp);
             supervisor::supervise(
                 "proxied upgrade",
-                splice_upgraded(client_upgrade, backend_upgrade),
+                splice_upgraded(client_upgrade, backend_upgrade, rec.cloned()),
             );
         }
     } else {
@@ -368,7 +390,20 @@ async fn forward(
             sender,
         });
     }
-    Ok(resp.map(|body| body.boxed()))
+    Ok(resp.map(|body| match rec {
+        Some(rec) if !upgraded => rec.tap(Side::Response, body).boxed(),
+        _ => body.boxed(),
+    }))
+}
+
+/// Who sent a recorded request. Everything on loopback is the developer's
+/// own machine: a browser, curl, or a container through Docker's port mapping.
+fn traffic_source(client_ip: IpAddr) -> String {
+    if client_ip.is_loopback() {
+        "host".to_string()
+    } else {
+        client_ip.to_string()
+    }
 }
 
 /// Safe to send twice, and nothing of it is lost by having been sent once.
@@ -472,11 +507,19 @@ fn add_forwarded_headers(headers: &mut HeaderMap, client_ip: IpAddr, proto: &'st
     }
 }
 
-async fn splice_upgraded(client: OnUpgrade, backend: OnUpgrade) -> Result<()> {
+async fn splice_upgraded(
+    client: OnUpgrade,
+    backend: OnUpgrade,
+    rec: Option<Recording>,
+) -> Result<()> {
     let (client, backend) = tokio::try_join!(client, backend).context("upgrade failed")?;
     let mut client = TokioIo::new(client);
     let mut backend = TokioIo::new(backend);
-    match tokio::io::copy_bidirectional(&mut client, &mut backend).await {
+    let relayed = tokio::io::copy_bidirectional(&mut client, &mut backend).await;
+    if let Some(rec) = rec {
+        rec.closed();
+    }
+    match relayed {
         Err(e) if !is_benign_disconnect(&e) => Err(e).context("upgraded connection relay failed"),
         _ => Ok(()),
     }
@@ -532,6 +575,7 @@ mod tests {
                     let backend = Backend {
                         host: host.to_string(),
                         port: *port,
+                        traffic: None,
                     };
                     (name.to_string(), backend)
                 })
@@ -1178,5 +1222,126 @@ mod tests {
         assert!(!is_benign_disconnect(&io::Error::from(
             io::ErrorKind::PermissionDenied
         )));
+    }
+
+    fn recorded_routes(port: u16, log: &Arc<TrafficLog>) -> Arc<dyn RouteResolver> {
+        let backend = Backend {
+            host: "127.0.0.1".to_string(),
+            port,
+            traffic: Some(log.clone()),
+        };
+        Arc::new(StaticRoutes(HashMap::from([(ROUTED.to_string(), backend)])))
+    }
+
+    /// The proxy finishes a recording when hyper is done with the body,
+    /// which can be a moment after the client has read it.
+    async fn settled(log: &TrafficLog, id: u64) -> serde_json::Value {
+        for _ in 0..100 {
+            let v = serde_json::to_value(log.get(id).unwrap().detail()).unwrap();
+            if !["pending", "streaming", "open"].contains(&v["state"].as_str().unwrap()) {
+                return v;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("exchange {id} never settled");
+    }
+
+    #[tokio::test]
+    async fn recording_switched_on_mid_connection_captures_the_next_request() {
+        let backend_port = header_echo_backend().await;
+        let store = crate::web::traffic::TrafficStore::default();
+        let log = store.log("ws", "cart");
+        let (addr, ca_der) = https_proxy(0, recorded_routes(backend_port, &log)).await;
+        let mut client = tls_client(addr, ROUTED, ca_der).await;
+
+        let (status, _) = post(
+            &mut client,
+            Full::new(Bytes::from_static(b"unrecorded")).boxed(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(log.summaries().is_empty());
+
+        log.set_mode(Some(crate::web::traffic::BodyMode::Text));
+        let (status, body) = post(
+            &mut client,
+            Full::new(Bytes::from_static(b"{\"a\":1}")).boxed(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&body[..], b"{\"a\":1}");
+
+        let summaries = log.summaries();
+        assert_eq!(summaries.len(), 1);
+        let v = settled(&log, summaries[0].id).await;
+        assert_eq!(v["method"], "POST");
+        assert_eq!(v["url"], "/echo");
+        assert_eq!(v["host"], ROUTED);
+        assert_eq!(v["source"], "host");
+        assert_eq!(v["scheme"], "https");
+        assert_eq!(v["status"], 200);
+        assert_eq!(v["state"], "done");
+        // Untyped both ways, so kept because they sniff as text.
+        assert_eq!(v["request"]["body"]["text"], "{\"a\":1}");
+        assert_eq!(v["response"]["body"]["text"], "{\"a\":1}");
+        // Headers as the client sent them, before the proxy added its own.
+        let request_headers = v["request"]["headers"].as_array().unwrap();
+        assert!(!request_headers.iter().any(|h| h[0] == "x-forwarded-proto"));
+    }
+
+    #[tokio::test]
+    async fn a_502_is_recorded_with_its_error() {
+        let closed = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let closed_port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let store = crate::web::traffic::TrafficStore::default();
+        let log = store.log("ws", "cart");
+        log.set_mode(Some(crate::web::traffic::BodyMode::Text));
+        let (addr, ca_der) = https_proxy(0, recorded_routes(closed_port, &log)).await;
+
+        let mut client = tls_client(addr, ROUTED, ca_der).await;
+        let (status, _, _) = get(&mut client, ROUTED, &[]).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+        let v = settled(&log, log.summaries()[0].id).await;
+        assert_eq!(v["status"], 502);
+        assert_eq!(v["state"], "error");
+        assert!(
+            v["error"].as_str().unwrap().contains("failed to connect"),
+            "{v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_is_recorded_until_it_closes() {
+        let backend_port = header_echo_backend().await;
+        let store = crate::web::traffic::TrafficStore::default();
+        let log = store.log("ws", "cart");
+        log.set_mode(Some(crate::web::traffic::BodyMode::Text));
+        let (addr, ca_der) = https_proxy(0, recorded_routes(backend_port, &log)).await;
+        let mut client = tls_client(addr, ROUTED, ca_der).await;
+
+        client.ready().await.unwrap();
+        let req = Request::builder()
+            .uri("/ws")
+            .header(header::HOST, ROUTED)
+            .header(header::CONNECTION, "upgrade")
+            .header(header::UPGRADE, "echo")
+            .body(Full::default().boxed())
+            .unwrap();
+        let resp = client.send_request(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
+        let mut io = TokioIo::new(hyper::upgrade::on(resp).await.unwrap());
+        io.write_all(b"hello").await.unwrap();
+        let mut buf = [0u8; 5];
+        io.read_exact(&mut buf).await.unwrap();
+
+        let id = log.summaries()[0].id;
+        assert_eq!(log.get(id).unwrap().summary().state, "open");
+        drop(io);
+        let v = settled(&log, id).await;
+        assert_eq!(v["state"], "closed");
+        assert_eq!(v["upgraded"], true);
+        assert_eq!(v["status"], 101);
     }
 }

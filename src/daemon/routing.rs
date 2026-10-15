@@ -11,9 +11,10 @@ use crate::{dns, raw_net};
 
 impl proxy::RouteResolver for WorkspaceRegistry {
     fn resolve(&self, host: &str) -> Option<proxy::Backend> {
-        query::resolve_route(&self.states(), host).map(|port| proxy::Backend {
+        query::resolve_route(&self.states(), host).map(|target| proxy::Backend {
             host: "127.0.0.1".to_string(),
-            port,
+            port: target.port,
+            traffic: Some(self.traffic().log(&target.workspace, &target.node_id)),
         })
     }
 }

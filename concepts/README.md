@@ -79,6 +79,7 @@ it in the audit's tracker — the concept files stay the durable record.
 |---|---|
 | [[node-identity-and-domains]] | How a node gets its `id`/`label`, how that id becomes a `*.fghj.internal` domain, and named/primary ports. |
 | [[local-ca-and-tls-proxy]] | The local root CA, on-the-fly per-SNI leaf certs, and the TLS-terminating reverse proxy that dispatches to real containers. |
+| [[traffic-capture]] | The Traffic tab: per-node HTTP capture in the host proxy, held in memory by fghjd, bodies kept by content type, and why recording outlives the drawer. |
 | [[split-dns]] | The hand-rolled authoritative DNS server for `*.fghj.internal` and how it's wired into the OS resolver. |
 | [[two-zones-and-raw-ports]] | Why there are two domain zones — `fghj.internal` (proxied, TLS, dispatch by name) and `fghj.raw.internal` (a real per-node address, any protocol) — and the virtual-IP allocator that makes the second one work. |
 | [[in-network-sidecar]] | The one-container-per-run DNS+TLS proxy that makes `fghj.internal` names resolve the same way from inside a run's network as they do from the host. |

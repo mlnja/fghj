@@ -47,6 +47,11 @@ bytes = "1.12.1"
 hyper = { version = "1.11.0", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 http-body-util = "0.1.5"
+base64 = "0.22.1"
+# Captured traffic is stored as it went over the wire and decoded only when
+# someone opens it in the UI.
+flate2 = "1.1.10"
+brotli = "9.0.0"
 
 [dev-dependencies]
 x509-parser = { version = "0.18.1", features = ["verify"] }

@@ -15,6 +15,7 @@ pub(crate) struct RouteFileEntry {
     wildcard: bool,
     connect_host: String,
     connect_port: u16,
+    node_id: String,
 }
 
 pub(crate) fn route_file_entries<'a>(
@@ -30,6 +31,7 @@ pub(crate) fn route_file_entries<'a>(
                     wildcard: r.wildcard,
                     connect_host: c.desired.raw_domain.clone(),
                     connect_port,
+                    node_id: c.node_id.clone(),
                 })
             })
         })
@@ -42,6 +44,26 @@ pub(crate) fn sidecar_routes_dir(network: &str) -> PathBuf {
 
 pub(crate) fn sidecar_routes_path(network: &str) -> PathBuf {
     sidecar_routes_dir(network).join("routes.json")
+}
+
+/// Created once per network and read on every capture request, so a running
+/// sidecar keeps accepting the same one across fghjd restarts.
+pub(crate) fn sidecar_capture_token(network: &str) -> Result<String> {
+    let path = sidecar_routes_dir(network).join(crate::web::capture::TOKEN_FILE);
+    if let Ok(token) = std::fs::read_to_string(&path)
+        && !token.trim().is_empty()
+    {
+        return Ok(token.trim().to_string());
+    }
+    let token = crate::web::capture::new_token()?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &token).with_context(|| format!("failed to write {tmp:?}"))?;
+    // World-readable like the rest of this folder, or it can't be mounted;
+    // it only keeps out other containers and web pages, not local users.
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))
+        .with_context(|| format!("failed to set permissions on {tmp:?}"))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("failed to rename into {path:?}"))?;
+    Ok(token)
 }
 
 pub(crate) fn sidecar_ca_dir() -> PathBuf {
@@ -129,6 +151,7 @@ mod tests {
                 wildcard: false,
                 connect_host: "svc.demo.fghj.raw.internal".to_string(),
                 connect_port: 8080,
+                node_id: "svc".to_string(),
             }]
         );
     }

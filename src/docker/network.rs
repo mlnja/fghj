@@ -35,3 +35,23 @@ pub async fn ensure_network(docker: &Docker, name: &str, project: &str) -> Resul
 pub async fn remove_network(docker: &Docker, name: &str) {
     let _ = docker.remove_network(name).await;
 }
+
+/// Container name by IPv4 address, for every container attached to `network`.
+pub async fn network_container_ips(
+    docker: &Docker,
+    network: &str,
+) -> Result<HashMap<String, String>> {
+    let inspected = docker
+        .inspect_network(network, None)
+        .await
+        .context("docker inspect_network failed")?;
+    Ok(inspected
+        .containers
+        .unwrap_or_default()
+        .into_values()
+        .filter_map(|c| {
+            let ip = c.ipv4_address?.split('/').next()?.to_string();
+            Some((ip, c.name?))
+        })
+        .collect())
+}

@@ -13,6 +13,7 @@ pub mod error;
 pub mod exec;
 pub mod extract;
 pub mod logs;
+pub mod traffic;
 pub mod workspaces;
 
 use crate::daemon::control::DaemonControl;
@@ -65,6 +66,7 @@ pub(crate) fn build_router(registry: Arc<WorkspaceRegistry>, daemon: Arc<DaemonC
         )
         .route("/nodes/{node_id}/events", get(get_node_events))
         .route("/nodes/{node_id}/exec/ws", get(get_node_exec_ws))
+        .merge(traffic::routes())
         .with_state(registry);
 
     let daemon_api = Router::new()

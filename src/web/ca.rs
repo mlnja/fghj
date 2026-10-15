@@ -381,6 +381,7 @@ mod tests {
             self.0.get(host).copied().map(|port| proxy::Backend {
                 host: "127.0.0.1".to_string(),
                 port,
+                traffic: None,
             })
         }
     }

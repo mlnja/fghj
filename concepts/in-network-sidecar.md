@@ -81,11 +81,14 @@ Docker work — which meant it could be rendered from a snapshot that had
 already lost a sibling's routes. Driving it from state removed that class of
 bug entirely; see [[state-and-effects]].
 
-Each entry is `{lookup, wildcard, connect_host, connect_port}`. The
+Each entry is `{lookup, wildcard, connect_host, connect_port, node_id}`. The
 `connect_host` is the backend's own **`fghj.raw.internal`** domain — a real
 Docker network alias that Docker's embedded DNS already resolves for any
 container on the network, this one included. So the sidecar never needs to
 learn container IPs, and never goes stale when one changes.
+
+`node_id` names the log a request to that route is recorded in when its node
+is recording ([[traffic-capture]]).
 
 `RouteFileEntry` is defined separately in the sidecar rather than shared with
 `fghj::runs`, with matching field names, so the sidecar binary does not depend
@@ -116,6 +119,12 @@ anything else being up: bind a UDP socket, `connect` it to an unreachable
 address, and read back `local_addr()`. No packet is sent; the kernel just
 picks the source address it *would* use, which is this container's real
 in-network IP.
+
+**It records traffic when asked.** Its proxy fills a `TrafficStore` exactly
+as fghjd's does, and it listens on port 7480 for fghjd to pull from. That is
+the one port it publishes on the host, on 127.0.0.1 with a port Docker picks,
+guarded by a token in the routes folder. It records only while fghjd is
+connected. See [[traffic-capture]].
 
 ## Lifecycle
 
@@ -237,7 +246,9 @@ That is the only knob, and it exists for the person editing
 
 No control API. Its `control_port` is `0`, because nothing inside a run's
 network ever presents the zone apex's own SNI, so that branch is never
-reached. The sidecar serves this run's services and nothing else.
+reached. The sidecar serves this run's services and nothing else. The capture
+port is not a control API either: it takes one thing, the set of nodes to
+record, and only from a request carrying the token.
 
 ## Related
 
@@ -247,3 +258,4 @@ reached. The sidecar serves this run's services and nothing else.
   the sidecar forwards rather than answers.
 - [[run-lifecycle-and-registry]] — where `ensure_sidecar` sits in a run's start.
 - [[state-and-effects]] — `effects::routes` as the writer of `routes.json`.
+- [[traffic-capture]] — what the capture port carries and why it's a pull.

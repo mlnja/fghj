@@ -31,27 +31,38 @@ fn live_host_port(container: &ContainerInfo, route: &PortRoute) -> u16 {
         .unwrap_or(route.host_port)
 }
 
-/// Exact matches beat wildcards across all workspaces, hence two passes.
-pub fn resolve_route(states: &BTreeMap<String, Arc<WorkspaceState>>, host: &str) -> Option<u16> {
-    let exact = running_containers(states).find_map(|container| {
-        container
-            .desired
-            .routes
-            .iter()
-            .find(|route| !route.wildcard && route.domain == host)
-            .map(|route| live_host_port(container, route))
-    });
+/// Which node a routed name belongs to, and where it listens on the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteTarget {
+    pub workspace: String,
+    pub node_id: String,
+    pub port: u16,
+}
 
-    exact.or_else(|| {
-        running_containers(states).find_map(|container| {
-            container
-                .desired
-                .routes
+/// Exact matches beat wildcards across all workspaces, hence two passes.
+pub fn resolve_route(
+    states: &BTreeMap<String, Arc<WorkspaceState>>,
+    host: &str,
+) -> Option<RouteTarget> {
+    let find = |matches: &dyn Fn(&PortRoute) -> bool| {
+        states.iter().find_map(|(workspace, state)| {
+            state
+                .env
                 .iter()
-                .find(|route| route.wildcard && matches_suffix(host, &route.domain))
-                .map(|route| live_host_port(container, route))
+                .flat_map(|run| run.containers.values())
+                .filter(|container| container.observed.status == "running")
+                .find_map(|container| {
+                    let route = container.desired.routes.iter().find(|r| matches(r))?;
+                    Some(RouteTarget {
+                        workspace: workspace.clone(),
+                        node_id: container.node_id.clone(),
+                        port: live_host_port(container, route),
+                    })
+                })
         })
-    })
+    };
+    find(&|route| !route.wildcard && route.domain == host)
+        .or_else(|| find(&|route| route.wildcard && matches_suffix(host, &route.domain)))
 }
 
 /// Not a substring check: `notmyservice.local` doesn't match `myservice.local`.
@@ -136,8 +147,37 @@ mod tests {
                 vec![route("web.fghj.internal", 5001, false, "80")],
             )],
         )]);
-        assert_eq!(resolve_route(&states, "web.fghj.internal"), Some(5001));
-        assert_eq!(resolve_route(&states, "other.fghj.internal"), None);
+        assert_eq!(
+            resolve_route(&states, "web.fghj.internal").map(|t| t.port),
+            Some(5001)
+        );
+        assert_eq!(
+            resolve_route(&states, "other.fghj.internal").map(|t| t.port),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_route_names_the_workspace_and_node_it_found() {
+        let states = states(vec![
+            ("a", vec![container("db", "running", vec![])]),
+            (
+                "b",
+                vec![container(
+                    "web",
+                    "running",
+                    vec![route("web.fghj.internal", 5001, false, "80")],
+                )],
+            ),
+        ]);
+        assert_eq!(
+            resolve_route(&states, "web.fghj.internal"),
+            Some(RouteTarget {
+                workspace: "b".to_string(),
+                node_id: "web".to_string(),
+                port: 5001,
+            })
+        );
     }
 
     #[test]
@@ -150,7 +190,10 @@ mod tests {
                 vec![route("web.fghj.internal", 5001, false, "80")],
             )],
         )]);
-        assert_eq!(resolve_route(&states, "web.fghj.internal"), None);
+        assert_eq!(
+            resolve_route(&states, "web.fghj.internal").map(|t| t.port),
+            None
+        );
     }
 
     #[test]
@@ -170,10 +213,22 @@ mod tests {
                 ),
             ],
         )]);
-        assert_eq!(resolve_route(&states, "app.example.com"), Some(5001));
-        assert_eq!(resolve_route(&states, "example.com"), Some(5002));
-        assert_eq!(resolve_route(&states, "other.example.com"), Some(5002));
-        assert_eq!(resolve_route(&states, "notexample.com"), None);
+        assert_eq!(
+            resolve_route(&states, "app.example.com").map(|t| t.port),
+            Some(5001)
+        );
+        assert_eq!(
+            resolve_route(&states, "example.com").map(|t| t.port),
+            Some(5002)
+        );
+        assert_eq!(
+            resolve_route(&states, "other.example.com").map(|t| t.port),
+            Some(5002)
+        );
+        assert_eq!(
+            resolve_route(&states, "notexample.com").map(|t| t.port),
+            None
+        );
     }
 
     #[test]
@@ -196,7 +251,10 @@ mod tests {
                 )],
             ),
         ]);
-        assert_eq!(resolve_route(&states, "app.example.com"), Some(5001));
+        assert_eq!(
+            resolve_route(&states, "app.example.com").map(|t| t.port),
+            Some(5001)
+        );
     }
 
     #[test]
@@ -208,7 +266,10 @@ mod tests {
         );
         c.observed.ports = BTreeMap::from([("80".to_string(), Some(6002))]);
         let states = states(vec![("ws", vec![c])]);
-        assert_eq!(resolve_route(&states, "web.fghj.internal"), Some(6002));
+        assert_eq!(
+            resolve_route(&states, "web.fghj.internal").map(|t| t.port),
+            Some(6002)
+        );
     }
 
     #[test]
@@ -221,7 +282,10 @@ mod tests {
                 vec![route("web.fghj.internal", 5001, false, "80")],
             )],
         )]);
-        assert_eq!(resolve_route(&states, "web.fghj.internal"), Some(5001));
+        assert_eq!(
+            resolve_route(&states, "web.fghj.internal").map(|t| t.port),
+            Some(5001)
+        );
     }
 
     #[test]
@@ -297,7 +361,10 @@ mod tests {
     #[test]
     fn projections_over_no_workspaces_are_empty() {
         let none = BTreeMap::new();
-        assert_eq!(resolve_route(&none, "web.fghj.internal"), None);
+        assert_eq!(
+            resolve_route(&none, "web.fghj.internal").map(|t| t.port),
+            None
+        );
         assert!(wildcard_suffixes(&none).is_empty());
         assert!(raw_endpoints(&none).is_empty());
     }

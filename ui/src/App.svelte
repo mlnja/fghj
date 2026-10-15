@@ -85,11 +85,24 @@
 
   async function loadEnv() {
     try {
-      const res = await fetch(withWs('/environment'));
-      env = await res.json();
+      const [envRes, recRes] = await Promise.all([
+        fetch(withWs('/environment')),
+        fetch(withWs('/traffic/recording')),
+      ]);
+      env = await envRes.json();
+      if (recRes.ok) recordingNodes = (await recRes.json()).nodes ?? {};
     } catch (e) {
       // best-effort polling; ignore transient failures
     }
+  }
+
+  // Node id -> body mode, for every node whose traffic fghjd is recording.
+  // Polled with `/environment` for the dot on the graph; recording itself
+  // is held by fghjd and outlives the drawer.
+  let recordingNodes = $state({});
+
+  function trafficUrl(nodeId, rest) {
+    return withWs(`/nodes/${encodeURIComponent(nodeId)}/traffic${rest}`);
   }
 
   async function pullAll() {
@@ -601,7 +614,7 @@
       {#if activeTab === 'repos'}
         <GraphView graph={reposGraph} {currentFlow} mode="repos" onSelectNode={(n) => (selectedNode = n)} />
       {:else if activeTab === 'containers'}
-        <GraphView graph={containersGraph} {currentFlow} mode="containers" {runContainers} onSelectNode={(n) => (selectedNode = n)} />
+        <GraphView graph={containersGraph} {currentFlow} mode="containers" {runContainers} {recordingNodes} onSelectNode={(n) => (selectedNode = n)} />
       {:else}
         <Placeholder
           eyebrow="Config — secrets, split-DNS, root CA"
@@ -633,6 +646,7 @@
       onFetchLogHistory={fetchLogHistory}
       onFetchEvents={fetchEvents}
       onLogStreamUrl={logStreamUrl}
+      onTrafficUrl={trafficUrl}
       onDownload={downloadNode}
       onPullStatus={pullStatus}
       onDownloadComplete={onDownloadComplete}

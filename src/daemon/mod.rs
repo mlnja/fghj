@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use crate::persistence;
 
 pub mod bootstrap;
+mod capture;
 pub mod control;
 mod heal;
 pub mod reconcile;

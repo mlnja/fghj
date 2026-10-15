@@ -1,5 +1,6 @@
 <script>
   import SideDrawer from './SideDrawer.svelte';
+  import TrafficTab from './TrafficTab.svelte';
 
   let {
     node,
@@ -12,6 +13,7 @@
     // busy flag here couldn't be trusted across that remount.
     busy = false,
     onLogStreamUrl,
+    onTrafficUrl,
     onFetchLogGenerations,
     onFetchLogHistory,
     onFetchEvents,
@@ -362,6 +364,9 @@
       {#if node.downloaded !== false}
         <div class="tab" class:active={activeTab === 'events'} onclick={() => (activeTab = 'events')}>Events</div>
       {/if}
+      {#if node.downloaded !== false && node.kind !== 'flow' && onTrafficUrl}
+        <div class="tab" class:active={activeTab === 'traffic'} onclick={() => (activeTab = 'traffic')}>Traffic</div>
+      {/if}
     </div>
 
     {#if activeTab === 'general'}
@@ -598,6 +603,8 @@
           <pre>{dlLog}</pre>
         {/if}
       </div>
+    {:else if activeTab === 'traffic'}
+      <TrafficTab nodeId={node.id} trafficUrl={onTrafficUrl} />
     {:else if activeTab === 'events'}
       <div class="logs">
         <div class="logs-toolbar">

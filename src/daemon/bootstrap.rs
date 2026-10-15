@@ -164,6 +164,7 @@ pub async fn run_control_api() -> Result<()> {
     });
     spawn_reconciler(Arc::clone(&daemon));
     spawn_sync_reconciler(Arc::clone(&daemon));
+    super::capture::spawn(registry.clone());
 
     // Stays idle if the last `fghj daemon` call was `stop`, so a crash or reboot
     // doesn't undo it.

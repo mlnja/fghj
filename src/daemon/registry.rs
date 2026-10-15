@@ -8,6 +8,7 @@ use tokio::sync::watch;
 use crate::actor::ActorHandle;
 use crate::daemon::workspace_id::workspace_id;
 use crate::server::WorkspaceState;
+use crate::web::traffic::TrafficStore;
 use crate::{actor, daemon_log, effects, persistence, state, supervisor};
 
 /// Mirrors what `resolve_universe` and `derive_domain` produce, for a workspace
@@ -73,6 +74,8 @@ pub struct WorkspaceRegistry {
     actors: watch::Sender<effects::ActorMap>,
     /// The only thing that mutates a workspace's real containers.
     docker_converge_tasks: Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    /// Recorded proxy traffic. In memory only: it is gone when fghjd stops.
+    traffic: TrafficStore,
 }
 
 impl WorkspaceRegistry {
@@ -126,6 +129,7 @@ impl WorkspaceRegistry {
             docker,
             actors: watch::Sender::new(Arc::new(BTreeMap::new())),
             docker_converge_tasks: Mutex::new(HashMap::new()),
+            traffic: TrafficStore::default(),
         };
         let loaded: Vec<(String, Arc<WorkspaceState>)> = registry
             .by_id
@@ -263,6 +267,10 @@ impl WorkspaceRegistry {
         }
 
         Ok((id, canonical))
+    }
+
+    pub fn traffic(&self) -> &TrafficStore {
+        &self.traffic
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<WorkspaceState>> {
