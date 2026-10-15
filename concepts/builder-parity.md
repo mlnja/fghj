@@ -63,9 +63,8 @@ at all. Reading the process's environment would resolve to "no builder
 selected" on every machine and silently produce the exact wrong answer — the
 bug, wearing the fix's clothes. `build_node_image` therefore loads
 `WorkspaceOwner` first and passes `o.home`. This is the same hazard
-[[persistence-and-workspace-store]] describes for `git`, and
-`connect_docker()` in `src/daemon/bootstrap.rs` still has an open instance of
-it.
+[[persistence-and-workspace-store]] describes for `git`, and for the Docker
+socket ([[docker-and-downloads]]).
 
 ## fghj runs its own BuildKit, at buildx's image
 
@@ -139,9 +138,6 @@ Implemented. Verified against a real daemon by three `#[ignore]`d tests in
 store and running; container reuse across two builds with identical layer
 digests, version parity with buildx, and buildx's own container and volume
 left untouched; and `--build-arg`/`--target` surviving the tar round trip.
-
-Open: `connect_docker()` runs `docker context inspect` as root, the same
-owner/home bug in a different place.
 
 ## Related
 

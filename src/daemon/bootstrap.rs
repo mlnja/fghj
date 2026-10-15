@@ -1,4 +1,3 @@
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -11,33 +10,47 @@ use crate::web::api::build_router;
 use crate::web::{ca, trust};
 use crate::{daemon_log, dns, persistence, supervisor};
 
-/// Falls back to the socket of the `docker` CLI's active context: Docker
-/// Desktop, OrbStack and colima don't use the default socket.
+/// `DOCKER_HOST` if set, else the console user's active docker context, else
+/// `/var/run/docker.sock`; see `docker::find_docker_host`.
 pub fn connect_docker() -> Result<bollard::Docker> {
-    match bollard::Docker::connect_with_local_defaults() {
-        Ok(docker) => Ok(docker),
-        Err(default_err) => {
-            let context_host = Command::new("docker")
-                .args([
-                    "context",
-                    "inspect",
-                    "--format",
-                    "{{.Endpoints.docker.Host}}",
-                ])
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .filter(|h| !h.is_empty());
-            match context_host {
-                Some(host) => {
-                    bollard::Docker::connect_with_socket(&host, 120, bollard::API_DEFAULT_VERSION)
-                        .with_context(|| {
-                            format!("failed to connect to the docker context's socket ({host})")
-                        })
-                }
-                None => Err(default_err).context("failed to construct a Docker client"),
-            }
+    if std::env::var_os("DOCKER_HOST").is_some() {
+        return bollard::Docker::connect_with_local_defaults()
+            .context("failed to connect to DOCKER_HOST");
+    }
+    let host = crate::docker::find_docker_host().context(
+        "no Docker socket: no docker context names a live one, nor is /var/run/docker.sock live",
+    )?;
+    bollard::Docker::connect_with_socket(&host, 120, bollard::API_DEFAULT_VERSION)
+        .with_context(|| format!("failed to connect to {host}"))
+}
+
+const DOCKER_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Resolves once Docker stopped answering where fghjd dials it and answers
+/// somewhere else, as when the engine is switched or `/var/run/docker.sock`
+/// is repointed. The client is shared by every workspace and can't be
+/// swapped in place, so fghjd restarts onto it; launchd starts it again.
+async fn docker_moved(docker: Arc<bollard::Docker>) -> String {
+    if std::env::var_os("DOCKER_HOST").is_some() {
+        return std::future::pending().await;
+    }
+    let dialled = crate::docker::find_docker_host();
+    loop {
+        tokio::time::sleep(DOCKER_RECHECK).await;
+        if docker.ping().await.is_ok() {
+            continue;
+        }
+        let Some(host) = crate::docker::find_docker_host().filter(|h| Some(h) != dialled.as_ref())
+        else {
+            continue;
+        };
+        let answers =
+            match bollard::Docker::connect_with_socket(&host, 5, bollard::API_DEFAULT_VERSION) {
+                Ok(candidate) => candidate.ping().await.is_ok(),
+                Err(_) => false,
+            };
+        if answers {
+            return host;
         }
     }
 }
@@ -142,7 +155,7 @@ pub async fn run_control_api() -> Result<()> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
 
     // Before the cert resolver, which gates reserved-TLD alias certs on routes.
-    let registry = Arc::new(WorkspaceRegistry::load(docker).await);
+    let registry = Arc::new(WorkspaceRegistry::load(Arc::clone(&docker)).await);
 
     let cert_resolver = Arc::new(ca::DynamicCertResolver::new(
         signing_ca,
@@ -205,6 +218,12 @@ pub async fn run_control_api() -> Result<()> {
     tokio::select! {
         result = axum::serve(control_listener, app) => {
             result.context("control API server error")?;
+        }
+        host = docker_moved(Arc::clone(&docker)) => {
+            daemon_log::info(format!(
+                "fghjd: Docker answers at {host} now, restarting to use it..."
+            ));
+            daemon.deactivate();
         }
         _ = shutdown_signal => {
             daemon_log::info(

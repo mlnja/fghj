@@ -1,5 +1,25 @@
 # Docker integration and background downloads
 
+## Which Docker fghjd talks to
+
+`/var/run/docker.sock` is a symlink owned by whichever engine set it last,
+and it can point at nothing: a Docker Desktop uninstall leaves its
+privileged helper behind, which repoints the link at Docker Desktop's
+socket on the next boot. The user's own `docker` doesn't care, because it
+follows the active context. fghjd follows the same one
+(`docker::find_docker_host`): it reads `currentContext` from the console
+user's `~/.docker/config.json` and that context's endpoint from
+`contexts/meta/<sha256 of the name>/meta.json`. It reads the files rather
+than running `docker context inspect`, because as root that would ask
+about root's contexts, and root has none. It uses `/var/run/docker.sock`
+only when the context is `default` or names no live socket. `DOCKER_HOST`
+in fghjd's environment overrides both.
+
+The client is made once and shared by every workspace, so it can't be
+swapped when Docker moves. Instead fghjd checks every 5 s: if Docker stops
+answering where it dials and does answer at the socket the lookup finds now,
+fghjd shuts down cleanly and launchd starts it again on the new socket.
+
 ## Building without Compose
 
 `fghj` never shells out to `docker compose`, even though it deliberately

@@ -1,11 +1,13 @@
 //! Thin wrappers over bollard, one file per kind of Docker object.
 
 mod container;
+mod host;
 mod image;
 mod network;
 mod volume;
 
 pub use container::*;
+pub use host::find_docker_host;
 pub use image::*;
 pub use network::*;
 pub use volume::*;
