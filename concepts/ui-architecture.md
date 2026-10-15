@@ -9,8 +9,10 @@ a fixed `Header`. All three tabs read from the same resolved graph
 (`universe`, from `GET /universe.json`) — they're different *views* over one
 shared model, not three separately-fetched datasets.
 
-`Header` lays out what every tab shares first (workspace and flow pickers,
-the tab switch, ⚡, ?) and the active tab's own actions last: Download flow
+Every log — fghjd's, a container's, a clone's — renders through `LogPane`,
+which fills what's left of its drawer and follows the tail while you're at
+the bottom. `Header` lays out what every tab shares first (workspace and flow pickers,
+at fixed widths, the tab switch, ⚡) and the active tab's own actions last: Download flow
 and Download all on Repos, Switch to flow on Actual, nothing on Config.
 Switching tabs then only changes the end of the bar, and nothing else moves.
 
@@ -27,7 +29,8 @@ The tabs:
   Actual tab makes per card). Clicking one opens `RepoDrawer`, not the
   node `Drawer`: a repo has no container to start. It holds Download (for
   a repo not on disk), Fetch (`git fetch` as the workspace owner, never
-  touching the working tree), Copy path, the last commit, the changed
+  touching the working tree), Pull (`git pull --ff-only` as the owner: it
+  fast-forwards or refuses, never merges or rebases), Copy path, the last commit, the changed
   files, the services it declares (each opens on the Actual tab), its
   flows, and which repos it needs and is needed by. The git detail comes
   from `GET /repos` (`web/api/repos.rs`, `resolver::git::repo_status`),
@@ -71,7 +74,7 @@ waste requests:
   `graphPoll` effect) — reflects live git state (branch/dirty — see
   [[branch-ownership-model]]) without a manual refresh.
 - `/repos` every 10s while the Repos tab is active, plus right after a
-  Fetch or a download, and `/environment` every 5s there for the
+  Fetch, a Pull or a download, and `/environment` every 5s there for the
   older-code warning.
 - `/environment` every 1s while the Actual tab is active (`envPoll`) — matched to
   `daemon::spawn_reconciler`'s own 1s tick (see
@@ -134,10 +137,11 @@ fresh from `graph.nodes`/`graph.edges` on every render (`$derived`):
   first) with its live log — the one place to see a `pull-all` or
   individual clone's raw git output.
 - **`TelemetryDrawer`** (the "⚡" header button): the daemon's own view of
-  itself, not any workspace's — four tabs. `Logs` (the `daemon_log` ring
-  buffer); `Pull queue`; `Doctor`, the same report `fghj doctor` prints; and
+  itself, not any workspace's — five tabs. `Logs` (the `daemon_log` ring
+  buffer); `Pull queue`; `Doctor`, the same report `fghj doctor` prints;
   `Switch`, the switch in flight node by node (starting, stopping, still to
-  do, up), derived from the live environment. Doctor's DNS and NAT checks
+  do, up), derived from the live environment; and `Help`, the key to the
+  map. Doctor's DNS and NAT checks
   expand into what they cover: the managed `/etc/hosts` block, the
   `/etc/resolver` zones with the ephemeral port each points at, and the `pf`
   NAT routes backing the raw zone, which `raw-routes` checks are loaded in the

@@ -30,7 +30,6 @@
   } = $props();
   let menuOpen = $state(false);
   let wsMenuOpen = $state(false);
-  let helpOpen = $state(false);
   let pulling = $state(false);
   let pullState = $state(null); // null | 'running' | 'done' | 'error'
   let pollTimer = null;
@@ -182,8 +181,8 @@
   <div class="divider"></div>
 
   <div class="flow-picker">
-    <button class="flow-btn" onclick={toggleWorkspaceMenu} title="switch workspace">
-      <span>{currentWorkspaceLabel}</span>
+    <button class="flow-btn ws-btn" onclick={toggleWorkspaceMenu} title="switch workspace: {currentWorkspaceLabel}">
+      <span class="name">{currentWorkspaceLabel}</span>
     </button>
     {#if wsMenuOpen}
       <div class="flow-menu">
@@ -200,8 +199,8 @@
   <div class="divider"></div>
 
   <div class="flow-picker">
-    <button class="flow-btn" onclick={openFlowMenu}>
-      <span>{currentFlow ?? '…'}</span>
+    <button class="flow-btn flow-name-btn" onclick={openFlowMenu} title={currentFlow}>
+      <span class="name">{currentFlow ?? '…'}</span>
       <span style="width:6px;height:6px;background:{hasConflict ? 'var(--danger)' : 'var(--success)'}"></span>
     </button>
     {#if menuOpen}
@@ -237,9 +236,7 @@
   </div>
 
   <div class="divider"></div>
-  <div class="help-btn" onclick={onOpenTelemetry} title="fghjd telemetry (logs, DNS/DNAT, pull queue, doctor)">⚡</div>
-  <div class="divider"></div>
-  <div class="help-btn" onclick={() => (helpOpen = true)}>?</div>
+  <div class="help-btn" onclick={onOpenTelemetry} title="fghjd telemetry (logs, pull queue, doctor, help)">⚡</div>
 
   <!-- Per-tab actions go last, so switching tabs never moves the rest. -->
   {#if activeTab === 'repos' || activeTab === 'containers'}
@@ -281,17 +278,6 @@
   {/if}
 </div>
 
-{#if helpOpen}
-  <div class="modal-veil" onclick={() => (helpOpen = false)}>
-    <div class="modal" onclick={(e) => e.stopPropagation()}>
-      <h3>How to read the map</h3>
-      <div class="line"><b style="color:var(--ink)">Solid line</b> — <code>depends_on</code>: the left node needs the right one to start. It starts after it, waits for it, and is blocked if it fails. <b style="color:var(--ink)">Dashed</b> — <code>required: false</code>: the left node needs the right one at runtime. Nothing waits, and it starts only if a flow lists it.</div>
-      <div class="line"><b style="color:var(--ink)">Tinted block</b> — infrastructure (postgres, redis): fixed image, no branch.</div>
-      <div class="line">Click a node to see its resolved repo, branch and domain. Switch flows with the picker top-left — a flow is <code>repo/flow</code>, and what starting it would start highlights in accent color; every known repo still renders regardless of flow.</div>
-      <div class="close" onclick={() => (helpOpen = false)}>Close</div>
-    </div>
-  </div>
-{/if}
 
 <style>
   .topbar {
@@ -308,6 +294,11 @@
     display: flex; align-items: center; gap: 7px; padding: 6px 10px; border: 1px solid var(--line-strong);
     border-radius: 4px; cursor: pointer; font: 600 12px var(--font-mono); color: var(--ink); background: none;
   }
+  /* Fixed widths, so picking a longer or shorter name moves nothing after it. */
+  .ws-btn { width: 150px; }
+  .flow-name-btn { width: 240px; justify-content: space-between; }
+  .flow-btn .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .flow-btn > span:not(.name) { flex: 0 0 auto; }
   .flow-menu {
     position: absolute; top: calc(100% + 6px); left: 0; background: var(--panel-2); border: 1px solid var(--line-strong);
     border-radius: 6px; box-shadow: 0 12px 32px -8px rgba(19,27,46,0.16); z-index: 50; min-width: 200px; overflow: hidden;
@@ -352,9 +343,4 @@
 
   .help-btn { width: 22px; height: 22px; border-radius: 50%; background: var(--panel-2); display: flex; align-items: center; justify-content: center; font: 700 12px var(--font-mono); color: var(--ink-dim); cursor: pointer; }
 
-  .modal-veil { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 80; display: flex; align-items: center; justify-content: center; }
-  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 26px 28px; max-width: 460px; box-shadow: 0 24px 60px -20px rgba(19,27,46,0.22); }
-  .modal h3 { font: 600 16px var(--font-body); color: var(--ink); margin: 0 0 14px; }
-  .modal .line { font: 400 12.5px/1.5 var(--font-body); color: var(--ink-dim); margin-bottom: 10px; }
-  .modal .close { margin-top: 18px; padding: 8px 0; text-align: center; border-radius: 4px; background: var(--panel-2); font: 700 11px var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer; color: var(--ink); }
 </style>

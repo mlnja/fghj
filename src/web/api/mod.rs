@@ -51,6 +51,7 @@ pub(crate) fn build_router(registry: Arc<WorkspaceRegistry>, daemon: Arc<DaemonC
         .route("/pull-jobs", get(get_pull_jobs))
         .route("/repos", get(repos::get_repos))
         .route("/repos/{path}/fetch", post(repos::post_repo_fetch))
+        .route("/repos/{path}/pull", post(repos::post_repo_pull))
         .route("/environment", get(get_environment))
         .route("/switch", post(post_switch))
         .route("/nodes/{node_id}/start", post(post_node_start))

@@ -1,6 +1,7 @@
 <script>
   import SideDrawer from './SideDrawer.svelte';
   import TrafficTab from './TrafficTab.svelte';
+  import LogPane, { textLines } from './LogPane.svelte';
 
   let {
     node,
@@ -108,7 +109,6 @@
   let historyLines = $state([]);
   let loadingHistory = $state(false);
   let hasMoreHistory = $state(true);
-  let logsScrollEl = $state(null);
   let streaming = $state(false);
 
   // ArgoCD-style "events": what `fghjd` itself did during the last start or
@@ -153,12 +153,6 @@
     copiedTimer = setTimeout(() => (copiedKey = null), 1200);
   }
 
-  function scrollLogsToBottom() {
-    requestAnimationFrame(() => {
-      if (logsScrollEl) logsScrollEl.scrollTop = logsScrollEl.scrollHeight;
-    });
-  }
-
   async function loadInitialHistory(generation) {
     historyLines = [];
     hasMoreHistory = true;
@@ -167,7 +161,6 @@
     historyLines = await onFetchLogHistory(node.id, generation);
     loadingHistory = false;
     hasMoreHistory = historyLines.length >= 500;
-    scrollLogsToBottom();
   }
 
   async function loadLogGenerations(nodeId) {
@@ -195,17 +188,9 @@
     if (!older.length) {
       hasMoreHistory = false;
     } else {
-      const prevHeight = logsScrollEl?.scrollHeight ?? 0;
       historyLines = [...older, ...historyLines];
-      requestAnimationFrame(() => {
-        if (logsScrollEl) logsScrollEl.scrollTop = logsScrollEl.scrollHeight - prevHeight;
-      });
     }
     loadingHistory = false;
-  }
-
-  function onLogsScroll() {
-    if (logsScrollEl && logsScrollEl.scrollTop < 40) loadOlderHistory();
   }
 
   async function loadEvents(nodeId, action) {
@@ -300,8 +285,7 @@
     source.onmessage = (e) => {
       if (generations.length && selectedGeneration !== generations[0].generation) return;
       const lastSeq = historyLines.length ? historyLines[historyLines.length - 1].seq : -1;
-      historyLines = [...historyLines, { seq: lastSeq + 1, stream: 'stdout', ts: '', line: e.data }];
-      scrollLogsToBottom();
+      historyLines = [...historyLines, { seq: lastSeq + 1, stream: 'stdout', ts: new Date().toISOString(), line: e.data }];
     };
     source.onerror = () => {
       streaming = false;
@@ -421,7 +405,7 @@
             </span>
           </div>
           {#if !bs.downloaded && dlStatus === 'error' && dlLog}
-            <pre>{dlLog}</pre>
+            <LogPane lines={textLines(dlLog)} maxHeight="300px" />
           {/if}
         {/if}
         {#each Object.entries(node.ports ?? {}) as [port, cfg]}
@@ -600,7 +584,7 @@
           <div class="dl-status ok">✓ downloaded</div>
         {/if}
         {#if dlLog}
-          <pre>{dlLog}</pre>
+          <LogPane lines={textLines(dlLog)} />
         {/if}
       </div>
     {:else if activeTab === 'traffic'}
@@ -659,10 +643,11 @@
           {#if streaming}<span class="live-badge"><span class="spinner"></span> live</span>{/if}
         </div>
         {#if historyLines.length}
-          <pre class="log-pane" bind:this={logsScrollEl} onscroll={onLogsScroll}
-            >{#if loadingHistory}<span class="loading-more">loading more…</span>
-{/if}{#each historyLines as l (l.seq)}{l.ts} {l.line}
-{/each}</pre>
+          <LogPane
+            lines={historyLines.map((l) => ({ key: l.seq, ts: l.ts, text: l.line }))}
+            loadingMore={loadingHistory}
+            onNearTop={loadOlderHistory}
+          />
         {:else if loadingHistory}
           <div class="logs-empty">loading…</div>
         {:else}
@@ -764,7 +749,7 @@
   }
   .copy-btn:hover { color: var(--accent); }
   .row.not-downloaded .v { color: var(--ink-faint); font-style: italic; }
-  .logs { margin-top: 20px; display: flex; flex-direction: column; gap: 10px; }
+  .logs { margin-top: 20px; display: flex; flex-direction: column; gap: 10px; flex: 1 1 auto; min-height: 0; }
   .logs .btn {
     align-self: flex-start; padding: 6px 10px; border-radius: 4px; background: var(--panel-2);
     border: 1px solid var(--line-strong); color: var(--ink); font: 700 10px var(--font-mono);
@@ -779,7 +764,6 @@
     text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer;
   }
   .gen-btn.active { color: var(--ink); border-color: var(--accent, #6fa8ff); }
-  .loading-more { color: var(--ink-faint); font-style: italic; }
   .event-list { display: flex; flex-direction: column; gap: 2px; }
   .event-row {
     display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px;
@@ -819,8 +803,4 @@
   .dl-status { font: 700 11px var(--font-mono); }
   .dl-status.ok { color: var(--ok, #6fdc8c); }
   .dl-status.error { color: var(--danger); }
-  .logs pre {
-    background: #000; color: #b8ffb8; padding: 12px; border-radius: 6px; font: 400 11px var(--font-mono);
-    max-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-all;
-  }
 </style>

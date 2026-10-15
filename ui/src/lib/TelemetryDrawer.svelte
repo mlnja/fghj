@@ -1,5 +1,6 @@
 <script>
   import SideDrawer from './SideDrawer.svelte';
+  import LogPane, { textLines } from './LogPane.svelte';
 
   let {
     initialTab = 'logs',
@@ -18,7 +19,6 @@
   // poll is just as responsive as SSE and much simpler.
   let logLines = $state([]);
   let lastSeq = $state(null);
-  let logsPre = $state(null);
   let logFilter = $state('');
 
   async function pollLogs() {
@@ -44,12 +44,7 @@
     const rows = needle
       ? logLines.filter((l) => l.message.toLowerCase().includes(needle))
       : logLines;
-    return rows.map((l) => ({ seq: l.seq, level: l.level, ts_ms: l.ts_ms, text: clean(l.message) }));
-  });
-
-  $effect(() => {
-    visibleLines;
-    if (logsPre) logsPre.scrollTop = logsPre.scrollHeight;
+    return rows.map((l) => ({ key: l.seq, ts: l.ts_ms, warn: l.level === 'warn', text: clean(l.message) }));
   });
 
   // What fghjd has installed — /etc/hosts lines, /etc/resolver zones, pf NAT
@@ -189,14 +184,6 @@
 
   const MARKS = { pass: '\u2713', warn: '!', fail: '\u2717' };
 
-  // 24-hour, so every timestamp is exactly eight characters wide. The
-  // locale default renders `1:34:18 PM` against `11:34:18 AM` — two widths
-  // and a suffix carrying no information in a pane where every line is from
-  // the same hour or two.
-  function formatLogTime(ms) {
-    return new Date(ms).toLocaleTimeString([], { hour12: false });
-  }
-
   function formatAge(ms) {
     if (!ms) return 'never';
     const secs = Math.max(0, Math.round((Date.now() - ms) / 1000));
@@ -228,6 +215,7 @@
     <div class="tab" class:active={activeTab === 'pulls'} onclick={() => (activeTab = 'pulls')}>Pull queue</div>
     <div class="tab" class:active={activeTab === 'doctor'} onclick={openDoctor}>Doctor</div>
     <div class="tab" class:active={activeTab === 'switch'} onclick={() => (activeTab = 'switch')}>Switch</div>
+    <div class="tab" class:active={activeTab === 'help'} onclick={() => (activeTab = 'help')}>Help</div>
   </div>
 
   {#if activeTab === 'logs'}
@@ -253,19 +241,7 @@
       {:else if !visibleLines.length}
         <div class="empty">nothing matches “{logFilter.trim()}”</div>
       {:else}
-        <!-- One element per line rather than one `<pre>` of joined text: the
-             timestamp, the level and the message are three different things
-             and none of them could be styled while they were one string. The
-             row is a grid so a wrapped message hangs under the message
-             column instead of running back under the clock. -->
-        <div class="log-pane" bind:this={logsPre}>
-          {#each visibleLines as l (l.seq)}
-            <div class="log-line" class:warn={l.level === 'warn'}>
-              <span class="ts">{formatLogTime(l.ts_ms)}</span>
-              <span class="msg">{l.text}</span>
-            </div>
-          {/each}
-        </div>
+        <LogPane lines={visibleLines} />
       {/if}
     </div>
   {:else if activeTab === 'pulls'}
@@ -283,11 +259,18 @@
       </div>
       <div class="ops-log">
         {#if job}
-          <pre>{job.log || '(no output yet)'}</pre>
+          <LogPane lines={textLines(job.log || '(no output yet)')} />
         {:else}
           <div class="empty">select a pull to see its log</div>
         {/if}
       </div>
+    </div>
+  {:else if activeTab === 'help'}
+    <div class="net help">
+      <div class="section-title">How to read the map</div>
+      <p><b>Solid line</b> — <code>depends_on</code>: the left node needs the right one to start. It starts after it, waits for it, and is blocked if it fails. <b>Dashed</b> — <code>required: false</code>: the left node needs the right one at runtime. Nothing waits, and it starts only if a flow lists it.</p>
+      <p><b>Tinted block</b> — infrastructure (postgres, redis): fixed image, no branch.</p>
+      <p>Click a node to see its resolved repo, branch and domain. Switch flows with the picker top-left — a flow is <code>repo/flow</code>, and what starting it would start highlights in accent color; every known repo still renders regardless of flow.</p>
     </div>
   {:else if activeTab === 'switch'}
     <div class="net">
@@ -365,6 +348,8 @@
 
   .empty { font: 500 12px var(--font-mono); color: var(--ink-faint); font-style: italic; padding: 10px 0; }
 
+  /* Every tab body takes the rest of the drawer's height. */
+  .logs, .ops, .net { flex: 1 1 auto; min-height: 0; }
   .logs { display: flex; flex-direction: column; gap: 8px; }
 
   .log-bar { display: flex; align-items: center; gap: 10px; }
@@ -376,44 +361,7 @@
   .log-filter:focus { outline: none; border-color: var(--accent); }
   .log-count { font: 500 10.5px var(--font-mono); color: var(--ink-faint); white-space: nowrap; }
 
-  /* Sized to its content up to a cap, rather than a fixed
-     `calc(100vh - 220px)`. Eight lines in a pane locked to the full window
-     height is mostly a black void, which reads as something having gone
-     wrong rather than as a quiet daemon. */
-  .log-pane {
-    min-height: 90px; max-height: calc(100vh - 260px); overflow: auto;
-    background: #0c1116; border: 1px solid #1d262f; border-radius: 6px;
-    padding: 8px 10px;
-  }
-
-  /* `auto 1fr`: the clock column is as wide as a timestamp and no wider,
-     and the message gets everything left over — so a long resolver path
-     wraps within its own column with a hanging indent instead of flowing
-     back underneath the time. */
-  .log-line {
-    display: grid; grid-template-columns: auto 1fr; gap: 0 10px;
-    align-items: baseline; padding: 1.5px 0;
-    font: 400 11px/1.55 var(--font-mono);
-    /* `break-word`, not `break-all`: the old rule chopped words at whatever
-       column ran out, so `/etc/resolver/proxy.package-repository…` split
-       mid-token. This keeps a path intact until it genuinely cannot fit. */
-    overflow-wrap: break-word;
-  }
-  /* Dim, because it is the column you scan past on every line you are not
-     looking for — present for when you need it, never competing with the
-     message for attention the way one uniform green made it. */
-  .log-line .ts { color: #55707f; font-variant-numeric: tabular-nums; }
-  .log-line .msg { color: #c6d6cc; }
-
-  /* A warning used to be a lone `!` glyph inside the same green run of text,
-     which is invisible in a wall of it. Amber plus a rule down the left edge
-     makes it findable without reading. */
-  .log-line.warn { background: #241a07; border-left: 2px solid #c9871f; margin-left: -10px; padding-left: 8px; }
-  .log-line.warn .msg { color: #f0c177; }
-  .log-line.warn .ts { color: #9a7533; }
-
-
-  .ops { display: flex; gap: 16px; height: calc(100vh - 220px); }
+  .ops { display: flex; gap: 16px; }
   .ops-list { flex: 0 0 200px; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
   .ops-row {
     display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 5px; cursor: pointer;
@@ -427,13 +375,12 @@
   .dot.done { background: var(--success, #6fdc8c); }
   .dot.error { background: var(--danger); }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-  .ops-log { flex: 1; min-width: 0; }
-  .ops-log pre {
-    height: 100%; margin: 0; background: #0c1116; color: #c6d6cc; padding: 12px; border-radius: 6px;
-    border: 1px solid #1d262f; font: 400 11px var(--font-mono); overflow: auto; white-space: pre-wrap; word-break: break-all;
-  }
+  .ops-log { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 
-  .net { display: flex; flex-direction: column; gap: 20px; overflow-y: auto; height: calc(100vh - 220px); }
+  .net { display: flex; flex-direction: column; gap: 20px; overflow-y: auto; }
+  .help { gap: 12px; }
+  .help p { margin: 0; font: 400 12.5px/1.55 var(--font-body); color: var(--ink-dim); }
+  .help b { color: var(--ink); }
   .net-meta { font: 500 11.5px var(--font-mono); color: var(--ink-dim); }
   .net-meta b { color: var(--ink); }
   .section-title { font: 700 10px var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-faint); margin-bottom: 8px; }

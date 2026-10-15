@@ -1,4 +1,4 @@
-//! The Repos tab: git state of each checkout, and fetching one.
+//! The Repos tab: git state of each checkout, and fetching or pulling one.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -13,9 +13,9 @@ use crate::web::api::error::{bad_request, err_response};
 use crate::web::api::extract::WorkspaceExtractor;
 use crate::{downloads, persistence, resolver};
 
-/// Long enough for a big first fetch, short enough that a hung remote
+/// Long enough for a big first fetch or pull, short enough that a hung remote
 /// doesn't leave the button spinning forever.
-const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The checkouts the workspace's graph knows of, by `local_path`. Taken from
 /// the graph rather than the folder, so a path from the client can't name
@@ -60,23 +60,37 @@ pub(crate) async fn get_repos(WorkspaceExtractor(state): WorkspaceExtractor) -> 
     }
 }
 
-/// `git fetch` as the workspace's owner. Answers 200 either way; `ok` says
-/// whether git succeeded, `output` what it printed.
+/// `git fetch` as the workspace's owner: what the remote has, never the
+/// working tree.
 pub(crate) async fn post_repo_fetch(
     AxumPath(path): AxumPath<String>,
     WorkspaceExtractor(state): WorkspaceExtractor,
 ) -> Response {
-    match checkouts(&state).await {
-        Ok(paths) if paths.contains(&path) => {}
+    git_as_owner(&state, &path, &["fetch", "--quiet"]).await
+}
+
+/// `git pull --ff-only` as the workspace's owner. Fast-forward only, so it
+/// never makes a merge commit or starts a rebase you'd have to finish: a
+/// branch that has diverged is refused, and git says why.
+pub(crate) async fn post_repo_pull(
+    AxumPath(path): AxumPath<String>,
+    WorkspaceExtractor(state): WorkspaceExtractor,
+) -> Response {
+    git_as_owner(&state, &path, &["pull", "--ff-only", "--quiet"]).await
+}
+
+/// Runs git in one of the workspace's checkouts. Answers 200 either way;
+/// `ok` says whether git succeeded, `output` what it printed.
+async fn git_as_owner(state: &WorkspaceState, path: &str, args: &[&str]) -> Response {
+    match checkouts(state).await {
+        Ok(paths) if paths.contains(path) => {}
         Ok(_) => return bad_request(format!("{path} is not a downloaded repo of this workspace")),
         Err(e) => return err_response(e),
     }
     let owner = persistence::workspace_owner(state.db.clone(), &state.path).await;
 
     let mut cmd = std::process::Command::new("git");
-    cmd.arg("-C")
-        .arg(state.path.join(&path))
-        .args(["fetch", "--quiet"]);
+    cmd.arg("-C").arg(state.path.join(path)).args(args);
     if let Some(owner) = &owner {
         owner.apply_to_command(&mut cmd);
     }
@@ -84,7 +98,7 @@ pub(crate) async fn post_repo_fetch(
     let mut cmd = tokio::process::Command::from(cmd);
     cmd.kill_on_drop(true);
 
-    let (ok, output) = match tokio::time::timeout(FETCH_TIMEOUT, cmd.output()).await {
+    let (ok, output) = match tokio::time::timeout(GIT_TIMEOUT, cmd.output()).await {
         Ok(Ok(out)) => {
             let mut text = String::from_utf8_lossy(&out.stderr).into_owned();
             text.push_str(&String::from_utf8_lossy(&out.stdout));
@@ -93,7 +107,11 @@ pub(crate) async fn post_repo_fetch(
         Ok(Err(e)) => (false, format!("failed to run git: {e}")),
         Err(_) => (
             false,
-            format!("git fetch took longer than {}s", FETCH_TIMEOUT.as_secs()),
+            format!(
+                "git {} took longer than {}s",
+                args[0],
+                GIT_TIMEOUT.as_secs()
+            ),
         ),
     };
     let hint = if ok {

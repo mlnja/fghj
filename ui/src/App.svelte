@@ -138,9 +138,10 @@
     }
   }
 
-  async function fetchRepo(path) {
+  // `action` is `fetch` or `pull`.
+  async function gitRepo(path, action) {
     try {
-      const res = await fetch(withWs(`/repos/${encodeURIComponent(path)}/fetch`), { method: 'POST' });
+      const res = await fetch(withWs(`/repos/${encodeURIComponent(path)}/${action}`), { method: 'POST' });
       const out = await res.json();
       if (!res.ok) return { ok: false, output: out.error ?? `HTTP ${res.status}` };
       return out;
@@ -742,7 +743,7 @@
       onDownload={downloadNode}
       onPullStatus={pullStatus}
       onDownloadComplete={onPullAllComplete}
-      onFetch={fetchRepo}
+      onGit={gitRepo}
       onOpenNode={(id) => {
         selectedRepoId = null;
         activeTab = 'containers';

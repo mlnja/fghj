@@ -13,5 +13,7 @@
   .drawer {
     height: 100%; background: var(--panel); border-left: 1px solid var(--line-strong);
     padding: 24px; box-shadow: -24px 0 60px -20px rgba(19,27,46,0.22); overflow-y: auto;
+    /* A column, so a log pane can take whatever height is left. */
+    display: flex; flex-direction: column;
   }
 </style>

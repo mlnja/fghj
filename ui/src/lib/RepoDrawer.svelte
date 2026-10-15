@@ -1,5 +1,6 @@
 <script>
   import SideDrawer from './SideDrawer.svelte';
+  import LogPane, { textLines } from './LogPane.svelte';
 
   let {
     repo,
@@ -10,7 +11,7 @@
     onDownload,
     onPullStatus,
     onDownloadComplete,
-    onFetch,
+    onGit,
     onOpenNode,
   } = $props();
 
@@ -52,15 +53,15 @@
     if (dlStatus === 'running') pollTimer = setInterval(poll, 600);
   }
 
-  let fetching = $state(false);
-  let fetchResult = $state(null); // { ok, output, hint }
+  let gitBusy = $state(null); // null | 'fetch' | 'pull'
+  let gitResult = $state(null); // { action, ok, output, hint }
 
-  async function fetchRepo() {
-    if (fetching || !repo.local_path) return;
-    fetching = true;
-    fetchResult = null;
-    fetchResult = await onFetch?.(repo.local_path);
-    fetching = false;
+  async function runGit(action) {
+    if (gitBusy || !repo.local_path) return;
+    gitBusy = action;
+    gitResult = null;
+    gitResult = { action, ...(await onGit?.(repo.local_path, action)) };
+    gitBusy = null;
   }
 
   let copied = $state(false);
@@ -75,7 +76,7 @@
   // A different repo keeps the drawer mounted, so its results go.
   $effect(() => {
     repo.id;
-    fetchResult = null;
+    gitResult = null;
   });
 
   $effect(() => () => {
@@ -114,8 +115,16 @@
         {#if downloading}<span class="spinner"></span> downloading…{:else}Download{/if}
       </button>
     {:else}
-      <button class="ctrl-btn" onclick={fetchRepo} disabled={fetching} title="git fetch as you: updates what the remote has, never your working tree">
-        {#if fetching}<span class="spinner"></span> fetching…{:else}Fetch{/if}
+      <button class="ctrl-btn" onclick={() => runGit('fetch')} disabled={gitBusy} title="git fetch as you: updates what the remote has, never your working tree">
+        {#if gitBusy === 'fetch'}<span class="spinner"></span> fetching…{:else}Fetch{/if}
+      </button>
+      <button
+        class="ctrl-btn"
+        onclick={() => runGit('pull')}
+        disabled={gitBusy || (g && !g.upstream)}
+        title={g && !g.upstream ? 'this branch tracks no upstream' : 'git pull --ff-only as you: fast-forwards the branch, never merges or rebases'}
+      >
+        {#if gitBusy === 'pull'}<span class="spinner"></span> pulling…{:else}Pull{g?.behind ? ` (${g.behind})` : ''}{/if}
       </button>
       {#if absolutePath}
         <button class="ctrl-btn" onclick={copyPath} title={absolutePath}>{copied ? 'Copied' : 'Copy path'}</button>
@@ -124,10 +133,10 @@
   </div>
 
   {#if dlStatus === 'error' || (dlStatus === 'running' && dlLog)}
-    <pre class="log">{dlLog}</pre>
+    <div class="log"><LogPane lines={textLines(dlLog)} maxHeight="300px" /></div>
   {/if}
-  {#if fetchResult && !fetchResult.ok}
-    <pre class="log">{fetchResult.output}{fetchResult.hint ? `\nhint: ${fetchResult.hint}` : ''}</pre>
+  {#if gitResult && !gitResult.ok}
+    <div class="log"><LogPane lines={textLines(gitResult.output + (gitResult.hint ? `\nhint: ${gitResult.hint}` : ''))} maxHeight="300px" /></div>
   {/if}
 
   <div class="rows">
@@ -160,7 +169,7 @@
       {#if g}
         <div class="row">
           <span class="k">last fetched</span>
-          <span class="v">{g.fetched_at_ms ? ago(g.fetched_at_ms) : 'never'}{fetchResult?.ok ? ' · fetched' : ''}</span>
+          <span class="v">{g.fetched_at_ms ? ago(g.fetched_at_ms) : 'never'}{gitResult?.ok ? (gitResult.action === 'pull' ? ' · pulled' : ' · fetched') : ''}</span>
         </div>
       {/if}
       {#if g?.last_commit}
@@ -280,10 +289,7 @@
     font: 500 12px var(--font-mono); color: var(--warning);
   }
   .link:hover { text-decoration: underline; }
-  .log {
-    background: #000; color: #b8ffb8; padding: 12px; border-radius: 6px; font: 400 11px var(--font-mono);
-    max-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin-bottom: 16px;
-  }
+  .log { display: flex; flex-direction: column; margin-bottom: 16px; }
   .spinner {
     display: inline-block; width: 9px; height: 9px; border-radius: 50%;
     border: 2px solid var(--line-strong); border-top-color: var(--ink);

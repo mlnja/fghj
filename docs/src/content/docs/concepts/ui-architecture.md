@@ -17,7 +17,7 @@ shared model, not three separately fetched datasets:
   only git: branch, clean or dirty, ahead/behind its upstream, whether it's
   downloaded, and a warning when a container built from it runs older code.
   The header's **Download flow** and **Download all** live here, and only
-  here. Clicking a card opens the repo's drawer, with Download or Fetch, the last
+  here. Clicking a card opens the repo's drawer, with Download, Fetch or Pull (fast-forward only), the last
   commit, the changed files and the services it declares.
 - **Actual** — every node kind, services and backing dependencies
   together, overlaid with live container status from the workspace's one
@@ -104,6 +104,7 @@ the current node/edge set on every render:
   with the port each points at, and the NAT routes backing the raw zone;
   the **pull queue** — every clone/download started this daemon lifetime,
   with its raw Git output (the "☰" next to **Download all** opens straight
-  to it); and **Doctor**. It's how you check the plumbing is up without reading `fghjd`'s
+  to it); **Doctor**; and **Help**, the key to the map's lines and
+  blocks. It's how you check the plumbing is up without reading `fghjd`'s
   output — see [Split DNS](/concepts/split-dns/) and
   [Networking: HTTP vs. raw](/guides/networking-http-vs-raw/).
