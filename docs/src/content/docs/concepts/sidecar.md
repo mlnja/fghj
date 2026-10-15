@@ -111,6 +111,13 @@ already polls for TLS/SNI dispatch, reused as the DNS answer source, so
 there's no second data plane to keep in sync. Full mechanics in [Split
 DNS](/concepts/split-dns/).
 
+Because every container's `--dns` holds the sidecar's address, that address
+is fixed: fghj pins each new network's subnet, leaves the upper half to
+Docker, and gives the sidecar `.2`. `fghjd` checks it every second, so a
+deleted or crashed sidecar comes back on the same address within a couple of
+seconds, and the containers that kept running resolve `*.fghj.internal`
+again without a restart.
+
 ## Platform pitfalls found while building this
 
 None of these are sidecar-specific in principle, but the sidecar is what

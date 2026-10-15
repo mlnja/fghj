@@ -109,6 +109,12 @@ control socket connects, and `cue` is on `PATH`. Everything else is in
   whatever `connect_docker` resolves right now, which is not necessarily the
   daemon the running containers are on;
 - the activation state;
+- each workspace's environment, for the per-workspace `sidecar:<workspace>`
+  check. That one is the exception to "read the host": whether the sidecar is
+  running is read from Docker, but *why* it won't come back is only known to
+  the reconciler, which keeps its last restore error in
+  `DaemonControl::sidecar_failures` until a restore succeeds or the sidecar
+  is seen running;
 - root. The CA lives under `/var/lib/fghjd`, which the invoking user cannot
   read ([[persistence-and-workspace-store]]).
 

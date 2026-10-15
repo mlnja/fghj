@@ -82,6 +82,7 @@ impl Orchestrator {
                 name: &spec.container_name,
                 network,
                 aliases: &spec.aliases,
+                ipv4_address: None,
                 env: &env,
                 dns: &dns,
                 ports: &spec.port_list,

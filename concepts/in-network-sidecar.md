@@ -135,7 +135,20 @@ stopped-but-not-removed predecessor is force-removed first (its name is fixed,
 started. If the whole run's start fails, the sidecar is torn down with it.
 
 Its IP is threaded into every node's `--dns` at `start_node` time, which is
-why it must come up first.
+why it must come up first. That makes the address part of every running
+container, so it must not move when the sidecar is replaced. The
+reconciler checks it every second while an environment exists and no create
+is in flight, and starts it again if it's gone or stopped
+(`restore_sidecar`, logged once). A create and the reconciler share
+`sidecar_lock`, since starting one removes whatever holds its name. `ensure_network` pins a new
+network to the subnet Docker picked for it, with `ip_range` set to the upper
+half, and the sidecar asks for `.2` in the lower half, which nothing else can
+be handed. Docker only honours a requested address on a network created with
+an explicit subnet, hence create, read back, recreate. A network from before
+pinning has no `ip_range` and keeps the old behaviour: whatever Docker hands
+out, so a replaced sidecar can land elsewhere: later starts use its new
+address (`SidecarRestored`), but containers already running keep the old one
+in `--dns` until they're recreated.
 
 `sidecar_image::ensure_built` makes sure the image exists first — see *Where
 the image comes from* below.

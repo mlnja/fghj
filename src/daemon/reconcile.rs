@@ -4,6 +4,7 @@ use std::time::Duration;
 use crate::action::Action;
 use crate::daemon::control::DaemonControl;
 use crate::daemon::heal::{Heal, Healer};
+use crate::orchestrator::observe::SidecarSeen;
 use crate::state::NodeCondition;
 use crate::util::time::now_ms;
 use crate::{daemon_log, effects, resolver, supervisor};
@@ -16,7 +17,8 @@ pub(crate) const RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Reports container status into the actor so out-of-band stops, removals and
-/// port changes show up, then restarts what crashed (`heal`) while active.
+/// port changes show up, then, while active, brings back a missing sidecar and
+/// restarts what crashed (`heal`).
 /// Hosts, resolver and raw-net routes belong to `effects::spawn_all`.
 pub(crate) fn spawn_reconciler(daemon: Arc<DaemonControl>) {
     supervisor::supervise_forever("docker reconciler", reconcile_loop(daemon));
@@ -34,13 +36,45 @@ async fn reconcile_loop(daemon: Arc<DaemonControl>) {
             else {
                 continue;
             };
-            effects::docker::observe::report(&state.orchestrator, &actor).await;
+            let sidecar = effects::docker::observe::report(&state.orchestrator, &actor).await;
             if !daemon.is_active() {
                 continue;
             }
             let Some(env) = actor.current().env.clone() else {
                 continue;
             };
+            if sidecar == SidecarSeen::Running {
+                daemon.sidecar_failures.lock().unwrap().remove(&id);
+            }
+            // A create brings the sidecar up itself.
+            if sidecar == SidecarSeen::Down && env.pending_create.is_none() {
+                match state.orchestrator.restore_sidecar(&env).await {
+                    Ok(sidecar_ip) => {
+                        daemon.sidecar_failures.lock().unwrap().remove(&id);
+                        daemon_log::info(format!(
+                            "fghjd: {}'s sidecar was gone, started it again",
+                            env.network
+                        ));
+                        let _ = actor.dispatch(Action::SidecarRestored { sidecar_ip }).await;
+                    }
+                    // Once per streak: this runs every second.
+                    Err(e) => {
+                        let first = daemon
+                            .sidecar_failures
+                            .lock()
+                            .unwrap()
+                            .insert(id.clone(), format!("{e:#}"))
+                            .is_none();
+                        if first {
+                            daemon_log::warn(format!(
+                                "fghjd: {}'s sidecar is gone and won't start again, so \
+                                 *.fghj.internal names don't resolve inside it: {e:#}",
+                                env.network
+                            ));
+                        }
+                    }
+                }
+            }
             match healer.pick(&id, &env, std::time::Instant::now()) {
                 Some(Heal::Restart {
                     node_id,

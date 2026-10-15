@@ -8,6 +8,7 @@ use super::route_table::{
     refresh_sidecar_ca_copy, sidecar_capture_token, sidecar_routes_dir, sidecar_routes_path,
 };
 use crate::docker;
+use crate::state::EnvState;
 use crate::web::capture::CAPTURE_PORT;
 
 use super::naming::sidecar_name;
@@ -22,15 +23,33 @@ impl Orchestrator {
         network: &str,
     ) -> Result<(String, String)> {
         let name = sidecar_name(workspace_name);
+        let ip = self.ensure_sidecar_named(&name, network).await?;
+        Ok((name, ip))
+    }
 
-        let alive = matches!(
-            docker::inspect_status(&self.docker, &name).await,
+    /// Brings back the environment's sidecar once an observation saw it gone or
+    /// stopped, since every node's `--dns` points at it. Returns its address,
+    /// which on a pinned network is the one it had before.
+    pub async fn restore_sidecar(&self, env: &EnvState) -> Result<String> {
+        self.ensure_sidecar_named(&env.sidecar_container_name, &env.network)
+            .await
+    }
+
+    async fn sidecar_running(&self, name: &str) -> bool {
+        matches!(
+            docker::inspect_status(&self.docker, name).await,
             Ok(Some(s)) if s.status == "running"
-        );
-        if alive && let Some(ip) = docker::inspect_network_ip(&self.docker, &name, network).await? {
-            return Ok((name, ip));
+        )
+    }
+
+    async fn ensure_sidecar_named(&self, name: &str, network: &str) -> Result<String> {
+        let _guard = self.sidecar_lock.lock().await;
+        let alive = self.sidecar_running(name).await;
+        if alive && let Some(ip) = docker::inspect_network_ip(&self.docker, name, network).await? {
+            return Ok(ip);
         }
         crate::sidecar_image::ensure_built(&self.docker).await?;
+        let address = docker::sidecar_address(&self.docker, network).await?;
 
         let routes_dir = sidecar_routes_dir(network);
         std::fs::create_dir_all(&routes_dir)
@@ -62,9 +81,10 @@ impl Orchestrator {
         docker::run_container(
             &self.docker,
             &docker::RunOpts {
-                name: &name,
+                name,
                 network,
                 aliases: &[],
+                ipv4_address: address.as_deref(),
                 env: &[],
                 ports: &ports,
                 image: &crate::sidecar_image::image_tag(),
@@ -91,9 +111,8 @@ impl Orchestrator {
         .await
         .context("failed to start this run's sidecar proxy")?;
 
-        let ip = docker::inspect_network_ip(&self.docker, &name, network)
+        docker::inspect_network_ip(&self.docker, name, network)
             .await?
-            .context("sidecar proxy started but has no address on its own network")?;
-        Ok((name, ip))
+            .context("sidecar proxy started but has no address on its own network")
     }
 }

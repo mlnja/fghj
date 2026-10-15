@@ -160,7 +160,7 @@ wait that never happened.
 |---|---|---|
 | `ContainerDesired::terminating` | `start_node`, from `Node.kind` | this container's desired terminal state is "exited 0", not "running" |
 | `ContainerDesired::running` | `start_node` | `false` for a task **even on success** — `running` records what fghj wants at rest, and what it wants for a task at rest is for it to be finished |
-| `ContainerObserved::exit_code` | `start_node`'s wait, and `inspect_containers` | the outcome for a task; one more detail of a crash for a service |
+| `ContainerObserved::exit_code` | `start_node`'s wait, and `observe` (parsed from the listing's status text) | the outcome for a task; one more detail of a crash for a service |
 
 `running: false` is the load-bearing half. Every projection in
 `state::query` filters on a container Docker reports as `running`, so a

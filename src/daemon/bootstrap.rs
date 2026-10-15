@@ -172,6 +172,7 @@ pub async fn run_control_api() -> Result<()> {
         control_port,
         active: Mutex::new(None),
         last_reconcile_ms: Mutex::new(None),
+        sidecar_failures: Mutex::new(std::collections::HashMap::new()),
         idle_requested: Mutex::new(idle_requested),
         daemon_state_path,
     });

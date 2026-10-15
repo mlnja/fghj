@@ -142,6 +142,14 @@ pub(super) fn reduce(
             Ok(next)
         }
 
+        Action::SidecarRestored { sidecar_ip } => {
+            let mut next = state.clone();
+            if let Some(run) = next.env.as_mut() {
+                run.sidecar_ip = Some(sidecar_ip);
+            }
+            Ok(next)
+        }
+
         Action::VolumeObserved {
             volume_name,
             exists,
@@ -592,6 +600,30 @@ mod tests {
         assert_eq!(run.network, "fghj-default");
         assert_eq!(run.sidecar_ip.as_deref(), Some("172.30.0.2"));
         assert!(run.containers.contains_key("web"));
+    }
+
+    #[test]
+    fn a_restored_sidecar_updates_the_address_later_starts_point_dns_at() {
+        let state = workspace(vec![container("web")]);
+        let next = reduce(
+            &state,
+            Action::SidecarRestored {
+                sidecar_ip: "172.30.0.9".into(),
+            },
+        )
+        .unwrap();
+        let run = next.env.as_ref().unwrap();
+        assert_eq!(run.sidecar_ip.as_deref(), Some("172.30.0.9"));
+        assert!(run.containers.contains_key("web"));
+
+        let none = reduce(
+            &WorkspaceState::default(),
+            Action::SidecarRestored {
+                sidecar_ip: "172.30.0.9".into(),
+            },
+        )
+        .unwrap();
+        assert!(none.env.is_none());
     }
 
     #[test]

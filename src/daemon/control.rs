@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -26,6 +27,9 @@ pub struct DaemonControl {
     /// Freshness of container status for `/daemon/net-status`. `None` until the
     /// first tick or while idle.
     pub(crate) last_reconcile_ms: Mutex<Option<u64>>,
+    /// Why the reconciler couldn't bring a workspace's sidecar back, by workspace
+    /// id, until it manages to. For the doctor.
+    pub(crate) sidecar_failures: Mutex<HashMap<String, String>>,
     /// Durable: `daemon stop` should survive a crash or reboot until countermanded.
     /// Read once at construction, written through by `set_idle_requested`.
     pub(crate) idle_requested: Mutex<bool>,
@@ -161,6 +165,7 @@ mod tests {
             control_port: 0,
             active: Mutex::new(None),
             last_reconcile_ms: Mutex::new(None),
+            sidecar_failures: Mutex::new(HashMap::new()),
             idle_requested: Mutex::new(idle_requested),
             daemon_state_path: state_path,
         })

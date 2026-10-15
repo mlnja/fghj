@@ -60,6 +60,11 @@ pub enum Action {
         sidecar_ip: Option<String>,
         info: ContainerInfo,
     },
+    /// The reconciler started the sidecar again after it went missing. Its address
+    /// only differs on a network from before subnets were pinned.
+    SidecarRestored {
+        sidecar_ip: String,
+    },
     /// A create is about to work on `node_id` (`Some`), or gave up on it (`None`).
     EnvCreateWorking {
         node_id: String,

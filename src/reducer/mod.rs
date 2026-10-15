@@ -20,6 +20,7 @@ pub fn reduce(state: &WorkspaceState, action: Action) -> Result<WorkspaceState, 
         | Action::EnvCreateWorking { .. }
         | Action::EnvCreateProgress { .. }
         | Action::EnvCreateSettled { .. }
+        | Action::SidecarRestored { .. }
         | Action::VolumeObserved { .. }
         | Action::ConfigDriftObserved { .. } => observation::reduce(state, action),
 

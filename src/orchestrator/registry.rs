@@ -18,6 +18,9 @@ pub struct Orchestrator {
     pub(super) node_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// At most one capture task per node.
     pub(super) log_captures: Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    /// A create and the reconciler can both bring the sidecar up, and starting
+    /// one removes whatever holds its name first.
+    pub(super) sidecar_lock: tokio::sync::Mutex<()>,
 }
 
 impl Orchestrator {
@@ -32,6 +35,7 @@ impl Orchestrator {
             docker,
             node_locks: Mutex::new(HashMap::new()),
             log_captures: Mutex::new(HashMap::new()),
+            sidecar_lock: tokio::sync::Mutex::new(()),
         }
     }
 

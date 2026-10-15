@@ -6,22 +6,22 @@
 use crate::action::Action;
 use crate::actor::ActorHandle;
 use crate::orchestrator::Orchestrator;
-use crate::orchestrator::observe::DriftReport;
+use crate::orchestrator::observe::{DriftReport, SidecarSeen};
 use crate::resolver::Graph;
 use crate::state::ContainerObserved;
 
 use super::volumes;
 
-pub async fn report(orchestrator: &Orchestrator, actor: &ActorHandle) {
+pub async fn report(orchestrator: &Orchestrator, actor: &ActorHandle) -> SidecarSeen {
     let Some(env) = actor.current().env.clone() else {
-        return;
+        return SidecarSeen::Unknown;
     };
-    for (node_id, observed) in orchestrator.inspect_containers(&env).await {
-        let _ = actor
-            .dispatch(container_observed(&node_id, &observed))
-            .await;
+    let observation = orchestrator.observe(&env).await;
+    for (node_id, observed) in &observation.containers {
+        let _ = actor.dispatch(container_observed(node_id, observed)).await;
     }
     volumes::observe_volumes(orchestrator, actor).await;
+    observation.sidecar
 }
 
 /// Config drift, on the slower `spawn_sync_reconciler` schedule.

@@ -9,36 +9,47 @@ use crate::state::{ContainerObserved, EnvState, SyncStatus};
 use super::registry::Orchestrator;
 
 impl Orchestrator {
-    /// Re-inspects every container and reports what Docker says. Observes only;
-    /// the reducer writes it down.
-    pub async fn inspect_containers(&self, env: &EnvState) -> BTreeMap<String, ContainerObserved> {
-        let mut updated = BTreeMap::new();
-        for (node_id, c) in &env.containers {
-            let name = &c.desired.container_name;
-            // Docker not answering says nothing about the container: its last
-            // reading stays, marked as no longer current.
-            let Ok(inspected) = docker::inspect_status(&self.docker, name).await else {
-                updated.insert(
-                    node_id.clone(),
-                    ContainerObserved {
-                        unseen: true,
-                        ..c.observed.clone()
-                    },
-                );
-                continue;
+    /// What Docker says about every container and the sidecar, from one listing
+    /// of the environment's compose project. Observes only; the reducer writes
+    /// it down.
+    pub async fn observe(&self, env: &EnvState) -> Observation {
+        // Docker not answering says nothing about a container: its last reading
+        // stays, marked as no longer current.
+        let Ok(listed) = docker::list_statuses(&self.docker, &env.network).await else {
+            let containers = env
+                .containers
+                .iter()
+                .map(|(node_id, c)| {
+                    (
+                        node_id.clone(),
+                        ContainerObserved {
+                            unseen: true,
+                            ..c.observed.clone()
+                        },
+                    )
+                })
+                .collect();
+            return Observation {
+                containers,
+                sidecar: SidecarSeen::Unknown,
             };
-            let host_port = |port: &str| inspected.as_ref().and_then(|s| s.host_port(port));
+        };
+
+        let mut containers = BTreeMap::new();
+        for (node_id, c) in &env.containers {
+            let inspected = listed.get(&c.desired.container_name);
+            let host_port = |port: &str| inspected.and_then(|s| s.host_port(port));
             let published_port = c.desired.status_port.as_deref().and_then(host_port);
             let mut ports = c.observed.ports.clone();
             for (port, host) in ports.iter_mut() {
                 *host = host_port(port);
             }
             let (status, exit_code) = match inspected {
-                Some(s) => (s.status, s.exit_code),
+                Some(s) => (s.status.clone(), s.exit_code),
                 None => ("removed".to_string(), None),
             };
 
-            updated.insert(
+            containers.insert(
                 node_id.clone(),
                 ContainerObserved {
                     status,
@@ -50,7 +61,21 @@ impl Orchestrator {
                 },
             );
         }
-        updated
+
+        let sidecar = if env.sidecar_container_name.is_empty() {
+            SidecarSeen::Unknown
+        } else if listed
+            .get(&env.sidecar_container_name)
+            .is_some_and(|s| s.status == "running")
+        {
+            SidecarSeen::Running
+        } else {
+            SidecarSeen::Down
+        };
+        Observation {
+            containers,
+            sidecar,
+        }
     }
 
     /// Empty on a Docker error: observation is never worth failing over.
@@ -85,6 +110,20 @@ impl Orchestrator {
         }
         reports
     }
+}
+
+pub struct Observation {
+    pub containers: BTreeMap<String, ContainerObserved>,
+    pub sidecar: SidecarSeen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarSeen {
+    Running,
+    /// Gone or stopped.
+    Down,
+    /// Docker didn't answer, or the environment has no sidecar yet.
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +161,8 @@ mod tests {
                     "--rm",
                     "--name",
                     &name,
+                    "--label",
+                    &format!("com.docker.compose.project={name}"),
                     "-p",
                     "127.0.0.1::8080",
                     "busybox",
@@ -149,7 +190,7 @@ mod tests {
     /// A container Docker republished on a new host port must report the new port.
     #[tokio::test]
     #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
-    async fn inspect_reports_the_real_port_after_docker_moves_the_published_one() {
+    async fn observing_reports_the_real_port_after_docker_moves_the_published_one() {
         let container = DriftingPortContainer::start();
         let docker = Arc::new(crate::daemon::connect_docker().expect("docker client"));
         let real_port = docker::inspect_status(&docker, &container.name)
@@ -193,16 +234,71 @@ mod tests {
             pending_action: None,
         };
         let env = EnvState {
-            network: "bridge".to_string(),
+            network: container.name.clone(),
             containers: BTreeMap::from([("svc".to_string(), stale_container.clone())]),
             ..Default::default()
         };
 
-        let observed = registry.inspect_containers(&env).await;
+        let observed = registry.observe(&env).await.containers;
         let o = &observed["svc"];
         assert_eq!(o.published_port, Some(real_port));
         assert_eq!(o.ports.get("8080").copied().flatten(), Some(real_port));
         assert!(stale_container.desired.running);
         assert_eq!(stale_container.desired.routes[0].host_port, stale_port);
+    }
+
+    /// The listing's status text carries the code; a task's outcome hangs on it.
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
+    async fn a_listed_container_that_exited_reports_its_code_and_a_gone_one_is_removed() {
+        let name = format!("fghj-list-test-{}", crate::docker::rand_suffix());
+        let status = std::process::Command::new("docker")
+            .args([
+                "run",
+                "--name",
+                &name,
+                "--label",
+                &format!("com.docker.compose.project={name}"),
+                "busybox",
+                "sh",
+                "-c",
+                "exit 3",
+            ])
+            .status()
+            .expect("failed to run `docker run`");
+        assert_eq!(status.code(), Some(3));
+
+        let docker = Arc::new(crate::daemon::connect_docker().expect("docker client"));
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
+        let registry = Orchestrator::new(tmp.path().to_path_buf(), db, docker);
+        let info = |container_name: &str| ContainerInfo {
+            node_id: container_name.to_string(),
+            desired: ContainerDesired {
+                container_name: container_name.to_string(),
+                ..Default::default()
+            },
+            observed: ContainerObserved::default(),
+            pending_action: None,
+        };
+        let env = EnvState {
+            network: name.clone(),
+            containers: BTreeMap::from([
+                ("task".to_string(), info(&name)),
+                ("gone".to_string(), info("fghj-list-test-never-created")),
+            ]),
+            sidecar_container_name: format!("{name}-sidecar"),
+            ..Default::default()
+        };
+
+        let observation = registry.observe(&env).await;
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "-f", &name])
+            .status();
+
+        assert_eq!(observation.containers["task"].status, "exited");
+        assert_eq!(observation.containers["task"].exit_code, Some(3));
+        assert_eq!(observation.containers["gone"].status, "removed");
+        assert_eq!(observation.sidecar, SidecarSeen::Down);
     }
 }

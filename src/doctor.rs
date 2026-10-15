@@ -396,9 +396,124 @@ fn host_checks() -> Vec<Check> {
 }
 
 /// In cascade order: Docker, then whether fghjd is active, then the rest.
+/// What the doctor learned about one workspace's sidecar.
+struct SidecarFacts {
+    workspace: String,
+    name: String,
+    running: bool,
+    ip: Option<String>,
+    capture_port: Option<u16>,
+    /// The network reserves the sidecar's address, so a replacement keeps it.
+    pinned: bool,
+    /// The reconciler's last error bringing it back.
+    failure: Option<String>,
+    active: bool,
+}
+
+fn sidecar_check(f: &SidecarFacts) -> Check {
+    let name = format!("sidecar:{}", f.workspace);
+    let title = format!("{}'s sidecar", f.workspace);
+    if !f.running {
+        if let Some(failure) = &f.failure {
+            return Check::fail(
+                &name,
+                &title,
+                format!("{} won't start: {failure}", f.name),
+                "fghjd retries every second and this is its last error; *.fghj.internal \
+                 names don't resolve inside the environment until it starts",
+            );
+        }
+        let hint = if f.active {
+            "fghjd starts it again within a second; if this stays, check the daemon log"
+        } else {
+            "fghjd is idle, so nothing brings it back: run `fghj daemon start`"
+        };
+        return Check::warn(&name, &title, format!("{} isn't running", f.name), hint);
+    }
+    let at = f.ip.as_deref().unwrap_or("an unknown address");
+    let Some(port) = f.capture_port else {
+        return Check::warn(
+            &name,
+            &title,
+            format!(
+                "{} is running at {at}, but predates traffic capture",
+                f.name
+            ),
+            "recreate the environment to record traffic between its services",
+        );
+    };
+    if !f.pinned {
+        return Check::warn(
+            &name,
+            &title,
+            format!(
+                "{} is running at {at}, but its network predates fixed sidecar addresses",
+                f.name
+            ),
+            "if the sidecar is replaced, running services lose *.fghj.internal until \
+             they're recreated; recreate the environment to pin it",
+        );
+    }
+    Check::pass(
+        &name,
+        &title,
+        format!("{} is running at {at}, capture on 127.0.0.1:{port}", f.name),
+    )
+}
+
+/// One per workspace with an environment. Skipped while Docker doesn't answer:
+/// the Docker checks already say so.
+async fn sidecar_checks(docker: &Docker, daemon: &DaemonControl) -> Vec<Check> {
+    let paths: std::collections::HashMap<_, _> = daemon.registry.list().into_iter().collect();
+    let mut checks = Vec::new();
+    for (id, state) in daemon.registry.states() {
+        let Some(env) = &state.env else {
+            continue;
+        };
+        if env.sidecar_container_name.is_empty() {
+            continue;
+        }
+        let Ok(status) = crate::docker::inspect_status(docker, &env.sidecar_container_name).await
+        else {
+            continue;
+        };
+        let running = status.as_ref().is_some_and(|s| s.status == "running");
+        let ip = if running {
+            crate::docker::inspect_network_ip(docker, &env.sidecar_container_name, &env.network)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let pinned = crate::docker::sidecar_address(docker, &env.network)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        let workspace = paths
+            .get(&id)
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or(id.clone());
+        checks.push(sidecar_check(&SidecarFacts {
+            workspace,
+            name: env.sidecar_container_name.clone(),
+            running,
+            ip,
+            capture_port: status.and_then(|s| s.host_port(&web::capture::CAPTURE_PORT.to_string())),
+            pinned,
+            failure: daemon.sidecar_failures.lock().unwrap().get(&id).cloned(),
+            active: daemon.is_active(),
+        }));
+    }
+    checks
+}
+
 pub async fn daemon_report(docker: &Docker, daemon: &DaemonControl) -> Report {
     let mut checks = docker_checks(docker).await;
     checks.push(daemon_check(daemon));
+    checks.extend(sidecar_checks(docker, daemon).await);
     match tokio::task::spawn_blocking(host_checks).await {
         Ok(host) => checks.extend(host),
         Err(e) => checks.push(Check::fail(
@@ -455,6 +570,75 @@ pub fn client_checks() -> Vec<Check> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sidecar() -> SidecarFacts {
+        SidecarFacts {
+            workspace: "aikido".into(),
+            name: "fghj-aikido-default-sidecar".into(),
+            running: true,
+            ip: Some("192.168.97.2".into()),
+            capture_port: Some(32768),
+            pinned: true,
+            failure: None,
+            active: true,
+        }
+    }
+
+    #[test]
+    fn a_running_pinned_sidecar_with_capture_passes() {
+        let check = sidecar_check(&sidecar());
+        assert_eq!(check.verdict, Verdict::Pass);
+        assert_eq!(check.name, "sidecar:aikido");
+        assert!(check.detail.contains("192.168.97.2"), "{}", check.detail);
+    }
+
+    #[test]
+    fn a_sidecar_that_wont_come_back_fails_with_the_reason() {
+        let check = sidecar_check(&SidecarFacts {
+            running: false,
+            ip: None,
+            failure: Some("no such image".into()),
+            ..sidecar()
+        });
+        assert_eq!(check.verdict, Verdict::Fail);
+        assert!(check.detail.contains("no such image"), "{}", check.detail);
+    }
+
+    #[test]
+    fn a_missing_sidecar_is_only_a_warning_while_fghjd_brings_it_back() {
+        let check = sidecar_check(&SidecarFacts {
+            running: false,
+            ip: None,
+            ..sidecar()
+        });
+        assert_eq!(check.verdict, Verdict::Warn);
+        assert!(check.hint.unwrap().contains("within a second"));
+
+        let idle = sidecar_check(&SidecarFacts {
+            running: false,
+            ip: None,
+            active: false,
+            ..sidecar()
+        });
+        assert!(idle.hint.unwrap().contains("fghj daemon start"));
+    }
+
+    #[test]
+    fn an_old_sidecar_or_network_warns_to_recreate_the_environment() {
+        let no_capture = sidecar_check(&SidecarFacts {
+            capture_port: None,
+            ..sidecar()
+        });
+        assert_eq!(no_capture.verdict, Verdict::Warn);
+        assert!(no_capture.detail.contains("predates traffic capture"));
+
+        let unpinned = sidecar_check(&SidecarFacts {
+            pinned: false,
+            ..sidecar()
+        });
+        assert_eq!(unpinned.verdict, Verdict::Warn);
+        assert!(unpinned.hint.unwrap().contains("recreate the environment"));
+    }
 
     #[test]
     fn api_versions_parse_to_comparable_pairs() {

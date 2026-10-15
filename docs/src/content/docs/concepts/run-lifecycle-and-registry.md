@@ -44,8 +44,9 @@ override branch whose own config doesn't match the live graph's shape).
 
 ## The reconciler: drift correction
 
-A background loop periodically re-inspects every live run's containers
-against real Docker state and writes back any status that changed —
+A background loop checks every live run's containers each second, with one
+Docker listing per workspace rather than a call per container, against real
+Docker state and writes back any status that changed —
 including flagging a container that's vanished entirely (removed by hand,
 outside `fghj`) as removed. This is explicitly analogous to a Kubernetes
 controller's reconcile loop.

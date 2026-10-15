@@ -164,14 +164,26 @@ graph's shape).
 = 1s, matched to the frontend's own `/environment` poll interval so the UI is
 essentially never stale) that calls
 `effects::docker::observe::report` for every wired workspace. That reads the
-actor's current state, hands it to `Orchestrator::inspect_containers`, and
+actor's current state, hands it to `Orchestrator::observe`, and
 dispatches what Docker actually says back as `Action::ContainerObserved` —
 including flagging a container that's vanished entirely (`docker rm`'d by
 hand, outside fghj) as `"removed"`. This is explicitly analogous to a
-Kubernetes controller's reconcile loop. Observing stays read-only; what it
-does with the reading is split by what happened:
+Kubernetes controller's reconcile loop.
 
-- **Docker not answering** (`Unknown`) — `inspect_containers` reports the
+`observe` reads Docker with **one `list_containers` per workspace per tick**,
+filtered on the environment's compose project label (every node and the
+sidecar carry it), not an inspect per container: a big workspace was making
+a dozen-plus calls a second. The listing carries status and published ports
+but no exit code field, so the code is parsed from its status text
+(`Exited (137) 5 seconds ago`); only an exited container whose text doesn't
+carry one costs an inspect. The same listing says whether the sidecar is
+running, and the reconciler restores it only on `SidecarSeen::Down`, so a
+healthy sidecar costs no extra call.
+
+Observing stays read-only; what it does with the reading is split by what
+happened:
+
+- **Docker not answering** (`Unknown`) — `observe` reports the
   last reading again with `observed.unseen` set. The status stays what it
   was, so routes, `/etc/hosts` and NAT don't churn on a blip, but the
   condition says nothing is known and heal leaves it alone.
@@ -217,11 +229,11 @@ does with the reading is split by what happened:
   (Start) or **Forget** (Delete, which is a no-op on Docker's side for a
   container that's already gone).
 
-A Docker that doesn't answer is no reading at all: `inspect_containers` skips
+A Docker that doesn't answer is no reading at all: `observe` skips
 the container rather than reporting it gone, so an outage doesn't show every
 node as `Missing`.
 
-Note the direction: `inspect_containers` *reports*, it does not write.
+Note the direction: `observe` *reports*, it does not write.
 `observed` is the reducer's to record, and the reducer is the only thing
 that records it. That was not always true — the inspection used to fold its
 answers into a second copy of the environment state and persist that, which is how
@@ -341,7 +353,7 @@ reconciles.
 ## Status
 
 Implemented: `src/orchestrator/` (`Orchestrator::ensure_running`/`restart_node`/
-`stop`/`inspect_containers`, route derivation).
+`stop`/`observe`, route derivation).
 `daemon::spawn_reconciler` drives the inspection on a 1s tick. Known gap:
 `resolve_route` filters on `status == "running"`, which
 excludes stopped containers but can briefly still return a route to a

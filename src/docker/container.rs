@@ -5,12 +5,12 @@ use anyhow::{Context, Result, bail};
 use bollard::Docker;
 use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::models::{
-    ContainerCreateBody, ContainerInspectResponse, EndpointSettings, HealthConfig, HostConfig,
-    NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
+    ContainerCreateBody, ContainerInspectResponse, EndpointIpamConfig, EndpointSettings,
+    HealthConfig, HostConfig, NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
-    CreateContainerOptionsBuilder, InspectContainerOptionsBuilder, LogsOptionsBuilder,
-    RemoveContainerOptionsBuilder,
+    CreateContainerOptionsBuilder, InspectContainerOptionsBuilder, ListContainersOptionsBuilder,
+    LogsOptionsBuilder, RemoveContainerOptionsBuilder,
 };
 use futures_util::StreamExt;
 use futures_util::stream::Stream;
@@ -32,6 +32,9 @@ pub struct RunOpts<'a> {
     pub name: &'a str,
     pub network: &'a str,
     pub aliases: &'a [String],
+    /// A fixed address on `network`, which must have an explicit subnet.
+    /// `None` takes whatever Docker hands out.
+    pub ipv4_address: Option<&'a str>,
     pub env: &'a [String],
     /// `None` publishes to an ephemeral localhost port.
     pub ports: &'a [(String, Option<u16>)],
@@ -101,6 +104,10 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
         opts.network.to_string(),
         EndpointSettings {
             aliases: Some(opts.aliases.to_vec()),
+            ipam_config: opts.ipv4_address.map(|ip| EndpointIpamConfig {
+                ipv4_address: Some(ip.to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );
@@ -277,6 +284,82 @@ pub async fn inspect_status(docker: &Docker, name: &str) -> Result<Option<Contai
     }))
 }
 
+/// Every container of compose `project`, stopped ones included, by name: one
+/// call in place of an inspect per container. A container missing here doesn't
+/// exist.
+pub async fn list_statuses(
+    docker: &Docker,
+    project: &str,
+) -> Result<HashMap<String, ContainerStatus>> {
+    let mut filters: HashMap<&str, Vec<String>> = HashMap::new();
+    filters.insert(
+        "label",
+        vec![format!("com.docker.compose.project={project}")],
+    );
+    let listed = docker
+        .list_containers(Some(
+            ListContainersOptionsBuilder::new()
+                .all(true)
+                .filters(&filters)
+                .build(),
+        ))
+        .await
+        .context("docker list_containers failed")?;
+
+    let mut statuses = HashMap::new();
+    for summary in listed {
+        let Some(name) = summary
+            .names
+            .as_ref()
+            .and_then(|names| names.first())
+            .map(|n| n.trim_start_matches('/').to_string())
+        else {
+            continue;
+        };
+        let status = summary
+            .state
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".to_string());
+        let exit_code = match summary.status.as_deref().and_then(exit_code_in) {
+            Some(code) => Some(code),
+            // Rare: the text says `Dead`, or a format this doesn't know.
+            None if matches!(status.as_str(), "exited" | "dead") => inspect_status(docker, &name)
+                .await?
+                .and_then(|s| s.exit_code),
+            // What inspect reports for a container that hasn't exited.
+            None => Some(0),
+        };
+        let host_ports = summary
+            .ports
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|p| {
+                let typ = p.typ.map(|t| t.to_string()).filter(|t| !t.is_empty());
+                let key = format!("{}/{}", p.private_port, typ.as_deref().unwrap_or("tcp"));
+                Some((key, p.public_port?))
+            })
+            .collect();
+        statuses.insert(
+            name,
+            ContainerStatus {
+                status,
+                exit_code,
+                host_ports,
+            },
+        );
+    }
+    Ok(statuses)
+}
+
+/// The code in Docker's status text: `Exited (137) 5 seconds ago`,
+/// `Restarting (1) 2 seconds ago`.
+fn exit_code_in(text: &str) -> Option<i64> {
+    let (_, rest) = text.split_once('(')?;
+    let (code, _) = rest.split_once(')')?;
+    code.trim().parse().ok()
+}
+
 /// `Ok(None)` if the container doesn't exist or isn't on `network`.
 pub async fn inspect_network_ip(
     docker: &Docker,
@@ -419,6 +502,16 @@ pub async fn exec_exit_code(docker: &Docker, exec_id: &str) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_exit_code_comes_out_of_dockers_status_text() {
+        assert_eq!(exit_code_in("Exited (137) 5 seconds ago"), Some(137));
+        assert_eq!(exit_code_in("Exited (0) About a minute ago"), Some(0));
+        assert_eq!(exit_code_in("Restarting (1) 2 seconds ago"), Some(1));
+        assert_eq!(exit_code_in("Up 3 hours (healthy)"), None);
+        assert_eq!(exit_code_in("Up 5 minutes"), None);
+        assert_eq!(exit_code_in("Dead"), None);
+    }
     use std::process::Command;
     use tokio::io::AsyncWriteExt;
 
