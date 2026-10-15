@@ -16,4 +16,4 @@ pub use index::{load_index, save_index};
 pub use paths::{default_index_path, default_state_path, fghjd_root};
 pub use rehydrate::rehydrate;
 pub use sqlite::{EventEntry, LogGeneration, LogLine, WorkspaceDb};
-pub use workspace_owner::{WorkspaceOwner, harden_git_ssh};
+pub use workspace_owner::{WorkspaceOwner, harden_git_ssh, workspace_owner};

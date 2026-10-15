@@ -215,6 +215,7 @@ fn run_git_logged(
     }
     crate::persistence::harden_git_ssh(&mut cmd);
 
+    let log_start = state.lock().unwrap().log.len();
     let mut child = cmd.spawn().context("failed to spawn git")?;
 
     let stderr = child.stderr.take().expect("piped stderr");
@@ -229,9 +230,70 @@ fn run_git_logged(
     let _ = stdout_handle.join();
 
     if !status.success() {
+        let output = state.lock().unwrap().log[log_start..].to_string();
+        let as_root = unsafe { libc::geteuid() } == 0;
+        let agent = match owner.map(WorkspaceOwner::live_ssh_auth_sock) {
+            None | Some(None) => Agent::None,
+            Some(Some(sock)) if sock.contains("/com.apple.launchd.") => Agent::Apple,
+            Some(Some(_)) => Agent::Other,
+        };
+        if let Some(hint) = failure_hint(&output, owner.is_some(), as_root, agent) {
+            append_log(state, &format!("\nhint: {hint}\n"));
+        }
         bail!("git exited with {status}");
     }
     Ok(())
+}
+
+/// Why a remote refused us, when the cause is how fghj ran git.
+#[derive(Clone, Copy)]
+enum Agent {
+    None,
+    /// The login session's, found by scanning. Keys kept in 1Password and the
+    /// like aren't in it.
+    Apple,
+    /// One `fghj wire` sent.
+    Other,
+}
+
+fn failure_hint(
+    output: &str,
+    has_owner: bool,
+    as_root: bool,
+    agent: Agent,
+) -> Option<&'static str> {
+    let refused = [
+        "Permission denied (publickey",
+        "Authentication failed",
+        "could not read Username",
+    ]
+    .iter()
+    .any(|marker| output.contains(marker));
+    if !refused {
+        return None;
+    }
+    Some(match (has_owner, as_root, agent) {
+        (false, true, _) => {
+            "git ran as root, with root's keys: this workspace has no recorded owner and \
+             its folder belongs to root. Run `fghj wire` from your own user, then pull again."
+        }
+        (false, false, _) => return None,
+        (true, _, Agent::None) => {
+            "git ran as you, with the keys in your ~/.ssh and no ssh-agent. A key with a \
+             passphrase needs one: run `ssh-add`, then pull again. If your keys live in \
+             another agent (1Password and the like), set `IdentityAgent` in ~/.ssh/config \
+             or run `fghj wire` from your shell."
+        }
+        (true, _, Agent::Apple) => {
+            "git ran as you, with macOS's ssh-agent. If your keys live in another agent \
+             (1Password and the like), set `IdentityAgent` in ~/.ssh/config or run \
+             `fghj wire` from your shell. Otherwise check `ssh-add -l` lists your key."
+        }
+        (true, _, Agent::Other) => {
+            "git ran as you, with your ssh-agent. If your key has a passphrase, check \
+             `ssh-add -l` lists it; otherwise check your account can read this repository."
+        }
+    })
 }
 
 /// An existing clone is never fetched or reset, so pins and local patches stay.
@@ -388,6 +450,33 @@ fn pull_all_logged(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_while_cloning_as_root_says_to_wire() {
+        let output = "git@gitlab.com: Permission denied (publickey).\nfatal: Could not read";
+        let hint = failure_hint(output, false, true, Agent::None).unwrap();
+        assert!(hint.contains("fghj wire"), "{hint}");
+        assert!(
+            failure_hint(output, true, true, Agent::None)
+                .unwrap()
+                .contains("ssh-add")
+        );
+    }
+
+    #[test]
+    fn a_refusal_through_macos_agent_points_at_other_agents() {
+        let output = "git@gitlab.com: Permission denied (publickey).";
+        let hint = failure_hint(output, true, true, Agent::Apple).unwrap();
+        assert!(hint.contains("IdentityAgent"), "{hint}");
+        let hint = failure_hint(output, true, true, Agent::Other).unwrap();
+        assert!(!hint.contains("IdentityAgent"), "{hint}");
+    }
+
+    #[test]
+    fn other_failures_get_no_hint() {
+        let output = "fatal: repository 'x' not found";
+        assert_eq!(failure_hint(output, false, true, Agent::None), None);
+    }
 
     fn checkout_with_origin(origin: Option<&str>) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();

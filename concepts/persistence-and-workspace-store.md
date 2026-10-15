@@ -68,11 +68,23 @@ session that was live when it was captured, and can go stale if the agent
 restarts. `live_ssh_auth_sock` doesn't trust the stored hint blindly either
 — it re-verifies the hint is still a live socket owned by the right uid,
 and if not, falls back to scanning macOS's well-known launchd socket
-location (`/private/tmp/com.apple.launchd.*/Listeners`, which macOS's
-*login-session-scoped* system agent is bound to, not any one terminal) to
-recover a working socket even when the original hint has gone dead. On
-other platforms there's no equivalent well-known path, so a dead hint is
-simply unusable there.
+location (`com.apple.launchd.*/Listeners` under `/private/var/run` since
+macOS 26, `/private/tmp` before; macOS's *login-session-scoped* system agent
+is bound to it, not any one terminal) to recover a working socket even when
+the original hint has gone dead. On other platforms there's no equivalent
+well-known path, so a dead hint is simply unusable there.
+
+A workspace with no recorded owner (one wired before owners were recorded,
+or whose `.fghj` was recreated since) borrows whoever owns its folder
+instead: uid/gid from the folder, home from the password database, and the
+agent found by the same scan (`workspace_owner`). A folder owned by root
+leaves nobody to borrow, so git runs as root. When the remote then refuses
+the key, the pull log ends with a hint saying so and to run `fghj wire`
+from your own user. A refusal while running as the owner gets a hint about
+`ssh-add` instead. If the agent was macOS's own, found by the scan, the hint
+also says that keys kept in another agent (1Password and the like) need
+`IdentityAgent` in `~/.ssh/config` or a `fghj wire` from the shell that has
+their `SSH_AUTH_SOCK`.
 
 The agent is borrowed for `docker build` too, not just `git clone` — but by a
 different mechanism, because there is no subprocess to configure. bollard reads

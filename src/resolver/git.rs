@@ -1,4 +1,3 @@
-use std::ffi::CStr;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -24,7 +23,7 @@ fn git_in(dir: &Path) -> Command {
 
     cmd.uid(uid).gid(gid);
     // Otherwise git reads root's `HOME` and fails on its config.
-    match home_dir_of(uid) {
+    match crate::persistence::workspace_owner::home_dir_of(uid) {
         Some(home) => {
             cmd.env("HOME", home);
         }
@@ -33,20 +32,6 @@ fn git_in(dir: &Path) -> Command {
         }
     }
     cmd
-}
-
-fn home_dir_of(uid: u32) -> Option<String> {
-    // SAFETY: the static buffer is copied out before any other libc call.
-    unsafe {
-        let pw = libc::getpwuid(uid as libc::uid_t);
-        if pw.is_null() || (*pw).pw_dir.is_null() {
-            return None;
-        }
-        CStr::from_ptr((*pw).pw_dir)
-            .to_str()
-            .ok()
-            .map(str::to_owned)
-    }
 }
 
 pub fn git_remote_and_branch(dir: &Path) -> (Option<String>, Option<String>) {

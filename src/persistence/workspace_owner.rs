@@ -13,6 +13,25 @@ pub struct WorkspaceOwner {
 }
 
 impl WorkspaceOwner {
+    /// Whoever owns `folder`. Stands in when no owner was recorded: the
+    /// workspace predates recording one, or its `.fghj` was recreated since,
+    /// and only `fghj wire` records one. `None` for a root-owned folder,
+    /// which leaves nobody to act as.
+    pub fn of_folder(folder: &Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(folder).ok()?;
+        if meta.uid() == 0 {
+            return None;
+        }
+        Some(Self {
+            uid: meta.uid(),
+            gid: meta.gid(),
+            home: home_dir_of(meta.uid())?,
+            // Found when used; see `live_ssh_auth_sock`.
+            ssh_auth_sock: None,
+        })
+    }
+
     /// Root bypasses the permission check on the user's ssh-agent socket; it just
     /// needs `HOME` and `SSH_AUTH_SOCK`.
     pub fn apply_to_command(&self, cmd: &mut std::process::Command) {
@@ -34,9 +53,34 @@ impl WorkspaceOwner {
     }
 }
 
-/// `hint` goes stale when the agent restarts. On macOS the login-session agent
-/// lives at a discoverable path, so a dead hint can be recovered; elsewhere it
-/// can't.
+/// The recorded owner, else whoever owns the workspace folder.
+pub async fn workspace_owner(
+    db: std::sync::Arc<crate::persistence::WorkspaceDb>,
+    folder: &Path,
+) -> Option<WorkspaceOwner> {
+    match db.load_owner().await {
+        Ok(Some(owner)) => Some(owner),
+        _ => WorkspaceOwner::of_folder(folder),
+    }
+}
+
+pub(crate) fn home_dir_of(uid: u32) -> Option<String> {
+    // SAFETY: the static buffer is copied out before any other libc call.
+    unsafe {
+        let pw = libc::getpwuid(uid as libc::uid_t);
+        if pw.is_null() || (*pw).pw_dir.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr((*pw).pw_dir)
+            .to_str()
+            .ok()
+            .map(str::to_owned)
+    }
+}
+
+/// `hint` goes stale when the agent restarts, and `of_folder` has none. On
+/// macOS the login-session agent lives at a discoverable path, so it can be
+/// found anyway; elsewhere it can't.
 fn live_ssh_auth_sock(uid: u32, hint: Option<&str>) -> Option<String> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
@@ -53,18 +97,23 @@ fn live_ssh_auth_sock(uid: u32, hint: Option<&str>) -> Option<String> {
     }
 
     if cfg!(target_os = "macos") {
-        let entries = std::fs::read_dir("/private/tmp").ok()?;
-        for entry in entries.flatten() {
-            if !entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("com.apple.launchd.")
-            {
+        // `/private/tmp` up to macOS 15, `/private/var/run` since.
+        for dir in ["/private/var/run", "/private/tmp"] {
+            let Ok(entries) = std::fs::read_dir(dir) else {
                 continue;
-            }
-            let candidate = entry.path().join("Listeners");
-            if is_live_socket_for_uid(&candidate) {
-                return Some(candidate.to_string_lossy().into_owned());
+            };
+            for entry in entries.flatten() {
+                if !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("com.apple.launchd.")
+                {
+                    continue;
+                }
+                let candidate = entry.path().join("Listeners");
+                if is_live_socket_for_uid(&candidate) {
+                    return Some(candidate.to_string_lossy().into_owned());
+                }
             }
         }
     }
@@ -79,4 +128,24 @@ pub fn harden_git_ssh(cmd: &mut std::process::Command) {
         "GIT_SSH_COMMAND",
         "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_folder_stands_in_for_its_owner() {
+        let uid = unsafe { libc::getuid() };
+        let tmp = tempfile::tempdir().unwrap();
+        let owner = WorkspaceOwner::of_folder(tmp.path());
+        if uid == 0 {
+            assert!(owner.is_none());
+            return;
+        }
+        let owner = owner.unwrap();
+        assert_eq!(owner.uid, uid);
+        assert_eq!(Some(owner.home), home_dir_of(uid));
+        assert!(WorkspaceOwner::of_folder(Path::new("/")).is_none());
+    }
 }

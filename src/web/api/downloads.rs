@@ -4,8 +4,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use crate::downloads;
 use crate::web::api::extract::WorkspaceExtractor;
+use crate::{downloads, persistence};
 
 #[derive(Deserialize)]
 pub(crate) struct FlowQuery {
@@ -16,7 +16,7 @@ pub(crate) async fn post_pull_all(
     Query(q): Query<FlowQuery>,
     WorkspaceExtractor(state): WorkspaceExtractor,
 ) -> Response {
-    let owner = state.db.clone().load_owner().await.ok().flatten();
+    let owner = persistence::workspace_owner(state.db.clone(), &state.path).await;
     let s = state
         .downloads
         .start_pull_all(state.path.clone(), owner, q.flow);
@@ -42,7 +42,7 @@ pub(crate) async fn post_pull_node(
     AxumPath(node_id): AxumPath<String>,
     WorkspaceExtractor(state): WorkspaceExtractor,
 ) -> Response {
-    let owner = state.db.clone().load_owner().await.ok().flatten();
+    let owner = persistence::workspace_owner(state.db.clone(), &state.path).await;
     let s = state
         .downloads
         .start_node(state.path.clone(), node_id, owner);

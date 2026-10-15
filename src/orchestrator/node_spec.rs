@@ -66,7 +66,7 @@ impl Orchestrator {
                 Some(_) => docker::INLINE_DOCKERFILE,
                 None => build.dockerfile.as_str(),
             };
-            let owner = self.db.clone().load_owner().await.ok().flatten();
+            let owner = crate::persistence::workspace_owner(self.db.clone(), &self.workspace).await;
             // Read from the owner's home: `fghjd` is root, whose buildx config is empty.
             let builder = owner
                 .as_ref()
