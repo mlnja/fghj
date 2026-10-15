@@ -4,9 +4,14 @@
   import Drawer from './lib/Drawer.svelte';
   import Placeholder from './lib/Placeholder.svelte';
   import TelemetryDrawer from './lib/TelemetryDrawer.svelte';
+  import GraphSkeleton from './lib/GraphSkeleton.svelte';
 
   let universe = $state(null);
+  // fghjd answered, but with an error: the workspace failed to resolve.
   let error = $state(null);
+  // fghjd didn't answer at all: restarting, upgrading, or stopped. Kept
+  // apart from `error` because the cure is waiting, not editing a file.
+  let backendDown = $state(false);
   let activeTab = $state('repos');
   let currentFlow = $state(null);
   let selectedNode = $state(null);
@@ -48,19 +53,33 @@
     load();
   }
 
+  // Polled (see the effect below), so every outcome has to be able to
+  // undo the last one: a success clears both the error and the outage.
   async function load() {
+    let data;
     try {
       const res = await fetch(withWs('/universe.json'));
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      universe = data;
-      const flows = data.flows ?? [];
-      const recent = loadRecentFlows();
-      if (!currentFlow || !flows.includes(currentFlow))
-        currentFlow = recent.find((f) => flows.includes(f)) ?? flows[0] ?? null;
+      // Not JSON means something other than fghjd's API answered.
+      data = await res.json();
     } catch (e) {
-      error = String(e);
+      backendDown = true;
+      return;
     }
+    if (backendDown) {
+      backendDown = false;
+      // It may have failed while fghjd was away, leaving the picker empty.
+      loadWorkspaces();
+    }
+    if (data.error) {
+      error = data.error;
+      return;
+    }
+    error = null;
+    universe = data;
+    const flows = data.flows ?? [];
+    const recent = loadRecentFlows();
+    if (!currentFlow || !flows.includes(currentFlow))
+      currentFlow = recent.find((f) => flows.includes(f)) ?? flows[0] ?? null;
   }
   load();
 
@@ -358,8 +377,10 @@
   // proper `service.repo` id) doesn't leave the Containers tab pointing at
   // a graph that no longer has that node, silently 404ing every Start/Stop
   // click against it.
+  // Faster while fghjd is unreachable, so the page comes back about as soon
+  // as fghjd does after a restart.
   $effect(() => {
-    const id = setInterval(load, 3000);
+    const id = setInterval(load, backendDown ? 1000 : 3000);
     return () => clearInterval(id);
   });
 
@@ -542,11 +563,30 @@
   />
 
   <div style="padding-top:90px">
-    {#if error}
-      <pre style="color:var(--danger);padding:20px;font-family:var(--font-mono)">{error}</pre>
+    {#if backendDown && !universe}
+      <GraphSkeleton
+        tone="down"
+        title="fghjd isn't answering. Retrying the connection…"
+        detail={"It may be restarting or upgrading. If it was stopped with `fghj daemon stop`, run `fghj daemon start`; otherwise `fghj doctor` shows what is wrong."}
+        onRetry={load}
+      />
+    {:else if error}
+      <GraphSkeleton
+        tone="error"
+        title="This workspace failed to resolve"
+        detail={error}
+        onRetry={load}
+      />
     {:else if !universe}
-      <div class="body-sm" style="padding:20px">resolving graph…</div>
+      <GraphSkeleton title="Resolving graph…" />
     {:else}
+      {#if backendDown}
+        <div class="connection-banner" role="alert">
+          <span class="spinner"></span>
+          <span>fghjd isn't answering. Showing the last known graph and retrying the connection…</span>
+          <button onclick={load}>Retry now</button>
+        </div>
+      {/if}
       {#if universe.warnings.length}
         <div style="padding:0 40px;display:flex;flex-direction:column;gap:6px;margin-bottom:4px">
           {#each universe.warnings as w}
@@ -619,6 +659,18 @@
 </div>
 
 <style>
+  .connection-banner {
+    display: flex; align-items: center; gap: 10px; margin: 0 40px 10px; padding: 8px 12px; border-radius: 6px;
+    background: var(--warning-bg); border: 1px solid var(--warning); color: var(--warning); font: 500 11.5px var(--font-mono);
+  }
+  .connection-banner .spinner {
+    width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto;
+    border: 2px solid var(--line-strong); border-top-color: var(--warning); animation: banner-spin 0.7s linear infinite;
+  }
+  .connection-banner button {
+    margin-left: auto; padding: 4px 9px; border-radius: 4px; background: var(--panel); border: 1px solid var(--warning);
+    color: var(--warning); font: 700 10px var(--font-mono); text-transform: uppercase; cursor: pointer;
+  }
   .action-banner {
     position: fixed; top: 96px; right: 24px; z-index: 50; display: flex; align-items: center; gap: 8px;
     background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: 6px; padding: 8px 12px;
