@@ -75,7 +75,8 @@
   //   missing   -> Recreate (Start) or Forget (Delete); deleted outside fghj
   //   stopped   -> Start or Delete
   //   running   -> Stop, Delete, or Reset (force a fresh container)
-  //   starting/stopping/removing -> nothing; show the in-flight action instead
+  //   starting  -> Stop or Delete, either of which calls the start off
+  //   stopping/removing -> nothing; show the in-flight action instead
   // `state::NodeCondition`, snake_case. The ones that mean "this will not
   // fix itself" get the same loud pill as drifted config, because they call
   // for the same thing: the user has to do something.
@@ -309,7 +310,11 @@
     {#if node.downloaded !== false}
       {@const lifecycle = nodeLifecycle(liveInfo)}
       <div class="controls">
-        {#if lifecycle === 'starting' || lifecycle === 'stopping' || lifecycle === 'removing'}
+        {#if lifecycle === 'starting'}
+          <span class="ctrl-status"><span class="spinner"></span> starting…</span>
+          <button class="ctrl-btn" onclick={stopNode} disabled={busy} title="Call off the start and stop the container">Stop</button>
+          <button class="ctrl-btn danger" onclick={deleteNode} disabled={busy} title="Call off the start and delete the container">Delete</button>
+        {:else if lifecycle === 'stopping' || lifecycle === 'removing'}
           <span class="ctrl-status"><span class="spinner"></span> {lifecycle}…</span>
         {:else if lifecycle === 'unknown'}
           <span class="ctrl-status">Docker isn't answering.</span>
@@ -614,7 +619,7 @@
               <div class="event-row" class:error={e.status === 'error'} class:block>
                 <span class="event-time">{new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
                 <span class="event-status status-{e.status}">
-                  {#if e.status === 'running'}<span class="spinner"></span>{:else if e.status === 'ok'}✓{:else if e.status === 'error'}✕{/if}
+                  {#if e.status === 'running'}<span class="spinner"></span>{:else if e.status === 'ok'}✓{:else if e.status === 'error'}✕{:else if e.status === 'cancelled'}–{/if}
                 </span>
                 <span class="event-step">{e.step}</span>
                 {#if e.detail}<span class="event-detail">{e.detail}</span>{/if}
@@ -780,6 +785,7 @@
   .event-status { flex: 0 0 auto; width: 12px; text-align: center; }
   .event-status.status-ok { color: var(--success, #6fdc8c); }
   .event-status.status-error { color: var(--danger); }
+  .event-status.status-cancelled { color: var(--ink-faint); }
   .event-step { color: var(--ink); text-transform: uppercase; letter-spacing: 0.03em; flex: 0 0 auto; }
   /* `pre-wrap` so the newlines the daemon writes survive, and so the padded
      `tag  ·  context  ·  --target x` line keeps the spacing it was written

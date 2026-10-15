@@ -3,8 +3,10 @@
 //! each result back as an action. Changes nobody asked for are picked up by
 //! `observe`.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
+
+use tokio::task::AbortHandle;
 
 use crate::action::Action;
 use crate::actor::ActorHandle;
@@ -50,21 +52,35 @@ fn extract_pending_create(state: &WorkspaceState) -> Option<EnvSpec> {
         .and_then(|env| env.pending_create.clone())
 }
 
-/// Spawns entries not already in flight. `converge` gets the whole snapshot
-/// each time, so without this a still-pending node would get a second call.
-fn plan(
-    in_flight: &HashSet<String>,
-    snapshot: &[PendingEntry],
-) -> (Vec<PendingEntry>, HashSet<String>) {
-    let mut still_in_flight = HashSet::with_capacity(snapshot.len());
-    let mut to_spawn = Vec::new();
+/// What `converge` does with a snapshot: entries to spawn, and nodes whose
+/// task is no longer wanted. `converge` gets the whole snapshot each time, so
+/// without this a still-pending node would get a second call.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Plan {
+    spawn: Vec<PendingEntry>,
+    /// A start called off by a Stop or Delete, which `spawn` then carries.
+    abort: Vec<String>,
+}
+
+fn plan(in_flight: &HashMap<String, PendingAction>, snapshot: &[PendingEntry]) -> Plan {
+    let mut plan = Plan::default();
     for entry in snapshot {
-        if !in_flight.contains(&entry.node_id) {
-            to_spawn.push(entry.clone());
+        match in_flight.get(&entry.node_id) {
+            Some(action) if *action == entry.action => {}
+            Some(_) => {
+                plan.abort.push(entry.node_id.clone());
+                plan.spawn.push(entry.clone());
+            }
+            None => plan.spawn.push(entry.clone()),
         }
-        still_in_flight.insert(entry.node_id.clone());
     }
-    (to_spawn, still_in_flight)
+    // Gone without settling: a start with no container yet, called off.
+    for (node_id, action) in in_flight {
+        if *action == PendingAction::Starting && !snapshot.iter().any(|e| e.node_id == *node_id) {
+            plan.abort.push(node_id.clone());
+        }
+    }
+    plan
 }
 
 /// At most one create at a time: two would fight over the same containers.
@@ -161,6 +177,7 @@ async fn perform_create(
 struct SettleGuard {
     actor: ActorHandle,
     node_id: String,
+    of: PendingAction,
     outcome: Option<Result<Option<ContainerInfo>, String>>,
 }
 
@@ -174,6 +191,7 @@ impl Drop for SettleGuard {
     fn drop(&mut self) {
         let actor = self.actor.clone();
         let node_id = std::mem::take(&mut self.node_id);
+        let of = Some(self.of);
         let outcome = self.outcome.take().unwrap_or_else(|| {
             Err(
                 "action task ended without reporting a result (likely a panic or cancellation)"
@@ -184,6 +202,7 @@ impl Drop for SettleGuard {
             let _ = actor
                 .dispatch(Action::ContainerActionSettled {
                     node_id,
+                    of,
                     result: outcome,
                 })
                 .await;
@@ -227,7 +246,7 @@ pub struct ConvergeSnapshot {
 pub struct DockerConvergeEffect {
     old: Arc<server::WorkspaceState>,
     actor: ActorHandle,
-    in_flight: HashSet<String>,
+    in_flight: HashMap<String, (PendingAction, AbortHandle)>,
     create_in_flight: bool,
 }
 
@@ -236,16 +255,36 @@ impl DockerConvergeEffect {
         Self {
             old,
             actor,
-            in_flight: HashSet::new(),
+            in_flight: HashMap::new(),
             create_in_flight: false,
         }
     }
 
-    fn spawn_action(&self, entry: PendingEntry) {
+    /// Aborting drops the start's `SettleGuard`, whose report the reducer
+    /// ignores: the node has moved on to the action that called it off.
+    fn abort_start(&mut self, node_id: &str) {
+        let Some((_, task)) = self.in_flight.remove(node_id) else {
+            return;
+        };
+        // A start that settled on its own leaves the snapshot the same way.
+        if task.is_finished() {
+            return;
+        }
+        task.abort();
+        daemon_log::info(format!("fghjd: called off starting {node_id}"));
+        let old = self.old.clone();
+        let node_id = node_id.to_string();
+        supervisor::supervise("start called off", async move {
+            old.orchestrator.record_start_called_off(&node_id).await;
+        });
+    }
+
+    fn spawn_action(&self, entry: PendingEntry) -> AbortHandle {
         let old = self.old.clone();
         let guard = SettleGuard {
             actor: self.actor.clone(),
             node_id: entry.node_id.clone(),
+            of: entry.action,
             outcome: None,
         };
         let run = self.actor.current().env.clone();
@@ -262,12 +301,13 @@ impl DockerConvergeEffect {
                 let _ = actor
                     .dispatch(Action::ContainerActionSettled {
                         node_id: info.node_id.clone(),
+                        of: None,
                         result: Ok(Some(info)),
                     })
                     .await;
             }
             guard.settle(result);
-        });
+        })
     }
 
     fn spawn_create(&self, plan: EnvSpec) {
@@ -338,10 +378,21 @@ impl Effect for DockerConvergeEffect {
     }
 
     fn converge(&mut self, snapshot: &Self::Snapshot) -> anyhow::Result<()> {
-        let (to_spawn, still_in_flight) = plan(&self.in_flight, &snapshot.pending);
-        self.in_flight = still_in_flight;
-        for entry in to_spawn {
-            self.spawn_action(entry);
+        let actions = self
+            .in_flight
+            .iter()
+            .map(|(node_id, (action, _))| (node_id.clone(), *action))
+            .collect();
+        let Plan { spawn, abort } = plan(&actions, &snapshot.pending);
+        for node_id in abort {
+            self.abort_start(&node_id);
+        }
+        // Settled ones drop out; their tasks are done or finishing.
+        self.in_flight
+            .retain(|node_id, _| snapshot.pending.iter().any(|e| e.node_id == *node_id));
+        for entry in spawn {
+            let task = self.spawn_action(entry.clone());
+            self.in_flight.insert(entry.node_id, (entry.action, task));
         }
 
         let (to_create, still_creating) =
@@ -419,42 +470,61 @@ mod tests {
         assert_eq!(extract_pending_create(&WorkspaceState::default()), None);
     }
 
+    fn in_flight(entries: &[(&str, PendingAction)]) -> HashMap<String, PendingAction> {
+        entries
+            .iter()
+            .map(|(node_id, action)| (node_id.to_string(), *action))
+            .collect()
+    }
+
     #[test]
     fn plan_spawns_every_entry_when_nothing_is_already_in_flight() {
         let snapshot = vec![entry("web", PendingAction::Starting)];
-        let (to_spawn, still_in_flight) = plan(&HashSet::new(), &snapshot);
-        assert_eq!(to_spawn.len(), 1);
-        assert!(still_in_flight.contains("web"));
+        let plan = plan(&HashMap::new(), &snapshot);
+        assert_eq!(plan.spawn, snapshot);
+        assert!(plan.abort.is_empty());
     }
 
     #[test]
     fn plan_does_not_respawn_an_entry_already_in_flight() {
-        let in_flight = HashSet::from(["web".to_string()]);
+        let in_flight = in_flight(&[("web", PendingAction::Starting)]);
         let snapshot = vec![entry("web", PendingAction::Starting)];
-        let (to_spawn, still_in_flight) = plan(&in_flight, &snapshot);
-        assert!(to_spawn.is_empty());
-        assert!(still_in_flight.contains("web"));
+        assert_eq!(plan(&in_flight, &snapshot), Plan::default());
     }
 
     #[test]
-    fn plan_drops_bookkeeping_for_an_entry_that_settled() {
-        let in_flight = HashSet::from(["web".to_string()]);
-        let (to_spawn, still_in_flight) = plan(&in_flight, &[]);
-        assert!(to_spawn.is_empty());
-        assert!(still_in_flight.is_empty());
+    fn plan_has_nothing_to_do_for_a_stop_that_settled() {
+        let in_flight = in_flight(&[("web", PendingAction::Stopping)]);
+        assert_eq!(plan(&in_flight, &[]), Plan::default());
     }
 
     #[test]
     fn plan_only_spawns_the_newly_pending_entry_among_several() {
-        let in_flight = HashSet::from(["web".to_string()]);
+        let in_flight = in_flight(&[("web", PendingAction::Starting)]);
         let snapshot = vec![
             entry("web", PendingAction::Starting),
             entry("api", PendingAction::Stopping),
         ];
-        let (to_spawn, still_in_flight) = plan(&in_flight, &snapshot);
-        assert_eq!(to_spawn.len(), 1);
-        assert_eq!(to_spawn[0].node_id, "api");
-        assert_eq!(still_in_flight.len(), 2);
+        let plan = plan(&in_flight, &snapshot);
+        assert_eq!(plan.spawn, vec![entry("api", PendingAction::Stopping)]);
+        assert!(plan.abort.is_empty());
+    }
+
+    #[test]
+    fn plan_calls_off_a_start_a_stop_took_over() {
+        let in_flight = in_flight(&[("web", PendingAction::Starting)]);
+        let snapshot = vec![entry("web", PendingAction::Stopping)];
+        let plan = plan(&in_flight, &snapshot);
+        assert_eq!(plan.abort, vec!["web".to_string()]);
+        assert_eq!(plan.spawn, snapshot);
+    }
+
+    #[test]
+    fn plan_calls_off_a_start_whose_node_went_away() {
+        let in_flight = in_flight(&[("web", PendingAction::Starting)]);
+        let plan = plan(&in_flight, &[]);
+        assert_eq!(plan.abort, vec!["web".to_string()]);
+        assert!(plan.spawn.is_empty());
     }
 
     #[test]
@@ -506,6 +576,7 @@ mod tests {
         let guard = SettleGuard {
             actor: handle.clone(),
             node_id: "web".into(),
+            of: PendingAction::Starting,
             outcome: None,
         };
         guard.settle(Ok(Some(container("web", None))));
@@ -520,6 +591,7 @@ mod tests {
             let _guard = SettleGuard {
                 actor: handle.clone(),
                 node_id: "web".into(),
+                of: PendingAction::Stopping,
                 outcome: None,
             };
         }

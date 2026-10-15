@@ -99,15 +99,30 @@ fn split_step_failure(message: &str) -> (Option<&str>, Option<&str>) {
 
 /// Builds `opts.tag`, always through BuildKit. See `concepts/build-inputs.md`.
 pub async fn build_image(docker: &Docker, opts: &BuildOpts<'_>) -> Result<BuildReport> {
-    let tar_bytes = tar_build_context(
+    let context = build_context(opts).await?;
+    build_image_from(docker, opts, context).await
+}
+
+/// The build context as sent: what `.dockerignore` leaves in, tarred.
+pub async fn build_context(opts: &BuildOpts<'_>) -> Result<Vec<u8>> {
+    tar_build_context(
         opts.context_dir,
         opts.dockerfile,
         opts.dockerfile_inline,
         opts.skip_git_dir,
     )
-    .await?;
-    let context_bytes = tar_bytes.len() as u64;
-    build_image_buildkit(docker, opts, tar_bytes).await?;
+    .await
+}
+
+/// `build_image` with the context already tarred, so its size can be told
+/// before it's sent.
+pub async fn build_image_from(
+    docker: &Docker,
+    opts: &BuildOpts<'_>,
+    context: Vec<u8>,
+) -> Result<BuildReport> {
+    let context_bytes = context.len() as u64;
+    build_image_buildkit(docker, opts, context).await?;
     Ok(BuildReport {
         context_bytes,
         builder: opts.builder.map(|b| b.builder.clone()),
@@ -266,13 +281,16 @@ async fn build_image_buildkit(
 }
 
 /// bollard's solve futures are `!Send`, so they run on a current-thread runtime
-/// on a thread of their own and only the result crosses back.
+/// on a thread of their own and only the result crosses back. Dropping the
+/// returned future (a start called off) drops the solve too, which ends the
+/// BuildKit session and with it the build.
 async fn on_dedicated_thread<F, Fut>(make: F) -> Result<Result<(), GrpcError>>
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: Future<Output = Result<(), GrpcError>>,
 {
     let (tx, rx) = tokio::sync::oneshot::channel();
+    let (called_off, mut on_called_off) = tokio::sync::oneshot::channel::<()>();
     std::thread::spawn(move || {
         let outcome = (|| -> Result<Result<(), GrpcError>> {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -280,10 +298,17 @@ where
                 .build()
                 .context("failed to build a runtime for the buildkit solve")?;
             let local = tokio::task::LocalSet::new();
-            Ok(local.block_on(&runtime, make()))
+            Ok(local.block_on(&runtime, async move {
+                tokio::select! {
+                    result = make() => result,
+                    // Nobody is waiting for the result any more.
+                    _ = &mut on_called_off => Ok(()),
+                }
+            }))
         })();
         let _ = tx.send(outcome);
     });
+    let _called_off = called_off;
     rx.await.context("buildkit solve thread panicked")?
 }
 

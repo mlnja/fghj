@@ -19,7 +19,7 @@ can't disagree about what a state means.
 |---|---|
 | **running** | Docker reports it up. |
 | **stopped** | Docker reports it down, and fghj was not asked to keep it up. Expected, uninteresting — this is what you get after a Stop. |
-| **crashed** | fghj *was* asked to keep this up and Docker says it is down. fghj restarts it, waiting longer between each try (5 seconds up to 5 minutes); the node's events show why it keeps going down. |
+| **crashed** | fghj *was* asked to keep this up and Docker says it is down. fghj restarts it, waiting longer between each try (5 seconds up to 5 minutes), and gives up after 8 tries, about ten minutes; the node's events show why it keeps going down. Start it by hand once that's fixed. |
 | **interrupted** | Asked to be up and found down, but it went down while fghj couldn't see Docker — the engine stopped (quitting OrbStack), a reboot. Nobody saw it crash, so fghj doesn't call it one; it starts it again once Docker answers. |
 | **unknown** | Docker isn't answering, so nothing about the container is known. A banner says so, with a link to the doctor; fghj picks Docker back up on its own. |
 | **missing** | The container was deleted outside fghj (`docker rm`, a prune). fghj doesn't guess whether you meant it: open the node and **Recreate** it or **Forget** it. |
@@ -41,6 +41,11 @@ On top of that settled reading, a live action wins while it's in flight: a
 node mid-`stopping` shows `stopping`, not the state it's about to leave. That
 layering is why the settled word stays honest — it never has to encode
 "…but something is happening".
+
+A start you no longer want, such as a build that's taking forever, doesn't
+have to be waited out. **Stop** and **Delete** stay in the drawer while a
+node is `starting`. Either one calls the start off, build included, and the
+start's events mark the step it was on as cancelled.
 
 ## Drift: the container no longer matches the file
 

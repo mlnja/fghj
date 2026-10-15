@@ -456,13 +456,14 @@
   // (`RunRegistry::action_lock`, to avoid racing Docker calls against the
   // same container name), but that's invisible latency, not a reason to
   // stop the user from even queuing an action on an unrelated container.
-  // `liveInfo?.pending_action` is the backend's own per-node truth;
+  // `liveInfo?.pending_action` is the backend's own per-node truth, except
+  // that a start can be called off by a Stop or Delete;
   // `activeAction`/`actionQueue` fill the ~1s gap before the next `/environment`
   // poll would otherwise reflect a just-fired request for *this* node.
   let selectedNodeBusy = $derived(
     selectedNode
       ? env?.pending_create != null ||
-          liveInfo?.pending_action != null ||
+          (liveInfo?.pending_action != null && liveInfo.pending_action !== 'starting') ||
           activeAction?.nodeId === selectedNode.id ||
           actionQueue.some((j) => j.nodeId === selectedNode.id)
       : false

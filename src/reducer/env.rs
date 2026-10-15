@@ -30,13 +30,12 @@ pub(super) fn reduce(
             set_pending(state, &node_id, PendingAction::Stopping, false)
         }
         Action::NodeDeleteRequested { node_id } => {
-            let mut next = state.clone();
-            let container = lookup_mut(&mut next, &node_id)?;
-            if container.pending_action.is_some() {
-                return Err(ActionRejected::AlreadyInFlight);
-            }
-            container.pending_action = Some(PendingAction::Removing);
-            Ok(next)
+            let desired_running = state
+                .env
+                .as_ref()
+                .and_then(|run| run.containers.get(&node_id))
+                .is_some_and(|c| c.desired.running);
+            set_pending(state, &node_id, PendingAction::Removing, desired_running)
         }
 
         other => unreachable!("reducer::env::reduce called with a non-request action: {other:?}"),
@@ -131,6 +130,9 @@ pub(super) fn starting_placeholder(node_id: &str) -> ContainerInfo {
     }
 }
 
+/// A start can be called off: Stop and Delete take over from it, and
+/// `converge` aborts the start's task. A start that has no container yet
+/// leaves nothing behind to stop or delete, so its entry just goes.
 fn set_pending(
     state: &WorkspaceState,
     node_id: &str,
@@ -139,8 +141,16 @@ fn set_pending(
 ) -> Result<WorkspaceState, ActionRejected> {
     let mut next = state.clone();
     let container = lookup_mut(&mut next, node_id)?;
-    if container.pending_action.is_some() {
-        return Err(ActionRejected::AlreadyInFlight);
+    match container.pending_action {
+        None => {}
+        Some(PendingAction::Starting) if container.desired.container_name.is_empty() => {
+            if let Some(run) = next.env.as_mut() {
+                run.containers.remove(node_id);
+            }
+            return Ok(next);
+        }
+        Some(PendingAction::Starting) => {}
+        Some(_) => return Err(ActionRejected::AlreadyInFlight),
     }
     container.desired.running = desired_running;
     container.pending_action = Some(pending);
@@ -415,5 +425,74 @@ mod tests {
         let c = &next.env.as_ref().unwrap().containers["web"];
         assert_eq!(c.pending_action, Some(PendingAction::Removing));
         assert!(c.desired.running);
+    }
+
+    fn starting(node_id: &str) -> ContainerInfo {
+        let mut c = container(node_id);
+        c.desired.running = true;
+        c.pending_action = Some(PendingAction::Starting);
+        c
+    }
+
+    #[test]
+    fn stop_takes_over_from_a_start_in_flight() {
+        let state = workspace(vec![starting("web")]);
+        let next = reduce(
+            &state,
+            Action::NodeStopRequested {
+                node_id: "web".into(),
+            },
+        )
+        .unwrap();
+        let c = &next.env.as_ref().unwrap().containers["web"];
+        assert_eq!(c.pending_action, Some(PendingAction::Stopping));
+        assert!(!c.desired.running);
+    }
+
+    #[test]
+    fn delete_takes_over_from_a_start_in_flight() {
+        let state = workspace(vec![starting("web")]);
+        let next = reduce(
+            &state,
+            Action::NodeDeleteRequested {
+                node_id: "web".into(),
+            },
+        )
+        .unwrap();
+        let c = &next.env.as_ref().unwrap().containers["web"];
+        assert_eq!(c.pending_action, Some(PendingAction::Removing));
+    }
+
+    #[test]
+    fn calling_off_a_start_with_no_container_yet_drops_its_placeholder() {
+        let state = workspace(vec![starting_placeholder("web")]);
+        for action in [
+            Action::NodeStopRequested {
+                node_id: "web".into(),
+            },
+            Action::NodeDeleteRequested {
+                node_id: "web".into(),
+            },
+        ] {
+            let next = reduce(&state, action).unwrap();
+            assert!(!next.env.as_ref().unwrap().containers.contains_key("web"));
+        }
+    }
+
+    #[test]
+    fn a_stop_or_delete_in_flight_is_not_taken_over() {
+        for pending in [PendingAction::Stopping, PendingAction::Removing] {
+            let mut web = container("web");
+            web.pending_action = Some(pending);
+            let state = workspace(vec![web]);
+            let err = reduce(
+                &state,
+                Action::NodeStopRequested {
+                    node_id: "web".into(),
+                },
+            )
+            .unwrap_err();
+            assert_eq!(err, ActionRejected::AlreadyInFlight);
+        }
     }
 }

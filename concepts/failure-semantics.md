@@ -146,6 +146,11 @@ is not a missing message; it is a permanently stuck node. Making the report
 a destructor rather than a line at the end of the happy path is what makes
 "always reports" true by construction.
 
+A start called off by a Stop or Delete reports too, as that cancelled `Err`.
+Each settle names the action it settles (`of`), and the reducer ignores one
+for an action the node no longer has, so the late report can't clear the
+Stop that replaced it.
+
 ## Related
 
 - [[state-and-effects]] — why intent and outcome are separate actions.

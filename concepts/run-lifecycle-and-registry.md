@@ -190,10 +190,28 @@ does with the reading is split by what happened:
   5 minutes, reset after a minute up; in memory, so a restarted `fghjd`
   starts over. Only while active: `fghj daemon stop` stops it too.
 
+  The node tried longest ago goes first. A start can take longer than its
+  backoff (a slow build), and picking the first due node by name let one
+  failing build restart forever while every other crashed node waited
+  behind it. After 8 restarts (about ten minutes) a node still down is left
+  down, with a warning in the daemon log: by then it's a build or config
+  failure that one more try won't fix, and each try holds up the rest. A
+  Stop, or a Start by hand that stays up, makes it eligible again.
+
   Docker's own `restart: unless-stopped` was the alternative and is not
   used by default. When the engine comes back it starts everything at once,
   with no regard for dependency order or health, and nothing reaches the
   events pane. `restart` stays `"no"` unless a node asks otherwise.
+- **Starting, called off** — a start is the one action another can take
+  over. Stop and Delete are accepted while `pending_action` is `Starting`;
+  converge sees the action change, aborts the start's task (a BuildKit solve
+  on its own thread included: dropping it ends the session) and marks the
+  start's open steps `cancelled` in its events. The aborted task's
+  `SettleGuard` still reports, tagged `of: Starting`, and the reducer drops a
+  settle whose action the node has moved on from. A start with no container
+  yet (a placeholder) has nothing to stop: its entry just goes. Stop and
+  Delete themselves are not interruptible, and a whole-flow create still
+  holds every node until it settles.
 - **Deleted** (`Missing`) — `docker rm`, a prune. Nothing can tell whether
   that was meant, so the user is asked: the Drawer offers **Recreate**
   (Start) or **Forget** (Delete, which is a no-op on Docker's side for a

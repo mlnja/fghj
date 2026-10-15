@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::action::Action;
 use crate::daemon::control::DaemonControl;
-use crate::daemon::heal::Healer;
+use crate::daemon::heal::{Heal, Healer};
 use crate::state::NodeCondition;
 use crate::util::time::now_ms;
 use crate::{daemon_log, effects, resolver, supervisor};
@@ -41,17 +41,27 @@ async fn reconcile_loop(daemon: Arc<DaemonControl>) {
             let Some(env) = actor.current().env.clone() else {
                 continue;
             };
-            if let Some((node_id, condition, attempt)) =
-                healer.pick(&id, &env, std::time::Instant::now())
-            {
-                daemon_log::info(if condition == NodeCondition::Interrupted {
-                    format!(
-                        "fghjd: {node_id} went down while Docker was out of sight, starting it again (attempt {attempt})"
-                    )
-                } else {
-                    format!("fghjd: {node_id} crashed, restarting it (attempt {attempt})")
-                });
-                let _ = actor.dispatch(Action::NodeStartRequested { node_id }).await;
+            match healer.pick(&id, &env, std::time::Instant::now()) {
+                Some(Heal::Restart {
+                    node_id,
+                    condition,
+                    attempt,
+                }) => {
+                    daemon_log::info(if condition == NodeCondition::Interrupted {
+                        format!(
+                            "fghjd: {node_id} went down while Docker was out of sight, starting it again (attempt {attempt})"
+                        )
+                    } else {
+                        format!("fghjd: {node_id} crashed, restarting it (attempt {attempt})")
+                    });
+                    let _ = actor.dispatch(Action::NodeStartRequested { node_id }).await;
+                }
+                Some(Heal::GiveUp { node_id }) => daemon_log::warn(format!(
+                    "fghjd: {node_id} is still down after {} restarts; leaving it down. \
+                     Its drawer's start events say why; Start it from there once that's fixed",
+                    crate::daemon::heal::MAX_ATTEMPTS
+                )),
+                None => {}
             }
         }
         if daemon.is_active() {

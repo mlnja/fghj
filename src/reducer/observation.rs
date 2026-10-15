@@ -44,9 +44,17 @@ pub(super) fn reduce(
             Ok(next)
         }
 
-        Action::ContainerActionSettled { node_id, result } => {
+        Action::ContainerActionSettled {
+            node_id,
+            of,
+            result,
+        } => {
             let mut next = state.clone();
             if let Some(run) = next.env.as_mut() {
+                let current = run.containers.get(&node_id).and_then(|c| c.pending_action);
+                if of.is_some() && of != current {
+                    return Ok(next);
+                }
                 match result {
                     // Replaced wholesale: this is the only place real post-action state arrives.
                     Ok(Some(mut info)) => {
@@ -302,6 +310,7 @@ mod tests {
             &state,
             Action::ContainerActionSettled {
                 node_id: "web".into(),
+                of: None,
                 result: Ok(Some(fresh)),
             },
         )
@@ -324,6 +333,7 @@ mod tests {
             &state,
             Action::ContainerActionSettled {
                 node_id: "web".into(),
+                of: None,
                 result: Ok(Some(settled)),
             },
         )
@@ -343,6 +353,7 @@ mod tests {
             &state,
             Action::ContainerActionSettled {
                 node_id: "web".into(),
+                of: None,
                 result: Err("docker daemon unreachable".into()),
             },
         )
@@ -355,6 +366,26 @@ mod tests {
     }
 
     #[test]
+    fn a_called_off_start_settling_late_leaves_the_stop_that_replaced_it_alone() {
+        let mut web = container("web");
+        web.pending_action = Some(PendingAction::Stopping);
+        let state = workspace(vec![web]);
+        let next = reduce(
+            &state,
+            Action::ContainerActionSettled {
+                node_id: "web".into(),
+                of: Some(PendingAction::Starting),
+                result: Err("cancelled".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            next.env.as_ref().unwrap().containers["web"].pending_action,
+            Some(PendingAction::Stopping)
+        );
+    }
+
+    #[test]
     fn container_action_settled_removes_the_container_when_a_removal_succeeds() {
         let mut web = container("web");
         web.pending_action = Some(PendingAction::Removing);
@@ -363,6 +394,7 @@ mod tests {
             &state,
             Action::ContainerActionSettled {
                 node_id: "web".into(),
+                of: None,
                 result: Ok(None),
             },
         )
@@ -379,6 +411,7 @@ mod tests {
             &state,
             Action::ContainerActionSettled {
                 node_id: "web".into(),
+                of: None,
                 result: Err("container in use".into()),
             },
         )

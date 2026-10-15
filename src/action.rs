@@ -39,8 +39,12 @@ pub enum Action {
         unseen: bool,
     },
     /// `Ok(None)` is a delete. The only way post-action state reaches the reducer.
+    /// `of` is the action this settles, and the report is dropped once the node
+    /// has moved on to another (a start called off by a Stop); `None` for a node
+    /// another action touched on the way.
     ContainerActionSettled {
         node_id: String,
+        of: Option<PendingAction>,
         result: Result<Option<ContainerInfo>, String>,
     },
     /// `Ok` replaces the environment. `Err` clears `pending_create` and adopts the

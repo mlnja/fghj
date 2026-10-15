@@ -21,6 +21,33 @@ impl Orchestrator {
     }
 }
 
+impl Orchestrator {
+    /// Closes every step a called-off start left running, so its events pane
+    /// says it was called off instead of spinning on.
+    pub async fn record_start_called_off(&self, node_id: &str) {
+        let ev = self.events(node_id, "start");
+        let Ok(events) = self
+            .db
+            .clone()
+            .list_events(node_id.to_string(), "start".to_string())
+            .await
+        else {
+            return;
+        };
+        let mut open: Vec<String> = Vec::new();
+        for e in events {
+            open.retain(|step| *step != e.step);
+            if e.status == "running" {
+                open.push(e.step);
+            }
+        }
+        for step in open {
+            ev.record(&step, "cancelled", Some("called off".to_string()))
+                .await;
+        }
+    }
+}
+
 impl Events<'_> {
     /// Replaces this action's previous narration.
     pub(super) async fn begin(&self) {

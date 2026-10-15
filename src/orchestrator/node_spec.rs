@@ -13,6 +13,8 @@ use crate::util::label::sanitize_label;
 
 use super::registry::Orchestrator;
 
+const LARGE_CONTEXT: u64 = 1024 * 1024 * 1024;
+
 fn human_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     let b = bytes as f64;
@@ -90,7 +92,8 @@ impl Orchestrator {
                 Some(b) => format!("  ·  buildkit: {}", b.builder),
                 None => String::from("  ·  buildkit: dockerd"),
             });
-            ev.record("building image", "running", Some(what)).await;
+            ev.record("building image", "running", Some(what.clone()))
+                .await;
             let secrets = resolve_build_secrets(repo_root, &build.secrets)?;
             // Re-derived on every build so a restarted agent is picked up.
             let ssh_auth_sock = if build.ssh {
@@ -101,23 +104,35 @@ impl Orchestrator {
             } else {
                 None
             };
-            docker::build_image(
-                &self.docker,
-                &docker::BuildOpts {
-                    context_dir: &build_dir,
-                    dockerfile,
-                    dockerfile_inline: build.dockerfile_inline.as_deref(),
-                    skip_git_dir: build.source.is_some(),
-                    tag,
-                    platform,
-                    args: &build.args,
-                    target: build.target.as_deref(),
-                    secrets: &secrets,
-                    ssh_auth_sock: ssh_auth_sock.as_deref(),
-                    builder: builder.as_ref(),
-                },
-            )
-            .await
+            let opts = docker::BuildOpts {
+                context_dir: &build_dir,
+                dockerfile,
+                dockerfile_inline: build.dockerfile_inline.as_deref(),
+                skip_git_dir: build.source.is_some(),
+                tag,
+                platform,
+                args: &build.args,
+                target: build.target.as_deref(),
+                secrets: &secrets,
+                ssh_auth_sock: ssh_auth_sock.as_deref(),
+                builder: builder.as_ref(),
+            };
+            let context = docker::build_context(&opts).await?;
+            what.push_str(&format!(
+                "  ·  sending {}",
+                human_bytes(context.len() as u64)
+            ));
+            // Held in memory and sent whole on every build; past this, it's
+            // nearly always something `.dockerignore` should leave out.
+            if context.len() as u64 > LARGE_CONTEXT {
+                what.push_str(&format!(
+                    ". That's large: whatever in {} the Dockerfile doesn't COPY \
+                     belongs in its .dockerignore",
+                    build_dir.display()
+                ));
+            }
+            ev.record("building image", "running", Some(what)).await;
+            docker::build_image_from(&self.docker, &opts, context).await
         }
         .await;
         match built {

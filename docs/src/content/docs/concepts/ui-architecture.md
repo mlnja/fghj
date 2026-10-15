@@ -22,7 +22,8 @@ shared model, not three separately fetched datasets:
 - **Actual** — every node kind, services and backing dependencies
   together, overlaid with live container status from the workspace's one
   environment. The header's **Switch to flow** acts on the selected flow
-  here; a single node starts from its drawer.
+  here; a single node starts from its drawer. Its Stop and Delete stay there
+  while it's starting, and either calls the start off.
 - **Config** — reserved for environment variables, the split-DNS table,
   and issued certs; not built out yet.
 

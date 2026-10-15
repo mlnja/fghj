@@ -185,6 +185,13 @@ build, and a second repo uploaded 209 MiB where 2 MiB was warranted.
 Implemented in `src/dockerignore.rs`, applied by `append_filtered` in
 `src/docker/image.rs`.
 
+The size goes into the "building image" event before the context is sent,
+with a `.dockerignore` hint above 1 GiB. A repo with a 4.3 GB gitignored
+`temp/` and a 3.5 GB `.git` neither in its `.dockerignore` sent 8 GB on
+every start for a Dockerfile that copies one zip. BuildKit cancelled the
+upload after about two minutes, and the events pane showed only "building
+image" spinning until then.
+
 ### Why this is hand-rolled
 
 A new matcher is hard to justify when `ignore` exists and has 184M downloads,
