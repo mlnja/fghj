@@ -7,7 +7,14 @@ The whole UI is a single Svelte 5 app (`App.svelte`, runes-based state —
 (`'repos' | 'containers' | 'config'`) just switches which body renders under
 a fixed `Header`. All three tabs read from the same resolved graph
 (`universe`, from `GET /universe.json`) — they're different *views* over one
-shared model, not three separately-fetched datasets:
+shared model, not three separately-fetched datasets.
+
+`Header` lays out what every tab shares first (workspace and flow pickers,
+the tab switch, ⚡, ?) and the active tab's own actions last: Download flow
+and Download all on Repos, Switch to flow on Actual, nothing on Config.
+Switching tabs then only changes the end of the bar, and nothing else moves.
+
+The tabs:
 
 - **Repos** (`reposGraph`): one node per repo (nodes grouped by
   `local_path`), with cross-repo edges merged from `depends-on` and `uses` —

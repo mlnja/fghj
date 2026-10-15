@@ -16,7 +16,8 @@ shared model, not three separately fetched datasets:
   [Fog-of-war visibility](/concepts/fog-of-war-visibility/). A card shows
   only git: branch, clean or dirty, ahead/behind its upstream, whether it's
   downloaded, and a warning when a container built from it runs older code.
-  Clicking one opens the repo's drawer, with Download or Fetch, the last
+  The header's **Download flow** and **Download all** live here, and only
+  here. Clicking a card opens the repo's drawer, with Download or Fetch, the last
   commit, the changed files and the services it declares.
 - **Actual** — every node kind, services and backing dependencies
   together, overlaid with live container status from the workspace's one

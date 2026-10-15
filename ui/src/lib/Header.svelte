@@ -229,6 +229,22 @@
     {/if}
   </div>
 
+  <div class="divider"></div>
+  <div class="view-switch">
+    {#each [['repos', 'Repos'], ['containers', 'Actual'], ['config', 'Config']] as [id, label]}
+      <div class="view-tab" class:active={activeTab === id} onclick={() => onSelectTab(id)}>{label}</div>
+    {/each}
+  </div>
+
+  <div class="divider"></div>
+  <div class="help-btn" onclick={onOpenTelemetry} title="fghjd telemetry (logs, DNS/DNAT, pull queue, doctor)">⚡</div>
+  <div class="divider"></div>
+  <div class="help-btn" onclick={() => (helpOpen = true)}>?</div>
+
+  <!-- Per-tab actions go last, so switching tabs never moves the rest. -->
+  {#if activeTab === 'repos' || activeTab === 'containers'}
+    <div class="divider"></div>
+  {/if}
   {#if activeTab === 'repos'}
     <button class="pull-btn" onclick={pullFlow} disabled={!currentFlow || flowPulling || missingInFlow === 0} title="clone every not-yet-downloaded repo in this flow">
       {#if flowPulling}<span class="spinner"></span> downloading flow…{:else if missingInFlow === 0}Flow downloaded{:else}Download flow{missingInFlow ? ` (${missingInFlow})` : ''}{/if}
@@ -238,6 +254,18 @@
         >{flowPullState === 'done' ? '✓' : '✕'}</span
       >
     {/if}
+    <div class="divider"></div>
+    <div class="pull-wrap">
+      <button class="pull-btn" onclick={pullAll} disabled={pulling || missingAll === 0} title="clone every not-yet-downloaded repo">
+        {#if pulling}<span class="spinner"></span> downloading…{:else if missingAll === 0}All downloaded{:else}Download all{missingAll ? ` (${missingAll})` : ''}{/if}
+      </button>
+      {#if pullState && pullState !== 'running'}
+        <span class="pull-result" class:ok={pullState === 'done'} class:error={pullState === 'error'}
+          >{pullState === 'done' ? '✓' : '✕'}</span
+        >
+      {/if}
+      <span class="ops-link" onclick={onOpenOperations} title="download queue">☰</span>
+    </div>
   {:else if activeTab === 'containers'}
     <!-- While a switch runs, the button opens its plan instead. -->
     <button
@@ -251,31 +279,6 @@
       {#if switchingFlow || envBusy}<span class="spinner"></span> switching…{:else}Switch to flow{/if}
     </button>
   {/if}
-
-  <div class="divider"></div>
-  <div class="pull-wrap">
-    <button class="pull-btn" onclick={pullAll} disabled={pulling || missingAll === 0} title="clone every not-yet-downloaded repo">
-      {#if pulling}<span class="spinner"></span> downloading…{:else if missingAll === 0}All downloaded{:else}Download all{missingAll ? ` (${missingAll})` : ''}{/if}
-    </button>
-    {#if pullState && pullState !== 'running'}
-      <span class="pull-result" class:ok={pullState === 'done'} class:error={pullState === 'error'}
-        >{pullState === 'done' ? '✓' : '✕'}</span
-      >
-    {/if}
-    <span class="ops-link" onclick={onOpenOperations} title="download queue">☰</span>
-  </div>
-
-  <div class="divider"></div>
-  <div class="view-switch">
-    {#each [['repos', 'Repos'], ['containers', 'Actual'], ['config', 'Config']] as [id, label]}
-      <div class="view-tab" class:active={activeTab === id} onclick={() => onSelectTab(id)}>{label}</div>
-    {/each}
-  </div>
-
-  <div class="divider"></div>
-  <div class="help-btn" onclick={onOpenTelemetry} title="fghjd telemetry (logs, DNS/DNAT, pull queue, doctor)">⚡</div>
-  <div class="divider"></div>
-  <div class="help-btn" onclick={() => (helpOpen = true)}>?</div>
 </div>
 
 {#if helpOpen}

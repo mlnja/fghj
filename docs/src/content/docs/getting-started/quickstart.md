@@ -62,7 +62,7 @@ See [UI architecture](/concepts/ui-architecture/) for the full tour.
 
 A freshly wired workspace only has the entry repo on disk — every
 dependency it declares shows up as a not-yet-downloaded node. Click
-**Download all** in the header, or from the CLI's perspective, the daemon walks
+**Download all** on the Repos tab, or from the CLI's perspective, the daemon walks
 the graph, clones anything missing, re-resolves, and repeats until nothing
 new turns up (a repo's own dependencies aren't known until *it's* cloned).
 
