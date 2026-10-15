@@ -35,6 +35,8 @@ pub enum Action {
         /// Every declared port, so a plain TCP service's port is visible too.
         ports: BTreeMap<String, Option<u16>>,
         exit_code: Option<i64>,
+        /// Docker didn't answer; every other field is the last reading.
+        unseen: bool,
     },
     /// `Ok(None)` is a delete. The only way post-action state reaches the reducer.
     ContainerActionSettled {

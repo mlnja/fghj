@@ -289,6 +289,8 @@ impl Orchestrator {
                 ports: port_host_ports,
                 sync: SyncStatus::Synced,
                 exit_code,
+                interrupted: false,
+                unseen: false,
             },
             pending_action: None,
         })

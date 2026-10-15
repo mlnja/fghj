@@ -171,8 +171,16 @@ hand, outside fghj) as `"removed"`. This is explicitly analogous to a
 Kubernetes controller's reconcile loop. Observing stays read-only; what it
 does with the reading is split by what happened:
 
-- **Down without being asked** (`Crashed`) — a crash, a Docker or OrbStack
-  restart, a reboot, a hand-typed `docker stop`. `daemon::heal` restarts it,
+- **Docker not answering** (`Unknown`) — `inspect_containers` reports the
+  last reading again with `observed.unseen` set. The status stays what it
+  was, so routes, `/etc/hosts` and NAT don't churn on a blip, but the
+  condition says nothing is known and heal leaves it alone.
+- **Down without being asked** — `Interrupted` when it went down while
+  fghjd couldn't watch (Docker unseen, or fghjd not running: the next fresh
+  reading finds it down, see `ContainerObserved::settle_interruption`), so an
+  engine stop or a reboot isn't reported as a crash. `Crashed` otherwise: a
+  crash, a hand-typed `docker stop`. `daemon::heal` restarts both, logging
+  which it was,
   by dispatching `NodeStartRequested`, the Start button's own request. The
   stored intent is the whole test: `desired.running` moves only when the user
   starts or stops through fghj, so anything down while it's `true` came from
@@ -265,8 +273,10 @@ sets `status` without updating it. `ContainerInfo` has a hand-written
 `Serialize` for exactly this reason, which is the only thing in the codebase
 that is not `#[derive]`d there.
 
-Only `Crashed` is acted on, and only through the same request a user would
-make. `Missing` waits for the user.
+Only `Crashed` and `Interrupted` are acted on, and only through the same
+request a user would make. `Missing` waits for the user; `Unknown` waits for
+Docker. A crash during an outage reads as `Interrupted`: fghjd didn't see
+it, so it doesn't claim it.
 
 ## Reconciling at startup, not just steady-state
 
@@ -276,7 +286,8 @@ is constructed, against whatever environment was persisted from a previous
 Docker still has gets a freshly-read status and exit code, one it doesn't
 reads as `"removed"` with no exit code (so it shows as `Missing`, and a
 `run: once` task whose container is gone runs again), and an unreachable
-Docker leaves the record as it was.
+Docker keeps the record, marked unseen. One persisted as up and found down
+reads as `Interrupted`: it went down while `fghjd` wasn't running.
 
 Nothing is dropped, on purpose. It used to drop the containers it couldn't
 find, and before that the whole environment on a single miss, which silently

@@ -178,6 +178,8 @@ mod tests {
                 ports: BTreeMap::from([("8080".to_string(), Some(8080))]),
                 sync: SyncStatus::Synced,
                 exit_code: None,
+                interrupted: false,
+                unseen: false,
             },
             pending_action: None,
         }

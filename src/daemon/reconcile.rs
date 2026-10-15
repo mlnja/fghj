@@ -4,6 +4,7 @@ use std::time::Duration;
 use crate::action::Action;
 use crate::daemon::control::DaemonControl;
 use crate::daemon::heal::Healer;
+use crate::state::NodeCondition;
 use crate::util::time::now_ms;
 use crate::{daemon_log, effects, resolver, supervisor};
 
@@ -40,10 +41,16 @@ async fn reconcile_loop(daemon: Arc<DaemonControl>) {
             let Some(env) = actor.current().env.clone() else {
                 continue;
             };
-            if let Some((node_id, attempt)) = healer.pick(&id, &env, std::time::Instant::now()) {
-                daemon_log::info(format!(
-                    "fghjd: {node_id} crashed, restarting it (attempt {attempt})"
-                ));
+            if let Some((node_id, condition, attempt)) =
+                healer.pick(&id, &env, std::time::Instant::now())
+            {
+                daemon_log::info(if condition == NodeCondition::Interrupted {
+                    format!(
+                        "fghjd: {node_id} went down while Docker was out of sight, starting it again (attempt {attempt})"
+                    )
+                } else {
+                    format!("fghjd: {node_id} crashed, restarting it (attempt {attempt})")
+                });
                 let _ = actor.dispatch(Action::NodeStartRequested { node_id }).await;
             }
         }

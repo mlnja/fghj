@@ -49,6 +49,7 @@ fn container_observed(node_id: &str, observed: &ContainerObserved) -> Action {
         published_port: observed.published_port,
         ports: observed.ports.clone(),
         exit_code: observed.exit_code,
+        unseen: observed.unseen,
     }
 }
 
@@ -78,6 +79,7 @@ mod tests {
                 published_port,
                 ports,
                 exit_code: _,
+                unseen: _,
             } => {
                 assert_eq!(node_id, "web");
                 assert_eq!(status, "running");

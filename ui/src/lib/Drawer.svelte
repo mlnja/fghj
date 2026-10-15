@@ -84,6 +84,8 @@
     running: 'up, and reachable at the domains above',
     stopped: 'down, and fghj was not asked to keep it up — expected after a Stop',
     crashed: 'fghj was asked to keep this up and Docker says it is down — fghj restarts it, backing off between tries',
+    interrupted: 'went down while fghjd could not see Docker (the engine stopped, a reboot) — fghj starts it again',
+    unknown: "Docker isn't answering, so nothing about this container is known right now",
     missing: 'the container was deleted outside fghj. Recreate it, or forget it',
     restarting: "Docker is bouncing it under this node's restart policy — not reachable while it does",
     paused: 'paused from outside fghj (docker pause). Start will not help — docker unpause will',
@@ -95,7 +97,7 @@
   function nodeLifecycle(info) {
     if (!info) return 'absent';
     if (info.pending_action) return info.pending_action;
-    if (info.condition === 'missing') return 'missing';
+    if (info.condition === 'missing' || info.condition === 'unknown') return info.condition;
     return info.observed.status === 'running' ? 'running' : 'stopped';
   }
   // Persisted log history (see `store::WorkspaceDb`'s `logs` table): a
@@ -309,6 +311,8 @@
       <div class="controls">
         {#if lifecycle === 'starting' || lifecycle === 'stopping' || lifecycle === 'removing'}
           <span class="ctrl-status"><span class="spinner"></span> {lifecycle}…</span>
+        {:else if lifecycle === 'unknown'}
+          <span class="ctrl-status">Docker isn't answering.</span>
         {:else if lifecycle === 'missing'}
           <span class="ctrl-status">Deleted outside fghj.</span>
           <button class="ctrl-btn" onclick={startNode} disabled={busy} title="Create the container again from .fghj.yaml">Recreate</button>

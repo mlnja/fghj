@@ -447,6 +447,9 @@
   // `RunState.containers` is already keyed by node id on the backend, so
   // this is a rename, not an index build.
   let runContainers = $derived(env?.containers ?? {});
+  // fghjd keeps each container's last reading when Docker stops answering
+  // and marks it unseen, so one unseen container means Docker is out of reach.
+  let dockerDown = $derived(Object.values(runContainers).some((c) => c.observed?.unseen));
   let liveInfo = $derived(selectedNode ? runContainers[selectedNode.id] : null);
   // Scoped to the selected node only, not the whole workspace: the backend
   // already serializes lifecycle calls *execution-order-wise* per workspace
@@ -673,6 +676,13 @@
           <span class="spinner"></span>
           <span>fghjd isn't answering. Showing the last known graph and retrying the connection…</span>
           <button onclick={load}>Retry now</button>
+        </div>
+      {/if}
+      {#if dockerDown && !backendDown}
+        <div class="connection-banner" role="alert">
+          <span class="spinner"></span>
+          <span>Docker isn't answering, so every container's state is unknown until it's back. fghjd picks it up on its own.</span>
+          <button onclick={() => (telemetryTab = 'doctor')}>Doctor</button>
         </div>
       {/if}
       {#if universe.warnings.length}

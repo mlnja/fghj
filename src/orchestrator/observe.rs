@@ -15,8 +15,16 @@ impl Orchestrator {
         let mut updated = BTreeMap::new();
         for (node_id, c) in &env.containers {
             let name = &c.desired.container_name;
-            // Docker not answering says nothing about the container.
+            // Docker not answering says nothing about the container: its last
+            // reading stays, marked as no longer current.
             let Ok(inspected) = docker::inspect_status(&self.docker, name).await else {
+                updated.insert(
+                    node_id.clone(),
+                    ContainerObserved {
+                        unseen: true,
+                        ..c.observed.clone()
+                    },
+                );
                 continue;
             };
             let host_port = |port: &str| inspected.as_ref().and_then(|s| s.host_port(port));
@@ -37,6 +45,7 @@ impl Orchestrator {
                     published_port,
                     ports,
                     exit_code,
+                    unseen: false,
                     ..c.observed.clone()
                 },
             );

@@ -8,7 +8,7 @@ use super::sqlite::WorkspaceDb;
 
 /// Reads the persisted environment and refreshes each container's status from
 /// Docker. A container Docker no longer has reads as `removed`, for the user to
-/// recreate or forget; an unreachable Docker leaves the status as it was.
+/// recreate or forget; an unreachable Docker makes every status unknown.
 pub async fn rehydrate(
     db: Arc<WorkspaceDb>,
     docker: Arc<bollard::Docker>,
@@ -16,17 +16,26 @@ pub async fn rehydrate(
     let Some(mut state) = db.clone().load_env().await? else {
         return Ok(None);
     };
-    // Only `observed` moves, so a container that died while fghjd was down still
-    // reads as crashed.
+    // Only `observed` moves, so `desired` still says what should be up. One
+    // that went down while fghjd wasn't running is interrupted: nobody saw it
+    // crash.
     for c in state.containers.values_mut() {
-        match crate::docker::inspect_status(&docker, &c.desired.container_name).await {
+        let was_up = c.observed.is_up() || c.observed.unseen;
+        let reading = crate::docker::inspect_status(&docker, &c.desired.container_name).await;
+        let observed = &mut c.observed;
+        match reading {
             // A deleted `run: once` task must not keep reading as a clean exit.
             Ok(Some(status)) => {
-                (c.observed.status, c.observed.exit_code) = (status.status, status.exit_code)
+                (observed.status, observed.exit_code) = (status.status, status.exit_code)
             }
-            Ok(None) => (c.observed.status, c.observed.exit_code) = ("removed".to_string(), None),
-            Err(_) => {}
+            Ok(None) => (observed.status, observed.exit_code) = ("removed".to_string(), None),
+            Err(_) => {
+                observed.unseen = true;
+                continue;
+            }
         }
+        observed.unseen = false;
+        observed.settle_interruption(was_up);
     }
     Ok(Some(state))
 }
@@ -80,7 +89,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unreachable_docker_keeps_every_container() {
+    async fn an_unreachable_docker_keeps_every_container_as_unknown() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
         let state = EnvState {
@@ -98,7 +107,9 @@ mod tests {
         db.clone().save_env(state.clone()).await.unwrap();
 
         let docker = Arc::new(crate::docker::undialled_client());
-        assert_eq!(rehydrate(db.clone(), docker).await.unwrap(), Some(state));
+        let mut expected = state;
+        expected.containers.get_mut("svc").unwrap().observed.unseen = true;
+        assert_eq!(rehydrate(db.clone(), docker).await.unwrap(), Some(expected));
         assert!(db.load_env().await.unwrap().is_some());
     }
 }

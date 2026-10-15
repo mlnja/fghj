@@ -49,6 +49,8 @@
     finishing: 'task has exited but has not been re-inspected yet — no exit code read, so no verdict',
     stopped: 'stopped, and fghj was not asked to keep it up — expected',
     crashed: 'fghj was asked to keep this up and Docker says it is down — fghj restarts it, backing off between tries',
+    interrupted: 'went down while fghjd could not see Docker (the engine stopped, a reboot) — fghj starts it again',
+    unknown: "Docker isn't answering, so nothing about this container is known right now",
     missing: 'the container was deleted outside fghj — open it to recreate or forget it',
     restarting: "Docker is bouncing it under this node's own restart policy — not reachable while it does",
     paused: 'paused from outside fghj (docker pause) — not reachable, and Start will not help; docker unpause will',
@@ -454,6 +456,12 @@
      own restart loop rather than one of fghj's, but equally "wait". */
   .status-bar.state-restarting {
     background: var(--warning); color: #ffffff; animation: status-pulse 1s ease-in-out infinite;
+  }
+  /* Amber, not red: nobody saw it crash, and fghj is bringing it back. */
+  .status-bar.state-interrupted { background: var(--warning); color: #ffffff; }
+  .status-bar.state-unknown {
+    background: repeating-linear-gradient(135deg, var(--line-strong) 0 6px, var(--panel-2) 6px 12px);
+    color: var(--ink-faint);
   }
   .status-bar.state-paused { background: var(--line-strong); color: var(--ink); }
   .status-bar.state-finishing { background: var(--success-bg); color: var(--ink-faint); }

@@ -87,6 +87,33 @@ pub struct ContainerObserved {
     pub sync: SyncStatus,
     /// `None` while running. A task's outcome; for a service just a detail.
     pub exit_code: Option<i64>,
+    /// It went down while fghjd couldn't see Docker (Docker unreachable, or
+    /// fghjd not running), so nobody knows whether it crashed or the engine
+    /// stopped it. Cleared once it's up again.
+    #[serde(default)]
+    pub interrupted: bool,
+    /// Docker didn't answer the last time fghjd asked. The rest is the last
+    /// reading it did get, kept so routes don't churn on a blip, but the
+    /// condition says nothing is known.
+    #[serde(default)]
+    pub unseen: bool,
+}
+
+impl ContainerObserved {
+    /// Docker's own word for a container that's serving or trying to.
+    pub fn is_up(&self) -> bool {
+        matches!(self.status.as_str(), "running" | "restarting" | "paused")
+    }
+
+    /// After a fresh reading: down now, when nobody could see it go down
+    /// (`went_unwatched`), is an interruption; up again clears it.
+    pub fn settle_interruption(&mut self, went_unwatched: bool) {
+        if self.is_up() {
+            self.interrupted = false;
+        } else if went_unwatched {
+            self.interrupted = true;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +133,11 @@ pub enum NodeCondition {
     Running,
     Stopped,
     Crashed,
+    /// Down after a stretch fghjd couldn't watch: the engine stopping, a
+    /// reboot. Brought back like a crash, but nobody saw it crash.
+    Interrupted,
+    /// Docker isn't answering, so nothing about the container is known.
+    Unknown,
     Restarting,
     /// Not serving; a Start won't help, it isn't stopped.
     Paused,
@@ -120,6 +152,9 @@ pub enum NodeCondition {
 impl ContainerInfo {
     /// Ignores `pending_action`; consumers layer that on top.
     pub fn condition(&self) -> NodeCondition {
+        if self.observed.unseen {
+            return NodeCondition::Unknown;
+        }
         let status = self.observed.status.as_str();
         if status == "removed" {
             return NodeCondition::Missing;
@@ -136,6 +171,7 @@ impl ContainerInfo {
             "running" => NodeCondition::Running,
             "restarting" => NodeCondition::Restarting,
             "paused" => NodeCondition::Paused,
+            _ if self.desired.running && self.observed.interrupted => NodeCondition::Interrupted,
             _ if self.desired.running => NodeCondition::Crashed,
             _ => NodeCondition::Stopped,
         }
@@ -215,6 +251,24 @@ mod tests {
     fn asked_to_be_up_and_observed_down_is_crashed_not_stopped() {
         assert_eq!(info("exited", true).condition(), NodeCondition::Crashed);
         assert_eq!(info("exited", false).condition(), NodeCondition::Stopped);
+    }
+
+    #[test]
+    fn an_unanswered_docker_reads_as_unknown_whatever_was_wanted() {
+        for (status, running) in [("running", true), ("exited", true), ("exited", false)] {
+            let mut c = info(status, running);
+            c.observed.unseen = true;
+            assert_eq!(c.condition(), NodeCondition::Unknown);
+        }
+    }
+
+    #[test]
+    fn down_after_going_unseen_is_interrupted_not_crashed() {
+        let mut c = info("exited", true);
+        c.observed.interrupted = true;
+        assert_eq!(c.condition(), NodeCondition::Interrupted);
+        c.desired.running = false;
+        assert_eq!(c.condition(), NodeCondition::Stopped);
     }
 
     #[test]

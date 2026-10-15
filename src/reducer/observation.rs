@@ -18,6 +18,7 @@ pub(super) fn reduce(
             published_port,
             ports,
             exit_code,
+            unseen,
         } => {
             let mut next = state.clone();
             if let Some(container) = next
@@ -25,10 +26,20 @@ pub(super) fn reduce(
                 .as_mut()
                 .and_then(|run| run.containers.get_mut(&node_id))
             {
-                container.observed.status = status;
-                container.observed.published_port = published_port;
-                container.observed.ports = ports;
-                container.observed.exit_code = exit_code;
+                let observed = &mut container.observed;
+                if unseen {
+                    observed.unseen = true;
+                } else {
+                    let went_unwatched = observed.unseen;
+                    observed.unseen = false;
+                    observed.status = status;
+                    observed.published_port = published_port;
+                    observed.ports = ports;
+                    observed.exit_code = exit_code;
+                    // Down when Docker answers again: it went down while
+                    // nobody could see why.
+                    observed.settle_interruption(went_unwatched);
+                }
             }
             Ok(next)
         }
@@ -193,6 +204,7 @@ mod tests {
                 published_port: Some(54321),
                 ports: BTreeMap::from([("http".into(), Some(54321)), ("db".into(), None)]),
                 exit_code: None,
+                unseen: false,
             },
         )
         .unwrap();
@@ -201,6 +213,45 @@ mod tests {
         assert_eq!(c.observed.published_port, Some(54321));
         assert_eq!(c.observed.ports.get("http"), Some(&Some(54321)));
         assert_eq!(c.observed.ports.get("db"), Some(&None));
+    }
+
+    fn observed(status: Option<&str>) -> Action {
+        Action::ContainerObserved {
+            node_id: "web".into(),
+            status: status.unwrap_or("running").into(),
+            published_port: None,
+            ports: BTreeMap::new(),
+            exit_code: None,
+            unseen: status.is_none(),
+        }
+    }
+
+    #[test]
+    fn down_once_docker_answers_again_is_an_interruption_until_it_is_up() {
+        let mut web = container("web");
+        web.observed.status = "running".into();
+        let mut state = workspace(vec![web]);
+        // `None`: Docker didn't answer.
+        for (status, interrupted) in [
+            (None, false),
+            (Some("exited"), true),
+            (Some("exited"), true),
+            (Some("running"), false),
+            (Some("exited"), false),
+        ] {
+            state = reduce(&state, observed(status)).unwrap();
+            let c = &state.env.as_ref().unwrap().containers["web"];
+            assert_eq!(c.observed.interrupted, interrupted, "after {status:?}");
+            assert_eq!(c.observed.unseen, status.is_none());
+        }
+        // Unseen keeps the last reading, so routes don't churn on a blip.
+        let state = reduce(&state, observed(None)).unwrap();
+        assert_eq!(
+            state.env.as_ref().unwrap().containers["web"]
+                .observed
+                .status,
+            "exited"
+        );
     }
 
     #[test]
@@ -214,6 +265,7 @@ mod tests {
                 published_port: None,
                 ports: BTreeMap::new(),
                 exit_code: None,
+                unseen: false,
             },
         )
         .unwrap();
@@ -231,6 +283,7 @@ mod tests {
                 published_port: None,
                 ports: BTreeMap::new(),
                 exit_code: None,
+                unseen: false,
             },
         )
         .unwrap();

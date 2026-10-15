@@ -67,7 +67,7 @@
   // Loaded from the tab's own click rather than from the `$effect` below:
   // `runDoctor` writes the same state it reads to guard itself, and doing
   // that inside a tracked effect makes the effect re-run on its own writes.
-  // The drawer never opens on `doctor`, so a click is the only way in here.
+  // Opening straight on `doctor` (the Docker banner does) runs it once below.
   let doctorChecks = $state(null);
   let doctorBusy = $state(false);
   let doctorAt = $state(null);
@@ -148,6 +148,8 @@
     activeTab = 'doctor';
     if (doctorChecks === null) runDoctor();
   }
+
+  if (initialTab === 'doctor') runDoctor();
 
   $effect(() => {
     if (activeTab === 'logs') {
