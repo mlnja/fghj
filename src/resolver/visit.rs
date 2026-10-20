@@ -25,6 +25,10 @@ pub struct ResolveCtx<'a> {
     pub(crate) nodes: HashMap<String, Node>,
     pub(crate) edges: Vec<Edge>,
     pub(crate) warnings: Vec<Warning>,
+    /// `(from, seed)`: `from` requires another repo's flow and the seed is in
+    /// it. Not an edge, since nothing waits on a seed, but a flow that starts
+    /// `from` still runs it.
+    pub(crate) seeds_pulled: Vec<(String, String)>,
 }
 
 /// Leaf-first, like the domain built from it.
@@ -47,6 +51,7 @@ impl<'a> ResolveCtx<'a> {
             nodes: HashMap::new(),
             edges: Vec::new(),
             warnings: Vec::new(),
+            seeds_pulled: Vec::new(),
         }
     }
 
@@ -509,6 +514,12 @@ impl<'a> ResolveCtx<'a> {
                         };
                         let via = self.flow_label(local_path, target);
                         for to in members {
+                            if self.nodes.get(&to).is_some_and(|n| !n.seeds.is_empty()) {
+                                if entry.required {
+                                    self.seeds_pulled.push((from.clone(), to));
+                                }
+                                continue;
+                            }
                             self.push_dependency(
                                 &from,
                                 to,

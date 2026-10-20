@@ -100,6 +100,7 @@ async fn perform(
     entry: &PendingEntry,
     run: &EnvState,
     cascaded: &mut Vec<ContainerInfo>,
+    progress: &ProgressSink,
 ) -> anyhow::Result<Option<ContainerInfo>> {
     let container = run.containers.get(&entry.node_id);
     match entry.action {
@@ -109,7 +110,7 @@ async fn perform(
             // The reducer already wrote the debug switch; `restart_node` reads it.
             let restarted = old
                 .orchestrator
-                .restart_node(&graph, &entry.node_id, run)
+                .restart_node(&graph, &entry.node_id, run, Some(progress))
                 .await?;
             cascaded.extend(restarted.others);
             restarted.node.map(Some).map_err(anyhow::Error::msg)
@@ -152,7 +153,51 @@ async fn perform(
                 .await?;
             Ok(None)
         }
+        PendingAction::Restarting => {
+            anyhow::bail!("a restart is part of a run, never asked for on its own")
+        }
     }
+}
+
+/// Turns a run's progress into actions, so the UI follows each node as it goes.
+/// `skip` is the node a container action is for: its own settle reports it, and
+/// clearing its mark early would make the reducer drop that settle.
+fn forward_progress(
+    actor: ActorHandle,
+    skip: Option<String>,
+) -> (ProgressSink, tokio::task::JoinHandle<()>) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RunProgress>();
+    let drain = tokio::spawn(async move {
+        while let Some(p) = rx.recv().await {
+            let action = match p {
+                RunProgress::Working { node_id, action } => {
+                    if skip.as_ref() == Some(&node_id) {
+                        continue;
+                    }
+                    Action::EnvCreateWorking { node_id, action }
+                }
+                RunProgress::Done(done) => {
+                    let NodeDone {
+                        network,
+                        sidecar_container_name,
+                        sidecar_ip,
+                        info,
+                    } = *done;
+                    if skip.as_ref() == Some(&info.node_id) {
+                        continue;
+                    }
+                    Action::EnvCreateProgress {
+                        network,
+                        sidecar_container_name,
+                        sidecar_ip,
+                        info,
+                    }
+                }
+            };
+            let _ = actor.dispatch(action).await;
+        }
+    });
+    (tx, drain)
 }
 
 async fn resolve(old: &server::WorkspaceState) -> anyhow::Result<resolver::Graph> {
@@ -291,12 +336,18 @@ impl DockerConvergeEffect {
         let actor = self.actor.clone();
         supervisor::supervise("container action", async move {
             let mut cascaded = Vec::new();
+            let (tx, drain) = forward_progress(actor.clone(), Some(entry.node_id.clone()));
             let result = match run {
-                Some(run) => perform(&old, &entry, &run, &mut cascaded)
+                Some(run) => perform(&old, &entry, &run, &mut cascaded, &tx)
                     .await
                     .map_err(|e| format!("{e:#}")),
                 None => Err("no environment yet".to_string()),
             };
+            // Drained first, so a late progress report can't land after the settle.
+            drop(tx);
+            if let Err(e) = drain.await {
+                daemon_log::warn(format!("container-action progress drain task failed: {e}"));
+            }
             for info in cascaded {
                 let _ = actor
                     .dispatch(Action::ContainerActionSettled {
@@ -320,32 +371,7 @@ impl DockerConvergeEffect {
         let prior = self.actor.current().env.clone();
         supervisor::supervise("env create", async move {
             // Translated here: `orchestrator/` knows nothing about actors.
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RunProgress>();
-            let progress_actor = actor.clone();
-            let drain = tokio::spawn(async move {
-                while let Some(p) = rx.recv().await {
-                    let action = match p {
-                        RunProgress::Working { node_id, action } => {
-                            Action::EnvCreateWorking { node_id, action }
-                        }
-                        RunProgress::Done(done) => {
-                            let NodeDone {
-                                network,
-                                sidecar_container_name,
-                                sidecar_ip,
-                                info,
-                            } = *done;
-                            Action::EnvCreateProgress {
-                                network,
-                                sidecar_container_name,
-                                sidecar_ip,
-                                info,
-                            }
-                        }
-                    };
-                    let _ = progress_actor.dispatch(action).await;
-                }
-            });
+            let (tx, drain) = forward_progress(actor.clone(), None);
             let result = perform_create(&old, &plan, prior.as_ref(), Some(&tx)).await;
             // Closing the channel lets the drain finish first, so a late progress report
             // can't land after `EnvCreateSettled`.

@@ -151,6 +151,24 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
+    /// The seeds of the other repos' flows that `start` requires, and what
+    /// they need. See `ResolveCtx::seeds_pulled`.
+    fn add_pulled_seeds(&self, start: &mut BTreeSet<String>) {
+        loop {
+            let missing: BTreeSet<String> = self
+                .seeds_pulled
+                .iter()
+                .filter(|(from, seed)| start.contains(from) && !start.contains(seed))
+                .map(|(_, seed)| seed.clone())
+                .collect();
+            if missing.is_empty() {
+                return;
+            }
+            start.extend(required_closure(&self.edges, missing));
+            add_migrations(self.nodes.values(), &self.edges, start);
+        }
+    }
+
     pub(crate) fn resolve_flows(&mut self) -> Vec<String> {
         let mut flow_ids = Vec::new();
         let mut memberships: Vec<(String, BTreeSet<String>)> = Vec::new();
@@ -173,6 +191,7 @@ impl<'a> ResolveCtx<'a> {
                 }
                 let mut start = required_closure(&self.edges, members);
                 add_migrations(self.nodes.values(), &self.edges, &mut start);
+                self.add_pulled_seeds(&mut start);
                 flow_ids.push(id.clone());
                 memberships.push((id, start));
             }

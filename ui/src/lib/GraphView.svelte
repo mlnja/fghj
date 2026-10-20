@@ -39,10 +39,16 @@
   // more than "is it running": a terminating node is read on its exit code,
   // and a container fghj was asked to keep up but which Docker says is down
   // is `crashed`, which is a different situation from one the user stopped.
+  // fghj's own restart shares a word with Docker's restart-policy loop
+  // (`condition: restarting`), so it gets its own key: they mean different
+  // things and call for different reactions.
   function containerStateOf(live) {
     if (!live) return 'none';
+    if (live.pending_action === 'restarting') return 'rebounding';
     return live.pending_action ?? live.condition;
   }
+
+  const STATE_LABEL = { none: 'absent', rebounding: 'restarting' };
 
   const STATE_TITLE = {
     completed: 'task finished successfully — it is meant to exit, not stay up',
@@ -54,6 +60,7 @@
     unknown: "Docker isn't answering, so nothing about this container is known right now",
     missing: 'the container was deleted outside fghj — open it to recreate or forget it',
     restarting: "Docker is bouncing it under this node's own restart policy — not reachable while it does",
+    rebounding: 'fghj is restarting it because something it needs came back: the same container and code, not a rebuild',
     paused: 'paused from outside fghj (docker pause) — not reachable, and Start will not help; docker unpause will',
   };
 
@@ -446,7 +453,7 @@
       {#if containerState}
         <div class="status-bar">
           <div class="state state-{containerState}" title={STATE_TITLE[containerState] ?? `container: ${containerState}`}>
-            {containerState === 'none' ? 'absent' : containerState}
+            {STATE_LABEL[containerState] ?? containerState}
           </div>
           {#if migration}
             {@const migState = containerStateOf(runContainers?.[migration.id])}
@@ -457,7 +464,7 @@
               title="{migration.label} migrates {n.label}: it runs every time {n.label} starts, and whatever waits on {n.label} waits on it. {STATE_TITLE[migState] ?? `container: ${migState}`}"
               onclick={(ev) => { ev.stopPropagation(); onSelectNode(migration); }}
             >
-              migrate {migState === 'none' ? 'absent' : migState}
+              migrate {STATE_LABEL[migState] ?? migState}
             </button>
           {/if}
         </div>
@@ -540,7 +547,7 @@
   .state.state-completed { background: var(--success-bg); color: var(--success); }
   .state.state-failed { background: var(--danger); color: #ffffff; }
   .state.state-none { background: var(--line-strong); color: var(--ink-faint); }
-  .state.state-starting, .state.state-stopping, .state.state-removing {
+  .state.state-starting, .state.state-stopping, .state.state-removing, .state.state-rebounding {
     background: var(--accent); color: #ffffff; animation: status-pulse 1s ease-in-out infinite;
   }
   @keyframes status-pulse { 50% { opacity: 0.55; } }

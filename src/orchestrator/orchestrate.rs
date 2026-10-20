@@ -43,19 +43,19 @@ fn top_up_may_skip(
     alive && existing.is_some_and(|e| fresh_hash.is_none_or(|hash| hash == e.desired.config_hash))
 }
 
-/// The first requirement this top-up recreated: `node` may hold connections to
-/// it, so restart it too.
-fn recreated_requirement<'a>(
+/// The first requirement this run took down and brought back, recreated or
+/// restarted: `node` may hold connections to it, so restart it too.
+fn bounced_requirement<'a>(
     graph: &'a Graph,
     node: &Node,
-    recreated: &HashSet<String>,
+    bounced: &HashSet<String>,
 ) -> Option<&'a str> {
     graph
         .edges
         .iter()
         .filter(|e| e.needed_to_start() && e.from == node.id)
         .map(|e| e.to.as_str())
-        .find(|to| recreated.contains(*to))
+        .find(|to| bounced.contains(*to))
 }
 
 /// What a Start of `node_id` brings up: its requirements, itself, and the
@@ -121,16 +121,17 @@ impl Orchestrator {
 
     /// Starts `node_id` within the environment — the Drawer's Start button. Always
     /// recreates it, starts requirements only if down, and restarts its running
-    /// dependents afterwards.
+    /// dependents afterwards, in place.
     pub async fn restart_node(
         &self,
         graph: &Graph,
         node_id: &str,
         prior: &EnvState,
+        progress: Option<&ProgressSink>,
     ) -> Result<Restarted> {
         let spec = EnvSpec::Node(node_id.to_string());
         let up = self
-            .bring_up(graph, &spec, Some(prior), None, Some(node_id))
+            .bring_up(graph, &spec, Some(prior), progress, Some(node_id))
             .await
             .map_err(|e| anyhow::anyhow!(e.message))?;
         let others = up
@@ -202,6 +203,8 @@ impl Orchestrator {
         let waited = waited_on(&target_ids, &graph.edges);
         let mut outcomes = StartOutcomes::new(&target_ids, &graph.edges);
         let mut recreated: HashSet<String> = HashSet::new();
+        // Recreated, or restarted because a requirement was.
+        let mut bounced: HashSet<String> = HashSet::new();
         let mut started = Vec::new();
         let budget = RunBudget::default();
 
@@ -246,7 +249,7 @@ impl Orchestrator {
                     .map(|spec| spec_hash(node, &spec)),
                 _ => None,
             };
-            let restart_for = recreated_requirement(graph, node, &recreated);
+            let restart_for = bounced_requirement(graph, node, &bounced);
             if !forced
                 && restart_for.is_none()
                 && top_up_may_skip(alive, existing, fresh_hash.as_deref())
@@ -262,16 +265,42 @@ impl Orchestrator {
                 }
                 continue;
             }
+            // A requirement went down and came back: restart this one, don't recreate
+            // it. A recreate would rebuild from the checkout, shipping whatever code
+            // is there now, when all this needs is new connections.
+            if let (true, false, Some(dep), Some(existing)) = (alive, forced, restart_for, existing)
+            {
+                let why = if recreated.contains(dep) {
+                    format!("{dep} was recreated, and this can't start without it")
+                } else {
+                    format!("{dep} was restarted, and this can't start without it")
+                };
+                working(progress, node_id, Some(PendingAction::Restarting));
+                let lock = self.node_lock(node_id);
+                let guard = lock.lock().await;
+                let restarted = self
+                    .restart_in_place(node, existing, &why, &budget, waited.contains(node_id))
+                    .await;
+                drop(guard);
+                match restarted {
+                    Ok(info) => {
+                        bounced.insert(node.id.clone());
+                        report_done(progress, &state, info.clone());
+                        state.containers.insert(info.node_id.clone(), info);
+                        started.push(node_id.clone());
+                    }
+                    Err(e) => {
+                        working(progress, node_id, None);
+                        outcomes.fail(node_id, format!("{e:#}"));
+                    }
+                }
+                continue;
+            }
             if alive && !forced {
                 // Narrated: a top-up bouncing a healthy container otherwise looks like a bug.
-                let why = match restart_for {
-                    Some(dep) => format!(
-                        "restarting container: {dep} was recreated, and this can't start \
-                         without it"
-                    ),
-                    None => "recreating container: config changed since it was started".into(),
-                };
-                self.events(&node.id, "create").ok(&why).await;
+                self.events(&node.id, "create")
+                    .ok("recreating container: config changed since it was started")
+                    .await;
             }
             working(progress, node_id, Some(PendingAction::Starting));
 
@@ -302,6 +331,7 @@ impl Orchestrator {
             };
             if node.kind != "task" {
                 recreated.insert(node.id.clone());
+                bounced.insert(node.id.clone());
             }
             if !node.seeds.is_empty() {
                 self.record_seeded(graph, node).await;

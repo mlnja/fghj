@@ -201,6 +201,14 @@ pub async fn stop_container(docker: &Docker, name: &str) {
     let _ = docker.stop_container(name, None).await;
 }
 
+/// The same container again: stop (the grace period applies), then start.
+pub async fn restart_container(docker: &Docker, name: &str) -> Result<()> {
+    docker
+        .restart_container(name, None)
+        .await
+        .with_context(|| format!("docker restart {name} failed"))
+}
+
 /// Stop, then remove — not `force`, which is SIGKILL and would kill a database
 /// mid-write. Docker escalates after the grace period, so this can't hang.
 pub async fn stop_and_remove(docker: &Docker, name: &str) {

@@ -100,7 +100,11 @@ nothing can start without them.
 - **Recreating a node** restarts the running services that require it, after
   it is ready again. This applies to a top-up recreating it for config drift,
   and to the Drawer's Start button. A service holding a pool against the old
-  database would otherwise keep failing until someone noticed. A re-run task
+  database would otherwise keep failing until someone noticed. It's a
+  `docker restart`, not a recreate: the same container, image and code, so
+  resetting a database doesn't ship whatever the checkout behind its
+  dependents holds now. A restarted service restarts what requires it in
+  turn, and the graph shows each one as **restarting** while it goes. A re-run task
   doesn't restart anything: `on_start` tasks re-run on every top-up, and
   bouncing the whole environment each time would make top-ups useless.
 - **Starting one node** also starts the required dependencies it has that

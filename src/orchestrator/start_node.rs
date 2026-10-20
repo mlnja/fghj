@@ -11,6 +11,7 @@ use crate::state::{
     ContainerDesired, ContainerInfo, ContainerObserved, ContainerSource, PortRoute, SyncStatus,
 };
 
+use super::events::Events;
 use super::registry::Orchestrator;
 
 #[derive(Clone, Copy)]
@@ -238,29 +239,7 @@ impl Orchestrator {
             }
             ev.ok("waiting for exit").await;
         } else if node.healthcheck.is_some() && wait_ready {
-            ev.running("waiting for healthcheck").await;
-            let allowance = budget.health.allowance();
-            let spent_before_waiting = budget.health.is_exhausted();
-            let outcome = if spent_before_waiting {
-                HealthOutcome::TimedOut
-            } else {
-                wait_for_healthy(&self.docker, &spec.container_name, allowance).await
-            };
-            // A truncated wait is recorded as such, not as a clean pass.
-            let detail = match outcome {
-                HealthOutcome::Healthy => None,
-                HealthOutcome::Settled => {
-                    Some("container settled without reporting healthy; continuing".to_string())
-                }
-                HealthOutcome::TimedOut if spent_before_waiting => Some(
-                    "the run's health-wait budget is spent; not waiting on this node".to_string(),
-                ),
-                HealthOutcome::TimedOut => Some(format!(
-                    "gave up after {}s without a healthy report; continuing",
-                    allowance.as_secs()
-                )),
-            };
-            ev.record("waiting for healthcheck", "ok", detail).await;
+            self.wait_healthy(&ev, &spec.container_name, budget).await;
         }
         ev.ok("ready").await;
 
@@ -295,6 +274,85 @@ impl Orchestrator {
             },
             pending_action: None,
         })
+    }
+}
+
+impl Orchestrator {
+    /// `docker restart` of a running container, for a dependent whose
+    /// requirement was just recreated or restarted: it may hold connections to
+    /// the old one.
+    /// Not a recreate, so it keeps its image and config, and the code it runs
+    /// is the code it ran.
+    pub(super) async fn restart_in_place(
+        &self,
+        node: &Node,
+        existing: &ContainerInfo,
+        why: &str,
+        budget: &RunBudget,
+        wait_ready: bool,
+    ) -> Result<ContainerInfo> {
+        let name = existing.desired.container_name.as_str();
+        let ev = self.events(&node.id, "start");
+        ev.begin().await;
+        ev.record("restarting container", "running", Some(why.to_string()))
+            .await;
+        if let Err(e) = docker::restart_container(&self.docker, name).await {
+            ev.failed("restarting container", &e).await;
+            return Err(e);
+        }
+        ev.ok("restarting container").await;
+        // The old log stream ended with the old process.
+        self.spawn_log_capture(&node.id, name);
+        if node.healthcheck.is_some() && wait_ready && !existing.desired.debug_wait {
+            self.wait_healthy(&ev, name, budget).await;
+        }
+        ev.ok("ready").await;
+
+        // Docker may hand out new ephemeral host ports on a restart.
+        let inspected = docker::inspect_status(&self.docker, name).await?;
+        let mut info = existing.clone();
+        info.pending_action = None;
+        if let Some(s) = inspected {
+            for (port, host_port) in info.observed.ports.iter_mut() {
+                *host_port = s.host_port(port);
+            }
+            for route in &mut info.desired.routes {
+                if let Some(p) = s.host_port(&route.container_port) {
+                    route.host_port = p;
+                }
+            }
+            if let Some(port) = &info.desired.status_port {
+                info.observed.published_port = s.host_port(port);
+            }
+            info.observed.status = s.status;
+        }
+        Ok(info)
+    }
+
+    async fn wait_healthy(&self, ev: &Events<'_>, container_name: &str, budget: &RunBudget) {
+        ev.running("waiting for healthcheck").await;
+        let allowance = budget.health.allowance();
+        let spent_before_waiting = budget.health.is_exhausted();
+        let outcome = if spent_before_waiting {
+            HealthOutcome::TimedOut
+        } else {
+            wait_for_healthy(&self.docker, container_name, allowance).await
+        };
+        // A truncated wait is recorded as such, not as a clean pass.
+        let detail = match outcome {
+            HealthOutcome::Healthy => None,
+            HealthOutcome::Settled => {
+                Some("container settled without reporting healthy; continuing".to_string())
+            }
+            HealthOutcome::TimedOut if spent_before_waiting => {
+                Some("the run's health-wait budget is spent; not waiting on this node".to_string())
+            }
+            HealthOutcome::TimedOut => Some(format!(
+                "gave up after {}s without a healthy report; continuing",
+                allowance.as_secs()
+            )),
+        };
+        ev.record("waiting for healthcheck", "ok", detail).await;
     }
 }
 
@@ -514,5 +572,50 @@ mod tests {
         assert!(message.contains("still running"), "{message}");
 
         fixture.cleanup("hangs.api").await;
+    }
+
+    fn inspect(name: &str, format: &str) -> String {
+        let out = std::process::Command::new("docker")
+            .args(["inspect", "--format", format, name])
+            .output()
+            .expect("failed to run docker");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
+    async fn a_restart_in_place_keeps_the_container_and_starts_it_again() {
+        let fixture = TaskFixture::new().await;
+        let mut node = test_node("php.api", "php", "service");
+        node.image = Some("busybox".to_string());
+        node.command = vec!["sleep".to_string(), "60".to_string()];
+        let before = fixture.start(&node).await.expect("service should start");
+        let name = before.desired.container_name.clone();
+        let id = inspect(&name, "{{.Id}}");
+        let started = inspect(&name, "{{.State.StartedAt}}");
+
+        let after = fixture
+            .registry
+            .restart_in_place(
+                &node,
+                &before,
+                "mysql.api was recreated",
+                &super::RunBudget::default(),
+                true,
+            )
+            .await
+            .expect("restart should succeed");
+
+        assert_eq!(inspect(&name, "{{.Id}}"), id, "the same container");
+        assert_ne!(
+            inspect(&name, "{{.State.StartedAt}}"),
+            started,
+            "started again"
+        );
+        assert_eq!(after.observed.status, "running");
+        assert_eq!(after.desired.config_hash, before.desired.config_hash);
+        assert!(after.pending_action.is_none());
+
+        fixture.cleanup("php.api").await;
     }
 }

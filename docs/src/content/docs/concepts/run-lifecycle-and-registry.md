@@ -11,7 +11,8 @@ first start creates it. Two verbs act on it:
 
 - **Start a node** — bring up whatever that node requires that isn't
   running, then (re)create the node itself from the current config, then
-  restart its running dependents so they pick up the new container. On a
+  restart its running dependents in place (`docker restart`, not a
+  rebuild) so they reconnect to the new container. On a
   workspace with no environment yet, this is what creates it, with just
   that node and its requirements in it.
 - **Switch to a flow** — make the environment that flow: top up the flow's

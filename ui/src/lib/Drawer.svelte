@@ -76,7 +76,7 @@
   //   stopped   -> Start or Delete
   //   running   -> Stop, Delete, or Reset (force a fresh container)
   //   starting  -> Stop or Delete, either of which calls the start off
-  //   stopping/removing -> nothing; show the in-flight action instead
+  //   stopping/removing/restarting -> nothing; show the in-flight action instead
   // `state::NodeCondition`, snake_case. The ones that mean "this will not
   // fix itself" get the same loud pill as drifted config, because they call
   // for the same thing: the user has to do something.
@@ -314,7 +314,7 @@
           <span class="ctrl-status"><span class="spinner"></span> starting…</span>
           <button class="ctrl-btn" onclick={stopNode} disabled={busy} title="Call off the start and stop the container">Stop</button>
           <button class="ctrl-btn danger" onclick={deleteNode} disabled={busy} title="Call off the start and delete the container">Delete</button>
-        {:else if lifecycle === 'stopping' || lifecycle === 'removing'}
+        {:else if lifecycle === 'stopping' || lifecycle === 'removing' || lifecycle === 'restarting'}
           <span class="ctrl-status"><span class="spinner"></span> {lifecycle}…</span>
         {:else if lifecycle === 'unknown'}
           <span class="ctrl-status">Docker isn't answering.</span>

@@ -79,6 +79,11 @@ start as slow as the seed and a broken seed take the app down with it. A
 service that really needs the data says so: `depends_on: {seed: {condition:
 service_completed_successfully}}`. A skipped seed counts as completed.
 
+That holds across repos too. Waiting on another repo's flow waits on each of
+its members except a seed, so `depends_on: [backend/base]` draws no line to
+backend's seed. A flow that starts the waiter, with `required` left on, still
+runs the seed.
+
 Because nothing waits on a seed, a seed can depend on the app it seeds
 through — POSTing fixtures to an API — without a cycle. A migration can't:
 it would wait on something waiting on it, which `check_cycles` refuses.

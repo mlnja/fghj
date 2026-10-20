@@ -205,3 +205,50 @@ fn a_migration_waiting_on_its_stores_user_is_a_cycle() {
         graph.warnings
     );
 }
+
+/// Nothing waits on a seed, so waiting on a flow that lists one isn't waiting
+/// on it; a flow that starts the waiter still runs it.
+#[test]
+fn waiting_on_another_repos_flow_does_not_wait_on_its_seed() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_yaml(
+        tmp.path(),
+        "core",
+        &CORE.replace("  app: [php]", "  app: [php, seed]"),
+    );
+    write_yaml(
+        tmp.path(),
+        "shop",
+        r#"version: "2.0"
+include:
+  core: https://example.com/core.git
+services:
+  web:
+    build: .
+    depends_on:
+      core/app: {condition: service_started}
+  tool:
+    build: .
+    depends_on:
+      core/app: {condition: service_started, required: false}
+flows:
+  shop: [web]
+  tools: [tool]
+"#,
+    );
+    let graph = resolve_universe(tmp.path()).unwrap();
+    assert!(edge(&graph, "web.shop", "php.core").is_some());
+    assert!(edge(&graph, "web.shop", "seed.core").is_none());
+    assert!(edge(&graph, "tool.shop", "seed.core").is_none());
+    let seed = node(&graph, "seed.core");
+    assert!(
+        seed.flows.contains(&"shop/shop".to_string()),
+        "{:?}",
+        seed.flows
+    );
+    assert!(
+        !seed.flows.contains(&"shop/tools".to_string()),
+        "{:?}",
+        seed.flows
+    );
+}

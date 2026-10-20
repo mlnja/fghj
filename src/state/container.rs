@@ -25,6 +25,9 @@ pub struct PortRoute {
 #[serde(rename_all = "snake_case")]
 pub enum PendingAction {
     Starting,
+    /// `docker restart` of a container whose requirement went down and came
+    /// back: the same container, image and config. Only a run sets it.
+    Restarting,
     Stopping,
     Removing,
 }
@@ -33,6 +36,7 @@ impl std::fmt::Display for PendingAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PendingAction::Starting => write!(f, "starting"),
+            PendingAction::Restarting => write!(f, "restarting"),
             PendingAction::Stopping => write!(f, "stopping"),
             PendingAction::Removing => write!(f, "removing"),
         }

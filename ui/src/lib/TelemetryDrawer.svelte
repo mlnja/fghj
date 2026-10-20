@@ -124,7 +124,7 @@
     for (const id of inFlow) {
       const c = containers[id];
       const step =
-        c?.pending_action === 'starting'
+        c?.pending_action === 'starting' || c?.pending_action === 'restarting'
           ? 'starting'
           : c?.condition === 'running'
             ? 'ok'

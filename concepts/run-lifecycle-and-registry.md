@@ -54,17 +54,20 @@ Everything that creates a container goes through
   it — see [[config-drift]] for why "who asked" is the distinction that
   matters. A node a top-up recreates also restarts the alive nodes that
   can't start without it, since they may hold connections to the container
-  that went away.
+  that went away. That's `restart_in_place`, a `docker restart` under
+  `PendingAction::Restarting`: a recreate would rebuild them from the
+  checkout and ship code nobody asked to ship.
 
-- **`restart_node(graph, node_id, prior)`** — the Drawer's **Start** /
+- **`restart_node(graph, node_id, prior, progress)`** — the Drawer's **Start** /
   **Recreate** button on a node in an existing environment, and what applies
   a debug-switch flip. Same path, in "restart this node" mode: the node
   itself is always recreated (so a `.fghj.yaml` edit is picked up and a
   `run: once` task re-runs); what it can't start without is started only if
   it isn't up, and drift is *not* a reason to bounce one — the user asked
   to start one node, not to apply every pending edit behind it; and the
-  running services that can't start without it are restarted afterwards
-  (`restart_targets`). A dependent failing to come back is logged and
+  running services that can't start without it are restarted in place
+  afterwards (`restart_targets`), each reported through `progress` so the
+  graph shows it restarting. A dependent failing to come back is logged and
   reported as its own state, but doesn't fail the Start.
 
 There used to be a third path: a per-node cascade hand-rolled in
