@@ -18,6 +18,7 @@ pub fn edge(from: &str, to: &str, kind: &str) -> Edge {
         condition: None,
         via_flow: None,
         flows: Vec::new(),
+        implied: false,
     }
 }
 
@@ -57,6 +58,8 @@ pub fn test_node(id: &str, label: &str, kind: &str) -> Node {
         healthcheck: None,
         platform: None,
         run_policy: None,
+        migrates: None,
+        seeds: Vec::new(),
         debug: None,
     }
 }

@@ -2,6 +2,7 @@ mod env;
 mod events;
 mod logs;
 mod schema;
+mod seeds;
 
 use std::path::Path;
 use std::sync::Mutex;

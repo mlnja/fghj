@@ -45,6 +45,7 @@ pub fn resolve_universe(workspace: &Path) -> Result<Graph> {
     for (local_path, component) in &scanned {
         ctx.add_dependency_edges(local_path, component);
     }
+    ctx.add_store_edges();
     ctx.check_references();
     ctx.check_source_paths();
     let flows = ctx.resolve_flows();

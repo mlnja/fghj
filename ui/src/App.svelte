@@ -586,6 +586,12 @@
   // be running, holding its ports and its domain, and invisible. Synthesizing
   // a node for it is what makes it selectable — and therefore stoppable —
   // from the drawer.
+  let showSeeds = $state(localStorage.getItem('fghj:show-seeds') === '1');
+  function setShowSeeds(on) {
+    showSeeds = on;
+    localStorage.setItem('fghj:show-seeds', on ? '1' : '0');
+  }
+
   let containersGraph = $derived.by(() => {
     if (!universe) return null;
     const declared = new Set(universe.nodes.map((n) => n.id));
@@ -700,7 +706,13 @@
       {#if activeTab === 'repos'}
         <GraphView graph={reposGraph} {currentFlow} mode="repos" onSelectNode={(n) => (selectedRepoId = n.id)} />
       {:else if activeTab === 'containers'}
-        <GraphView graph={containersGraph} {currentFlow} mode="containers" {runContainers} {recordingNodes} onSelectNode={(n) => (selectedNode = n)} />
+        {#if containersGraph.nodes.some((n) => n.seeds?.length)}
+          <label class="graph-option" title="Seeds fill a store with data once, and nothing waits on them, so they're hidden unless you ask">
+            <input type="checkbox" checked={showSeeds} onchange={(e) => setShowSeeds(e.currentTarget.checked)} />
+            seeds
+          </label>
+        {/if}
+        <GraphView graph={containersGraph} {currentFlow} mode="containers" {runContainers} {recordingNodes} {showSeeds} onSelectNode={(n) => (selectedNode = n)} />
       {:else}
         <Placeholder
           eyebrow="Config — secrets, split-DNS, root CA"
@@ -778,6 +790,10 @@
 </div>
 
 <style>
+  .graph-option {
+    display: inline-flex; align-items: center; gap: 6px; margin: 0 40px 6px; cursor: pointer;
+    font: 600 10.5px var(--font-mono); text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-faint);
+  }
   .connection-banner {
     display: flex; align-items: center; gap: 10px; margin: 0 40px 10px; padding: 8px 12px; border-radius: 6px;
     background: var(--warning-bg); border: 1px solid var(--warning); color: var(--warning); font: 500 11.5px var(--font-mono);

@@ -160,6 +160,8 @@ impl<'a> ResolveCtx<'a> {
                     healthcheck: service.healthcheck.clone(),
                     platform: service.platform.clone(),
                     run_policy: None,
+                    migrates: None,
+                    seeds: Vec::new(),
                     debug: service.debug,
                 },
             );
@@ -256,13 +258,15 @@ impl<'a> ResolveCtx<'a> {
             healthcheck: None,
             platform: None,
             run_policy: None,
+            migrates: None,
+            seeds: Vec::new(),
             debug: None,
         });
         stub_id
     }
 
     /// Phase 3. Waited on with `service_completed_successfully`, or declares
-    /// `run:`. A kind, not an edge condition, because "exited" is success for a
+    /// `run:`, `migrates:` or `seeds:`. A kind, not an edge condition, because "exited" is success for a
     /// task and drift for anything else.
     pub(crate) fn mark_tasks(&mut self, local_path: &str, component: &ComponentConfig) {
         let mut tasks: BTreeSet<&str> = BTreeSet::new();
@@ -277,7 +281,8 @@ impl<'a> ResolveCtx<'a> {
         }
         for (name, service) in &component.services {
             let id = node_id(name, local_path);
-            if !tasks.contains(name.as_str()) && service.run.is_none() {
+            let store_task = service.migrates.is_some() || !service.seeds.is_empty();
+            if !tasks.contains(name.as_str()) && service.run.is_none() && !store_task {
                 continue;
             }
             // An exited container can never be healthy, and a restart policy would
@@ -307,12 +312,143 @@ impl<'a> ResolveCtx<'a> {
                     "task '{id}' sets `run: {run}` — it is \"on_start\" or \"once\""
                 )));
             }
+            let (migrates, seeds) = self.check_stores(local_path, component, name, service);
             if let Some(node) = self.nodes.get_mut(&id) {
                 node.kind = "task".into();
                 node.run_policy = Some(run);
                 node.healthcheck = None;
+                node.migrates = migrates;
+                node.seeds = seeds;
             }
         }
+    }
+
+    /// `migrates:` and `seeds:` name services in this repo; what's kept is
+    /// their node ids, minus any that name nothing.
+    fn check_stores(
+        &mut self,
+        local_path: &str,
+        component: &ComponentConfig,
+        name: &str,
+        service: &super::service::ServiceConfig,
+    ) -> (Option<String>, Vec<String>) {
+        let id = node_id(name, local_path);
+        let (migrates, seeds) = (service.migrates.as_ref(), &service.seeds);
+        if migrates.is_none() && seeds.is_empty() {
+            return (None, Vec::new());
+        }
+        if service.run.is_some() {
+            self.warnings.push(Warning::blocking(format!(
+                "'{id}' sets `run` alongside `{}` — that decides when it runs; drop `run`",
+                if migrates.is_some() {
+                    "migrates"
+                } else {
+                    "seeds"
+                }
+            )));
+        }
+        if migrates.is_some() && !seeds.is_empty() {
+            self.warnings.push(Warning::blocking(format!(
+                "'{id}' sets both `migrates` and `seeds` — a migration runs on every start and \
+                 a seed only on new data, so split it into two services"
+            )));
+        }
+        let mut store = |field: &str, store: &str| -> Option<String> {
+            if store == name {
+                self.warnings.push(Warning::blocking(format!(
+                    "'{id}' names itself in `{field}`"
+                )));
+                return None;
+            }
+            if !component.services.contains_key(store) {
+                self.warnings.push(Warning::blocking(format!(
+                    "'{id}' {field} '{store}', but '{local_path}' has no service by that name \
+                     — a store is in the same repo as what migrates or seeds it"
+                )));
+                return None;
+            }
+            Some(node_id(store, local_path))
+        };
+        let migrates = migrates.and_then(|m| store("migrates", m));
+        let seeds = seeds.iter().filter_map(|s| store("seeds", s)).collect();
+        (migrates, seeds)
+    }
+
+    /// Phase 5, once every repo has its tasks and edges. A migration or seed
+    /// waits on its stores; whatever waits on a store waits on its migration.
+    pub(crate) fn add_store_edges(&mut self) {
+        let mut tasks: Vec<(String, Vec<String>)> = self
+            .nodes
+            .values()
+            .filter(|n| n.migrates.is_some() || !n.seeds.is_empty())
+            .map(|n| {
+                (
+                    n.id.clone(),
+                    n.migrates.iter().chain(&n.seeds).cloned().collect(),
+                )
+            })
+            .collect();
+        tasks.sort();
+
+        let mut migrations: BTreeMap<String, String> = BTreeMap::new();
+        for (task, stores) in &tasks {
+            for store in stores {
+                let Some(target) = self.nodes.get(store) else {
+                    continue;
+                };
+                if target.kind == "task" {
+                    self.warnings.push(Warning::blocking(format!(
+                        "'{task}' names '{store}' as a store, but '{store}' is a task — a store \
+                         is something that stays up"
+                    )));
+                    continue;
+                }
+                let condition = if target.healthcheck.is_some() {
+                    Condition::ServiceHealthy
+                } else {
+                    Condition::ServiceStarted
+                };
+                if !self.edges.iter().any(|e| e.from == *task && e.to == *store) {
+                    self.push_dependency(task, store.clone(), true, condition, None);
+                }
+            }
+            if let Some(store) = self.nodes[task].migrates.clone()
+                && let Some(other) = migrations.insert(store.clone(), task.clone())
+            {
+                self.warnings.push(Warning::blocking(format!(
+                    "'{other}' and '{task}' both migrate '{store}' — one migration per \
+                     store, so their order can't be a guess"
+                )));
+            }
+        }
+
+        let mut implied = Vec::new();
+        let mut seen = BTreeSet::new();
+        for edge in self.edges.iter().filter(|e| e.needed_to_start()) {
+            let Some(migration) = migrations.get(&edge.to) else {
+                continue;
+            };
+            if edge.from == *migration
+                || self
+                    .edges
+                    .iter()
+                    .any(|e| e.from == edge.from && e.to == *migration)
+                || !seen.insert((edge.from.clone(), migration.clone()))
+            {
+                continue;
+            }
+            implied.push(Edge {
+                from: edge.from.clone(),
+                to: migration.clone(),
+                kind: "depends-on".into(),
+                required: true,
+                condition: Some(Condition::ServiceCompletedSuccessfully.as_str().into()),
+                via_flow: edge.via_flow.clone(),
+                flows: Vec::new(),
+                implied: true,
+            });
+        }
+        self.edges.extend(implied);
     }
 
     /// Phase 4. Across repos a key names a flow or the whole repo, never a
@@ -403,6 +539,7 @@ impl<'a> ResolveCtx<'a> {
             condition: Some(condition.as_str().into()),
             via_flow,
             flows: Vec::new(),
+            implied: false,
         });
     }
 
@@ -480,7 +617,7 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    /// Phase 5. Every `${FGHJ_SERVICE_FQDN:…}` must name a service. Another
+    /// Phase 6. Every `${FGHJ_SERVICE_FQDN:…}` must name a service. Another
     /// repo's *service* is allowed here and nowhere else. No edge comes of it:
     /// see `concepts/dependency-kinds.md`.
     pub(crate) fn check_references(&mut self) {

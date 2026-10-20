@@ -80,6 +80,13 @@ pub struct Node {
     pub platform: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub run_policy: Option<String>,
+    /// The store this task migrates: everything that waits on the store waits
+    /// on this too. See `concepts/seeds-and-migrations.md`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub migrates: Option<String>,
+    /// The stores whose data this task seeds; it runs again only on new data.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub seeds: Vec<String>,
     /// Published alongside `ports`; nothing is injected into the environment. See
     /// `concepts/debugging-in-containers.md`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -159,6 +166,9 @@ pub struct Edge {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub via_flow: Option<String>,
     pub flows: Vec<String>,
+    /// Not written in any file: waiting on a store means waiting on its migration.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub implied: bool,
 }
 
 impl Edge {
@@ -192,7 +202,42 @@ pub fn required_closure(edges: &[Edge], seeds: BTreeSet<String>) -> BTreeSet<Str
     set
 }
 
+/// Adds the migration of every store in `set`, and what that migration needs:
+/// a store isn't ready until it's migrated, whichever way it was started.
+pub fn add_migrations<'a>(
+    nodes: impl IntoIterator<Item = &'a Node> + Clone,
+    edges: &[Edge],
+    set: &mut BTreeSet<String>,
+) {
+    loop {
+        let missing: BTreeSet<String> = nodes
+            .clone()
+            .into_iter()
+            .filter(|n| n.migrates.as_ref().is_some_and(|s| set.contains(s)))
+            .filter(|n| !set.contains(&n.id))
+            .map(|n| n.id.clone())
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        set.extend(required_closure(edges, missing));
+    }
+}
+
 impl Graph {
+    /// `ids` plus the migrations of any store among them. See [`add_migrations`].
+    pub fn with_migrations(&self, ids: Vec<String>) -> Vec<String> {
+        let mut set: BTreeSet<String> = ids.iter().cloned().collect();
+        add_migrations(&self.nodes, &self.edges, &mut set);
+        let mut ids = ids;
+        ids.extend(
+            set.into_iter()
+                .filter(|id| !ids.contains(id))
+                .collect::<Vec<_>>(),
+        );
+        ids
+    }
+
     /// An unknown flow is an error, so a typo can't start nothing and succeed.
     pub fn start_ids(&self, flow: Option<&str>) -> anyhow::Result<Vec<String>> {
         let Some(flow) = flow else {

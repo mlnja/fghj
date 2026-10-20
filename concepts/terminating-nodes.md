@@ -82,9 +82,11 @@ services:
   (`orchestrator::node_spec`).
 - **A task has no healthcheck and no restart policy** — declaring either is
   blocking.
-- **A task nothing waits on declares `run:`.** A seed only one journey needs
+- **A task nothing waits on declares `run:`.** A job only one journey needs
   has `run: on_start`, its own `depends_on`, and is listed in that journey's
-  flow. Before `run:` made a task, such a container was read as a service and
+  flow. A seed or a migration declares `seeds:` or `migrates:` instead, which
+  decides when it runs from the data rather than the container; see
+  [[seeds-and-migrations]]. Before `run:` made a task, such a container was read as a service and
   showed as crashed once it exited. See [[dependency-kinds]].
 
 ## Ordering

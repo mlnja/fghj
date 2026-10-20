@@ -156,8 +156,9 @@ package fghj
 	// Compose's `depends_on`. See `#DependsOn`.
 	depends_on: #DependsOn | *[]
 	// Makes this service a task, like being waited on with
-	// `service_completed_successfully` does — the way to declare a seed
-	// that nothing waits on and only a flow lists. "on_start" (the
+	// `service_completed_successfully` does — the way to declare a job
+	// that nothing waits on and only a flow lists. A seed or a migration
+	// declares `seeds` or `migrates` instead. "on_start" (the
 	// default) re-runs the task on every start and top-up — a migration,
 	// whose command is idempotent. "once" runs it at most once per run,
 	// and not again when the code changes; reach for it only when
@@ -167,6 +168,16 @@ package fghj
 	// healthy) or a `restart` other than "no" (it would restart forever).
 	// The resolver refuses both.
 	run?: "on_start" | "once"
+	// Makes this service the migration of a store in this repo: it runs on
+	// every run that includes the store, once the store is up, and
+	// everything that waits on the store waits on it too. Its command must
+	// be idempotent. One migration per store.
+	migrates?: string & =~"^[a-z0-9][a-z0-9-]*$"
+	// Makes this service the seed of stores in this repo: it runs once
+	// they're up and migrated, and only when their data is new — a volume
+	// fghj hasn't seen this seed succeed against. Nothing waits on it; a
+	// flow lists it. See `concepts/seeds-and-migrations.md`.
+	seeds?: [...string & =~"^[a-z0-9][a-z0-9-]*$"]
 }
 
 // Another repo, by URL. The alias is how this file names it: `alias/flow`

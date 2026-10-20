@@ -78,10 +78,11 @@ meant to exit.
   build the same context.
 - **A task has no healthcheck and no restart policy.** Declaring either is a
   blocking warning.
-- **A task nothing waits on declares `run:`.** A seed only one journey needs
-  has `run: on_start`, its own `depends_on` (on the database it seeds), and is
-  listed in that journey's flow. It starts once what it needs is up, and its
-  clean exit reads as success.
+- **A task nothing waits on declares `run:`.** A job only one journey needs
+  has `run: on_start`, its own `depends_on`, and is listed in that journey's
+  flow. It starts once what it needs is up, and its clean exit reads as
+  success. A seed or a migration declares `seeds:` or `migrates:` instead —
+  see [Seeds and migrations](/concepts/seeds-and-migrations/).
 
 Waiting on another repo with `service_completed_successfully` is refused: a
 flow is waited on until it's up, and never completes. A task is always its

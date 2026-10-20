@@ -633,23 +633,59 @@ the service from coming up against an unmigrated database. Everything else in
 the run keeps starting, and the run then reports what failed and what was
 blocked. Above, the start order is `db → migrate → api`.
 
-A task only one journey needs (a seed) declares `run: on_start` and its own
-`depends_on` (on the database it seeds), and is listed in that journey's flow.
-Nothing waits on it; it starts once what it needs is up.
+A job only one journey needs declares `run: on_start` and its own
+`depends_on`, and is listed in that journey's flow. Nothing waits on it; it
+starts once what it needs is up.
+
+### Migrations and seeds
+
+A migration and a seed are tasks with one more keyword, naming the
+**stores** they write to: services in the same repo.
 
 ```yaml
 services:
+  mysql:
+    image: mysql:8.0.33
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-p123"]
+  migrate:
+    image: sqldef/mysqldef
+    command: ["sh", "-c", "mysqldef -uroot -p123 -h ${FGHJ_SERVICE_FQDN:mysql} aikido < /schema/aikido.sql"]
+    volumes:
+      - host: docs/mysql
+        container: /schema
+    migrates: mysql
   seed:
+    image: mysql:8.0.33
+    command: ["bash", "seed-database.sh"]
+    seeds: [mysql]
+  php:
     build: .
-    command: ["./bin/seed"]
-    run: on_start
     depends_on:
-      db: {condition: service_healthy}
+      mysql: {condition: service_healthy}   # waits for migrate too
 flows:
-  demo: [api, seed]
+  app: [php]            # mysql, migrate, php
+  demo: [php, seed]     # and the seed
 ```
 
+| Field | Description |
+|---|---|
+| `migrates` | The store this migrates. It runs on **every** run that includes the store, once the store is up, so its command must be idempotent — dbmate, Flyway and mysqldef are. Everything that waits on the store waits on the migration too, without saying so. The graph draws the migration as a segment of the store's status bar, not as a card. A flow that starts the store starts its migration. One migration per store. |
+| `seeds` | The stores whose data this fills. It runs once they're up and migrated, and **only when their data is new**: fghj records the volumes it last succeeded against, and a volume removed and made again is new. Nothing waits on a seed, and a flow lists it. A failed seed always runs again, and the Start button on it always runs it. |
+
+Neither can set `run:`; the keyword decides when it runs. Keep the data a
+seed fills in a named volume: a bind mount has no creation time fghj can
+see, so it falls back to the store's container, and a recreated container
+reseeds. A service that really needs the seeded rows before it starts waits
+on the seed itself, with `condition: service_completed_successfully`; a
+skipped seed counts as completed. See
+[Seeds and migrations](/concepts/seeds-and-migrations/) for why it's keyed on
+the data.
+
 :::caution[What `run: once` actually means]
+For a seed, use `seeds:` instead — it's keyed on the data, `once` on the
+container.
+
 "At most once per run" — full stop. It is **not** re-run when your code
 changes. A `git pull` that adds a migration will not cause a `once` task to
 run again, even though fghj can see the commit moved. That's deliberate: an

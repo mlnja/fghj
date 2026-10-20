@@ -54,5 +54,6 @@ mod hosts;
 mod ports;
 mod run_options;
 mod scenarios;
+mod stores;
 mod tasks;
 mod volumes;

@@ -170,14 +170,14 @@ impl Orchestrator {
                 if !graph.nodes.iter().any(|n| &n.id == id) {
                     return Err(anyhow::anyhow!("no such node: {id}").into());
                 }
-                match (restart, prior) {
+                graph.with_migrations(match (restart, prior) {
                     (Some(_), Some(prior)) => restart_targets(id, graph, prior),
                     _ => {
                         let mut ids = requirements_of(id, &graph.edges);
                         ids.push(id.clone());
                         ids
                     }
-                }
+                })
             }
         };
         log_start_advisories(graph, &target_ids);
@@ -211,14 +211,24 @@ impl Orchestrator {
             let container_name = container_name(&graph.workspace_name, &node.id);
             let existing = state.containers.get(&node.id);
             if !forced {
+                // A recreated store starts empty or old, so its migration always runs.
+                let store_recreated = node
+                    .migrates
+                    .as_ref()
+                    .is_some_and(|store| recreated.contains(store));
                 if restart.is_some() {
                     if existing.is_some_and(|c| {
                         c.pending_action.is_some()
-                            || (node.kind == "task" && c.observed.exit_code == Some(0))
+                            || (node.kind == "task"
+                                && c.observed.exit_code == Some(0)
+                                && !store_recreated)
                     }) {
                         continue;
                     }
                 } else if task_already_done(node, existing) {
+                    continue;
+                }
+                if !node.seeds.is_empty() && self.already_seeded(graph, node).await {
                     continue;
                 }
             }
@@ -292,6 +302,9 @@ impl Orchestrator {
             };
             if node.kind != "task" {
                 recreated.insert(node.id.clone());
+            }
+            if !node.seeds.is_empty() {
+                self.record_seeded(graph, node).await;
             }
             // Per node, so a crash mid-create doesn't lose track of what started.
             report_done(progress, &state, info.clone());

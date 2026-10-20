@@ -214,7 +214,10 @@ pub async fn stop_and_remove(docker: &Docker, name: &str) {
 }
 
 /// `Ok(None)` if the container doesn't exist.
-async fn inspect(docker: &Docker, name: &str) -> Result<Option<ContainerInspectResponse>> {
+pub(super) async fn inspect(
+    docker: &Docker,
+    name: &str,
+) -> Result<Option<ContainerInspectResponse>> {
     match docker
         .inspect_container(
             name,

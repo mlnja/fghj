@@ -42,11 +42,25 @@ const CREATE_TABLES: &str = "
         PRIMARY KEY (node_id, action, seq)
     );";
 
+/// Added without a version bump, which would drop every other table: what a
+/// seed has already filled is worth keeping across an upgrade.
+const SEEDS_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS seeds (
+        node_id TEXT PRIMARY KEY,
+        data TEXT NOT NULL,
+        at INTEGER NOT NULL
+    );";
+
 pub fn init(conn: &mut Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == VERSION {
-        return Ok(());
+    if version != VERSION {
+        recreate(conn)?;
     }
+    conn.execute_batch(SEEDS_TABLE)?;
+    Ok(())
+}
+
+fn recreate(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
     let tables: Vec<String> = tx
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?

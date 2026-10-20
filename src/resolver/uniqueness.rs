@@ -152,6 +152,8 @@ mod tests {
             healthcheck: None,
             platform: None,
             run_policy: None,
+            migrates: None,
+            seeds: Vec::new(),
             debug: None,
         }
     }

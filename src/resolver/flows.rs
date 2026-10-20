@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use super::dependency::Target;
-use super::graph::required_closure;
+use super::graph::{add_migrations, required_closure};
 use super::visit::{ResolveCtx, node_id};
 use super::warning::Warning;
 
@@ -171,7 +171,8 @@ impl<'a> ResolveCtx<'a> {
                     self.warnings
                         .push(Warning::blocking(format!("flow '{id}' {e}")));
                 }
-                let start = required_closure(&self.edges, members);
+                let mut start = required_closure(&self.edges, members);
+                add_migrations(self.nodes.values(), &self.edges, &mut start);
                 flow_ids.push(id.clone());
                 memberships.push((id, start));
             }

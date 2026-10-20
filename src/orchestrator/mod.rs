@@ -15,6 +15,7 @@ pub mod order;
 pub mod progress;
 pub mod registry;
 pub mod route_table;
+pub mod seeds;
 pub mod sidecar;
 pub mod spec;
 pub mod start_node;

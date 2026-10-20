@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use super::config::{Build, Environment, Healthcheck, default_restart, default_stop_grace_period};
 use super::dependency::DependsOn;
+use super::name::Name;
 use super::port::BackingPorts;
 use super::volume::{HostAliasConfig, VolumeMount};
 use serde::Deserialize;
@@ -55,6 +56,10 @@ pub struct ServiceConfig {
     pub(crate) debug: Option<u16>,
     #[serde(default)]
     pub(crate) run: Option<String>,
+    #[serde(default)]
+    pub(crate) migrates: Option<Name>,
+    #[serde(default)]
+    pub(crate) seeds: Vec<Name>,
     #[serde(default)]
     pub(crate) depends_on: DependsOn,
 }

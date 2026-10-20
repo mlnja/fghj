@@ -1,7 +1,7 @@
 <script>
   import dagre from '@dagrejs/dagre';
 
-  let { graph, currentFlow, mode, runContainers, recordingNodes, onSelectNode } = $props();
+  let { graph, currentFlow, mode, runContainers, recordingNodes, onSelectNode, showSeeds = true } = $props();
 
   // Widened from 260 so two state lanes fit side by side without truncating
   // a branch name on every card. The gaps keep their old slack (80px across,
@@ -27,6 +27,7 @@
   // inline by a service like a backing dependency, but it runs to completion
   // instead of staying up. A checkmark rather than a box — what matters
   // about it is that it finished.
+  const SEED_ICON = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M8 14.4V7.6"/><path d="M8 9.4C8 6.6 6 4.8 2.8 4.8 2.8 7.8 4.8 9.4 8 9.4Z"/><path d="M8 7.6c0-2.8 2-4.8 5.2-4.8 0 3-2 4.8-5.2 4.8Z"/></svg>`;
   const TASK_ICON = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="6.2"/><path d="m5.2 8.2 2 2 3.6-4"/></svg>`;
 
   // What the status bar says about a node's container. Two layers, and the
@@ -143,7 +144,38 @@
     return { width: width + 2 * PAD, height: Math.max(300, y - GROUP_GAP + PAD), pos, routes, bottom };
   }
 
-  let l = $derived(layout(graph));
+  // A migration is part of its store, not a step of its own: it runs
+  // whenever the store does, and whatever waits on the store waits on it.
+  // So it's drawn as a segment of the store's status bar rather than as a
+  // card. Its edges move to the store, and the implied ones (a dependent of
+  // the store waiting on the migration) go: the edge to the store says it.
+  //
+  // A seed stays a card, but it's a step only some journeys take and
+  // nothing waits on, so it can be hidden, edges and all.
+  function foldMigrations(g, showSeeds) {
+    const byId = Object.fromEntries(g.nodes.map((n) => [n.id, n]));
+    const storeOf = {}, migrationOf = {};
+    for (const n of g.nodes) {
+      if (n.migrates && byId[n.migrates]) {
+        storeOf[n.id] = n.migrates;
+        migrationOf[n.migrates] = n;
+      }
+    }
+    const hidden = new Set(showSeeds ? [] : g.nodes.filter((n) => n.seeds?.length).map((n) => n.id));
+    const seen = new Set(), edges = [];
+    for (const e of g.edges) {
+      if (e.implied || hidden.has(e.from) || hidden.has(e.to)) continue;
+      const from = storeOf[e.from] ?? e.from, to = storeOf[e.to] ?? e.to;
+      const key = `${from}|${to}`;
+      if (from === to || seen.has(key)) continue;
+      seen.add(key);
+      edges.push({ ...e, from, to });
+    }
+    return { nodes: g.nodes.filter((n) => !storeOf[n.id] && !hidden.has(n.id)), edges, migrationOf };
+  }
+
+  let shown = $derived(foldMigrations(graph, showSeeds));
+  let l = $derived(layout(shown));
 
   // An edge leaves the middle of its source's right side and enters the
   // middle of its target's left side; dagre's corner-clipped endpoints are
@@ -195,7 +227,7 @@
 
 <div class="graph-area" style="width:{l.width}px;height:{l.height}px">
   <svg width={l.width} height={l.height} style="position:absolute;top:0;left:0;overflow:visible">
-    {#each graph.edges as e}
+    {#each shown.edges as e}
       {@const d = edgePath(e)}
       {#if d}
         {@const inFlow = e.flows.includes(currentFlow)}
@@ -215,8 +247,9 @@
     {/each}
   </svg>
 
-  {#each graph.nodes as n}
+  {#each shown.nodes as n}
     {@const p = l.pos[n.id]}
+    {@const migration = shown.migrationOf[n.id]}
     {@const inFlow = n.flows.includes(currentFlow)}
     {@const dimmed = currentFlow && !inFlow}
     {@const live = runContainers?.[n.id]}
@@ -256,6 +289,7 @@
       class:in-flow={inFlow}
       class:dimmed={dimmed}
       class:debug-wait={live?.desired.debug_wait}
+      class:seed={n.seeds?.length > 0}
       style="left:{p.x}px;top:{p.y}px"
       onclick={() => onSelectNode(n)}
     >
@@ -267,12 +301,17 @@
             <span class="kind-icon service" title="git checkout">{@html REPO_ICON}</span>
           {:else if n.kind === 'backing'}
             <span class="kind-icon backing" title="backing dependency">{@html BACKING_ICON}</span>
+          {:else if n.seeds?.length}
+            <span class="kind-icon seed" title="seeds {n.seeds.join(', ')}: runs only when their data is new, and nothing waits on it">{@html SEED_ICON}</span>
           {:else if n.kind === 'task'}
             <span class="kind-icon task" title="task (runs once and exits)">{@html TASK_ICON}</span>
           {:else if n.kind === 'service'}
             <span class="kind-icon service" title="service">{@html SERVICE_ICON}</span>
           {/if}
           <span class="node-id">{n.label}</span>
+          {#if n.seeds?.length}
+            <span class="seed-of" title="the stores this seeds">seeds {n.seeds.map((id) => graph.nodes.find((m) => m.id === id)?.label ?? id).join(', ')}</span>
+          {/if}
           {#if recordingNodes?.[n.id]}
             <span class="rec-dot" title="Recording HTTP traffic. Open the node's Traffic tab to see it or stop."></span>
           {/if}
@@ -405,9 +444,25 @@
            is the footer, pushed to the bottom edge and bled past the card's
            own padding on three sides. -->
       {#if containerState}
-        <div class="status-bar state-{containerState}" title={STATE_TITLE[containerState] ?? `container: ${containerState}`}>
-          {containerState === 'none' ? 'absent' : containerState}
+        <div class="status-bar">
+          <div class="state state-{containerState}" title={STATE_TITLE[containerState] ?? `container: ${containerState}`}>
+            {containerState === 'none' ? 'absent' : containerState}
+          </div>
+          {#if migration}
+            {@const migState = containerStateOf(runContainers?.[migration.id])}
+            <!-- Its own button: the migration has logs and a Start of its
+                 own, and this is the only place it's drawn. -->
+            <button
+              class="state migration state-{migState}"
+              title="{migration.label} migrates {n.label}: it runs every time {n.label} starts, and whatever waits on {n.label} waits on it. {STATE_TITLE[migState] ?? `container: ${migState}`}"
+              onclick={(ev) => { ev.stopPropagation(); onSelectNode(migration); }}
+            >
+              migrate {migState === 'none' ? 'absent' : migState}
+            </button>
+          {/if}
         </div>
+      {:else if migration}
+        <div class="lane-line migration-line" title="{migration.label} migrates {n.label}">migrated by {migration.label}</div>
       {/if}
       {/if}
     </div>
@@ -427,6 +482,12 @@
   .node.in-flow { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .node.not-downloaded { border-style: dashed; opacity: 0.7; background: transparent; }
   .node.dimmed { opacity: 0.35; }
+  /* A seed is data, not a process: a tinted card with a stripe down its
+     left edge, so it doesn't read as one more service in the start order. */
+  .node.seed {
+    background: color-mix(in srgb, var(--success) 7%, var(--panel-2));
+    border-left: 4px solid color-mix(in srgb, var(--success) 60%, transparent);
+  }
   /* Outside the border, so it stacks with `in-flow`'s box-shadow. */
   .node.debug-wait { outline: 2px solid color-mix(in srgb, orange 55%, transparent); outline-offset: 1px; }
   /* The card's footer. Still in normal flow rather than absolutely pinned —
@@ -436,41 +497,50 @@
      content height; the negative margins bleed it past the card's own
      padding on the two sides and the bottom. */
   .status-bar {
-    margin: auto -14px -14px; height: 26px; flex: 0 0 auto;
-    display: flex; align-items: center; justify-content: center;
+    margin: auto -14px -14px; height: 26px; flex: 0 0 auto; display: flex;
+  }
+  .state {
+    flex: 1 1 0; display: flex; align-items: center; justify-content: center;
     font: 700 12px var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em;
   }
-  .status-bar.state-running { background: var(--success); color: #ffffff; }
-  .status-bar.state-stopped { background: var(--warning); color: #ffffff; }
+  /* A store's migration, a smaller second segment of its status bar. */
+  .state.migration {
+    flex: 0 0 auto; padding: 0 10px; border: 0; border-left: 1px solid var(--panel-2);
+    font-size: 10px; cursor: pointer;
+  }
+  .state.migration:hover { filter: brightness(1.1); }
+  .migration-line { margin-top: auto; }
+  .state.state-running { background: var(--success); color: #ffffff; }
+  .state.state-stopped { background: var(--warning); color: #ffffff; }
   /* Deliberately louder than `stopped`, and the same weight as a failed
      task: both mean "this will not fix itself and you have to do
      something". A stopped container is a state the user chose; this one
      nobody chose. */
-  .status-bar.state-crashed { background: var(--danger); color: #ffffff; }
+  .state.state-crashed { background: var(--danger); color: #ffffff; }
   /* As loud as `crashed`, striped: there is no container behind it at all. */
-  .status-bar.state-missing {
+  .state.state-missing {
     background: repeating-linear-gradient(135deg, var(--danger) 0 6px, color-mix(in srgb, var(--danger) 75%, black) 6px 12px);
     color: #ffffff;
   }
   /* Pulsing like an in-flight action, because that is what it is — Docker's
      own restart loop rather than one of fghj's, but equally "wait". */
-  .status-bar.state-restarting {
+  .state.state-restarting {
     background: var(--warning); color: #ffffff; animation: status-pulse 1s ease-in-out infinite;
   }
   /* Amber, not red: nobody saw it crash, and fghj is bringing it back. */
-  .status-bar.state-interrupted { background: var(--warning); color: #ffffff; }
-  .status-bar.state-unknown {
+  .state.state-interrupted { background: var(--warning); color: #ffffff; }
+  .state.state-unknown {
     background: repeating-linear-gradient(135deg, var(--line-strong) 0 6px, var(--panel-2) 6px 12px);
     color: var(--ink-faint);
   }
-  .status-bar.state-paused { background: var(--line-strong); color: var(--ink); }
-  .status-bar.state-finishing { background: var(--success-bg); color: var(--ink-faint); }
+  .state.state-paused { background: var(--line-strong); color: var(--ink); }
+  .state.state-finishing { background: var(--success-bg); color: var(--ink-faint); }
   /* A finished task is a success, but a quieter one than a running service:
      there is nothing there to reach, so it shouldn't read as "live". */
-  .status-bar.state-completed { background: var(--success-bg); color: var(--success); }
-  .status-bar.state-failed { background: var(--danger); color: #ffffff; }
-  .status-bar.state-none { background: var(--line-strong); color: var(--ink-faint); }
-  .status-bar.state-starting, .status-bar.state-stopping, .status-bar.state-removing {
+  .state.state-completed { background: var(--success-bg); color: var(--success); }
+  .state.state-failed { background: var(--danger); color: #ffffff; }
+  .state.state-none { background: var(--line-strong); color: var(--ink-faint); }
+  .state.state-starting, .state.state-stopping, .state.state-removing {
     background: var(--accent); color: #ffffff; animation: status-pulse 1s ease-in-out infinite;
   }
   @keyframes status-pulse { 50% { opacity: 0.55; } }
@@ -490,6 +560,11 @@
   .kind-icon.service { color: var(--accent); }
   .kind-icon.backing { color: var(--ink-faint); }
   .kind-icon.task { color: var(--ink-faint); }
+  .kind-icon.seed { color: var(--success); }
+  .seed-of {
+    font: 600 9px var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; color: var(--success);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  }
   /* Truncates rather than wrapping (the old `.node-domain` used
      `word-break: break-all`): a card's height is part of the graph layout,
      so a long `owner/name` must not be able to push the lanes down. */
