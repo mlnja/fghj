@@ -57,13 +57,14 @@ pub(crate) async fn get_node_logs_stream(
         Err(e) => return bad_request(e),
     };
 
-    let stream = docker::logs_follow(&state.docker, &container_name, false).map(|item| {
-        let event = match item {
-            Ok(chunk) => Event::default().data(chunk.to_string()),
-            Err(e) => Event::default().event("error").data(e.to_string()),
-        };
-        Ok::<Event, Infallible>(event)
-    });
+    let stream = docker::logs_follow(&state.docker, &container_name, false, docker::LogsFrom::Now)
+        .map(|item| {
+            let event = match item {
+                Ok(chunk) => Event::default().data(chunk.to_string()),
+                Err(e) => Event::default().event("error").data(e.to_string()),
+            };
+            Ok::<Event, Infallible>(event)
+        });
 
     Sse::new(stream)
         .keep_alive(KeepAlive::default())

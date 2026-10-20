@@ -41,7 +41,12 @@ impl Orchestrator {
 
     /// Aborts any previous capture for the node so two tasks never write under the
     /// same key.
-    pub(super) fn spawn_log_capture(&self, node_id: &str, container_name: &str) {
+    pub(super) fn spawn_log_capture(
+        &self,
+        node_id: &str,
+        container_name: &str,
+        from: crate::docker::LogsFrom,
+    ) {
         let handle = supervisor::supervise(
             format!("log capture[{node_id}]"),
             capture_container_logs(
@@ -49,6 +54,7 @@ impl Orchestrator {
                 self.docker.clone(),
                 node_id.to_string(),
                 container_name.to_string(),
+                from,
             ),
         );
         if let Some(old) = self

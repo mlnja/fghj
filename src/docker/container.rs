@@ -417,18 +417,31 @@ pub async fn logs_tail(docker: &Docker, name: &str, tail: usize) -> Result<Strin
     Ok(combined)
 }
 
+/// Where a followed stream starts: what's printed from now on, or everything
+/// since a moment, in whole seconds.
+#[derive(Debug, Clone, Copy)]
+pub enum LogsFrom {
+    Now,
+    /// `0` is the container's whole output.
+    Since(i32),
+}
+
 pub fn logs_follow(
     docker: &Docker,
     name: &str,
     timestamps: bool,
+    from: LogsFrom,
 ) -> impl Stream<Item = Result<bollard::container::LogOutput, bollard::errors::Error>> + use<> {
     let options = LogsOptionsBuilder::default()
         .follow(true)
         .stdout(true)
         .stderr(true)
-        .tail("0")
-        .timestamps(timestamps)
-        .build();
+        .timestamps(timestamps);
+    let options = match from {
+        LogsFrom::Now => options.tail("0"),
+        LogsFrom::Since(at) => options.since(at),
+    }
+    .build();
     docker.logs(name, Some(options))
 }
 

@@ -113,7 +113,9 @@ impl Orchestrator {
         }
         ev.ok("creating container").await;
 
-        self.spawn_log_capture(&node.id, &spec.container_name);
+        // From the start: a new container has nothing older to skip, and a task
+        // can print and exit before a stream from "now" is attached.
+        self.spawn_log_capture(&node.id, &spec.container_name, docker::LogsFrom::Since(0));
 
         // Prefer `primary`: the map sorts ports as strings ("10000" < "9000").
         let status_port = node
@@ -296,13 +298,17 @@ impl Orchestrator {
         ev.begin().await;
         ev.record("restarting container", "running", Some(why.to_string()))
             .await;
+        let restarted_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i32);
         if let Err(e) = docker::restart_container(&self.docker, name).await {
             ev.failed("restarting container", &e).await;
             return Err(e);
         }
         ev.ok("restarting container").await;
-        // The old log stream ended with the old process.
-        self.spawn_log_capture(&node.id, name);
+        // The old log stream ended with the old process. Not from the start:
+        // that output is already in the previous generation.
+        self.spawn_log_capture(&node.id, name, docker::LogsFrom::Since(restarted_at));
         if node.healthcheck.is_some() && wait_ready && !existing.desired.debug_wait {
             self.wait_healthy(&ev, name, budget).await;
         }
@@ -572,6 +578,49 @@ mod tests {
         assert!(message.contains("still running"), "{message}");
 
         fixture.cleanup("hangs.api").await;
+    }
+
+    /// A task can print and exit before a stream from "now" is attached; a
+    /// silent-looking migration was one that finished in 150ms.
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
+    async fn a_task_that_exits_at_once_still_has_its_output_captured() {
+        let fixture = TaskFixture::new().await;
+        let node = fixture.task(
+            "migrate.api",
+            &["sh", "-c", "echo applied 3; echo warn >&2"],
+        );
+        fixture.start(&node).await.expect("task should succeed");
+
+        let db = fixture.registry.db.clone();
+        let mut lines = Vec::new();
+        for _ in 0..50 {
+            let generations = db
+                .clone()
+                .list_log_generations("migrate.api".into())
+                .await
+                .unwrap();
+            if let Some(g) = generations.iter().max_by_key(|g| g.generation)
+                && g.line_count >= 2
+            {
+                lines = db
+                    .clone()
+                    .load_log_history("migrate.api".into(), g.generation, None, 10)
+                    .await
+                    .unwrap();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let text: Vec<_> = lines
+            .iter()
+            .map(|l| (l.stream.as_str(), l.line.as_str()))
+            .collect();
+
+        assert!(text.contains(&("stdout", "applied 3")), "{text:?}");
+        assert!(text.contains(&("stderr", "warn")), "{text:?}");
+
+        fixture.cleanup("migrate.api").await;
     }
 
     fn inspect(name: &str, format: &str) -> String {

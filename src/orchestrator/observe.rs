@@ -291,7 +291,16 @@ mod tests {
             ..Default::default()
         };
 
-        let observation = registry.observe(&env).await;
+        // Under load the listing can still say `running` just after `docker run`
+        // returned the exit code; the reconciler reads again, so does this.
+        let mut observation = registry.observe(&env).await;
+        for _ in 0..20 {
+            if observation.containers["task"].status != "running" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            observation = registry.observe(&env).await;
+        }
         let _ = std::process::Command::new("docker")
             .args(["rm", "-f", &name])
             .status();

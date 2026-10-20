@@ -24,6 +24,7 @@ pub(crate) async fn capture_container_logs(
     docker: Arc<bollard::Docker>,
     node_id: String,
     container_name: String,
+    from: docker::LogsFrom,
 ) {
     let generation = match db.clone().begin_log_generation(node_id.clone()).await {
         Ok(g) => g,
@@ -33,7 +34,7 @@ pub(crate) async fn capture_container_logs(
         }
     };
 
-    let mut stream = docker::logs_follow(&docker, &container_name, true);
+    let mut stream = docker::logs_follow(&docker, &container_name, true, from);
     let mut seq: i64 = 0;
     let mut buffer: Vec<LogLine> = Vec::new();
     let mut leftover_out = String::new();
