@@ -103,8 +103,8 @@ exited cleanly — a recreated store may hold anything.
 
 A seed is a step in a journey, so it starts only when a flow lists it.
 The graph draws it as a card of its own, tinted and striped so it doesn't
-read as a service, and hides seeds unless the **seeds** checkbox above the
-graph is ticked.
+read as a service, and hides seeds unless the **Seeds** toggle next to **Switch to flow** is
+on.
 
 ## What "already seeded" means
 

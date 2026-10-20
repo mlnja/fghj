@@ -27,6 +27,9 @@
     currentWorkspaceId,
     onOpenWorkspaces,
     onSelectWorkspace,
+    // `null` when the workspace has no seeds, so there's nothing to show.
+    showSeeds = null,
+    onToggleSeeds,
   } = $props();
   let menuOpen = $state(false);
   let wsMenuOpen = $state(false);
@@ -275,6 +278,19 @@
     >
       {#if switchingFlow || envBusy}<span class="spinner"></span> switching…{:else}Switch to flow{/if}
     </button>
+    {#if showSeeds != null}
+      <button
+        class="pull-btn seeds-btn"
+        class:on={showSeeds}
+        aria-pressed={showSeeds}
+        onclick={onToggleSeeds}
+        title={showSeeds
+          ? 'hide seeds: they fill a store with data once, and nothing waits on them'
+          : "show seeds: they fill a store with data once, and nothing waits on them, so they're hidden by default"}
+      >
+        Seeds
+      </button>
+    {/if}
   {/if}
 </div>
 
@@ -325,6 +341,8 @@
     font: 700 11px var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink); background: none;
   }
   .pull-btn:disabled { opacity: 0.6; cursor: default; }
+  .seeds-btn { color: var(--ink-faint); }
+  .seeds-btn.on { color: var(--success); border-color: var(--success); background: var(--success-bg); }
   .spinner {
     display: inline-block; width: 9px; height: 9px; border-radius: 50%;
     border: 2px solid var(--line-strong); border-top-color: var(--ink);
