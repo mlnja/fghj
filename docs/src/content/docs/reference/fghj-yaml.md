@@ -222,6 +222,17 @@ volumes:
     read_only: true
 ```
 
+`~` and `~/…` are your home directory: the home of whoever owns the
+workspace, since `fghjd` runs as root. The same goes for `env_file` and
+`build.secrets[].file`.
+
+```yaml
+volumes:
+  - host: ~/.aws
+    container: /root/.aws
+    read_only: true
+```
+
 | Field | Type | Description |
 |---|---|---|
 | `host` | string | A host path. Relative paths resolve against this repo's checkout root; absolute or `..`-escaping paths pass through unchanged. |

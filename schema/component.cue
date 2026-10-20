@@ -76,8 +76,9 @@ package fghj
 	read_only: bool | *false
 } & ({
 	// Bind mount: a host path, resolved against the declaring repo's
-	// checkout root if relative. Not sandboxed — an absolute or
-	// `..`-escaping path passes straight through to Docker, same as Compose.
+	// checkout root if relative; `~/…` is the workspace owner's home. Not
+	// sandboxed — an absolute or `..`-escaping path passes straight through
+	// to Docker, same as Compose.
 	host: string
 } | {
 	// Named volume: a bare label, like `#Port.name` — the real Docker

@@ -94,7 +94,8 @@ impl Orchestrator {
             });
             ev.record("building image", "running", Some(what.clone()))
                 .await;
-            let secrets = resolve_build_secrets(repo_root, &build.secrets)?;
+            let home = owner.as_ref().map(|o| o.home.as_str());
+            let secrets = resolve_build_secrets(repo_root, home, &build.secrets)?;
             // Re-derived on every build so a restarted agent is picked up.
             let ssh_auth_sock = if build.ssh {
                 Some(owner.as_ref().and_then(|o| o.live_ssh_auth_sock()).context(
@@ -168,6 +169,10 @@ impl Orchestrator {
 
         // Relative `host` / `env_file` paths resolve against the declaring repo's root.
         let repo_root = node.local_path.as_ref().map(|p| self.workspace.join(p));
+        // `~` is the workspace owner's home: `fghjd` runs as root.
+        let home = crate::persistence::workspace_owner(self.db.clone(), &self.workspace)
+            .await
+            .map(|o| o.home);
 
         let image = match (&node.build, &node.image) {
             (Some(build), _) => {
@@ -242,14 +247,13 @@ impl Orchestrator {
                     container,
                     read_only,
                 } => {
-                    let host_path = if Path::new(host).is_absolute() {
-                        PathBuf::from(host)
-                    } else {
+                    let host_path = host_path(
+                        host,
                         repo_root
-                            .as_ref()
-                            .expect("node with volumes has a resolved checkout root")
-                            .join(host)
-                    };
+                            .as_deref()
+                            .expect("node with volumes has a resolved checkout root"),
+                        home.as_deref(),
+                    )?;
                     // Resolve symlinks (macOS `/var`): OrbStack rejects file binds through one.
                     let host_path = std::fs::canonicalize(&host_path).unwrap_or(host_path);
                     binds.push(format!(
@@ -281,14 +285,13 @@ impl Orchestrator {
         // `env_file` first, then `environment` on top; Docker keeps the last value.
         let mut env: Vec<String> = Vec::new();
         for path in &node.env_file {
-            let file_path = if Path::new(path).is_absolute() {
-                PathBuf::from(path)
-            } else {
+            let file_path = host_path(
+                path,
                 repo_root
-                    .as_ref()
-                    .expect("node with env_file has a resolved checkout root")
-                    .join(path)
-            };
+                    .as_deref()
+                    .expect("node with env_file has a resolved checkout root"),
+                home.as_deref(),
+            )?;
             let contents = std::fs::read_to_string(&file_path)
                 .with_context(|| format!("failed to read env_file {}", file_path.display()))?;
             env.extend(parse_env_file(&contents));
@@ -311,15 +314,33 @@ impl Orchestrator {
     }
 }
 
+/// A path on the host as written in `.fghj.yaml`: `~` or `~/…` is under
+/// `home`, a relative one is under the repo, an absolute one is itself.
+fn host_path(raw: &str, repo_root: &Path, home: Option<&str>) -> Result<PathBuf> {
+    let rest = match raw.strip_prefix('~') {
+        Some("") => Some(""),
+        Some(rest) => rest.strip_prefix('/'),
+        None => None,
+    };
+    let Some(rest) = rest else {
+        return Ok(repo_root.join(raw));
+    };
+    let Some(home) = home else {
+        bail!("{raw} is under a home directory, but this workspace's owner has none");
+    };
+    Ok(Path::new(home).join(rest))
+}
+
 /// A missing secret file is an error here, not a confusing 401 inside the build.
 fn resolve_build_secrets(
     repo_root: &Path,
+    home: Option<&str>,
     secrets: &[crate::resolver::NodeBuildSecret],
 ) -> Result<Vec<(String, std::path::PathBuf)>> {
     secrets
         .iter()
         .map(|secret| {
-            let path = repo_root.join(&secret.file);
+            let path = host_path(&secret.file, repo_root, home)?;
             if !path.is_file() {
                 bail!(
                     "build secret {} points at {}, which is not a file",
@@ -378,7 +399,8 @@ mod tests {
         std::fs::create_dir_all(repo.path().join("ci")).unwrap();
         std::fs::write(repo.path().join("ci/npmrc"), "token").unwrap();
 
-        let resolved = resolve_build_secrets(repo.path(), &[secret("npmrc", "ci/npmrc")]).unwrap();
+        let resolved =
+            resolve_build_secrets(repo.path(), None, &[secret("npmrc", "ci/npmrc")]).unwrap();
 
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].0, "npmrc");
@@ -389,7 +411,7 @@ mod tests {
     fn a_missing_secret_file_fails_the_build_up_front() {
         let repo = tempfile::tempdir().unwrap();
 
-        let err = resolve_build_secrets(repo.path(), &[secret("npmrc", "ci/npmrc")])
+        let err = resolve_build_secrets(repo.path(), None, &[secret("npmrc", "ci/npmrc")])
             .expect_err("a secret pointing at nothing must not build");
 
         let message = format!("{err:#}");
@@ -402,7 +424,75 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(repo.path().join("ci")).unwrap();
 
-        assert!(resolve_build_secrets(repo.path(), &[secret("npmrc", "ci")]).is_err());
+        assert!(resolve_build_secrets(repo.path(), None, &[secret("npmrc", "ci")]).is_err());
+    }
+
+    #[test]
+    fn a_tilde_path_is_under_the_owners_home_and_a_relative_one_under_the_repo() {
+        let repo = Path::new("/ws/backend");
+        let home = Some("/Users/me");
+        let at = |raw| host_path(raw, repo, home).unwrap();
+
+        assert_eq!(at("~/.aws"), PathBuf::from("/Users/me/.aws"));
+        assert_eq!(at("~"), PathBuf::from("/Users/me"));
+        assert_eq!(at("./db/seeds"), PathBuf::from("/ws/backend/./db/seeds"));
+        assert_eq!(at("db/~/x"), PathBuf::from("/ws/backend/db/~/x"));
+        assert_eq!(at("/etc/hosts"), PathBuf::from("/etc/hosts"));
+        assert!(host_path("~/.aws", repo, None).is_err());
+    }
+
+    #[test]
+    fn a_secret_file_under_home_is_read_from_the_owners_home() {
+        let repo = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(".npmrc"), "token").unwrap();
+
+        let resolved = resolve_build_secrets(
+            repo.path(),
+            home.path().to_str(),
+            &[secret("npmrc", "~/.npmrc")],
+        )
+        .unwrap();
+
+        assert_eq!(resolved[0].1, home.path().join(".npmrc"));
+    }
+
+    /// Joined to the repo, `~/.aws` made Docker create an empty `~` folder
+    /// inside the checkout and mount that.
+    #[tokio::test]
+    async fn a_bind_mount_from_home_mounts_the_owners_home_not_the_repo() {
+        let mut node = debuggable(None);
+        node.local_path = Some("backend".to_string());
+        node.volumes.push(crate::resolver::VolumeMount::Bind {
+            host: "~/.aws".to_string(),
+            container: "/root/.aws".to_string(),
+            read_only: true,
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(WorkspaceDb::open(tmp.path()).unwrap());
+        // What `fghj wire` records: the CLI's own `$HOME`, not root's.
+        db.clone()
+            .set_owner(crate::persistence::WorkspaceOwner {
+                uid: 1000,
+                gid: 1000,
+                home: "/home/dev".to_string(),
+                ssh_auth_sock: None,
+            })
+            .await
+            .unwrap();
+        let registry = Orchestrator::new(
+            tmp.path().to_path_buf(),
+            db,
+            Arc::new(crate::docker::undialled_client()),
+        );
+        let graph = test_graph(vec![node.clone()], Vec::new());
+
+        let spec = registry
+            .resolve_node_spec(&graph, &node, false)
+            .await
+            .unwrap();
+
+        assert_eq!(spec.binds[1], "/home/dev/.aws:/root/.aws:ro");
     }
 
     fn registry() -> (Orchestrator, tempfile::TempDir) {
