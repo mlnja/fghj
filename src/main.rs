@@ -34,7 +34,9 @@ enum Commands {
     },
     /// Resolve the full dependency universe (all flows) and print it as JSON
     Graph {
-        /// Git URL of the entry repo to clone in, if not already in the workspace
+        /// Git URL of the entry repo to clone in, if not already in the workspace;
+        /// or a repo on disk — its `.fghj.yaml` or its folder — whose parent is
+        /// the workspace
         entry: String,
         /// Workspace root holding sibling repo checkouts (default: the wired
         /// workspace the current directory is inside, else the current directory)
@@ -43,7 +45,9 @@ enum Commands {
     },
     /// Wire a workspace into the running fghjd daemon so it shows up in the UI
     Wire {
-        /// Git URL of the entry repo to clone in, if not already in the workspace
+        /// Git URL of the entry repo to clone in, if not already in the workspace;
+        /// or a repo on disk — its `.fghj.yaml` or its folder — whose parent is
+        /// the workspace
         entry: String,
         /// Workspace root holding sibling repo checkouts (default: the wired
         /// workspace the current directory is inside, else the current directory)
@@ -178,8 +182,75 @@ fn derive_workspace(cwd: &Path) -> Option<PathBuf> {
     fghj::enclosing_workspace(cwd, &candidates)
 }
 
+/// `None` for the entry when it's a repo on disk: there is nothing to clone,
+/// and its parent is the workspace.
+fn entry_and_workspace(
+    entry: &str,
+    workspace: Option<PathBuf>,
+) -> Result<(Option<String>, PathBuf)> {
+    let cwd = std::env::current_dir()?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let Some(local) = local_workspace(entry, &cwd, home.as_deref())? else {
+        return Ok((Some(entry.to_string()), workspace_root(workspace)?));
+    };
+    if let Some(flag) = workspace {
+        let flag = workspace_root(Some(flag))?;
+        if flag != local {
+            bail!(
+                "{entry} is a repo in {}, but --workspace names {}; drop --workspace, \
+                 or wire a repo inside it",
+                local.display(),
+                flag.display()
+            );
+        }
+    }
+    Ok((None, local))
+}
+
+/// `None` when `entry` isn't on disk, so it's a git URL. A workspace's repos
+/// are the folders right under it with a `.fghj.yaml`, so that's what this
+/// accepts. Home and `/` are refused: every folder in them would be a repo.
+fn local_workspace(entry: &str, cwd: &Path, home: Option<&Path>) -> Result<Option<PathBuf>> {
+    let path = cwd.join(entry);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let path = std::fs::canonicalize(&path)?;
+    let repo = if path.is_dir() {
+        if !path.join(".fghj.yaml").is_file() {
+            bail!("{} has no .fghj.yaml", path.display());
+        }
+        path
+    } else if path.file_name().is_some_and(|n| n == ".fghj.yaml") {
+        path.parent().map(Path::to_path_buf).unwrap_or(path)
+    } else {
+        bail!(
+            "{} isn't a .fghj.yaml; name the repo's .fghj.yaml or its folder",
+            path.display()
+        );
+    };
+    let workspace = match repo.parent() {
+        Some(parent) if parent.parent().is_some() => parent.to_path_buf(),
+        _ => bail!(
+            "{} is right under /, so the workspace would be all of /; \
+             move it into a folder of its own",
+            repo.display()
+        ),
+    };
+    let home = home.map(|h| std::fs::canonicalize(h).unwrap_or_else(|_| h.to_path_buf()));
+    if home.as_deref() == Some(workspace.as_path()) {
+        bail!(
+            "{} is right in your home folder, so the workspace would be all of it; \
+             move it into a folder of its own",
+            repo.display()
+        );
+    }
+    Ok(Some(workspace))
+}
+
 fn graph(entry: String, workspace: Option<PathBuf>) -> Result<()> {
-    let workspace = fghj::resolve_workspace(Some(entry), Some(workspace_root(workspace)?), None)?;
+    let (entry, workspace) = entry_and_workspace(&entry, workspace)?;
+    let workspace = fghj::resolve_workspace(entry, Some(workspace), None)?;
     let g = fghj::resolver::resolve_universe(&workspace)?;
     println!("{}", serde_json::to_string_pretty(&g)?);
     Ok(())
@@ -234,7 +305,7 @@ fn wire(entry: String, workspace: Option<PathBuf>) -> Result<()> {
         );
     }
 
-    let absolute_workspace = workspace_root(workspace)?;
+    let (entry, absolute_workspace) = entry_and_workspace(&entry, workspace)?;
 
     // Sent so root `fghjd` can clone as this user.
     let owner = std::env::var("HOME").ok().map(|home| {
@@ -720,5 +791,67 @@ mod tests {
         for no in ["", "\n", "n", "no", "ye", "yep", "sure", "q", "-y"] {
             assert!(!confirmed(no), "{no:?} must not confirm");
         }
+    }
+
+    /// `<tmp>/home/ws/app/.fghj.yaml`, canonical, so `/var` and `/private/var`
+    /// compare equal.
+    fn workspace_with_a_repo() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(root.join("home/ws/app")).unwrap();
+        std::fs::write(root.join("home/ws/app/.fghj.yaml"), "version: 1\n").unwrap();
+        (tmp, root)
+    }
+
+    #[test]
+    fn a_repos_fghj_yaml_or_folder_wires_its_parent() {
+        let (_tmp, root) = workspace_with_a_repo();
+        let app = root.join("home/ws/app");
+        let home = root.join("home");
+        let ws = Some(root.join("home/ws"));
+
+        assert_eq!(
+            local_workspace(".fghj.yaml", &app, Some(&home)).unwrap(),
+            ws
+        );
+        assert_eq!(local_workspace(".", &app, Some(&home)).unwrap(), ws);
+        assert_eq!(
+            local_workspace("app", &app.join(".."), Some(&home)).unwrap(),
+            ws
+        );
+    }
+
+    #[test]
+    fn an_entry_not_on_disk_is_a_git_url() {
+        let (_tmp, root) = workspace_with_a_repo();
+        for url in [
+            "git@github.com:acme/app.git",
+            "https://github.com/acme/app.git",
+        ] {
+            assert_eq!(local_workspace(url, &root, None).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn a_folder_without_fghj_yaml_or_another_file_is_refused() {
+        let (_tmp, root) = workspace_with_a_repo();
+        std::fs::write(root.join("home/ws/app/README.md"), "").unwrap();
+
+        let no_yaml = local_workspace("ws", &root.join("home"), None).unwrap_err();
+        assert!(
+            no_yaml.to_string().contains("has no .fghj.yaml"),
+            "{no_yaml}"
+        );
+        let other = local_workspace("README.md", &root.join("home/ws/app"), None).unwrap_err();
+        assert!(other.to_string().contains("isn't a .fghj.yaml"), "{other}");
+    }
+
+    #[test]
+    fn a_repo_right_in_home_is_refused() {
+        let (_tmp, root) = workspace_with_a_repo();
+        let home = root.join("home/ws");
+
+        let err = local_workspace(".", &root.join("home/ws/app"), Some(&home)).unwrap_err();
+        assert!(err.to_string().contains("home folder"), "{err}");
     }
 }

@@ -14,8 +14,27 @@ the web UI and can have runs started against it.
 
 | Argument | Description |
 |---|---|
-| `entry` | Git URL of the entry repo. Cloned into the workspace if it isn't already checked out there. |
+| `entry` | Git URL of the entry repo, cloned into the workspace if it isn't already checked out there. Or [a repo already on disk](#a-repo-already-on-disk) — its `.fghj.yaml` or its folder — whose parent is the workspace. |
 | `--workspace <path>` | Workspace root directory holding sibling repo checkouts. Defaults to [the wired workspace you're standing in](#the-workspace-is-derived-from-where-you-are), falling back to the current directory. |
+
+
+## A repo already on disk
+
+A repo you already have doesn't need a URL. Name its `.fghj.yaml`, or its
+folder, and the folder it sits in is the workspace:
+
+```bash
+cd ~/work/shop/api
+fghj wire .fghj.yaml      # the workspace is ~/work/shop
+fghj wire .               # the same
+```
+
+An entry that exists on disk is a repo; anything else is a git URL. A
+workspace's repos are the folders right under it with a `.fghj.yaml`, so
+the file must be at the repo's root, and every sibling folder with one
+joins the workspace too. A repo right in your home folder or right under `/`
+is refused, since the workspace would be all of it. `--workspace` may still
+be given, but it has to be that parent.
 
 
 ## The workspace is derived from where you are
