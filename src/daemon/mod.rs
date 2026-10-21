@@ -25,7 +25,7 @@ pub fn socket_path() -> PathBuf {
 }
 
 /// Durable, or every restart would need a fresh CA approved in Keychain Access.
-pub(crate) fn ca_dir() -> PathBuf {
+pub fn ca_dir() -> PathBuf {
     persistence::fghjd_root().join("ca")
 }
 

@@ -61,21 +61,19 @@ pub(super) fn install_trust(ca_cert_path: &Path) -> Result<()> {
         .status()
         .context("failed to run `security add-trusted-cert`")?;
     if !status.success() {
-        // A launchd system daemon has no session to prompt in, so this can't succeed
-        // there; hand over the command to run from a terminal instead of crash-looping.
+        // A launchd system daemon has no session to prompt in, so under
+        // `brew services` this always fails; the CLI, in a terminal, can.
         anyhow::bail!(
             "`security add-trusted-cert` failed for {cert}\n\
-             If this says the authorization was denied because no user interaction was \
-             possible, fghjd is running without a session to prompt in (a launchd \
-             LaunchDaemon, `brew services`, ssh). Install the trust once from a terminal:\n\
+             macOS asks for a password before trusting a root, and only a process in \
+             your login session can ask: fghjd under `brew services` or ssh can't. \
+             From a terminal, run `fghj daemon restart`, or:\n\
              \n\
-             \x20   sudo security add-trusted-cert -d -r trustRoot -k {keychain} {cert}\n\
-             \n\
-             then start fghjd again.",
+             \x20   security add-trusted-cert -d -r trustRoot -k {keychain} {cert}",
             cert = ca_cert_path.display(),
             keychain = SYSTEM_KEYCHAIN,
         );
     }
-    println!("fghjd: installed the fghj local CA into the System trust store");
+    println!("installed the fghj local CA into the System trust store");
     Ok(())
 }

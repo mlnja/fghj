@@ -349,7 +349,22 @@ fn daemon_start() -> Result<()> {
         "fghjd is active — serving 80/443 on {} and answering *.fghj.internal DNS",
         fghj::web::proxy::PROXY_IP
     );
+    trust_ca();
     Ok(())
+}
+
+/// Here and not only in fghjd: macOS asks for a password before trusting a
+/// root, and fghjd under `brew services` has no session to ask in. This runs in
+/// a terminal, as you. A failure doesn't fail the start: HTTP still works.
+fn trust_ca() {
+    let cert = fghj::web::ca::ca_cert_path(&fghj::daemon::ca_dir());
+    if !cert.exists() || fghj::web::trust::is_trusted(&cert) != Some(false) {
+        return;
+    }
+    println!("fghj's root CA isn't trusted yet — macOS will ask for your password to trust it");
+    if let Err(e) = fghj::web::trust::install(&cert) {
+        eprintln!("{e:#}");
+    }
 }
 
 fn daemon_stop() -> Result<()> {

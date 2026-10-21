@@ -68,9 +68,18 @@ live Docker containers and on-disk workspace metadata on every tick (see
 crash. It also clears the `idle_requested` flag described above, so a
 later crash/reboot restart comes back active again.
 
+On macOS it then checks that the system trusts fghj's root CA, and if not,
+asks macOS to trust it, which shows a password dialog. `fghjd` tries this on
+every start too, but under `brew services` it has no login session to show a
+dialog in, so macOS refuses it. `start` runs in your terminal, so it can.
+Cancelling the dialog doesn't fail the start: HTTPS shows certificate
+warnings until the CA is trusted.
+
 ## `fghj daemon restart`
 
-Equivalent to `stop` followed by `start`.
+Equivalent to `stop` followed by `start`, including the CA trust check.
+It doesn't restart the `fghjd` process: that's the service manager's job
+(`sudo brew services restart fghj`).
 
 ## `fghj daemon status`
 

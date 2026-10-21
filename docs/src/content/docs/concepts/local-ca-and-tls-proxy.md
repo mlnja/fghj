@@ -125,18 +125,15 @@ Services prompt, and **running as root does not bypass it** — that gate is
 about user interaction, not file permissions. A launchd *system* daemon has
 no session to show a prompt in, so `fghjd` started by `brew services` fails
 with `SecTrustSettingsSetTrustSettings: The authorization was denied since
-no user interaction was possible`, exits, and — with `KeepAlive` set — is
-restarted into the same failure indefinitely. `fghj doctor` then reports
-only that the daemon isn't running.
+no user interaction was possible`. It logs that and carries on serving,
+and `fghj doctor` reports the CA as untrusted.
 
-Running `sudo fghjd` once in your own terminal gives it a session to prompt
-in. After that the trust check at the top of every start is a no-op, so the
-service manager can take over again. If you'd rather not run the daemon in
-the foreground at all, install the trust directly — it's the same command
-`fghjd` runs:
+So `fghj daemon start` and `fghj daemon restart`, which run in your
+terminal, do the same check and ask for the password there. After that the
+check at the top of every start is a no-op. The command they run is:
 
 ```sh
-sudo security add-trusted-cert -d -r trustRoot \
+security add-trusted-cert -d -r trustRoot \
   -k /Library/Keychains/System.keychain /var/lib/fghjd/ca/ca-cert.pem
 ```
 :::

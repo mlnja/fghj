@@ -160,9 +160,11 @@ browser would instead of reading the file.
 
 **The browser shows a certificate warning.** The local CA isn't trusted —
 doctor's `root CA trusted by the system` check says so directly.
-`fghjd` verifies and re-installs its own CA into the system keychain on every
-start, so a restart usually fixes it. It only ever writes when trust is
-genuinely absent, which is why it can do that check every time.
+Run `fghj daemon restart` from a terminal: it trusts the CA, after a macOS
+password dialog. `fghjd` tries the same on every start, but under
+`brew services` macOS refuses it, because there's nobody to show the dialog
+to. Both only ever write when trust is genuinely absent, which is why they
+can check every time.
 
 **A name resolves but you get fghj's 404 page.** DNS and TLS both worked and
 there's no route registered for that name — so the node isn't running, or

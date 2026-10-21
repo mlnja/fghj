@@ -329,8 +329,8 @@ fn ca_trust_check(cert: &Path, is_trusted: impl FnOnce(&Path) -> Option<bool>) -
             name,
             title,
             format!("{} is not trusted as a root", cert.display()),
-            "restart fghjd — it re-installs trust on start, which may raise an OS \
-             authorization prompt you'll need to approve",
+            "run `fghj daemon restart` from a terminal — it asks macOS to trust the \
+             CA, which shows a password dialog",
         ),
     }
 }
@@ -751,7 +751,7 @@ mod tests {
         assert_eq!(ca_trust_check(&cert, |_| Some(true)).verdict, Verdict::Pass);
         let untrusted = ca_trust_check(&cert, |_| Some(false));
         assert_eq!(untrusted.verdict, Verdict::Fail);
-        assert!(untrusted.hint.unwrap().contains("restart fghjd"));
+        assert!(untrusted.hint.unwrap().contains("fghj daemon restart"));
     }
 
     #[tokio::test]
