@@ -92,6 +92,25 @@
   }
   load();
 
+  // A poll skips its turn while its last request is still out. Otherwise
+  // requests slower than the interval pile up, and fghjd works on every one.
+  // Called directly, after an action, they always fetch.
+  function polled(fn) {
+    let inFlight = false;
+    return async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        await fn();
+      } finally {
+        inFlight = false;
+      }
+    };
+  }
+  const pollLoad = polled(load);
+  const pollEnv = polled(loadEnv);
+  const pollRepos = polled(loadRepos);
+
   async function loadEnv() {
     try {
       const [envRes, recRes] = await Promise.all([
@@ -411,13 +430,13 @@
   $effect(() => {
     if (activeTab === 'containers') {
       loadEnv();
-      envPoll = setInterval(loadEnv, 1000);
+      envPoll = setInterval(pollEnv, 1000);
       return () => clearInterval(envPoll);
     }
     // Slower: here it only feeds the stale-container mark.
     if (activeTab === 'repos') {
       loadEnv();
-      envPoll = setInterval(loadEnv, 5000);
+      envPoll = setInterval(pollEnv, 5000);
       return () => clearInterval(envPoll);
     }
   });
@@ -426,7 +445,7 @@
   $effect(() => {
     if (activeTab !== 'repos' || !currentWorkspaceId) return;
     loadRepos();
-    const id = setInterval(loadRepos, 10000);
+    const id = setInterval(pollRepos, 10000);
     return () => clearInterval(id);
   });
 
@@ -440,7 +459,7 @@
   // Faster while fghjd is unreachable, so the page comes back about as soon
   // as fghjd does after a restart.
   $effect(() => {
-    const id = setInterval(load, backendDown ? 1000 : 3000);
+    const id = setInterval(pollLoad, backendDown ? 1000 : 3000);
     return () => clearInterval(id);
   });
 

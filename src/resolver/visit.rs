@@ -9,7 +9,7 @@ use super::config::{
     ComponentConfig, default_restart, default_run_policy, default_stop_grace_period,
 };
 use super::dependency::{Condition, Target};
-use super::git::{git_head_sha, git_remote_and_branch, git_status_dirty};
+use super::git::RepoFacts;
 use super::graph::{BuildSource, Edge, Node, NodeBuild, NodeBuildSecret};
 use super::repo_url::{normalize_repo_url, repo_name_from_url};
 use super::warning::Warning;
@@ -19,6 +19,8 @@ pub struct ResolveCtx<'a> {
     pub(crate) scanned: &'a BTreeMap<String, ComponentConfig>,
     /// Keyed by the real git remote, not the folder name.
     pub(crate) repo_index: HashMap<String, String>,
+    /// Read once per repo, by `local_path`.
+    pub(crate) facts: HashMap<String, RepoFacts>,
     /// Shared, so two repos including the same missing one get one stub.
     pub(crate) stub_repo_ids: HashMap<String, String>,
     pub(crate) includes: BTreeMap<String, BTreeMap<String, String>>,
@@ -41,11 +43,13 @@ impl<'a> ResolveCtx<'a> {
         workspace: &'a Path,
         scanned: &'a BTreeMap<String, ComponentConfig>,
         repo_index: HashMap<String, String>,
+        facts: HashMap<String, RepoFacts>,
     ) -> Self {
         ResolveCtx {
             workspace,
             scanned,
             repo_index,
+            facts,
             stub_repo_ids: HashMap::new(),
             includes: BTreeMap::new(),
             nodes: HashMap::new(),
@@ -67,10 +71,12 @@ impl<'a> ResolveCtx<'a> {
                 "'{local_path}' declares no services"
             )));
         }
-        let dir = self.workspace.join(local_path);
-        let (repo, branch) = git_remote_and_branch(&dir);
-        let dirty = git_status_dirty(&dir);
-        let head = git_head_sha(&dir);
+        let RepoFacts {
+            repo,
+            branch,
+            head,
+            dirty,
+        } = self.facts.get(local_path).cloned().unwrap_or_default();
 
         for (name, service) in &component.services {
             let id = node_id(name, local_path);

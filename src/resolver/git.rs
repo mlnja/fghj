@@ -9,6 +9,9 @@ use std::process::Command;
 fn git_in(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(dir);
+    // Several reads of one repo at once otherwise race for `index.lock` to
+    // refresh the index, and each loser rehashes the worktree instead.
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
 
     if unsafe { libc::geteuid() } != 0 {
         return cmd;
@@ -60,6 +63,43 @@ pub fn git_head_sha(dir: &Path) -> Option<String> {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|sha| !sha.is_empty())
+}
+
+/// What the graph reads of one checkout.
+#[derive(Debug, Default, Clone)]
+pub struct RepoFacts {
+    pub repo: Option<String>,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub dirty: bool,
+}
+
+/// One read per repo per resolve, the repos in parallel: it's four git calls
+/// each, and a workspace has a dozen repos.
+pub fn repo_facts<'a>(
+    dirs: impl IntoIterator<Item = (&'a str, std::path::PathBuf)>,
+) -> std::collections::HashMap<String, RepoFacts> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = dirs
+            .into_iter()
+            .map(|(local_path, dir)| {
+                let handle = scope.spawn(move || {
+                    let (repo, branch) = git_remote_and_branch(&dir);
+                    RepoFacts {
+                        repo,
+                        branch,
+                        head: git_head_sha(&dir),
+                        dirty: git_status_dirty(&dir),
+                    }
+                });
+                (local_path.to_string(), handle)
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|(local_path, handle)| (local_path, handle.join().unwrap_or_default()))
+            .collect()
+    })
 }
 
 /// Unreadable status counts as dirty.
