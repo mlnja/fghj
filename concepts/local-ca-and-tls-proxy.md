@@ -48,8 +48,10 @@ crash-restart loop would re-prompt for a password on every single restart.
 The check-first design doubles as a self-healing path: if trust is ever
 missing for any reason (first-ever run, or a user manually revoking it via
 Keychain Access while the persisted CA files remain on disk), the very next
-`fghjd` start notices and re-installs it — prompting exactly once, only
-when trust is actually absent.
+start notices and re-installs it — prompting exactly once, only when trust
+is actually absent. Under `brew services` the start that can prompt is the
+CLI's: `fghj daemon start`/`restart` (`trust_ca` in `src/main.rs`) run the
+same check in your terminal, as you, after activating the daemon.
 
 ## Two CAs: the root signs one certificate, and it isn't a leaf
 
@@ -115,16 +117,18 @@ machine depends on it, so the cost of rotating is about as low as a root
 rotation ever gets.
 
 One trap, found the hard way by following an earlier version of these
-instructions: the restart has to happen somewhere that can prompt.
+instructions: the trust has to be set somewhere that can prompt.
 `trust::install` needs Authorization Services, which a launchd *system*
 daemon has no session for, so a `brew services restart` after deleting the
 old root fails with "the authorization was denied since no user interaction
-was possible", exits, and is restarted by `KeepAlive` into the same failure
-forever — while `fghj doctor` reports only "fghjd isn't running", pointing
-nowhere near the cause. `sudo fghjd` once in a terminal is enough; the
-check-first design makes every later start a no-op. The bail message now
-carries the one-line `security add-trusted-cert` invocation for whoever hits
-it anyway, and `trust::install` was moved to *after* the `sidecar-ca`
+was possible". It used to exit on that, and `KeepAlive` restarted it into
+the same failure forever, while `fghj doctor` reported only "fghjd isn't
+running", pointing nowhere near the cause. Now `fghjd` logs it and carries
+on serving (HTTP works; HTTPS warns), `fghj doctor` reports the CA as
+untrusted and says to run `fghj daemon restart`, and that command trusts it
+from the terminal. The check-first design makes every later start a no-op.
+The error message carries the one-line `security add-trusted-cert`
+invocation for whoever hits it anyway, and `trust::install` was moved to *after* the `sidecar-ca`
 scrub in `run_control_api` for the same reason: trust install is the one CA
 step that can fail for reasons outside fghj's control, and it was preventing
 a machine that could not prompt from ever reaching the cleanup that removes

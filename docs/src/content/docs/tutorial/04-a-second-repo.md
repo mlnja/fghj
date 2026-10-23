@@ -25,7 +25,6 @@ services:
     # ...as before
     depends_on:
       db: {condition: service_healthy}
-      migrate: {condition: service_completed_successfully}
       catalog: {}
 ```
 
@@ -227,13 +226,14 @@ cd ~/code/shop
 fghj graph https://github.com/you/storefront.git
 ```
 
-## Five nodes
+## Six nodes
 
 ```
 service   id=api.catalog         domain=api.catalog.shop.fghj.internal
 backing   id=cache.catalog       domain=cache.catalog.shop.fghj.internal
 backing   id=db.storefront       domain=db.storefront.shop.fghj.internal
 task      id=migrate.storefront  domain=migrate.storefront.shop.fghj.internal
+task      id=seed.storefront     domain=seed.storefront.shop.fghj.internal
 service   id=web.storefront      domain=web.storefront.shop.fghj.internal
 ```
 
@@ -241,6 +241,8 @@ service   id=web.storefront      domain=web.storefront.shop.fghj.internal
 web.storefront      -> db.storefront        depends-on
 web.storefront      -> migrate.storefront   depends-on
 migrate.storefront  -> db.storefront        depends-on
+seed.storefront     -> db.storefront        depends-on
+seed.storefront     -> migrate.storefront   depends-on
 api.catalog         -> cache.catalog        depends-on
 web.storefront      -> api.catalog          depends-on  via_flow=catalog
 web.storefront      -> cache.catalog        depends-on  via_flow=catalog

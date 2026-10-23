@@ -21,7 +21,7 @@ A tiny shop, split across two repositories the way a real product is
 (plus two more in [chapter 7](/tutorial/07-attaching-a-debugger/)):
 
 - **`storefront`** — the thing a shopper opens. It has a Postgres
-  database and a schema migration.
+  database, a schema migration and a seed.
 - **`catalog`** — a separate repo, owned (let's pretend) by a different
   team. It serves the product list from a Redis cache.
 
@@ -32,6 +32,7 @@ graph LR
   web["web.storefront<br/>service"] -->|depends-on| db["db.storefront<br/>backing · postgres:16"]
   web -->|completed| migrate["migrate.storefront<br/>task · psql"]
   migrate -->|depends-on| db
+  seed["seed.storefront<br/>task · psql"] -->|depends-on| db
   web -->|depends-on catalog| api["api.catalog<br/>service"]
   api -->|depends-on| cache["cache.catalog<br/>backing · redis:7"]
 ```

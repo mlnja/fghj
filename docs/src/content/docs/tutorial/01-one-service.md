@@ -238,6 +238,12 @@ fghj wire https://github.com/you/storefront.git
 later), and asks it to resolve. From here on the daemon is the one holding
 the graph.
 
+`storefront` is already on disk, so the URL isn't cloned — it only names
+the repo. You can name it by its folder instead, `fghj wire storefront`
+from here or `fghj wire .fghj.yaml` from inside it: either way the folder
+it sits in, `shop`, is the workspace. A URL is what you'd hand a teammate
+who doesn't have the repo yet.
+
 ## Start it
 
 Open `https://fghj.internal/` — that's `fghjd`'s own UI, served over the
@@ -276,7 +282,7 @@ had to agree for that to happen:
    free for whatever else you run. See [Split DNS](/concepts/split-dns/).
 2. **TLS.** The connection lands on `fghjd`'s proxy on port 443, which mints
    a leaf certificate for that exact name on the fly, signed by a local CA
-   it installed into your system trust store on first start. See
+   that `fghj daemon start` asked macOS to trust when you installed fghj. See
    [Local CA & TLS proxy](/concepts/local-ca-and-tls-proxy/).
 3. **Dispatch.** The proxy reads the SNI name, finds the route registered
    for it, and relays to your container's published port.

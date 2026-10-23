@@ -43,6 +43,16 @@ them on your behalf; see
 [Persistence & workspace store](/concepts/persistence-and-workspace-store/)
 for why that hand-off exists.
 
+Already have the repo checked out? Skip the URL and name it instead — the
+folder it sits in becomes the workspace:
+
+```bash
+cd ~/code/acme/checkout-service
+fghj wire .               # or: fghj wire .fghj.yaml
+```
+
+See [fghj wire](/cli/wire/#a-repo-already-on-disk).
+
 ## 3. Open the UI
 
 `fghjd` serves a small web UI at `https://fghj.internal/` (scoped to the
@@ -82,8 +92,8 @@ domain and open it directly. For a service named `checkout` in a repo checked
 out as `checkout-service`, inside a workspace directory called `acme`, that's
 `checkout.checkout-service.acme.fghj.internal` — the service name, the repo
 folder, then the workspace. The certificate is issued on the fly by fghj's local
-CA and is already trusted, because `fghjd` installed that CA into your
-system trust store on first start. No `-k`, no self-signed warning. See
+CA and is already trusted, because `fghj daemon start` asked macOS to trust
+that CA when you installed fghj. No `-k`, no self-signed warning. See
 [Local CA & TLS proxy](/concepts/local-ca-and-tls-proxy/) for how that
 works, and [Node identity & domains](/concepts/node-identity-and-domains/)
 for exactly how that domain was derived.

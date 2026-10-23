@@ -42,10 +42,16 @@ the web UI.
 Steps run in a specific, fail-fast order so problems surface immediately
 instead of leaving `fghjd` half-up: Docker connectivity → control API
 listener bind (TCP, internal) and control socket bind (Unix, for the CLI)
-→ CA setup (generate or load, then install trust) → activation (DNS
+→ CA setup (generate or load, then trust it if it isn't already) → activation (DNS
 server bind and OS resolver config, alias `127.222.0.1` and bind ports 80/443 on it, sync
 `/etc/hosts`) → start serving. See [Control API](/concepts/control-api/)
 for why this exact order matters.
+
+Trusting the CA needs a password dialog, so it only works when `fghjd`
+runs in a terminal. Under `brew services` there's no login session to show
+one in: `fghjd` logs that and carries on, and HTTPS shows a certificate
+warning until you run [`fghj daemon start`](/cli/daemon/) (or `restart`) once
+from a terminal, which trusts it as you.
 
 ## Going idle without stopping it
 

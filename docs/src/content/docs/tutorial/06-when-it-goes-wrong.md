@@ -24,6 +24,7 @@ can't disagree about what a state means.
 | **unknown** | Docker isn't answering, so nothing about the container is known. A banner says so, with a link to the doctor; fghj picks Docker back up on its own. |
 | **missing** | The container was deleted outside fghj (`docker rm`, a prune). fghj doesn't guess whether you meant it: open the node and **Recreate** it or **Forget** it. |
 | **restarting** | Docker is bouncing it under this node's own `restart` policy. Not reachable while it does, but not stuck either — worth waiting out. |
+| **restarting** (fghj) | Something it needs was started again — you pressed Start on its database, say — so fghj is restarting it so it reconnects: the same container and code, `docker restart`, not a rebuild. The same word as Docker's, told apart by the tooltip. |
 | **paused** | `docker pause`, from outside fghj. Not reachable, and Start will not help; `docker unpause` will. |
 | **completed** | A task exited 0. Success, not drift. |
 | **failed** | A task exited non-zero. Everything downstream of it was not started. |

@@ -42,8 +42,10 @@ as root doesn't bypass it. Without the pre-check, a crash-restart loop
 would re-prompt for a password on every single restart. The same
 check-first design doubles as a self-healing path: if trust is ever
 missing (first-ever run, or you manually revoke it while the CA files
-remain on disk), the next `fghjd` start notices and re-installs it,
-prompting exactly once.
+remain on disk), the next start notices and re-installs it, prompting
+exactly once. Under `brew services` that start is
+[`fghj daemon start` or `restart`](/cli/daemon/), run from a terminal — see
+the caution below.
 
 ## Two CAs, because one key has to leave the daemon
 
@@ -112,14 +114,14 @@ sudo rm /var/lib/fghjd/ca/ca-cert.pem /var/lib/fghjd/ca/ca-key.pem \
   /var/lib/fghjd/ca/signing-cert.pem /var/lib/fghjd/ca/signing-key.pem \
   /var/lib/fghjd/ca/signing-generation
 
-# 3. mint the new root and trust it — from a terminal, see below
-sudo fghjd            # Ctrl-C once it logs "control API listening on ..."
-
-# 4. hand it back to the service manager
+# 3. start it again: it mints a new root
 sudo brew services start fghj
+
+# 4. trust the new root — from a terminal, see below
+fghj daemon restart
 ```
 
-:::caution[Step 3 has to come from a terminal]
+:::caution[Step 4 has to come from a terminal]
 Installing a root into the System trust store needs an Authorization
 Services prompt, and **running as root does not bypass it** — that gate is
 about user interaction, not file permissions. A launchd *system* daemon has

@@ -5,7 +5,7 @@ sidebar:
   order: 5
 ---
 
-Five nodes is already more than fits in your head at a glance, and a real
+Six nodes is already more than fits in your head at a glance, and a real
 workspace has fifty, across a dozen repos. Starting all of it works — it's
 what production runs — but it's slow and heavy, and most days you're working
 on one journey. A **flow** is a named list of what to start for one.

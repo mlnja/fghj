@@ -137,37 +137,38 @@ the binary wheel carries its own libpq, so the image needs no
 
 ## Migrations as a task
 
-A migration is a container that's *supposed* to exit. Your service waits
-for it to **complete**, and that's what makes it a task:
+A migration is a container that's *supposed* to exit. `migrates:` names the
+database it writes to, and that's what makes it a task:
 
 ```yaml
   api:
     # ...
     depends_on:
       db: {condition: service_healthy}
-      migrate: {condition: service_completed_successfully}
 
   migrate:
     build: .
     command: ["alembic", "upgrade", "head"]
-    depends_on:
-      db: {condition: service_healthy}
+    migrates: db
     environment:
       DATABASE_URL: postgresql://app:dev@${FGHJ_SERVICE_FQDN:db}:5432/app
 ```
 
 `build: .` is the same build as your service — your code and your
-`alembic/` directory, with a different command. Its own `depends_on` puts it
-behind the database, and `service_healthy` means after Postgres is actually
-accepting connections.
+`alembic/` directory, with a different command. `migrates: db` puts it
+behind the database (after Postgres is healthy, since `db` has a
+healthcheck), and puts everything that waits on `db` behind it — `api`
+doesn't have to say so.
 
 A task isn't considered started until it has *finished*, and a non-zero exit
 fails the node and blocks everything downstream. A migration that fails
 therefore stops the service coming up against an unmigrated database,
 instead of racing it.
 
-The default `run: on_start` re-runs the task on every start and every
-top-up, so the command must be idempotent — `alembic upgrade head` is.
+It runs on every start of `db`, so the command must be idempotent —
+`alembic upgrade head` is. Fixtures go in a separate service with
+`seeds: [db]`, which runs only when the database is new — see
+[the reference](/reference/fghj-yaml/#migrations-and-seeds).
 
 ## Live reload
 

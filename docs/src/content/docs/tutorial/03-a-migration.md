@@ -1,6 +1,6 @@
 ---
 title: 3. A migration
-description: A task — a service that is supposed to exit — what makes something one, and why "exited" needs two readings.
+description: A task — a service that is supposed to exit — what makes something one, why "exited" needs two readings, and a migration versus a seed.
 sidebar:
   order: 3
 ---
@@ -16,10 +16,9 @@ goal. Nothing downstream — the status badge, the reconciler, the "is this
 node healthy" check — can tell those two apart without knowing which kind of
 node it's looking at. See [Terminating nodes](/concepts/terminating-nodes/).
 
-You don't mark a task as one. You say what Compose says: that `web` waits
-for it to **complete successfully**. That's the only reading of "wait for
-this" that makes sense for something meant to exit, so it's what makes it
-a task.
+A task is any service that's meant to exit: something waits for it to
+**complete successfully**, or it says which **store** it writes to. A
+migration says the second thing.
 
 ## Declare it
 
@@ -34,7 +33,7 @@ create table if not exists orders (
 );
 ```
 
-Then a third service, and one more line in `web`'s `depends_on`:
+Then a third service. `web` doesn't change:
 
 ```yaml
 services:
@@ -42,13 +41,11 @@ services:
     # ...as before
     depends_on:
       db: {condition: service_healthy}
-      migrate: {condition: service_completed_successfully}
 
   migrate:
     image: postgres:16
     command: ["psql", "-v", "ON_ERROR_STOP=1", "-f", "/schema.sql"]
-    depends_on:
-      db: {condition: service_healthy}
+    migrates: db
     environment:
       PGHOST: ${FGHJ_SERVICE_FQDN:db}
       PGUSER: shop
@@ -65,11 +62,12 @@ services:
 
 Four things carry the weight here.
 
-**`service_completed_successfully`** is what makes `migrate` a task. Once
-something waits on it that way, everything that waits on it has to: a
-second service waiting on `migrate` with plain `depends_on: [migrate]`
-would be expecting it to stay up, and fghj refuses that start rather than
-guess which one you meant.
+**`migrates: db`** is what makes `migrate` a task, and it does two more
+things. `migrate` waits on `db` — healthy, since `db` has a healthcheck —
+without a `depends_on` of its own. And everything that waits on `db` now
+waits on `migrate` too, without saying so: `web` can't start against an old
+schema because someone forgot a line. One migration per store, so the order
+of two can't be a guess.
 
 **`command` is required.** A task *is* its command. A container with no
 command would just run the image's own long-running `CMD`, which is a
@@ -81,8 +79,9 @@ own code with another command (`rake db:migrate`, `alembic upgrade head`,
 no second Dockerfile. We use an image only because our migration genuinely
 isn't our code — it's stock `postgres:16` running `psql`.
 
-**`migrate`'s own `depends_on: db`** orders it after Postgres is healthy. A
-migration that beats Postgres to the socket fails.
+**It runs on every start of `db`.** So its command has to be idempotent —
+`create table if not exists` and `ON_ERROR_STOP=1` are both there for that.
+Every real migration runner (dbmate, Flyway, Alembic, Rails) already is.
 
 The bind mount puts your `schema.sql` inside the stock image. `host:
 ./schema.sql` resolves against this repo's checkout root, as every relative
@@ -104,7 +103,8 @@ the compose file.
   "volumes": [{ "host": "./schema.sql", "container": "/schema.sql", "read_only": true }],
   "restart": "no",
   "stop_grace_period": 10,
-  "run_policy": "on_start"
+  "run_policy": "on_start",
+  "migrates": "db.storefront"
 }
 ```
 
@@ -112,12 +112,13 @@ The edges, trimmed to the parts that matter here:
 
 ```json
 { "from": "web.storefront",     "to": "db.storefront",      "kind": "depends-on", "condition": "service_healthy" }
-{ "from": "web.storefront",     "to": "migrate.storefront", "kind": "depends-on", "condition": "service_completed_successfully" }
 { "from": "migrate.storefront", "to": "db.storefront",      "kind": "depends-on", "condition": "service_healthy" }
+{ "from": "web.storefront",     "to": "migrate.storefront", "kind": "depends-on", "condition": "service_completed_successfully", "implied": true }
 ```
 
-Start order is a topological walk of them: `db` first, wait for
-`pg_isready`, then `migrate`, wait for it to exit 0, then `web`.
+The last one is the edge nobody wrote: `web` waits on `db`, so it waits on
+`db`'s migration. Start order is a topological walk of them: `db` first,
+wait for `pg_isready`, then `migrate`, wait for it to exit 0, then `web`.
 
 `restart: "no"` is what a task gets; writing a `restart` on one is a
 blocking warning, since a restart policy on a container whose purpose is to
@@ -129,11 +130,10 @@ hole this node kind fills; a task's completion predicate is its exit code.
 
 ## Run it
 
-Press **Start** on `web`. In the UI, `migrate` appears, goes
-`running` briefly, and settles on **completed** — with a tooltip that says
-what that means:
-
-> task finished successfully — it is meant to exit, not stay up
+Press **Start** on `web`. `migrate` doesn't get a card of its own: it's
+part of `db`, so it's drawn as a second, smaller segment of `db`'s status
+bar. Watch it go `running` briefly and settle on **completed** — hover it
+for what that means, click it for its logs and its own Start button.
 
 Three states are reserved for tasks:
 
@@ -143,27 +143,61 @@ Three states are reserved for tasks:
 | **failed** | exited non-zero. Everything downstream of it was not started. |
 | **finishing** | exited, but fghj hasn't re-inspected it yet — no exit code read, so no verdict. Says "no answer", not "success". |
 
-**failed** is a real gate, not a warning: a task that exits non-zero blocks
-its dependents rather than letting them start against a half-migrated
-database. Break your SQL on purpose to see it — `web` will not come up.
+**failed** is a real gate, not a warning: a migration that exits non-zero
+blocks everything waiting on `db` rather than letting it start against a
+half-migrated database. Break your SQL on purpose to see it — `web` will
+not come up.
 
-## Runs every time, on purpose
+## A seed
 
-`run_policy: "on_start"` in the graph output is the default, and it means
-this task runs again on **every** start and every top-up. Which is why
-`create table if not exists` and `ON_ERROR_STOP=1` are both there: the
-command has to be idempotent, because it will be re-run.
+A seed fills the database with data to work against. It's a task too, but
+it's the opposite of a migration in every way that matters: it should run
+**once per database**, not on every start, and nothing should have to wait
+for it. In `storefront/seed.sql`:
 
-The alternative is `run: once` in the config — at most once per run, for a
-task that's expensive or destructive to repeat. Be clear about its cost
-before reaching for it: *at most once per run, full stop*. It is not re-run
-when your code changes. A `git pull` that adds a migration will not cause a
-`once` task to run again, even though fghj can see the commit moved. That's
-why the default is the other way round.
+```sql
+insert into orders (item, price) values ('mug', 1200), ('tote', 2500);
+```
 
-One useful exception: fghj's evidence that a `once` task is done is the
-container itself. If that container is removed out of band, the task runs
-again rather than being assumed complete.
+```yaml
+  seed:
+    image: postgres:16
+    command: ["psql", "-v", "ON_ERROR_STOP=1", "-f", "/seed.sql"]
+    seeds: [db]
+    environment:
+      PGHOST: ${FGHJ_SERVICE_FQDN:db}
+      PGUSER: shop
+      PGPASSWORD: dev
+      PGDATABASE: shop
+    volumes:
+      - host: ./seed.sql
+        container: /seed.sql
+        read_only: true
+```
+
+`seeds: [db]` orders it after `db` is up and migrated. It runs **only when
+`db`'s data is new**: fghj records the volume it last succeeded against, so
+the seed is skipped on every later start, and runs again once you remove the
+volume and a fresh one is made. That's why the seed above has no
+`on conflict` — it never runs over data it already filled. Keep a seeded
+store's data in a named volume (chapter 2 did); a bind mount has no creation
+time fghj can see.
+
+Nothing waits on a seed, so starting `web` doesn't run it. Starting
+everything does (when the data is new), so does a flow that lists it —
+[chapter 5](/tutorial/05-flows/) — and the Start button on its card always
+runs it, data or not. A failed seed always runs again.
+
+Seeds are hidden in the graph by default, since most starts skip them. The
+**Seeds** button in the header shows them.
+
+:::note[What about `run: once`?]
+A plain task can also say `run: once`: at most once per run, keyed on the
+task's own container. It is not re-run when your code changes, and it's
+wrong for a seed — a container removed while the volume stays reseeds on top
+of the data, a volume wiped while the container stays leaves an empty
+database marked done. Use `seeds:` for data, `migrates:` for a schema.
+:::
 
 ## Check it landed
 

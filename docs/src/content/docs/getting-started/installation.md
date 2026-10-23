@@ -34,9 +34,10 @@ shims.
 ```bash
 brew install mlnja/tap/fghj
 sudo brew services start fghj
+fghj daemon start
 ```
 
-Two commands, and the second one needs `sudo`. That is not an oversight:
+The second command needs `sudo`. That is not an oversight:
 `brew install` runs unprivileged and Homebrew never starts a service at
 install time (`brew install postgresql` doesn't start Postgres either), and
 `fghjd` is declared with `require_root true` because it binds ports 80/443
@@ -46,10 +47,14 @@ therefore installs it as a *LaunchDaemon* under `/Library/LaunchDaemons`
 rather than a per-user LaunchAgent, and refuses to start it unprivileged.
 This is the same shape as `dnsmasq` or `nginx` on macOS.
 
-Everything else is automatic. On its first start `fghjd` generates the local
-root CA, installs it into the System keychain, writes
+On its first start `fghjd` generates the local root CA, writes
 `/etc/resolver/fghj.internal`, and binds ports 80/443 on its own loopback
-alias — see [Start the daemon](#start-the-daemon) below. Then:
+alias — see [Start the daemon](#start-the-daemon) below. What it can't do is
+get the CA trusted: macOS asks for your password before trusting a root, and
+a LaunchDaemon has no login session to ask in. The third command is for
+that. `fghj daemon start` runs in your terminal, as you, and if the CA isn't
+trusted yet it asks macOS to trust it, which shows the password dialog. It's
+needed once; later starts find the CA trusted and say nothing. Then:
 
 ```bash
 fghj daemon status      # -> fghjd is running and active
@@ -137,8 +142,8 @@ foreground:
 sudo fghjd
 ```
 
-The first time it starts it generates a local root CA, installs it into your
-system trust store, and writes `/etc/resolver/fghj.internal` so macOS sends
+The first time it starts it generates a local root CA, trusts it in the
+System keychain, and writes `/etc/resolver/fghj.internal` so macOS sends
 `*.fghj.internal` lookups to `fghjd`'s own DNS server. Those are the two
 system-level changes fghj makes; both are idempotent on later starts.
 
@@ -146,6 +151,9 @@ For a persistent install, supervise it with a launchd `LaunchDaemon` (a
 *daemon*, not a per-user `LaunchAgent` — it has to be root). The Homebrew
 formula declares exactly that, which is why it's started with
 `sudo brew services start fghj` rather than the usual unprivileged form.
+Under launchd, `fghjd` can't show the password dialog that trusting the CA
+needs, so it logs that and carries on; run `fghj daemon start` once from a
+terminal to trust it.
 
 ## Verify
 
@@ -166,9 +174,11 @@ Three states are worth telling apart:
 - **`fghjd is running and active`** — the normal state.
 
 `fghj daemon start`/`stop`/`restart` never touch the *process* lifecycle;
-they toggle whether the running daemon is occupying the machine. Stopping
-the process itself is your supervisor's job (`sudo brew services stop fghj`,
-or Ctrl-C).
+they toggle whether the running daemon is occupying the machine, and `start`
+and `restart` also trust the CA if it isn't trusted yet. Stopping or
+restarting the process itself is your supervisor's job
+(`sudo brew services stop fghj`, `sudo brew services restart fghj`, or
+Ctrl-C).
 
 For the full picture — Docker and BuildKit, the loopback alias, both ports,
 OS DNS routing and CA trust, each checked against the machine rather than

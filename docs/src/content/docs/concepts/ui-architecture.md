@@ -23,7 +23,11 @@ shared model, not three separately fetched datasets:
   together, overlaid with live container status from the workspace's one
   environment. The header's **Switch to flow** acts on the selected flow
   here; a single node starts from its drawer. Its Stop and Delete stay there
-  while it's starting, and either calls the start off.
+  while it's starting, and either calls the start off. A migration has no
+  card of its own: it's a second segment of its store's status bar, which
+  opens it. Seeds are hidden unless the header's **Seeds** toggle is on,
+  since most starts skip them — see
+  [Seeds and migrations](/concepts/seeds-and-migrations/).
 - **Config** — reserved for environment variables, the split-DNS table,
   and issued certs; not built out yet.
 
@@ -61,6 +65,12 @@ Logs are the one exception: the log drawer opens a real live stream
 whenever it's showing a running container — genuinely pushed, not polled,
 since log lines arriving late would be a much more noticeable regression
 than a graph node being briefly stale.
+
+A poll skips its turn while its last request is still out, so a slow
+resolve on a loaded machine can't stack requests that each make the next
+one slower. On the daemon side, requests for the same workspace's graph
+that arrive together share one resolve, and a request never gets a result
+that began before it was made — an edit you just saved is always in it.
 
 Both pull jobs and run start/stop follow the same "kick off, then poll a
 status endpoint" shape client-side — matching the background-job design

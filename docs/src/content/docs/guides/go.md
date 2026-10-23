@@ -195,8 +195,8 @@ default is 10 seconds, matching Docker's.
 
 A migration is a container that's *supposed* to exit — a **task**. It's
 another service built from the same code with a different command, so a
-`migrate` subcommand in your binary needs nothing extra. Your service waits
-for it to complete, which is what makes it a task:
+`migrate` subcommand in your binary needs nothing extra. `migrates:` names
+the database it writes to, and that's what makes it a task:
 
 ```yaml
 services:
@@ -204,21 +204,22 @@ services:
     # ...
     depends_on:
       db: {condition: service_healthy}
-      migrate: {condition: service_completed_successfully}
   migrate:
     build: .
     command: ["/app", "migrate"]
-    depends_on:
-      db: {condition: service_healthy}
+    migrates: db
     environment:
       DATABASE_URL: postgres://app:dev@${FGHJ_SERVICE_FQDN:db}:5432/app
 ```
 
-A task isn't started until it has *finished*, and a non-zero exit fails the
-node and blocks everything downstream — so a failed migration stops the
-service coming up against an unmigrated database rather than racing it. The
-default `run: on_start` re-runs it on every start and top-up, so the command
-must be idempotent.
+The migration waits on `db`, and whatever waits on `db` waits on the
+migration too — `api` doesn't have to say so. A task isn't started until it
+has *finished*, and a non-zero exit fails the node and blocks everything
+downstream — so a failed migration stops the service coming up against an
+unmigrated database rather than racing it. It runs on every start of `db`,
+so the command must be idempotent. Seed data goes in a separate service with
+`seeds: [db]`, which runs only when the database is new — see
+[the reference](/reference/fghj-yaml/#migrations-and-seeds).
 
 ## Live reload
 

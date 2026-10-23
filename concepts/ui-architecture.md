@@ -40,7 +40,12 @@ The tabs:
   overlaid with live container status via `runContainers` (a
   `node_id → ContainerInfo` map derived from whichever run is currently
   selected). Backed by `GraphView` in `mode="containers"`, plus
-  `RunControls` for starting/stopping runs.
+  `RunControls` for starting/stopping runs. A migration (`migrates:`) has
+  no card: `foldMigrations` in `GraphView` draws it as a second segment of
+  its store's status bar, moves its edges onto the store and drops the
+  implied ones. Seeds (`seeds:`) are hidden, edges and all, unless the
+  header's **Seeds** toggle is on (remembered in `localStorage`; the button
+  only shows when the workspace has a seed). See [[seeds-and-migrations]].
 
 Layout uses `depends-on` edges only, since they're the start order. Drawn:
 `depends-on` solid, optional (`required: false`) dashed, `uses` (a hostname
@@ -67,12 +72,14 @@ workspace never briefly renders under the new one's identity.
 ## Polling, not push
 
 There's no websocket/SSE for the graph or run list — both are plain
-interval polling, gated by which tab is active so an inactive tab doesn't
-waste requests:
+interval polling, mostly gated by which tab is active so an inactive tab
+doesn't waste requests:
 
-- `/universe.json` every 3s while the Repos tab is active (`App.svelte`'s
-  `graphPoll` effect) — reflects live git state (branch/dirty — see
-  [[branch-ownership-model]]) without a manual refresh.
+- `/universe.json` every 3s whatever tab is active (1s while fghjd is
+  unreachable, so the page is back about as soon as fghjd is) — reflects
+  live git state (branch/dirty — see [[branch-ownership-model]]) without a
+  manual refresh, and keeps the Actual tab from pointing at a node id that
+  changed shape once its repo was cloned.
 - `/repos` every 10s while the Repos tab is active, plus right after a
   Fetch, a Pull or a download, and `/environment` every 5s there for the
   older-code warning.
@@ -80,6 +87,16 @@ waste requests:
   `daemon::spawn_reconciler`'s own 1s tick (see
   [[run-lifecycle-and-registry]]), so the UI is essentially never stale
   relative to what the backend has already reconciled.
+
+Every interval goes through `polled(fn)`, which skips a turn while the
+last request is still out. Without it, a resolve slower than 3s (a loaded
+machine, a big workspace) stacked requests, and fghjd worked on every one,
+which made each slower still. Called directly, after an action, a fetch
+always runs. On the daemon side, concurrent `/universe.json` requests for
+one workspace share one resolve (`SharedResolve` in
+`resolver/universe.rs`): a caller waits for the resolve in flight and takes
+its result only if that resolve began after the caller asked, so an edit
+saved just before a request is always seen.
 
 Logs are the one exception: `Drawer.svelte` opens a real `EventSource`
 against `/nodes/{node}/logs/stream` (SSE, backed by
