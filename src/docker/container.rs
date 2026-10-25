@@ -83,6 +83,10 @@ pub async fn run_container(docker: &Docker, opts: &RunOpts<'_>) -> Result<()> {
         opts.service_name.to_string(),
     );
     labels.insert("com.docker.compose.oneoff".to_string(), "False".to_string());
+    // Compose (and so OrbStack's and Docker Desktop's Delete) skips a
+    // container without it: the project looks empty and only its network goes.
+    let hash = labels.get("fghj.config_hash").cloned().unwrap_or_default();
+    labels.insert("com.docker.compose.config-hash".to_string(), hash);
 
     let mut exposed_ports = Vec::new();
     let mut port_bindings = HashMap::new();
