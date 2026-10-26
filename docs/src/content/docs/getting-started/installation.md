@@ -29,6 +29,15 @@ shims.
   daemon's own Rust types are the enforcing boundary, and the schema is an
   authoring aid (see [`.fghj.yaml` reference](/reference/fghj-yaml/)).
 
+:::note[What this changes on your machine]
+`fghjd` edits `/etc/hosts` and `/etc/resolver`, aliases two loopback
+ranges, loads a `pf` anchor, and trusts a local root CA. Everything but the
+CA and its state directory is undone by `fghj daemon stop`; those two are
+removed by `sudo fghj uninstall`. The full list, with commands to check it
+yourself, is [What fghj touches, and how to remove
+it](/guides/uninstalling/).
+:::
+
 ## Homebrew
 
 ```bash

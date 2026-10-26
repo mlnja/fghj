@@ -4,6 +4,9 @@ import mermaid from 'astro-mermaid';
 import remarkGfm from 'remark-gfm';
 
 export default defineConfig({
+  // The deployed origin. Starlight needs it for canonical URLs, the sitemap
+  // and social-card links; without it every page omits them.
+  site: 'https://fghj.mlops.ninja',
   // Astro 6's MDX pipeline doesn't apply GFM the way the plain-Markdown one
   // does, so a table in `index.mdx` renders as literal pipes. Declaring the
   // plugin here covers both.
@@ -25,6 +28,7 @@ export default defineConfig({
       favicon: '/favicon.svg',
       logo: { src: './src/assets/fghj-mark.svg', alt: '' },
       social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/mlnja/fghj' }],
+      editLink: { baseUrl: 'https://github.com/mlnja/fghj/edit/main/docs/' },
 
       // The three faces of the fghj design system, from the same Google Fonts
       // request `ui/src/app.css` makes — so the docs and the web UI render in
