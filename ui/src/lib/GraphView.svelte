@@ -1,5 +1,6 @@
 <script>
   import dagre from '@dagrejs/dagre';
+  import { columnOrder } from './columnOrder.js';
 
   let { graph, currentFlow, mode, runContainers, recordingNodes, onSelectNode, showSeeds = true } = $props();
 
@@ -80,17 +81,26 @@
   // a long diagonal. Nodes with no edges at all are packed into a grid
   // underneath: they have nothing to line up with.
   //
-  // Within a group dagre does the actual work: it orders each column to cut
-  // crossings, and routes an edge that skips columns through the gaps
-  // between cards instead of straight across whatever card sits in between.
+  // Within a group dagre picks the columns, places the cards and routes an
+  // edge that skips columns through the gaps between cards instead of
+  // straight across whatever card sits in between. The order within each
+  // column is columnOrder's: it keeps a repo's cards together and cuts
+  // crossings further than dagre does on its own.
+  //
   // Layout depends only on the graph's structure, never on which flow is
-  // selected, and nodes go in sorted by id so it's stable across refreshes.
+  // selected. Nodes and edges both go in sorted: dagre's result depends on
+  // the order it's fed, and the edge order otherwise follows the YAML, so
+  // reordering a `depends_on` list would reshuffle the picture.
   const PAD = 20, GROUP_GAP = 60;
 
   function layout(g) {
     const ids = g.nodes.map((n) => n.id).sort();
     const known = new Set(ids);
-    const edges = g.edges.filter((e) => known.has(e.from) && known.has(e.to) && e.from !== e.to);
+    const repoOf = Object.fromEntries(g.nodes.map((n) => [n.id, n.local_path]));
+    const order = columnOrder((id) => repoOf[id]);
+    const edges = g.edges
+      .filter((e) => known.has(e.from) && known.has(e.to) && e.from !== e.to)
+      .sort((a, b) => a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
 
     // Weakly connected components, by union-find.
     const parent = Object.fromEntries(ids.map((id) => [id, id]));
@@ -122,7 +132,7 @@
       edges.filter((e) => inGroup.has(e.from)).forEach((e, i) =>
         dg.setEdge(e.from, e.to, { weight: e.required === false ? 1 : 4 }, `${e.from}|${e.to}|${i}`),
       );
-      dagre.layout(dg);
+      dagre.layout(dg, { customOrder: order });
 
       const gw = dg.graph().width, gh = dg.graph().height;
       members.forEach((id) => {
