@@ -103,20 +103,35 @@ leave a half-cloned entry repo behind.
 
 ## Requirements
 
-`fghjd` must already be running (`sudo fghjd`) — `wire` fails immediately
-with a clear error if it can't find the daemon's control API.
+`fghjd` must already be running (`sudo brew services start fghj`, or
+`sudo fghjd` in the foreground) — `wire` fails immediately with a clear
+error if it can't find the daemon's control API.
 
 ## What it does
 
-1. Captures your identity — uid, gid, `$HOME`, and your SSH agent socket —
+`wire` is where setup finishes. Nothing in fghj works before something is
+wired, so this is where it asks you for what root `fghjd` can't find on its
+own.
+
+1. Tells `fghjd` which Docker to use: the same one your `docker` command
+   talks to, worked out the way `docker` does it — `DOCKER_HOST`, then
+   `DOCKER_CONTEXT`, then your current context, then
+   `/var/run/docker.sock`. It has to be a unix socket. If it's a different
+   one from what `fghjd` is using, `fghjd` restarts onto it and `wire` waits
+   until it's back. This is also how you switch engines: change your docker
+   context, then wire (or run `fghj doctor --fix`).
+2. Captures your identity — uid, gid, `$HOME`, and your SSH agent socket —
    if `$HOME` is set. This is what lets the root-owned `fghjd` clone
    private repos over SSH on your behalf later, without ever holding your
    credentials itself; see
    [Persistence & workspace store](/concepts/persistence-and-workspace-store/)
    for the full mechanism.
-2. Sends the entry repo and workspace path to `fghjd`'s control API, which
+3. Sends the entry repo and workspace path to `fghjd`'s control API, which
    registers the workspace (and clones the entry repo if needed).
-3. Prints a link to open the workspace in the UI:
+4. Trusts fghj's root CA if it isn't yet. On macOS that's a password
+   dialog, the first time only. Cancelling it doesn't fail the wire: HTTPS
+   shows certificate warnings until the CA is trusted.
+5. Prints a link to open the workspace in the UI:
    `https://fghj.internal/?workspace=<id>`.
 
 Run `fghj wire` again for the same workspace any time your SSH agent has

@@ -35,8 +35,8 @@ impl TrustStore for SystemKeychain {
     }
 
     fn untrusted_hint(&self) -> &'static str {
-        "run `fghj daemon restart` from a terminal — it asks macOS to trust the \
-         CA, which shows a password dialog"
+        "run `fghj doctor --fix` from a terminal — it asks macOS to trust the CA, \
+         which shows a password dialog"
     }
 }
 

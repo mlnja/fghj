@@ -13,13 +13,6 @@ impl Session for MacSession {
         PathBuf::from("/private/var/lib/fghjd")
     }
 
-    /// Whoever owns `/dev/console` is logged in at the screen.
-    fn console_uid(&self) -> Option<u32> {
-        use std::os::unix::fs::MetadataExt;
-        let uid = std::fs::metadata("/dev/console").ok()?.uid();
-        (uid != 0).then_some(uid)
-    }
-
     /// launchd gives every login session an agent at a discoverable path.
     fn session_ssh_agent(&self, _uid: u32, is_live: &dyn Fn(&Path) -> bool) -> Option<String> {
         // `/private/tmp` up to macOS 15, `/private/var/run` since.

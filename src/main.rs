@@ -63,7 +63,12 @@ enum Commands {
     /// there: Docker with BuildKit, the proxy's ports and loopback alias,
     /// OS DNS routing, and the trusted root CA. Exits non-zero if anything
     /// is broken
-    Doctor,
+    Doctor {
+        /// Also fix what it can: point fghjd at your Docker, trust the CA, and
+        /// start fghjd if it's idle
+        #[arg(long)]
+        fix: bool,
+    },
     /// Remove everything fghj installed on this machine: the trusted root
     /// CA, /var/lib/fghjd, and all system configuration. Needs root
     Uninstall {
@@ -297,13 +302,18 @@ fn http_get_json(path: &str) -> Result<serde_json::Value> {
     http_request_json("GET", path, None)
 }
 
+/// Everything setup needs from you happens here, since nothing works until
+/// something is wired: fghjd learns which Docker is yours, and the CA gets
+/// trusted.
 fn wire(entry: String, workspace: Option<PathBuf>) -> Result<()> {
     if !probe_daemon() {
         bail!(
-            "fghjd isn't running — start it with `sudo fghjd` in another terminal \
-             (or install it as a system service; see SPEC.md)"
+            "fghjd isn't running — start the service first ({}, or `sudo fghjd` in the \
+             foreground for local dev)",
+            fghj::platform::current().packaging.start_service_hint()
         );
     }
+    configure_docker()?;
 
     let (entry, absolute_workspace) = entry_and_workspace(&entry, workspace)?;
 
@@ -328,9 +338,45 @@ fn wire(entry: String, workspace: Option<PathBuf>) -> Result<()> {
         .as_str()
         .context("fghjd response missing workspace id")?;
 
+    trust_ca();
     println!("data is wired — open the UI to see it: https://fghj.internal/?workspace={id}");
 
     Ok(())
+}
+
+/// The same Docker your `docker` command talks to. When it's a different one
+/// from fghjd's, fghjd restarts onto it, and this waits until it's back.
+fn configure_docker() -> Result<()> {
+    let host = fghj::docker::users_docker_host()
+        .context("fghj uses the same Docker as your `docker` command, and couldn't reach it")?;
+    let resp = http_post_json("/daemon/docker", &serde_json::json!({ "host": host }))?;
+    if let Some(err) = resp.get("error") {
+        bail!("fghjd refused the Docker at {host}: {err}");
+    }
+    if resp["restarting"].as_bool() == Some(true) {
+        println!("fghjd is switching to the Docker at {host}…");
+        wait_for_docker_host(&host)?;
+    }
+    Ok(())
+}
+
+const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+fn wait_for_docker_host(host: &str) -> Result<()> {
+    let deadline = std::time::Instant::now() + RESTART_WAIT;
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        if let Ok(status) = http_get_json("/daemon/status")
+            && status["docker_host"].as_str() == Some(host)
+        {
+            return Ok(());
+        }
+    }
+    bail!(
+        "fghjd didn't come back on {host} within {}s. A service manager restarts it by \
+         itself; if you run `sudo fghjd` in the foreground, start it again",
+        RESTART_WAIT.as_secs()
+    )
 }
 
 /// Toggles whether `fghjd` is active; never touches the process itself.
@@ -350,13 +396,12 @@ fn daemon_start() -> Result<()> {
         "fghjd is active — serving 80/443 on {} and answering *.fghj.internal DNS",
         fghj::web::proxy::PROXY_IP
     );
-    trust_ca();
     Ok(())
 }
 
 /// Here and not only in fghjd: some trust stores ask for a password before
 /// trusting a root, and fghjd as a system service has no session to ask in.
-/// This runs in a terminal, as you. A failure doesn't fail the start: HTTP
+/// This runs in a terminal, as you. A failure doesn't fail the caller: HTTP
 /// still works.
 fn trust_ca() {
     let trust = &fghj::platform::current().trust;
@@ -727,6 +772,7 @@ fn daemon_status() -> Result<()> {
 fn print_check(check: &fghj::doctor::Check) {
     let mark = match check.verdict {
         Verdict::Pass => "\u{2713}",
+        Verdict::Pending => "\u{00b7}",
         Verdict::Warn => "!",
         Verdict::Fail => "\u{2717}",
     };
@@ -736,8 +782,51 @@ fn print_check(check: &fghj::doctor::Check) {
     }
 }
 
+fn fetch_report() -> Result<fghj::doctor::Report> {
+    // An old `fghjd` serves the UI for unknown routes, so the error is "not JSON".
+    let resp = http_get_json("/daemon/doctor").context(
+        "could not get a doctor report from fghjd — if the response above is HTML, the \
+         running fghjd is older than this CLI and has no doctor endpoint; restart it on \
+         the current build",
+    )?;
+    serde_json::from_value(resp)
+        .context("fghjd returned a doctor report this version of fghj can't read")
+}
+
+/// The fixes for checks that didn't pass, in an order that makes sense:
+/// Docker first, since switching it restarts fghjd. Says what it did.
+fn apply_fixes(report: &fghj::doctor::Report) -> bool {
+    let needs = |name: &str| {
+        report
+            .checks
+            .iter()
+            .any(|c| c.name == name && c.verdict != Verdict::Pass)
+    };
+    let mut fixed = false;
+    if needs("docker") {
+        match configure_docker() {
+            Ok(()) => println!("fixed: fghjd uses the same Docker as your `docker` command"),
+            Err(e) => eprintln!("couldn't fix Docker: {e:#}"),
+        }
+        fixed = true;
+    }
+    if needs("daemon") {
+        match http_post_json("/daemon/start", &serde_json::json!({})) {
+            Ok(resp) if resp.get("error").is_none() => println!("fixed: fghjd is active"),
+            Ok(resp) => eprintln!("couldn't start fghjd: {}", resp["error"]),
+            Err(e) => eprintln!("couldn't start fghjd: {e:#}"),
+        }
+        fixed = true;
+    }
+    if needs("ca-trust") {
+        trust_ca();
+        fixed = true;
+    }
+    fixed
+}
+
 /// Client checks first: when the socket is what's broken, that's the answer.
-fn doctor() -> Result<()> {
+fn doctor(fix: bool) -> Result<()> {
     let client = fghj::doctor::client_checks();
     for check in &client {
         print_check(check);
@@ -751,14 +840,11 @@ fn doctor() -> Result<()> {
         );
     }
 
-    // An old `fghjd` serves the UI for unknown routes, so the error is "not JSON".
-    let resp = http_get_json("/daemon/doctor").context(
-        "could not get a doctor report from fghjd — if the response above is HTML, the \
-         running fghjd is older than this CLI and has no doctor endpoint; restart it on \
-         the current build",
-    )?;
-    let report: fghj::doctor::Report = serde_json::from_value(resp)
-        .context("fghjd returned a doctor report this version of fghj can't read")?;
+    let mut report = fetch_report()?;
+    if fix && apply_fixes(&report) {
+        println!();
+        report = fetch_report()?;
+    }
     for check in &report.checks {
         print_check(check);
     }
@@ -769,9 +855,18 @@ fn doctor() -> Result<()> {
         .chain(client.iter())
         .filter(|c| c.verdict == Verdict::Fail)
         .count();
+    let pending = report
+        .checks
+        .iter()
+        .filter(|c| c.verdict == Verdict::Pending)
+        .count();
     println!();
     if failures == 0 {
-        println!("all clear");
+        if pending > 0 {
+            println!("nothing broken; {pending} check(s) wait for your first `fghj wire`");
+        } else {
+            println!("all clear");
+        }
         return Ok(());
     }
     // The failures were already printed with their hints.
@@ -794,7 +889,7 @@ async fn main() -> Result<()> {
             DaemonAction::Restart => daemon_restart(),
             DaemonAction::Status => daemon_status(),
         },
-        Commands::Doctor => doctor(),
+        Commands::Doctor { fix } => doctor(fix),
         Commands::Uninstall {
             yes,
             keep_ca,

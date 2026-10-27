@@ -1,7 +1,11 @@
 //! The preflight self-check behind `fghj doctor` and the UI's Doctor tab. Every
 //! check reads the real thing; DNS is resolved end to end through the OS,
 //! since a stale resolver file looks fine on disk. Checks never mutate; hints
-//! say what to run.
+//! say what to run, and `fghj doctor --fix` runs the ones it can.
+//!
+//! The first `fghj wire` is what finishes setup: it tells fghjd which Docker
+//! to use and trusts the CA. Until something is wired, those two report
+//! `Pending`, not a failure: there's nothing to fix yet.
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, ToSocketAddrs};
 use std::os::unix::net::UnixStream;
@@ -21,6 +25,8 @@ use crate::{dns, platform, raw_net, web};
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
     Pass,
+    /// Not set up yet, and nothing to do about it: the first `fghj wire` will.
+    Pending,
     /// Not broken yet: affects some features, or fghj fixes it on next start.
     Warn,
     Fail,
@@ -48,6 +54,16 @@ impl Check {
             name: name.to_string(),
             title: title.to_string(),
             verdict: Verdict::Pass,
+            detail,
+            hint: None,
+        }
+    }
+
+    fn pending(name: &str, title: &str, detail: String) -> Self {
+        Self {
+            name: name.to_string(),
+            title: title.to_string(),
+            verdict: Verdict::Pending,
             detail,
             hint: None,
         }
@@ -86,17 +102,45 @@ fn parse_api_version(v: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-async fn docker_checks(docker: &Docker) -> Vec<Check> {
+/// What decides whether a missing piece is a failure or just not set up yet.
+pub struct Setup {
+    /// Anything wired, ever: the first `fghj wire` finishes setup.
+    pub wired: bool,
+    /// The socket fghjd dialled; `None` under its own `DOCKER_HOST`, or with
+    /// no Docker at all.
+    pub docker_host: Option<String>,
+}
+
+async fn docker_checks(docker: &Docker, setup: &Setup) -> Vec<Check> {
+    let at = setup
+        .docker_host
+        .as_deref()
+        .map_or(String::new(), |host| format!(" at {host}"));
     let version = match docker.version().await {
         Ok(v) => v,
+        Err(_) if !setup.wired => {
+            return vec![
+                Check::pending(
+                    "docker",
+                    "Docker Engine reachable",
+                    "not set up yet — your first `fghj wire` tells fghjd which Docker to use"
+                        .to_string(),
+                ),
+                Check::pending(
+                    "buildkit",
+                    "BuildKit available",
+                    "checked once Docker is set up".to_string(),
+                ),
+            ];
+        }
         Err(e) => {
             return vec![
                 Check::fail(
                     "docker",
                     "Docker Engine reachable",
-                    format!("{e}"),
-                    "start Docker (Docker Engine, Docker Desktop, OrbStack, Colima…) and make sure \
-                     `docker ps` works, then restart fghjd",
+                    format!("no answer{at}: {e}"),
+                    "make sure Docker is running and `docker ps` works, then run \
+                     `fghj doctor --fix` to point fghjd at it",
                 ),
                 Check::warn(
                     "buildkit",
@@ -113,7 +157,7 @@ async fn docker_checks(docker: &Docker) -> Vec<Check> {
     let docker_check = Check::pass(
         "docker",
         "Docker Engine reachable",
-        format!("server {server}, API {api}"),
+        format!("server {server}, API {api}{at}"),
     );
 
     let buildkit = match parse_api_version(&api) {
@@ -297,7 +341,11 @@ fn dns_resolution_check() -> Check {
     }
 }
 
-fn ca_trust_check(cert: &Path, is_trusted: impl FnOnce(&Path) -> Option<bool>) -> Check {
+fn ca_trust_check(
+    cert: &Path,
+    wired: bool,
+    is_trusted: impl FnOnce(&Path) -> Option<bool>,
+) -> Check {
     let name = "ca-trust";
     let title = "root CA trusted by the system";
     if !cert.exists() {
@@ -326,6 +374,14 @@ fn ca_trust_check(cert: &Path, is_trusted: impl FnOnce(&Path) -> Option<bool>) -
                 "{} verifies against {}",
                 cert.display(),
                 platform::current().trust.store_name()
+            ),
+        ),
+        Some(false) if !wired => Check::pending(
+            name,
+            title,
+            format!(
+                "{} isn't trusted yet — your first `fghj wire` asks to trust it",
+                cert.display()
             ),
         ),
         Some(false) => Check::fail(
@@ -386,7 +442,7 @@ fn raw_routes_check(
 }
 
 /// Off the async runtime wholesale; the set takes well under a second.
-fn host_checks() -> Vec<Check> {
+fn host_checks(wired: bool) -> Vec<Check> {
     vec![
         loopback_alias_check(platform::current().loopback.alias_present(PROXY_IP)),
         proxy_port_check(HTTPS_PORT, "proxy-https", "proxy listening on 443"),
@@ -394,9 +450,11 @@ fn host_checks() -> Vec<Check> {
         resolver_files_check(platform::current().dns.status()),
         dns_resolution_check(),
         raw_routes_check(raw_net::route_health()),
-        ca_trust_check(&web::ca::ca_cert_path(&crate::daemon::ca_dir()), |cert| {
-            platform::current().trust.is_trusted(cert)
-        }),
+        ca_trust_check(
+            &web::ca::ca_cert_path(&crate::daemon::ca_dir()),
+            wired,
+            |cert| platform::current().trust.is_trusted(cert),
+        ),
     ]
 }
 
@@ -516,10 +574,14 @@ async fn sidecar_checks(docker: &Docker, daemon: &DaemonControl) -> Vec<Check> {
 }
 
 pub async fn daemon_report(docker: &Docker, daemon: &DaemonControl) -> Report {
-    let mut checks = docker_checks(docker).await;
+    let setup = Setup {
+        wired: !daemon.registry.list().is_empty(),
+        docker_host: daemon.docker_host.clone(),
+    };
+    let mut checks = docker_checks(docker, &setup).await;
     checks.push(daemon_check(daemon));
     checks.extend(sidecar_checks(docker, daemon).await);
-    match tokio::task::spawn_blocking(host_checks).await {
+    match tokio::task::spawn_blocking(move || host_checks(setup.wired)).await {
         Ok(host) => checks.extend(host),
         Err(e) => checks.push(Check::fail(
             "host",
@@ -741,7 +803,7 @@ mod tests {
     #[test]
     fn ca_trust_check_fails_on_a_missing_cert_without_probing_trust() {
         let tmp = tempfile::tempdir().unwrap();
-        let check = ca_trust_check(&tmp.path().join("ca.pem"), |_| {
+        let check = ca_trust_check(&tmp.path().join("ca.pem"), true, |_| {
             panic!("trust must not be probed for a cert that doesn't exist")
         });
         assert_eq!(check.verdict, Verdict::Fail);
@@ -754,21 +816,51 @@ mod tests {
         let cert = tmp.path().join("ca.pem");
         std::fs::write(&cert, "not inspected").unwrap();
 
-        assert_eq!(ca_trust_check(&cert, |_| None).verdict, Verdict::Warn);
-        assert_eq!(ca_trust_check(&cert, |_| Some(true)).verdict, Verdict::Pass);
-        let untrusted = ca_trust_check(&cert, |_| Some(false));
+        assert_eq!(ca_trust_check(&cert, true, |_| None).verdict, Verdict::Warn);
+        assert_eq!(
+            ca_trust_check(&cert, true, |_| Some(true)).verdict,
+            Verdict::Pass
+        );
+        let untrusted = ca_trust_check(&cert, true, |_| Some(false));
         assert_eq!(untrusted.verdict, Verdict::Fail);
-        assert!(untrusted.hint.unwrap().contains("fghj daemon restart"));
+        assert!(untrusted.hint.unwrap().contains("fghj doctor --fix"));
+    }
+
+    #[test]
+    fn an_untrusted_ca_is_only_pending_until_something_is_wired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cert = tmp.path().join("ca.pem");
+        std::fs::write(&cert, "not inspected").unwrap();
+        let check = ca_trust_check(&cert, false, |_| Some(false));
+        assert_eq!(check.verdict, Verdict::Pending);
+        assert!(check.detail.contains("fghj wire"), "{}", check.detail);
+        assert!(check.hint.is_none());
     }
 
     #[tokio::test]
     async fn an_unreachable_docker_still_reports_both_of_its_checks() {
-        let checks = docker_checks(&crate::docker::undialled_client()).await;
+        let setup = Setup {
+            wired: true,
+            docker_host: Some("unix:///var/run/docker.sock".into()),
+        };
+        let checks = docker_checks(&crate::docker::undialled_client(), &setup).await;
         let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["docker", "buildkit"]);
         assert_eq!(checks[0].verdict, Verdict::Fail);
         assert_eq!(checks[1].verdict, Verdict::Warn);
+        assert!(checks[0].detail.contains("/var/run/docker.sock"));
         assert!(checks.iter().all(|c| c.hint.is_some()));
+    }
+
+    #[tokio::test]
+    async fn no_docker_before_the_first_wire_is_pending_not_failing() {
+        let setup = Setup {
+            wired: false,
+            docker_host: None,
+        };
+        let checks = docker_checks(&crate::docker::undialled_client(), &setup).await;
+        assert!(checks.iter().all(|c| c.verdict == Verdict::Pending));
+        assert!(checks[0].detail.contains("fghj wire"));
     }
 
     #[test]

@@ -184,7 +184,7 @@
     expanded[name] = !expanded[name];
   }
 
-  const MARKS = { pass: '\u2713', warn: '!', fail: '\u2717' };
+  const MARKS = { pass: '\u2713', pending: '\u00b7', warn: '!', fail: '\u2717' };
 
   function formatAge(ms) {
     if (!ms) return 'never';
@@ -408,13 +408,15 @@
     border-left: 3px solid var(--line-strong);
   }
   /* Verdict carries a shape as well as a color — the mark glyph — so the
-     three states stay distinguishable without relying on hue. */
+     states stay distinguishable without relying on hue. `pending` is "not set
+     up yet, nothing to do": it keeps the neutral border. */
   .check.pass { border-left-color: #4ac97e; }
   .check.warn { border-left-color: #d9a73c; }
   .check.fail { border-left-color: #e05c5c; }
   .check-head { display: flex; align-items: baseline; gap: 8px; }
   .mark { font: 700 12px var(--font-mono); }
   .check.pass .mark { color: #4ac97e; }
+  .check.pending .mark { color: var(--ink-faint); }
   .check.warn .mark { color: #d9a73c; }
   .check.fail .mark { color: #e05c5c; }
   .check-title { font: 700 11.5px var(--font-mono); color: var(--ink); }

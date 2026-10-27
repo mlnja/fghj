@@ -1,14 +1,10 @@
 use std::path::{Path, PathBuf};
 
-/// Where things live, and who the logged-in user is, as root `fghjd` sees it.
+/// Where things live, and where a user's login session keeps its sockets.
 pub trait Session: Send + Sync {
     /// `/var/lib/fghjd` with symlinks resolved: bind-mounting a file through a
     /// symlink trips some Docker engines.
     fn state_root(&self) -> PathBuf;
-
-    /// The uid at the console, whose docker context fghjd follows. `None`
-    /// when it can't tell, or it's root.
-    fn console_uid(&self) -> Option<u32>;
 
     /// The login session's own ssh-agent for `uid`, found without being told:
     /// a recorded `SSH_AUTH_SOCK` goes stale when the agent restarts.

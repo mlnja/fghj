@@ -2,23 +2,46 @@
 
 ## Which Docker fghjd talks to
 
+The same Docker the user's own `docker` command talks to, and fghjd is told
+which one rather than guessing.
+
 `/var/run/docker.sock` is a symlink owned by whichever engine set it last,
 and it can point at nothing: a Docker Desktop uninstall leaves its
 privileged helper behind, which repoints the link at Docker Desktop's
-socket on the next boot. The user's own `docker` doesn't care, because it
-follows the active context. fghjd follows the same one
-(`docker::find_docker_host`): it reads `currentContext` from the console
-user's `~/.docker/config.json` and that context's endpoint from
-`contexts/meta/<sha256 of the name>/meta.json`. It reads the files rather
-than running `docker context inspect`, because as root that would ask
-about root's contexts, and root has none. It uses `/var/run/docker.sock`
-only when the context is `default` or names no live socket. `DOCKER_HOST`
-in fghjd's environment overrides both.
+socket on the next boot. The user's `docker` doesn't care, because it
+follows their `DOCKER_HOST`, `DOCKER_CONTEXT` or current context. Root
+`fghjd` has none of those: they live in the user's shell and `~/.docker`.
+
+So the CLI works it out, as the user (`docker::users_docker_host`), in
+Docker's own order: `DOCKER_HOST`, then `DOCKER_CONTEXT`, then
+`currentContext` from `$DOCKER_CONFIG` or `~/.docker/config.json` (the
+endpoint read from `contexts/meta/<sha256 of the name>/meta.json`, not from
+`docker context inspect`, so a missing `docker` binary doesn't matter), then
+`/var/run/docker.sock`. Only `unix://` sockets are accepted. `fghj wire`
+sends it to `fghjd` (`POST /daemon/docker`), which saves it in
+`daemon-state.json` and dials it on every start. `fghj doctor --fix` does the
+same without wiring anything.
+
+Before anything is wired fghjd dials `/var/run/docker.sock` if it's live,
+and otherwise has no Docker; the doctor reports that as pending, not as a
+failure, because nothing can run until something is wired anyway.
+`DOCKER_HOST` in fghjd's own environment overrides all of it.
+
+An earlier version guessed instead: as root, it read the `~/.docker` of
+whoever owned `/dev/console`. That needed a different guess per OS
+(`/dev/console` is root's on Linux, so logind there), broke with two users
+logged in over ssh, and could never see an environment variable. Being
+told by the CLI has none of those problems.
 
 The client is made once and shared by every workspace, so it can't be
-swapped when Docker moves. Instead fghjd checks every 5 s: if Docker stops
-answering where it dials and does answer at the socket the lookup finds now,
-fghjd shuts down cleanly and launchd starts it again on the new socket.
+swapped in place. When `wire` names a different socket from the one this
+process dialled, fghjd answers, then shuts down cleanly, and its service
+manager (launchd, systemd) starts it again on the new socket. `wire` waits
+until `/daemon/status` reports the new socket before carrying on. Run in the
+foreground, `fghjd` just exits, and `wire` says to start it again.
+
+Two users on one machine with different engines can't both be served by one
+fghjd: the last to wire wins.
 
 ## Building without Compose
 

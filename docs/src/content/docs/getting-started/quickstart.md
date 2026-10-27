@@ -92,8 +92,8 @@ domain and open it directly. For a service named `checkout` in a repo checked
 out as `checkout-service`, inside a workspace directory called `acme`, that's
 `checkout.checkout-service.acme.fghj.internal` — the service name, the repo
 folder, then the workspace. The certificate is issued on the fly by fghj's local
-CA and is already trusted, because `fghj daemon start` asked macOS to trust
-that CA when you installed fghj. No `-k`, no self-signed warning. See
+CA and is already trusted, because your first `fghj wire` asked macOS to
+trust that CA. No `-k`, no self-signed warning. See
 [Local CA & TLS proxy](/concepts/local-ca-and-tls-proxy/) for how that
 works, and [Node identity & domains](/concepts/node-identity-and-domains/)
 for exactly how that domain was derived.

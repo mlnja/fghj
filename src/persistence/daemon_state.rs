@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 pub struct DaemonState {
     #[serde(default)]
     pub idle_requested: bool,
+    /// The `unix://…` socket the last `fghj wire` (or `doctor --fix`) said its
+    /// user's Docker answers on. `None` until the first one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_host: Option<String>,
 }
 
 /// A missing or corrupt file means defaults.
@@ -47,6 +51,7 @@ mod tests {
             &path,
             &DaemonState {
                 idle_requested: true,
+                ..DaemonState::default()
             },
         )
         .unwrap();
@@ -59,6 +64,7 @@ mod tests {
             &path,
             &DaemonState {
                 idle_requested: false,
+                ..DaemonState::default()
             },
         )
         .unwrap();

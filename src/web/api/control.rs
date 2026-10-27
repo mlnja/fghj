@@ -10,6 +10,7 @@ use serde::Deserialize;
 
 use crate::daemon::control::DaemonControl;
 use crate::state::query;
+use crate::web::api::error::{bad_request, err_response};
 use crate::web::proxy;
 use crate::{daemon_log, doctor, hosts_file, platform, raw_net};
 
@@ -31,6 +32,37 @@ pub(crate) async fn post_daemon_start(State(daemon): State<Arc<DaemonControl>>) 
     }
 }
 
+#[derive(Deserialize)]
+pub(crate) struct DockerRequest {
+    host: String,
+}
+
+/// `fghj wire`: the socket its user's Docker answers on. A different one from
+/// what this process dialled restarts fghjd onto it. `Json`, not raw bytes, so
+/// a cross-origin page can't post here without a CORS preflight.
+pub(crate) async fn post_daemon_docker(
+    State(daemon): State<Arc<DaemonControl>>,
+    Json(req): Json<DockerRequest>,
+) -> Response {
+    if !req.host.starts_with("unix://") || !crate::docker::is_live_socket(&req.host) {
+        return bad_request(format!("{} isn't a live unix socket", req.host));
+    }
+    match daemon.set_docker_host(&req.host) {
+        Ok(restarting) => {
+            if restarting {
+                let daemon = Arc::clone(&daemon);
+                tokio::spawn(async move {
+                    // So this response is out before the server goes down.
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    daemon.docker_reconfigured.notify_one();
+                });
+            }
+            Json(serde_json::json!({ "host": req.host, "restarting": restarting })).into_response()
+        }
+        Err(e) => err_response(e),
+    }
+}
+
 /// `fghj daemon stop`: release 80/443/DNS but keep serving this API; containers
 /// are left alone. Persisted so a restart stays idle.
 pub(crate) async fn post_daemon_stop(State(daemon): State<Arc<DaemonControl>>) -> Response {
@@ -42,7 +74,11 @@ pub(crate) async fn post_daemon_stop(State(daemon): State<Arc<DaemonControl>>) -
 }
 
 pub(crate) async fn get_daemon_status(State(daemon): State<Arc<DaemonControl>>) -> Response {
-    Json(serde_json::json!({ "active": daemon.is_active() })).into_response()
+    Json(serde_json::json!({
+        "active": daemon.is_active(),
+        "docker_host": daemon.docker_host,
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]

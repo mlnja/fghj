@@ -71,7 +71,6 @@ Via Homebrew (macOS on Apple Silicon):
 ```bash
 brew install mlnja/tap/fghj
 sudo brew services start fghj
-fghj daemon start     # once, as you: asks macOS to trust fghj's local CA
 fghj doctor           # checks Docker, ports, DNS and the CA against the machine
 ```
 
@@ -79,9 +78,10 @@ The `sudo` is real: `fghjd` binds ports 80/443, installs a root CA into your
 system trust store, and edits `/etc/resolver` and `/etc/hosts`, so Homebrew
 installs it as a root LaunchDaemon — the same shape as `dnsmasq` or `nginx`.
 (No formula auto-starts a service; `brew install postgresql` doesn't either.)
-Everything else is automatic on first start. The last step is separate
-because macOS asks for your password before trusting a root CA, and a
-LaunchDaemon has no login session to show that dialog in.
+Everything else is automatic. Your first `fghj wire` finishes setup: it
+points `fghjd` at the same Docker your `docker` command uses, and asks macOS
+to trust fghj's local CA, which shows a password dialog once. Until then
+`fghj doctor` shows those two as pending, not broken.
 
 It binds those ports on `127.222.0.1`, a loopback address it aliases for
 itself — **not** on `127.0.0.1` or `0.0.0.0`. If you already run something on

@@ -76,7 +76,8 @@ impl TrustStore for NoTrustStore {
     }
 
     fn untrusted_hint(&self) -> &'static str {
-        "add the CA to your system trust store by hand, then run `fghj daemon restart`"
+        "add the CA to your system trust store by hand; `fghj doctor --fix` can't on this \
+         platform"
     }
 }
 
@@ -155,10 +156,6 @@ pub(super) struct PlainSession;
 impl Session for PlainSession {
     fn state_root(&self) -> PathBuf {
         PathBuf::from("/var/lib/fghjd")
-    }
-
-    fn console_uid(&self) -> Option<u32> {
-        None
     }
 
     fn session_ssh_agent(&self, _uid: u32, _is_live: &dyn Fn(&Path) -> bool) -> Option<String> {

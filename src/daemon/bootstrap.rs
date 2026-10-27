@@ -10,63 +10,51 @@ use crate::web::api::build_router;
 use crate::web::ca;
 use crate::{daemon_log, dns, persistence, platform, supervisor};
 
-/// `DOCKER_HOST` if set, else the console user's active docker context, else
-/// `/var/run/docker.sock`; see `docker::find_docker_host`.
+/// Docker as this process's user would reach it: `DOCKER_HOST`, else their
+/// docker context. For tests and tools running as a user, not for fghjd.
 pub fn connect_docker() -> Result<bollard::Docker> {
     if std::env::var_os("DOCKER_HOST").is_some() {
         return bollard::Docker::connect_with_local_defaults()
             .context("failed to connect to DOCKER_HOST");
     }
-    let host = crate::docker::find_docker_host().context(
-        "no Docker socket: no docker context names a live one, nor is /var/run/docker.sock live",
-    )?;
+    let host = crate::docker::users_docker_host()?;
     bollard::Docker::connect_with_socket(&host, 120, bollard::API_DEFAULT_VERSION)
         .with_context(|| format!("failed to connect to {host}"))
 }
 
-const DOCKER_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Resolves once Docker stopped answering where fghjd dials it and answers
-/// somewhere else, as when the engine is switched or `/var/run/docker.sock`
-/// is repointed. The client is shared by every workspace and can't be
-/// swapped in place, so fghjd restarts onto it; the service manager starts it
-/// again.
-async fn docker_moved(docker: Arc<bollard::Docker>) -> String {
+/// fghjd's own `DOCKER_HOST` if set, as an admin override; else the socket the
+/// last `fghj wire` reported; else the default socket, if one is live. Never a
+/// guess at whose Docker it should be. The dialled host is `None` under
+/// `DOCKER_HOST`.
+fn dial_docker(configured: Option<&str>) -> Result<(bollard::Docker, Option<String>)> {
     if std::env::var_os("DOCKER_HOST").is_some() {
-        return std::future::pending().await;
+        let docker = bollard::Docker::connect_with_local_defaults()
+            .context("failed to connect to DOCKER_HOST")?;
+        return Ok((docker, None));
     }
-    let dialled = crate::docker::find_docker_host();
-    loop {
-        tokio::time::sleep(DOCKER_RECHECK).await;
-        if docker.ping().await.is_ok() {
-            continue;
-        }
-        let Some(host) = crate::docker::find_docker_host().filter(|h| Some(h) != dialled.as_ref())
-        else {
-            continue;
-        };
-        let answers =
-            match bollard::Docker::connect_with_socket(&host, 5, bollard::API_DEFAULT_VERSION) {
-                Ok(candidate) => candidate.ping().await.is_ok(),
-                Err(_) => false,
-            };
-        if answers {
-            return host;
-        }
-    }
+    let host = configured
+        .map(str::to_string)
+        .or_else(|| {
+            crate::docker::is_live_socket(crate::docker::DEFAULT_SOCKET)
+                .then(|| crate::docker::DEFAULT_SOCKET.to_string())
+        })
+        .context("no Docker yet: the first `fghj wire` tells fghjd which one to use")?;
+    let docker = bollard::Docker::connect_with_socket(&host, 120, bollard::API_DEFAULT_VERSION)
+        .with_context(|| format!("failed to connect to {host}"))?;
+    Ok((docker, Some(host)))
 }
 
 /// Runs until SIGTERM/SIGINT, deactivating first. `fghj daemon stop`/`start`
 /// toggle the active state without ending the process.
 pub async fn run_control_api() -> Result<()> {
     // Docker trouble never stops the daemon: the UI's doctor reports it.
-    let docker = match connect_docker() {
-        Ok(docker) => docker,
+    let daemon_state_path = persistence::default_state_path();
+    let saved = persistence::load_daemon_state(&daemon_state_path);
+    let (docker, docker_host) = match dial_docker(saved.docker_host.as_deref()) {
+        Ok(dialled) => dialled,
         Err(e) => {
-            daemon_log::warn(format!(
-                "fghjd: no Docker client, restart once Docker is up: {e:#}"
-            ));
-            crate::docker::undialled_client()
+            daemon_log::warn(format!("fghjd: no Docker client: {e:#}"));
+            (crate::docker::undialled_client(), None)
         }
     };
     if let Err(e) = docker.ping().await {
@@ -165,8 +153,6 @@ pub async fn run_control_api() -> Result<()> {
         registry.clone(),
     ));
 
-    let daemon_state_path = persistence::default_state_path();
-    let idle_requested = persistence::load_daemon_state(&daemon_state_path).idle_requested;
     let daemon = Arc::new(DaemonControl {
         registry: registry.clone(),
         cert_resolver,
@@ -175,8 +161,10 @@ pub async fn run_control_api() -> Result<()> {
         active: Mutex::new(None),
         last_reconcile_ms: Mutex::new(None),
         sidecar_failures: Mutex::new(std::collections::HashMap::new()),
-        idle_requested: Mutex::new(idle_requested),
+        idle_requested: Mutex::new(saved.idle_requested),
         daemon_state_path,
+        docker_host,
+        docker_reconfigured: tokio::sync::Notify::new(),
     });
     spawn_reconciler(Arc::clone(&daemon));
     spawn_sync_reconciler(Arc::clone(&daemon));
@@ -222,10 +210,13 @@ pub async fn run_control_api() -> Result<()> {
         result = axum::serve(control_listener, app) => {
             result.context("control API server error")?;
         }
-        host = docker_moved(Arc::clone(&docker)) => {
-            daemon_log::info(format!(
-                "fghjd: Docker answers at {host} now, restarting to use it..."
-            ));
+        // The client is shared by every workspace and can't be swapped in
+        // place, so fghjd restarts onto the new one; the service manager starts
+        // it again.
+        _ = daemon.docker_reconfigured.notified() => {
+            daemon_log::info(
+                "fghjd: `fghj wire` named a different Docker, restarting to use it...".to_string(),
+            );
             daemon.deactivate();
         }
         _ = shutdown_signal => {

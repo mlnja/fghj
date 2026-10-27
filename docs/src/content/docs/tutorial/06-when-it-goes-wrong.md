@@ -161,7 +161,7 @@ browser would instead of reading the file.
 
 **The browser shows a certificate warning.** The local CA isn't trusted —
 doctor's `root CA trusted by the system` check says so directly.
-Run `fghj daemon restart` from a terminal: it trusts the CA, after a macOS
+Run `fghj doctor --fix` from a terminal: it trusts the CA, after a macOS
 password dialog. `fghjd` tries the same on every start, but under
 `brew services` macOS refuses it, because there's nobody to show the dialog
 to. Both only ever write when trust is genuinely absent, which is why they

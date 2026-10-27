@@ -34,11 +34,6 @@ impl Session for RuntimeDir {
         PathBuf::from("/var/lib/fghjd")
     }
 
-    /// `/dev/console` is root's on Linux, so there's nobody to read off it.
-    fn console_uid(&self) -> Option<u32> {
-        None
-    }
-
     fn session_ssh_agent(&self, uid: u32, is_live: &dyn Fn(&Path) -> bool) -> Option<String> {
         let dir = self.run_user.join(uid.to_string());
         SESSION_AGENTS
