@@ -245,7 +245,9 @@ pub(crate) fn refusal_hint(output: &str, owner: Option<&WorkspaceOwner>) -> Opti
     let as_root = unsafe { libc::geteuid() } == 0;
     let agent = match owner.map(WorkspaceOwner::live_ssh_auth_sock) {
         None | Some(None) => Agent::None,
-        Some(Some(sock)) if sock.contains("/com.apple.launchd.") => Agent::Apple,
+        Some(Some(sock)) if crate::platform::current().session.is_session_agent(&sock) => {
+            Agent::Session
+        }
         Some(Some(_)) => Agent::Other,
     };
     failure_hint(output, owner.is_some(), as_root, agent)
@@ -257,7 +259,7 @@ enum Agent {
     None,
     /// The login session's, found by scanning. Keys kept in 1Password and the
     /// like aren't in it.
-    Apple,
+    Session,
     /// One `fghj wire` sent.
     Other,
 }
@@ -290,8 +292,8 @@ fn failure_hint(
              another agent (1Password and the like), set `IdentityAgent` in ~/.ssh/config \
              or run `fghj wire` from your shell."
         }
-        (true, _, Agent::Apple) => {
-            "git ran as you, with macOS's ssh-agent. If your keys live in another agent \
+        (true, _, Agent::Session) => {
+            "git ran as you, with your login session's ssh-agent. If your keys live in another agent \
              (1Password and the like), set `IdentityAgent` in ~/.ssh/config or run \
              `fghj wire` from your shell. Otherwise check `ssh-add -l` lists your key."
         }
@@ -470,9 +472,9 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_through_macos_agent_points_at_other_agents() {
+    fn a_refusal_through_the_session_agent_points_at_other_agents() {
         let output = "git@gitlab.com: Permission denied (publickey).";
-        let hint = failure_hint(output, true, true, Agent::Apple).unwrap();
+        let hint = failure_hint(output, true, true, Agent::Session).unwrap();
         assert!(hint.contains("IdentityAgent"), "{hint}");
         let hint = failure_hint(output, true, true, Agent::Other).unwrap();
         assert!(!hint.contains("IdentityAgent"), "{hint}");

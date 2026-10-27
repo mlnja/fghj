@@ -1,5 +1,5 @@
 //! Host-reachable raw ports for `fghj.raw.internal` nodes: a per-node virtual
-//! IP NAT'd by the OS (`pf` on macOS) to the node's published
+//! IP NAT'd by the OS ([`crate::platform::RawNat`]) to the node's published
 //! `127.0.0.1:<host_port>`.
 //!
 //! `virtual_ip_for` can collide; that only matters for two active names on the
@@ -9,15 +9,13 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::Ipv4Addr;
-use std::sync::{Mutex, Once, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::daemon_log;
-
-mod macos;
+use crate::platform;
 
 /// Owned exclusively by fghjd, so alias pruning can claim the whole range.
 const POOL_BASE: u32 = u32::from_be_bytes([10, 222, 0, 0]);
@@ -47,63 +45,6 @@ pub struct RouteSpec {
     pub virtual_ip: Ipv4Addr,
     pub container_port: u16,
     pub host_port: u16,
-}
-
-/// `apply` gets the complete desired state, not a diff.
-pub trait RawNetBackend: Send + Sync {
-    fn apply(&self, routes: &[RouteSpec]) -> Result<()>;
-    fn clear(&self) -> Result<()>;
-    /// The backend's own last-applied record, not recomputed.
-    fn status(&self) -> Vec<RouteSpec>;
-}
-
-fn backend() -> &'static dyn RawNetBackend {
-    static BACKEND: OnceLock<Box<dyn RawNetBackend>> = OnceLock::new();
-    BACKEND
-        .get_or_init(|| {
-            if cfg!(target_os = "macos") {
-                Box::new(macos::MacosPfBackend::new())
-            } else {
-                Box::new(NoopBackend::new())
-            }
-        })
-        .as_ref()
-}
-
-struct NoopBackend {
-    warned: Once,
-}
-
-impl NoopBackend {
-    fn new() -> Self {
-        Self {
-            warned: Once::new(),
-        }
-    }
-}
-
-impl RawNetBackend for NoopBackend {
-    fn apply(&self, routes: &[RouteSpec]) -> Result<()> {
-        if !routes.is_empty() {
-            self.warned.call_once(|| {
-                daemon_log::warn(
-                    "fghjd: host-reachable raw ports (*.fghj.raw.internal) aren't implemented on \
-                     this platform yet — raw-zone names will resolve to a virtual IP, but \
-                     nothing will answer on it"
-                        .to_string(),
-                );
-            });
-        }
-        Ok(())
-    }
-
-    fn clear(&self) -> Result<()> {
-        Ok(())
-    }
-
-    fn status(&self) -> Vec<RouteSpec> {
-        Vec::new()
-    }
 }
 
 fn routes_for(endpoints: &[RawEndpoint], assigned: &HashMap<String, Ipv4Addr>) -> Vec<RouteSpec> {
@@ -216,72 +157,29 @@ pub fn reconcile(endpoints: &[RawEndpoint]) -> Result<()> {
         *table = next.clone();
         next
     };
-    backend().apply(&routes_for(endpoints, &next))
+    platform::current().nat.apply(&routes_for(endpoints, &next))
 }
 
 pub fn clear() -> Result<()> {
     assignments().lock().unwrap().clear();
-    backend().clear()
-}
-
-/// For `web::proxy::PROXY_IP`, not a raw-zone IP. Outside the pool so alias
-/// pruning never removes it. A no-op off macOS, which only assigns `127.0.0.1`.
-pub fn add_loopback_alias(ip: Ipv4Addr) -> Result<()> {
-    if cfg!(target_os = "macos") {
-        macos::add_lo0_alias(ip)
-    } else {
-        Ok(())
-    }
-}
-
-/// An address that was never aliased is fine.
-pub fn remove_loopback_alias(ip: Ipv4Addr) -> Result<()> {
-    if cfg!(target_os = "macos") {
-        macos::remove_lo0_alias(ip).or(Ok(()))
-    } else {
-        Ok(())
-    }
-}
-
-/// `None` where unsupported; `Err` when the interface can't be read.
-pub fn loopback_alias_present(ip: Ipv4Addr) -> Option<Result<bool>> {
-    if cfg!(target_os = "macos") {
-        Some(macos::has_lo0_alias(ip))
-    } else {
-        None
-    }
+    platform::current().nat.clear()
 }
 
 pub fn current_routes() -> Vec<RouteSpec> {
-    backend().status()
+    platform::current().nat.status()
 }
 
 /// The applied routes, and those of them the OS isn't serving. `None` where
 /// raw routing isn't implemented.
 pub fn route_health() -> Option<Result<(Vec<RouteSpec>, Vec<RouteSpec>)>> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
     let routes = current_routes();
-    Some(macos::unserved_routes(&routes).map(|unserved| (routes, unserved)))
+    let unserved = platform::current().nat.unserved(&routes)?;
+    Some(unserved.map(|unserved| (routes, unserved)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `192.0.2.1` is TEST-NET-1, which nothing assigns to loopback.
-    #[test]
-    fn loopback_alias_present_reads_the_live_interface_or_is_none() {
-        let localhost = loopback_alias_present(Ipv4Addr::LOCALHOST);
-        let test_net = loopback_alias_present(Ipv4Addr::new(192, 0, 2, 1));
-        if cfg!(target_os = "macos") {
-            assert!(localhost.unwrap().unwrap());
-            assert!(!test_net.unwrap().unwrap());
-        } else {
-            assert!(localhost.is_none() && test_net.is_none());
-        }
-    }
 
     #[test]
     fn virtual_ip_for_is_deterministic() {
@@ -369,14 +267,6 @@ mod tests {
             ports,
         }];
         assert!(routes_for(&endpoints, &HashMap::new()).is_empty());
-    }
-
-    #[test]
-    fn noop_backend_only_warns_when_routes_are_non_empty() {
-        let backend = NoopBackend::new();
-        assert!(backend.apply(&[]).is_ok());
-        assert!(backend.clear().is_ok());
-        assert!(backend.status().is_empty());
     }
 
     fn endpoint(name: &str, port: u16) -> RawEndpoint {

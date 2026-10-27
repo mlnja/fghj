@@ -44,7 +44,7 @@ pub fn generate_ca_for_tests() -> LoadedCa {
 }
 
 /// Loads the CA from `dir`, generating it on first run. `dir` must survive a
-/// reboot. Doesn't touch the system trust store (`web::trust::install`).
+/// reboot. Doesn't touch the system trust store (`platform::TrustStore::install`).
 pub fn ensure_ca(dir: &Path) -> Result<LoadedCa> {
     let cert_path = dir.join(CA_CERT_FILE);
     let key_path = dir.join(CA_KEY_FILE);
@@ -89,7 +89,7 @@ pub fn refresh_trust_files(dir: &Path, ca: &LoadedCa) -> Result<()> {
 fn merge_bundle(roots: &[CertificateDer<'static>], ca: &LoadedCa) -> String {
     let mut bundle = String::new();
     for der in roots {
-        // Already present once `web::trust::install` has run.
+        // Already present once `platform::TrustStore::install` has run.
         if der == &ca.cert_der {
             continue;
         }

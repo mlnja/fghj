@@ -1,14 +1,11 @@
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::net::UdpSocket;
 
-use crate::daemon_log;
-
-mod macos;
+use crate::{daemon_log, platform};
 
 pub(crate) const ZONE: &str = "fghj.internal";
 const ZONE_SUFFIX: &str = ".fghj.internal";
@@ -220,45 +217,11 @@ pub async fn serve(socket: UdpSocket, zones: Arc<dyn ZoneSource>, upstream: Opti
     }
 }
 
-/// Only macOS is implemented. Rerun as wildcard zones come and go.
+/// Rerun as wildcard zones come and go.
 pub fn install_os_resolver_config(port: u16, wildcard_zones: &[String]) -> Result<()> {
-    if cfg!(target_os = "macos") {
-        let mut zones: Vec<&str> = vec![ZONE, ZONE_RAW];
-        zones.extend(wildcard_zones.iter().map(String::as_str));
-        macos::sync_resolver(Path::new(macos::RESOLVER_DIR), port, &zones)
-    } else {
-        daemon_log::warn(format!(
-            "fghjd: automatic OS DNS routing for *.{ZONE} isn't implemented on this platform yet — \
-             point your resolver at 127.0.0.1:{port} for that zone manually"
-        ));
-        Ok(())
-    }
-}
-
-/// Otherwise a stopped fghjd leaves the names pointed at a dead port.
-pub fn clear_os_resolver_config() {
-    if cfg!(target_os = "macos") {
-        macos::clear_resolver(Path::new(macos::RESOLVER_DIR));
-    }
-}
-
-/// Read back from the OS, so drift from the desired state shows up.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OsRouting {
-    pub location: &'static str,
-    pub zones: Vec<(String, u16)>,
-}
-
-/// `None` where unsupported, so callers can tell it from "not routed".
-pub fn os_routing_status() -> Option<OsRouting> {
-    if cfg!(target_os = "macos") {
-        Some(OsRouting {
-            location: macos::RESOLVER_DIR,
-            zones: macos::managed_resolver_zones(Path::new(macos::RESOLVER_DIR)),
-        })
-    } else {
-        None
-    }
+    let mut zones: Vec<&str> = vec![ZONE, ZONE_RAW];
+    zones.extend(wildcard_zones.iter().map(String::as_str));
+    platform::current().dns.sync(port, &zones)
 }
 
 #[cfg(test)]
@@ -528,17 +491,5 @@ mod tests {
         let resp = build_response(&query, None);
         let (_, flags1) = header_flags(&resp);
         assert_eq!(flags1 & 0x0F, 3, "RCODE must be NXDOMAIN once inactive");
-    }
-
-    #[test]
-    fn os_routing_status_reports_the_platform_mechanism_or_none() {
-        let status = os_routing_status();
-        if cfg!(target_os = "macos") {
-            let routing = status.expect("macOS has OS DNS routing");
-            assert_eq!(routing.location, "/etc/resolver");
-            assert!(routing.zones.is_sorted());
-        } else {
-            assert_eq!(status, None);
-        }
     }
 }

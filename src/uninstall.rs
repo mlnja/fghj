@@ -5,8 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::web::trust;
-use crate::{dns, hosts_file, persistence, raw_net};
+use crate::{hosts_file, persistence, platform, raw_net};
 
 /// For reinstalling: keeps the trusted CA and wired workspaces.
 #[derive(Debug, Default, Clone, Copy)]
@@ -42,23 +41,26 @@ pub fn purge(opts: Options, stop_daemon: impl FnOnce() -> Result<bool>) -> Outco
             .warnings
             .push(format!("could not clear the /etc/hosts block: {e:#}"));
     }
-    dns::clear_os_resolver_config();
+    let platform = platform::current();
+    platform.dns.clear();
     if let Err(e) = raw_net::clear() {
-        outcome
-            .warnings
-            .push(format!("could not clear pf rules and lo0 aliases: {e:#}"));
-    }
-    if let Err(e) = raw_net::remove_loopback_alias(crate::web::proxy::PROXY_IP) {
         outcome.warnings.push(format!(
-            "could not remove the {} lo0 alias: {e:#}",
-            crate::web::proxy::PROXY_IP
+            "could not clear {}: {e:#}",
+            platform.nat.footprint().unwrap_or("the raw-port routes")
+        ));
+    }
+    if let Err(e) = platform.loopback.remove_alias(crate::web::proxy::PROXY_IP) {
+        outcome.warnings.push(format!(
+            "could not remove the {} {} alias: {e:#}",
+            crate::web::proxy::PROXY_IP,
+            platform.loopback.interface()
         ));
     }
 
     // Trust before disk: a trusted cert whose key we deleted is still a trusted
     // root.
     if !opts.keep_ca {
-        outcome.certificates_removed = trust::remove();
+        outcome.certificates_removed = platform.trust.remove();
     }
 
     if !opts.keep_state {

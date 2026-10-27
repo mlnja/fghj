@@ -30,8 +30,9 @@ fn docker_config_dir() -> Option<PathBuf> {
     if unsafe { libc::geteuid() } != 0 {
         return std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".docker"));
     }
-    let owner = crate::persistence::WorkspaceOwner::of_folder(Path::new("/dev/console"))?;
-    Some(PathBuf::from(owner.home).join(".docker"))
+    let uid = crate::platform::current().session.console_uid()?;
+    let home = crate::persistence::workspace_owner::home_dir_of(uid)?;
+    Some(PathBuf::from(home).join(".docker"))
 }
 
 /// The endpoint of `currentContext`, or `None` for the built-in `default`

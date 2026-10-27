@@ -78,9 +78,8 @@ pub(crate) fn home_dir_of(uid: u32) -> Option<String> {
     }
 }
 
-/// `hint` goes stale when the agent restarts, and `of_folder` has none. On
-/// macOS the login-session agent lives at a discoverable path, so it can be
-/// found anyway; elsewhere it can't.
+/// `hint` goes stale when the agent restarts, and `of_folder` has none. Where
+/// the login session's agent lives at a discoverable path, it's found anyway.
 fn live_ssh_auth_sock(uid: u32, hint: Option<&str>) -> Option<String> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
@@ -96,29 +95,9 @@ fn live_ssh_auth_sock(uid: u32, hint: Option<&str>) -> Option<String> {
         return Some(hint.to_string());
     }
 
-    if cfg!(target_os = "macos") {
-        // `/private/tmp` up to macOS 15, `/private/var/run` since.
-        for dir in ["/private/var/run", "/private/tmp"] {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                if !entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("com.apple.launchd.")
-                {
-                    continue;
-                }
-                let candidate = entry.path().join("Listeners");
-                if is_live_socket_for_uid(&candidate) {
-                    return Some(candidate.to_string_lossy().into_owned());
-                }
-            }
-        }
-    }
-
-    None
+    crate::platform::current()
+        .session
+        .session_ssh_agent(uid, &is_live_socket_for_uid)
 }
 
 /// `BatchMode` and auto-accepted host keys, so a clone fails fast instead of
