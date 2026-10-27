@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://fghj.mlops.ninja/
+    about: The tutorial, the .fghj.yaml reference, and how fghj works inside.
+  - name: Security vulnerability
+    url: https://github.com/mlnja/fghj/security/advisories/new
+    about: Please report security problems privately, not as a public issue.

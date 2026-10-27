@@ -204,24 +204,9 @@ cd docs && npm install && npm run dev
 
 ## Contributing
 
-```bash
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
-```
-
-CI runs those on macOS (`cargo check`/`clippy`/`fmt --check`/`test`), plus
-`cue vet schema/*.cue` and a no-push build of `sidecar/Dockerfile`. Note that
-the UI build is a *prerequisite* of every Rust job, not a nicety:
-`include_dir!("$CARGO_MANIFEST_DIR/ui/dist")` is a proc macro that panics at
-compile time if `ui/dist` is missing, and it's gitignored. The tests that
-need a real Docker daemon and a real root `fghjd` can't run in CI at all —
-run those locally.
-
-Before changing behaviour, check `concepts/` for a file that already explains
-why the current behaviour is what it is — and when you settle something new,
-fold the decision into the relevant concept file rather than leaving it only
-in a commit message.
+Bug reports from real multi-repo setups are the most useful thing right now.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, the checks CI runs,
+and where design decisions are recorded.
 
 ## License
 

@@ -1,0 +1,21 @@
+name: Feature request
+description: Something you couldn't express in .fghj.yaml or couldn't do with fghj.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: Describe your setup and the problem, not only the solution. How many repos, what kind of services, what breaks today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would help
+      description: A sketch of the config or command you'd want, if you have one.
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you do today instead
+      description: A Compose file, a script, mkcert + Traefik, OrbStack, nothing?
