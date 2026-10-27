@@ -1,6 +1,16 @@
 # fghj
 
+[![Release](https://img.shields.io/github/v/release/mlnja/fghj?sort=semver)](https://github.com/mlnja/fghj/releases/latest)
+[![CI](https://github.com/mlnja/fghj/actions/workflows/ci.yml/badge.svg)](https://github.com/mlnja/fghj/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Platform: macOS (Apple Silicon)](https://img.shields.io/badge/platform-macOS%20arm64-lightgrey)
+
 **Local dev environments scoped to a user flow, not your whole fleet.**
+
+[Docs](https://fghj.mlops.ninja/) ·
+[Tutorial](https://fghj.mlops.ninja/tutorial/) ·
+[What it fixes](https://fghj.mlops.ninja/guides/what-it-fixes/) ·
+[What it changes on your machine](https://fghj.mlops.ninja/guides/uninstalling/)
 
 Testing one user journey shouldn't mean booting every microservice you own.
 `fghj` reads a small `.fghj.yaml` in each repo, follows the dependencies
@@ -8,11 +18,11 @@ outward from whichever repos you're actually working on, and brings up just
 that subgraph — with real `*.fghj.internal` HTTPS domains, locally trusted
 certificates, and no `docker-compose.yml` to hand-maintain.
 
-> **Status: early.** macOS today, with Linux support in progress. Released
-> and installable from the Homebrew
-> tap; building from source (below) also works. The config language is
-> settled enough to write against; the `version: "2.0"` field in
-> `.fghj.yaml` is the compatibility hook.
+> **Status: early.** macOS on Apple Silicon today, with Linux support in
+> progress. Released and installable from the Homebrew tap; building from
+> source (below) also works. The config language is settled enough to write
+> against; the `version: "2.0"` field in `.fghj.yaml` is the compatibility
+> hook.
 
 ## The one idea
 
@@ -56,18 +66,22 @@ those instead.
 
 ## Install
 
-Once a release is tagged, via Homebrew:
+Via Homebrew (macOS on Apple Silicon):
 
 ```bash
 brew install mlnja/tap/fghj
 sudo brew services start fghj
+fghj daemon start     # once, as you: asks macOS to trust fghj's local CA
+fghj doctor           # checks Docker, ports, DNS and the CA against the machine
 ```
 
 The `sudo` is real: `fghjd` binds ports 80/443, installs a root CA into your
 system trust store, and edits `/etc/resolver` and `/etc/hosts`, so Homebrew
 installs it as a root LaunchDaemon — the same shape as `dnsmasq` or `nginx`.
 (No formula auto-starts a service; `brew install postgresql` doesn't either.)
-Everything after that is automatic on first start.
+Everything else is automatic on first start. The last step is separate
+because macOS asks for your password before trusting a root CA, and a
+LaunchDaemon has no login session to show that dialog in.
 
 It binds those ports on `127.222.0.1`, a loopback address it aliases for
 itself — **not** on `127.0.0.1` or `0.0.0.0`. If you already run something on
@@ -77,7 +91,8 @@ port 80, a local nginx or a `docker run -p 80:80`, it keeps working and
 ### Building from source
 
 If you'd rather not use the tap, you need Rust (stable), Node 22+, Docker,
-and macOS. `cue` is optional — only `fghj validate` needs it.
+and a [supported OS](https://fghj.mlops.ninja/getting-started/installation/#prerequisites).
+`cue` is optional — only `fghj validate` needs it.
 
 ```bash
 git clone https://github.com/mlnja/fghj.git
@@ -100,8 +115,31 @@ fghj daemon status    # -> "fghjd is running and active"
 fghj doctor           # Docker, BuildKit, ports, DNS, CA — all checked against the machine
 ```
 
-Full details, including uninstall cleanup:
-[`docs/.../installation.md`](docs/src/content/docs/getting-started/installation.md).
+Full details: [Installation](https://fghj.mlops.ninja/getting-started/installation/).
+
+### What it changes on your machine
+
+A root daemon that edits system config should say exactly what it touches.
+This is all of it:
+
+| Change | Where | Undone by |
+|---|---|---|
+| A managed block of host entries | `/etc/hosts`, between `# fghj-managed-begin`/`-end` | `fghj daemon stop` |
+| A split-DNS resolver for `*.fghj.internal` only | `/etc/resolver/fghj.internal` | `fghj daemon stop` |
+| Loopback aliases | `127.222.0.1` and `10.222.0.0/16` on `lo0` | `fghj daemon stop` |
+| A pf anchor for raw-port NAT, plus one hook line | the `fghjd` anchor, `/etc/pf.conf` | `fghj daemon stop` |
+| A local root CA, trusted for TLS | System keychain, as `fghj local CA` | `sudo fghj uninstall` |
+| Daemon state, including the CA's private key (root-only) | `/var/lib/fghjd` | `sudo fghj uninstall` |
+| Containers, networks and volumes, all prefixed `fghj-` | Docker | left alone, on purpose |
+
+Every leaf certificate is issued by an intermediate that is name-constrained
+to reserved local TLDs (`.internal`, `.test`, `.local`, `.localhost`) and
+excluded from IP addresses, so even a leaked signing key can't mint a cert
+for a public site. The root's key never leaves `/var/lib/fghjd/ca/`.
+Nothing is written to your home directory except the repos it clones into
+your workspace. `sudo fghj uninstall` lists what it will remove and asks
+first. The full inventory, with commands to verify nothing is left, is
+[What fghj touches, and how to remove it](https://fghj.mlops.ninja/guides/uninstalling/).
 
 ## Use it
 
@@ -135,18 +173,23 @@ Two domain zones, and the difference matters:
 
 ## Documentation
 
-The docs live in `docs/` as an Astro Starlight site. It isn't deployed
-anywhere yet, so read it either as plain Markdown in the repo or locally:
+The docs are at **[fghj.mlops.ninja](https://fghj.mlops.ninja/)**.
+
+- **[The tutorial](https://fghj.mlops.ninja/tutorial/)** — build a two-repo
+  workspace from nothing across seven chapters. Start here.
+- **[What it fixes](https://fghj.mlops.ninja/guides/what-it-fixes/)** and
+  **[fghj and OrbStack](https://fghj.mlops.ninja/guides/vs-orbstack/)** —
+  where it fits next to what you already use.
+- **[`.fghj.yaml` reference](https://fghj.mlops.ninja/reference/fghj-yaml/)** —
+  every field.
+- **[Concepts](https://fghj.mlops.ninja/concepts/architecture/)** — how it
+  works inside.
+
+The source is the Astro Starlight site in `docs/`. To run it locally:
 
 ```bash
 cd docs && npm install && npm run dev
 ```
-
-- **[The tutorial](docs/src/content/docs/tutorial/)** — build a two-repo
-  workspace from nothing across seven chapters. Start here.
-- **[`.fghj.yaml` reference](docs/src/content/docs/reference/fghj-yaml.md)** —
-  every field.
-- **[Concepts](docs/src/content/docs/concepts/)** — how it works inside.
 
 ## Repo layout
 
@@ -162,24 +205,9 @@ cd docs && npm install && npm run dev
 
 ## Contributing
 
-```bash
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
-```
-
-CI runs those on macOS (`cargo check`/`clippy`/`fmt --check`/`test`), plus
-`cue vet schema/*.cue` and a no-push build of `sidecar/Dockerfile`. Note that
-the UI build is a *prerequisite* of every Rust job, not a nicety:
-`include_dir!("$CARGO_MANIFEST_DIR/ui/dist")` is a proc macro that panics at
-compile time if `ui/dist` is missing, and it's gitignored. The tests that
-need a real Docker daemon and a real root `fghjd` can't run in CI at all —
-run those locally.
-
-Before changing behaviour, check `concepts/` for a file that already explains
-why the current behaviour is what it is — and when you settle something new,
-fold the decision into the relevant concept file rather than leaving it only
-in a commit message.
+Bug reports from real multi-repo setups are the most useful thing right now.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, the checks CI runs,
+and where design decisions are recorded.
 
 ## License
 

@@ -1,0 +1,56 @@
+name: Bug report
+description: Something fghj did that it shouldn't have, or didn't do that it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Security problems go through [SECURITY.md](https://github.com/mlnja/fghj/blob/main/SECURITY.md), not here.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The smallest `.fghj.yaml` files and commands that show it. Paste the YAML, not a screenshot.
+      render: shell
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `fghj doctor`
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Output of `fghj --version`
+      placeholder: fghj 0.1.51
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: "macOS 15.1, Ubuntu 24.04"
+  - type: dropdown
+    id: docker
+    attributes:
+      label: Docker runtime
+      options:
+        - Docker Desktop
+        - OrbStack
+        - Colima
+        - Docker Engine
+        - Other
+  - type: textarea
+    id: logs
+    attributes:
+      label: Daemon log, if relevant
+      description: "Under Homebrew: `tail -n 200 $(brew --prefix)/var/log/fghjd.err.log`"
+      render: text

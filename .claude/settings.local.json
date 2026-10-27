@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "WebFetch(domain:dev.to)",
-      "WebFetch(domain:new.signadot.com)"
+      "WebFetch(domain:new.signadot.com)",
+      "Bash(gh pr *)",
+      "Bash(git fetch *)",
+      "Bash(gh api *)"
     ]
   }
 }
