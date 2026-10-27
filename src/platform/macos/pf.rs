@@ -1,4 +1,4 @@
-//! macOS `pf`/`ifconfig` implementation of [`super::RawNetBackend`].
+//! macOS raw-port NAT: `pf` `rdr` rules, plus a `lo0` alias per virtual IP.
 //!
 //! Owns a dedicated top-level anchor `fghjd`, hooked once into `/etc/pf.conf`.
 //! Each tick only reloads that anchor. Not nested under `com.apple/*`: `rdr`
@@ -10,11 +10,13 @@ use std::collections::BTreeSet;
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 
-use super::{RawNetBackend, RouteSpec};
+use super::{lo0, run};
+use crate::platform::RawNat;
+use crate::raw_net::RouteSpec;
 
 const PF_CONF_PATH: &str = "/etc/pf.conf";
 const ANCHOR_NAME: &str = "fghjd";
@@ -23,28 +25,24 @@ const HOOK_MARKER_BEGIN: &str =
 const HOOK_MARKER_END: &str = "# --- end fghjd raw-net anchor hook ---";
 const ANCHOR_HOOK_LINE: &str = "rdr-anchor \"fghjd\"";
 
-pub struct MacosPfBackend {
+#[derive(Default)]
+pub(super) struct PfAnchor {
     applied: Mutex<Vec<RouteSpec>>,
     /// Only `pfctl -d` on `clear()` if we enabled it.
     enabled_pf: Mutex<bool>,
+    /// On first use rather than construction, which must not touch the system.
+    healed: OnceLock<()>,
 }
 
-impl MacosPfBackend {
-    pub fn new() -> Self {
-        let backend = Self {
-            applied: Mutex::new(Vec::new()),
-            enabled_pf: Mutex::new(false),
-        };
-        backend.self_heal_stray_aliases();
-        backend
-    }
-
+impl PfAnchor {
     /// Removes pool aliases a crashed predecessor left; pool membership is the only
     /// ownership signal.
     fn self_heal_stray_aliases(&self) {
-        for ip in current_pool_aliases() {
-            let _ = remove_lo0_alias(ip);
-        }
+        self.healed.get_or_init(|| {
+            for ip in current_pool_aliases() {
+                let _ = lo0::remove_alias(ip);
+            }
+        });
     }
 
     fn ensure_pf_enabled(&self) -> Result<()> {
@@ -68,14 +66,9 @@ impl MacosPfBackend {
     }
 }
 
-impl Default for MacosPfBackend {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl RawNetBackend for MacosPfBackend {
+impl RawNat for PfAnchor {
     fn apply(&self, routes: &[RouteSpec]) -> Result<()> {
+        self.self_heal_stray_aliases();
         let mut desired = routes.to_vec();
         desired.sort();
         let mut applied = self.applied.lock().unwrap();
@@ -84,10 +77,10 @@ impl RawNetBackend for MacosPfBackend {
         let desired_ips: BTreeSet<Ipv4Addr> = desired.iter().map(|r| r.virtual_ip).collect();
         let (to_add, to_remove) = diff_ips(&current_ips, &desired_ips);
         for ip in to_add {
-            add_lo0_alias(ip)?;
+            lo0::add_alias(ip)?;
         }
         for ip in to_remove {
-            remove_lo0_alias(ip)?;
+            lo0::remove_alias(ip)?;
         }
 
         if !desired.is_empty() {
@@ -101,8 +94,9 @@ impl RawNetBackend for MacosPfBackend {
     }
 
     fn clear(&self) -> Result<()> {
+        self.self_heal_stray_aliases();
         for ip in current_pool_aliases() {
-            let _ = remove_lo0_alias(ip);
+            let _ = lo0::remove_alias(ip);
         }
         let _ = load_named_anchor_ruleset(&[]);
         let _ = remove_anchor_hook();
@@ -116,7 +110,28 @@ impl RawNetBackend for MacosPfBackend {
     }
 
     fn status(&self) -> Vec<RouteSpec> {
+        self.self_heal_stray_aliases();
         self.applied.lock().unwrap().clone()
+    }
+
+    fn unserved(&self, routes: &[RouteSpec]) -> Option<Result<Vec<RouteSpec>>> {
+        Some(unserved_routes(routes))
+    }
+
+    fn name(&self) -> &'static str {
+        "pf"
+    }
+
+    fn location(&self) -> &'static str {
+        "pf anchor fghjd"
+    }
+
+    fn inspect_command(&self) -> &'static str {
+        "sudo pfctl -a fghjd -s nat"
+    }
+
+    fn footprint(&self) -> Option<&'static str> {
+        Some("the lo0 aliases and the pf anchor")
     }
 }
 
@@ -147,10 +162,9 @@ fn parse_pool_aliases(ifconfig_output: &str) -> Vec<Ipv4Addr> {
 }
 
 fn current_pool_aliases() -> Vec<Ipv4Addr> {
-    let Ok(output) = Command::new("ifconfig").arg("lo0").output() else {
-        return Vec::new();
-    };
-    parse_pool_aliases(&String::from_utf8_lossy(&output.stdout))
+    lo0::addresses()
+        .map(|output| parse_pool_aliases(&output))
+        .unwrap_or_default()
 }
 
 /// Must lead every non-empty ruleset. Without it pf reverse-translates replies
@@ -183,7 +197,7 @@ fn pf_status_enabled() -> bool {
 
 /// The applied routes the kernel isn't actually serving: pf off, the anchor's
 /// `rdr` rule gone, or the virtual IP's `lo0` alias missing.
-pub(super) fn unserved_routes(routes: &[RouteSpec]) -> Result<Vec<RouteSpec>> {
+fn unserved_routes(routes: &[RouteSpec]) -> Result<Vec<RouteSpec>> {
     if routes.is_empty() {
         return Ok(Vec::new());
     }
@@ -223,36 +237,6 @@ fn rule_loaded(pfctl_nat: &str, route: &RouteSpec) -> bool {
 
 fn disable_pf() -> Result<()> {
     run(Command::new("pfctl").arg("-d"))
-}
-
-pub(super) fn add_lo0_alias(ip: Ipv4Addr) -> Result<()> {
-    run(Command::new("ifconfig").args(["lo0", "alias", &ip.to_string(), "up"]))
-}
-
-pub(super) fn remove_lo0_alias(ip: Ipv4Addr) -> Result<()> {
-    run(Command::new("ifconfig").args(["lo0", "-alias", &ip.to_string()]))
-}
-
-pub(super) fn has_lo0_alias(ip: Ipv4Addr) -> Result<bool> {
-    let output = Command::new("ifconfig")
-        .arg("lo0")
-        .output()
-        .context("could not run `ifconfig lo0`")?;
-    if !output.status.success() {
-        bail!(
-            "`ifconfig lo0` failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(lo0_has_alias(&String::from_utf8_lossy(&output.stdout), ip))
-}
-
-fn lo0_has_alias(ifconfig_output: &str, ip: Ipv4Addr) -> bool {
-    let needle = ip.to_string();
-    ifconfig_output.lines().any(|line| {
-        let mut words = line.split_whitespace();
-        words.next() == Some("inet") && words.next() == Some(needle.as_str())
-    })
 }
 
 fn strip_managed_block(conf: &str) -> String {
@@ -366,23 +350,9 @@ fn load_named_anchor_ruleset(routes: &[RouteSpec]) -> Result<()> {
     Ok(())
 }
 
-fn run(cmd: &mut Command) -> Result<()> {
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to run {cmd:?}"))?;
-    if !output.status.success() {
-        bail!(
-            "{cmd:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::web::proxy::PROXY_IP;
 
     #[test]
     fn a_loaded_rule_is_found_in_pfctl_output() {
@@ -401,22 +371,6 @@ mod tests {
                 ..route
             }
         ));
-    }
-
-    #[test]
-    fn lo0_alias_is_found_by_exact_address_not_substring() {
-        let output = "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384\n\
-                      \tinet 127.0.0.1 netmask 0xff000000\n\
-                      \tinet 127.222.0.1 netmask 0xff000000\n";
-        assert!(lo0_has_alias(output, PROXY_IP));
-        assert!(lo0_has_alias(output, Ipv4Addr::new(127, 0, 0, 1)));
-        assert!(!lo0_has_alias(output, Ipv4Addr::new(127, 222, 0, 2)));
-    }
-
-    #[test]
-    fn a_longer_address_sharing_our_prefix_is_not_a_match() {
-        let output = "\tinet 127.222.0.10 netmask 0xff000000\n";
-        assert!(!lo0_has_alias(output, PROXY_IP));
     }
 
     #[test]

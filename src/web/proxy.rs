@@ -53,7 +53,7 @@ pub const HTTPS_PORT: u16 = 443;
 
 /// A dedicated loopback alias rather than 127.0.0.1, so a developer's own
 /// :80/:443 keep working; inside 127/8 so it can't collide with a real network.
-/// Aliased onto `lo0` by `raw_net::add_loopback_alias`.
+/// Aliased onto loopback by `platform::Loopback::add_alias` where needed.
 pub const PROXY_IP: Ipv4Addr = Ipv4Addr::new(127, 222, 0, 1);
 
 pub async fn bind_http() -> Result<TcpListener> {

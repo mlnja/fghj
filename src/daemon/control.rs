@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use crate::daemon::registry::WorkspaceRegistry;
 use crate::web::{ca, proxy};
-use crate::{daemon_log, dns, effects, hosts_file, persistence, raw_net, supervisor};
+use crate::{daemon_log, dns, effects, hosts_file, persistence, platform, raw_net, supervisor};
 
 /// Aborting these frees the ports they hold.
 pub(crate) struct ActiveResources {
@@ -70,12 +70,14 @@ impl DaemonControl {
             dns::serve(dns_socket, self.registry.clone(), None),
         );
 
-        // Before the binds: macOS only assigns `127.0.0.1` to `lo0`. Not part of
-        // `raw_net::reconcile`, since it must exist with no workspace wired at all.
-        raw_net::add_loopback_alias(proxy::PROXY_IP).with_context(|| {
+        // Before the binds, on platforms where loopback has only `127.0.0.1`. Not
+        // part of `raw_net::reconcile`, since it must exist with no workspace wired.
+        let loopback = &platform::current().loopback;
+        loopback.add_alias(proxy::PROXY_IP).with_context(|| {
             format!(
-                "failed to alias {} onto lo0 — fghjd needs it to bind its proxy",
-                proxy::PROXY_IP
+                "failed to alias {} onto {} — fghjd needs it to bind its proxy",
+                proxy::PROXY_IP,
+                loopback.interface()
             )
         })?;
 
@@ -120,7 +122,7 @@ impl DaemonControl {
             resources.https_task.abort();
             resources.effect_tasks.abort_all();
         }
-        dns::clear_os_resolver_config();
+        platform::current().dns.clear();
         if let Err(e) = hosts_file::sync(&hosts_file::hosts_path(), &[]) {
             daemon_log::warn(format!(
                 "fghjd: failed to clear /etc/hosts on deactivate: {e}"
@@ -132,10 +134,12 @@ impl DaemonControl {
             ));
         }
         // `raw_net::clear` won't: `PROXY_IP` is outside the raw-zone pool on purpose.
-        if let Err(e) = raw_net::remove_loopback_alias(proxy::PROXY_IP) {
+        let loopback = &platform::current().loopback;
+        if let Err(e) = loopback.remove_alias(proxy::PROXY_IP) {
             daemon_log::warn(format!(
-                "fghjd: failed to remove the {} lo0 alias on deactivate: {e}",
-                proxy::PROXY_IP
+                "fghjd: failed to remove the {} {} alias on deactivate: {e}",
+                proxy::PROXY_IP,
+                loopback.interface()
             ));
         }
     }

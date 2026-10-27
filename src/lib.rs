@@ -18,6 +18,7 @@ pub mod effects;
 pub mod hosts_file;
 pub mod orchestrator;
 pub mod persistence;
+pub mod platform;
 pub mod raw_net;
 pub mod reducer;
 pub mod resolver;

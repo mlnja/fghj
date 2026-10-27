@@ -1,16 +1,48 @@
+//! macOS trust: the root CA in the System keychain, via `security`.
+
 use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result};
 
+use crate::platform::TrustStore;
 use crate::web::ca::COMMON_NAME;
 
 /// Machine-wide: every user's browser must trust it.
-pub(super) const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
+const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
+
+pub(super) struct SystemKeychain;
+
+impl TrustStore for SystemKeychain {
+    fn install(&self, ca_cert_path: &Path) -> Result<()> {
+        install_trust(ca_cert_path)
+    }
+
+    fn remove(&self) -> usize {
+        remove_trust()
+    }
+
+    fn is_trusted(&self, ca_cert_path: &Path) -> Option<bool> {
+        Some(is_trusted(ca_cert_path))
+    }
+
+    fn store_name(&self) -> &'static str {
+        SYSTEM_KEYCHAIN
+    }
+
+    fn install_notice(&self) -> &'static str {
+        "fghj's root CA isn't trusted yet — macOS will ask for your password to trust it"
+    }
+
+    fn untrusted_hint(&self) -> &'static str {
+        "run `fghj daemon restart` from a terminal — it asks macOS to trust the \
+         CA, which shows a password dialog"
+    }
+}
 
 /// Loops: `delete-certificate` removes one match per call, and repeated installs
 /// leave several CAs. A non-zero exit means none are left.
-pub(super) fn remove_trust() -> usize {
+fn remove_trust() -> usize {
     let mut removed = 0;
     while removed < 32 {
         let ok = Command::new("security")
@@ -30,7 +62,7 @@ pub(super) fn remove_trust() -> usize {
 
 /// `verify-cert` evaluates trust without prompting, so this is safe to call
 /// anytime.
-pub(super) fn is_trusted(ca_cert_path: &Path) -> bool {
+fn is_trusted(ca_cert_path: &Path) -> bool {
     Command::new("security")
         .args(["verify-cert", "-c"])
         .arg(ca_cert_path)
@@ -43,7 +75,7 @@ pub(super) fn is_trusted(ca_cert_path: &Path) -> bool {
 
 /// Checks first, since `add-trusted-cert` always prompts. Runs on every start,
 /// so revoked trust self-heals.
-pub(super) fn install_trust(ca_cert_path: &Path) -> Result<()> {
+fn install_trust(ca_cert_path: &Path) -> Result<()> {
     if is_trusted(ca_cert_path) {
         return Ok(());
     }
@@ -76,4 +108,17 @@ pub(super) fn install_trust(ca_cert_path: &Path) -> Result<()> {
     }
     println!("installed the fghj local CA into the System trust store");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_store_is_the_machine_wide_keychain() {
+        assert_eq!(
+            SystemKeychain.store_name(),
+            "/Library/Keychains/System.keychain"
+        );
+    }
 }

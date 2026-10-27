@@ -1,5 +1,4 @@
-//! macOS half of [`super::install_os_resolver_config`]: one file per zone
-//! under `/etc/resolver`.
+//! macOS split DNS: one file per zone under `/etc/resolver`.
 
 use std::fs;
 use std::path::Path;
@@ -7,8 +6,32 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::daemon_log;
+use crate::platform::{DnsRouting, OsRouting};
 
-pub(super) const RESOLVER_DIR: &str = "/etc/resolver";
+const RESOLVER_DIR: &str = "/etc/resolver";
+
+pub(super) struct ResolverDir;
+
+impl DnsRouting for ResolverDir {
+    fn sync(&self, port: u16, zones: &[&str]) -> Result<()> {
+        sync_resolver(Path::new(RESOLVER_DIR), port, zones)
+    }
+
+    fn clear(&self) {
+        clear_resolver(Path::new(RESOLVER_DIR));
+    }
+
+    fn status(&self) -> Option<OsRouting> {
+        Some(OsRouting {
+            location: RESOLVER_DIR,
+            zones: managed_resolver_zones(Path::new(RESOLVER_DIR)),
+        })
+    }
+
+    fn footprint(&self) -> Option<&'static str> {
+        Some("/etc/resolver/fghj*")
+    }
+}
 
 fn parse_fghjd_resolver_port(content: &str) -> Option<u16> {
     content
@@ -23,7 +46,7 @@ fn is_fghjd_resolver_content(content: &str) -> bool {
     parse_fghjd_resolver_port(content).is_some()
 }
 
-pub(super) fn managed_resolver_zones(resolver_dir: &Path) -> Vec<(String, u16)> {
+fn managed_resolver_zones(resolver_dir: &Path) -> Vec<(String, u16)> {
     let Ok(entries) = fs::read_dir(resolver_dir) else {
         return Vec::new();
     };
@@ -43,7 +66,7 @@ pub(super) fn managed_resolver_zones(resolver_dir: &Path) -> Vec<(String, u16)> 
 
 /// Also removes fghjd-authored files for zones no longer wanted; other tools'
 /// files are never touched.
-pub(super) fn sync_resolver(resolver_dir: &Path, port: u16, zones: &[&str]) -> Result<()> {
+fn sync_resolver(resolver_dir: &Path, port: u16, zones: &[&str]) -> Result<()> {
     fs::create_dir_all(resolver_dir)
         .with_context(|| format!("failed to create {}", resolver_dir.display()))?;
     let desired = format!("nameserver 127.0.0.1\nport {port}\n");
@@ -80,7 +103,7 @@ pub(super) fn sync_resolver(resolver_dir: &Path, port: u16, zones: &[&str]) -> R
     Ok(())
 }
 
-pub(super) fn clear_resolver(resolver_dir: &Path) {
+fn clear_resolver(resolver_dir: &Path) {
     let Ok(entries) = fs::read_dir(resolver_dir) else {
         return;
     };
@@ -167,6 +190,13 @@ mod tests {
         ];
         expected.sort();
         assert_eq!(zones, expected);
+    }
+
+    #[test]
+    fn status_reads_back_the_system_resolver_dir_sorted() {
+        let routing = ResolverDir.status().expect("macOS has OS DNS routing");
+        assert_eq!(routing.location, "/etc/resolver");
+        assert!(routing.zones.is_sorted());
     }
 
     #[test]

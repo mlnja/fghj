@@ -337,8 +337,9 @@ fn wire(entry: String, workspace: Option<PathBuf>) -> Result<()> {
 fn daemon_start() -> Result<()> {
     if !probe_daemon() {
         bail!(
-            "fghjd isn't running — start the service first (e.g. `sudo brew services start fghj`, \
-             or `sudo fghjd` in the foreground for local dev)"
+            "fghjd isn't running — start the service first ({}, or `sudo fghjd` in the \
+             foreground for local dev)",
+            fghj::platform::current().packaging.start_service_hint()
         );
     }
     let resp = http_post_json("/daemon/start", &serde_json::json!({}))?;
@@ -353,16 +354,18 @@ fn daemon_start() -> Result<()> {
     Ok(())
 }
 
-/// Here and not only in fghjd: macOS asks for a password before trusting a
-/// root, and fghjd under `brew services` has no session to ask in. This runs in
-/// a terminal, as you. A failure doesn't fail the start: HTTP still works.
+/// Here and not only in fghjd: some trust stores ask for a password before
+/// trusting a root, and fghjd as a system service has no session to ask in.
+/// This runs in a terminal, as you. A failure doesn't fail the start: HTTP
+/// still works.
 fn trust_ca() {
+    let trust = &fghj::platform::current().trust;
     let cert = fghj::web::ca::ca_cert_path(&fghj::daemon::ca_dir());
-    if !cert.exists() || fghj::web::trust::is_trusted(&cert) != Some(false) {
+    if !cert.exists() || trust.is_trusted(&cert) != Some(false) {
         return;
     }
-    println!("fghj's root CA isn't trusted yet — macOS will ask for your password to trust it");
-    if let Err(e) = fghj::web::trust::install(&cert) {
+    println!("{}", trust.install_notice());
+    if let Err(e) = trust.install(&cert) {
         eprintln!("{e:#}");
     }
 }
@@ -388,24 +391,31 @@ fn confirmed(answer: &str) -> bool {
 /// Needs root, and won't re-exec under `sudo`: silently escalating to delete a
 /// trusted root is the wrong shape.
 fn uninstall(yes: bool, keep_ca: bool, keep_state: bool) -> Result<()> {
+    let platform = fghj::platform::current();
     if unsafe { libc::geteuid() } != 0 {
         bail!(
             "fghj uninstall needs root — it removes a certificate from {}, \
              {}, and fghjd's system configuration.\n\nRun: sudo fghj uninstall",
-            fghj::web::trust::store_name(),
+            platform.trust.store_name(),
             fghj::persistence::fghjd_root().display()
         );
     }
 
     if !yes {
+        let system_config: Vec<&str> = std::iter::once("the fghjd-managed block in /etc/hosts")
+            .chain(platform.dns.footprint())
+            .chain(platform.nat.footprint())
+            .collect();
         println!("This will remove:");
-        println!("  - the fghjd-managed block in /etc/hosts, /etc/resolver/fghj*, the lo0");
-        println!("    aliases and the pf anchor (stopping fghjd if it is running)");
+        println!(
+            "  - {} (stopping fghjd if it is running)",
+            system_config.join(", ")
+        );
         if !keep_ca {
             println!(
                 "  - the \"{}\" root certificate from {}",
                 fghj::web::ca::COMMON_NAME,
-                fghj::web::trust::store_name()
+                platform.trust.store_name()
             );
         }
         if !keep_state {
@@ -416,8 +426,10 @@ fn uninstall(yes: bool, keep_ca: bool, keep_state: bool) -> Result<()> {
         }
         println!();
         println!("Docker containers, networks and volumes are NOT removed (a volume may");
-        println!("hold data you still want). Neither are the binaries — use");
-        println!("`brew uninstall fghj` for those.");
+        println!(
+            "hold data you still want). Neither are the binaries ({}).",
+            platform.packaging.uninstall_hint()
+        );
         print!("\nContinue? [y/N] ");
         std::io::stdout().flush().ok();
 
@@ -457,7 +469,7 @@ fn uninstall(yes: bool, keep_ca: bool, keep_state: bool) -> Result<()> {
         n => println!(
             "removed {n} \"{}\" certificate(s) from {}",
             fghj::web::ca::COMMON_NAME,
-            fghj::web::trust::store_name()
+            platform.trust.store_name()
         ),
     }
     match &outcome.state_dir_removed {
@@ -477,7 +489,10 @@ fn uninstall(yes: bool, keep_ca: bool, keep_state: bool) -> Result<()> {
     }
 
     println!();
-    println!("Remaining: the binaries (`brew uninstall fghj`) and any fghj- Docker");
+    println!(
+        "Remaining: the binaries ({}) and any fghj- Docker",
+        platform.packaging.uninstall_hint()
+    );
     println!("resources (`docker ps -a --filter name=^fghj-`).");
     Ok(())
 }

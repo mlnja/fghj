@@ -7,8 +7,8 @@ use crate::daemon::reconcile::{spawn_reconciler, spawn_sync_reconciler};
 use crate::daemon::registry::WorkspaceRegistry;
 use crate::daemon::{ca_dir, certs_dir, socket_path};
 use crate::web::api::build_router;
-use crate::web::{ca, trust};
-use crate::{daemon_log, dns, persistence, supervisor};
+use crate::web::ca;
+use crate::{daemon_log, dns, persistence, platform, supervisor};
 
 /// `DOCKER_HOST` if set, else the console user's active docker context, else
 /// `/var/run/docker.sock`; see `docker::find_docker_host`.
@@ -29,7 +29,8 @@ const DOCKER_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
 /// Resolves once Docker stopped answering where fghjd dials it and answers
 /// somewhere else, as when the engine is switched or `/var/run/docker.sock`
 /// is repointed. The client is shared by every workspace and can't be
-/// swapped in place, so fghjd restarts onto it; launchd starts it again.
+/// swapped in place, so fghjd restarts onto it; the service manager starts it
+/// again.
 async fn docker_moved(docker: Arc<bollard::Docker>) -> String {
     if std::env::var_os("DOCKER_HOST").is_some() {
         return std::future::pending().await;
@@ -132,9 +133,10 @@ pub async fn run_control_api() -> Result<()> {
 
     // Last: it can fail outside fghj's control (no session to prompt in). The
     // doctor's `ca-trust` check reports it.
-    if let Err(e) = tokio::task::spawn_blocking(move || trust::install(&cert_path))
-        .await
-        .context("CA trust install task panicked")?
+    if let Err(e) =
+        tokio::task::spawn_blocking(move || platform::current().trust.install(&cert_path))
+            .await
+            .context("CA trust install task panicked")?
     {
         daemon_log::warn(format!("fghjd: failed to trust the root CA: {e:#}"));
     }

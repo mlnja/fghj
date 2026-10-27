@@ -130,7 +130,7 @@ mod tests {
             "sidecar/Dockerfile",
             "src/lib.rs",
             "src/sidecar_image.rs",
-            "src/raw_net/macos.rs",
+            "src/platform/macos/pf.rs",
         ] {
             assert!(
                 scratch.join(expected).is_file(),

@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::daemon::control::DaemonControl;
 use crate::state::query;
 use crate::web::proxy;
-use crate::{daemon_log, dns, doctor, hosts_file, raw_net};
+use crate::{daemon_log, doctor, hosts_file, platform, raw_net};
 
 /// `fghj daemon start`: rebind DNS/80/443. Idempotent; persists the choice so a
 /// restart comes back active.
@@ -64,7 +64,9 @@ pub(crate) async fn get_daemon_logs(Query(q): Query<DaemonLogsQuery>) -> Respons
 /// shows up.
 pub(crate) async fn get_daemon_net_status(State(daemon): State<Arc<DaemonControl>>) -> Response {
     let hosts = hosts_file::managed_hosts(&hosts_file::hosts_path());
-    let resolver_zones: Vec<_> = dns::os_routing_status()
+    let resolver_zones: Vec<_> = platform::current()
+        .dns
+        .status()
         .map(|r| r.zones)
         .unwrap_or_default()
         .into_iter()

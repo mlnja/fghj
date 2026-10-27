@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::daemon::control::DaemonControl;
 use crate::web::proxy::{HTTP_PORT, HTTPS_PORT, PROXY_IP};
-use crate::{dns, raw_net, web};
+use crate::{dns, platform, raw_net, web};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -210,7 +210,7 @@ fn loopback_alias_check(present: Option<Result<bool>>) -> Check {
     }
 }
 
-fn resolver_files_check(routing: Option<dns::OsRouting>) -> Check {
+fn resolver_files_check(routing: Option<platform::OsRouting>) -> Check {
     let name = "resolver-files";
     let Some(routing) = routing else {
         return Check::warn(
@@ -278,7 +278,10 @@ fn dns_resolution_check() -> Check {
                     ),
                     &format!(
                         "check {} for {}, then run `fghj daemon restart`",
-                        dns::os_routing_status().map_or("the OS resolver config", |r| r.location),
+                        platform::current()
+                            .dns
+                            .status()
+                            .map_or("the OS resolver config", |r| r.location),
                         dns::ZONE
                     ),
                 )
@@ -322,15 +325,14 @@ fn ca_trust_check(cert: &Path, is_trusted: impl FnOnce(&Path) -> Option<bool>) -
             format!(
                 "{} verifies against {}",
                 cert.display(),
-                web::trust::store_name()
+                platform::current().trust.store_name()
             ),
         ),
         Some(false) => Check::fail(
             name,
             title,
             format!("{} is not trusted as a root", cert.display()),
-            "run `fghj daemon restart` from a terminal — it asks macOS to trust the \
-             CA, which shows a password dialog",
+            platform::current().trust.untrusted_hint(),
         ),
     }
 }
@@ -339,7 +341,8 @@ fn raw_routes_check(
     health: Option<Result<(Vec<raw_net::RouteSpec>, Vec<raw_net::RouteSpec>)>>,
 ) -> Check {
     let name = "raw-routes";
-    let title = "raw-zone port routes (pf)";
+    let nat = &platform::current().nat;
+    let title = &format!("raw-zone port routes ({})", nat.name());
     match health {
         None => Check::warn(
             name,
@@ -352,7 +355,7 @@ fn raw_routes_check(
             title,
             match routes.len() {
                 0 => "no raw ports to route".to_string(),
-                n => format!("{n} loaded in pf anchor fghjd"),
+                n => format!("{n} loaded in {}", nat.location()),
             },
         ),
         Some(Ok((routes, unserved))) => Check::fail(
@@ -368,13 +371,16 @@ fn raw_routes_check(
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            "restart fghjd — it reloads its pf anchor and loopback aliases on start",
+            &format!(
+                "restart fghjd — it reloads {} on start",
+                nat.footprint().unwrap_or("its routes")
+            ),
         ),
         Some(Err(e)) => Check::warn(
             name,
             title,
             format!("{e:#}"),
-            "inspect the anchor by hand: `sudo pfctl -a fghjd -s nat`",
+            &format!("inspect the rules by hand: `{}`", nat.inspect_command()),
         ),
     }
 }
@@ -382,16 +388,15 @@ fn raw_routes_check(
 /// Off the async runtime wholesale; the set takes well under a second.
 fn host_checks() -> Vec<Check> {
     vec![
-        loopback_alias_check(raw_net::loopback_alias_present(PROXY_IP)),
+        loopback_alias_check(platform::current().loopback.alias_present(PROXY_IP)),
         proxy_port_check(HTTPS_PORT, "proxy-https", "proxy listening on 443"),
         proxy_port_check(HTTP_PORT, "proxy-http", "proxy listening on 80"),
-        resolver_files_check(dns::os_routing_status()),
+        resolver_files_check(platform::current().dns.status()),
         dns_resolution_check(),
         raw_routes_check(raw_net::route_health()),
-        ca_trust_check(
-            &web::ca::ca_cert_path(&crate::daemon::ca_dir()),
-            web::trust::is_trusted,
-        ),
+        ca_trust_check(&web::ca::ca_cert_path(&crate::daemon::ca_dir()), |cert| {
+            platform::current().trust.is_trusted(cert)
+        }),
     ]
 }
 
@@ -559,8 +564,10 @@ pub fn client_checks() -> Vec<Check> {
             "cue",
             "cue CLI on PATH",
             "not found".to_string(),
-            "install it (`brew install cue`) if you want `fghj validate`; nothing else \
-             needs it",
+            &format!(
+                "install it ({}) if you want `fghj validate`; nothing else needs it",
+                platform::current().packaging.install_cue_hint()
+            ),
         ),
     };
 
@@ -693,8 +700,8 @@ mod tests {
         assert!(unreadable.detail.contains("ifconfig lo0"));
     }
 
-    fn routing(zones: &[(&str, u16)]) -> Option<dns::OsRouting> {
-        Some(dns::OsRouting {
+    fn routing(zones: &[(&str, u16)]) -> Option<platform::OsRouting> {
+        Some(platform::OsRouting {
             location: "/etc/resolver",
             zones: zones.iter().map(|(z, p)| (z.to_string(), *p)).collect(),
         })
