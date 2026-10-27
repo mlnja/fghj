@@ -20,9 +20,8 @@ shims.
   Git-over-SSH clones. Until those land there is no Linux build to install —
   the release publishes `darwin-arm64` only. Windows would
   need the same work again and nobody is doing it.
-- **Docker** — Docker Desktop, OrbStack, or Colima. `fghjd` connects to
-  whichever Docker context is currently active and refuses to start if it
-  can't reach it.
+- **Docker** — Docker Desktop, OrbStack, or Colima. `fghjd` uses the same
+  one your `docker` command does; your first `fghj wire` tells it which.
 - **[CUE](https://cuelang.org/docs/install/)** — only needed for
   `fghj validate`, which shells out to the `cue` CLI to check an
   `.fghj.yaml` against fghj's schema. Everything else works without it: the
@@ -43,7 +42,6 @@ it](/guides/uninstalling/).
 ```bash
 brew install mlnja/tap/fghj
 sudo brew services start fghj
-fghj daemon start
 ```
 
 The second command needs `sudo`. That is not an oversight:
@@ -58,15 +56,23 @@ This is the same shape as `dnsmasq` or `nginx` on macOS.
 
 On its first start `fghjd` generates the local root CA, writes
 `/etc/resolver/fghj.internal`, and binds ports 80/443 on its own loopback
-alias — see [Start the daemon](#start-the-daemon) below. What it can't do is
-get the CA trusted: macOS asks for your password before trusting a root, and
-a LaunchDaemon has no login session to ask in. The third command is for
-that. `fghj daemon start` runs in your terminal, as you, and if the CA isn't
-trusted yet it asks macOS to trust it, which shows the password dialog. It's
-needed once; later starts find the CA trusted and say nothing. Then:
+alias — see [Start the daemon](#start-the-daemon) below. Two things it can't
+do on its own, and your first [`fghj wire`](/cli/wire/) does instead, since
+nothing works before something is wired anyway:
+
+- **Pick your Docker.** Root has no docker context of its own, so `wire`
+  works out the one your `docker` command uses (`DOCKER_HOST`,
+  `DOCKER_CONTEXT`, then your current context) and tells `fghjd`.
+- **Get the CA trusted.** macOS asks for your password before trusting a
+  root, and a LaunchDaemon has no login session to ask in. `wire` runs in
+  your terminal, as you, so it can: the password dialog shows once, and
+  later runs find the CA trusted and say nothing.
+
+Then:
 
 ```bash
 fghj daemon status      # -> fghjd is running and active
+fghj doctor             # Docker and CA show as pending until your first wire
 ```
 
 ### If you already use ports 80 or 443
@@ -161,8 +167,8 @@ For a persistent install, supervise it with a launchd `LaunchDaemon` (a
 formula declares exactly that, which is why it's started with
 `sudo brew services start fghj` rather than the usual unprivileged form.
 Under launchd, `fghjd` can't show the password dialog that trusting the CA
-needs, so it logs that and carries on; run `fghj daemon start` once from a
-terminal to trust it.
+needs, so it logs that and carries on; your first `fghj wire` trusts it from
+your terminal.
 
 ## Verify
 

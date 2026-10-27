@@ -50,8 +50,8 @@ for why this exact order matters.
 Trusting the CA needs a password dialog, so it only works when `fghjd`
 runs in a terminal. Under `brew services` there's no login session to show
 one in: `fghjd` logs that and carries on, and HTTPS shows a certificate
-warning until you run [`fghj daemon start`](/cli/daemon/) (or `restart`) once
-from a terminal, which trusts it as you.
+warning until your first [`fghj wire`](/cli/wire/), which trusts it from your
+terminal, as you. If trust is lost later, `fghj doctor --fix` restores it.
 
 ## Going idle without stopping it
 

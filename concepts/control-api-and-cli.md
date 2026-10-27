@@ -184,8 +184,8 @@ without any TLS proxy in front of it.
 
 Implemented: `src/main.rs` (`validate`/`graph`/`wire`/`exec`/`daemon stop`/`doctor`),
 `src/bin/fghjd.rs`, `src/daemon/` (`WorkspaceRegistry`, the full route
-table, `spawn_reconciler`, `connect_docker`, which follows the console
-user's Docker context, see [[docker-and-downloads]]), `src/web/api/` (the axum router and its
+table, `spawn_reconciler`, and the Docker endpoint `fghj wire` reports, see
+[[docker-and-downloads]]), `src/web/api/` (the axum router and its
 handlers, including `exec.rs`'s WebSocket relay and `control.rs`'s
 telemetry endpoints), `src/daemon_log.rs` (the ring buffer),
 `src/web/ui.rs` (embedded UI serving). Known

@@ -34,6 +34,11 @@ pub struct DaemonControl {
     /// Read once at construction, written through by `set_idle_requested`.
     pub(crate) idle_requested: Mutex<bool>,
     pub(crate) daemon_state_path: PathBuf,
+    /// The socket this process dialled; `None` under fghjd's own `DOCKER_HOST`,
+    /// or with no Docker at all. Fixed for the life of the process.
+    pub(crate) docker_host: Option<String>,
+    /// Fired when `fghj wire` names a different socket; fghjd restarts onto it.
+    pub(crate) docker_reconfigured: tokio::sync::Notify,
 }
 
 impl DaemonControl {
@@ -43,6 +48,18 @@ impl DaemonControl {
 
     pub fn is_idle_requested(&self) -> bool {
         *self.idle_requested.lock().unwrap()
+    }
+
+    /// Saves `host` for the next start. `true` when it differs from the one
+    /// this process dialled, so a restart is needed to use it. Under fghjd's own
+    /// `DOCKER_HOST` it's saved but never acted on.
+    pub fn set_docker_host(&self, host: &str) -> Result<bool> {
+        let path = &self.daemon_state_path;
+        let mut state = persistence::load_daemon_state(path);
+        state.docker_host = Some(host.to_string());
+        persistence::save_daemon_state(path, &state)?;
+        let overridden = std::env::var_os("DOCKER_HOST").is_some();
+        Ok(!overridden && self.docker_host.as_deref() != Some(host))
     }
 
     pub fn set_idle_requested(&self, idle_requested: bool) -> Result<()> {
@@ -172,6 +189,8 @@ mod tests {
             sidecar_failures: Mutex::new(HashMap::new()),
             idle_requested: Mutex::new(idle_requested),
             daemon_state_path: state_path,
+            docker_host: Some("unix:///var/run/docker.sock".to_string()),
+            docker_reconfigured: tokio::sync::Notify::new(),
         })
     }
 
@@ -198,6 +217,7 @@ mod tests {
             &state_path,
             &persistence::DaemonState {
                 idle_requested: false,
+                ..persistence::DaemonState::default()
             },
         )
         .unwrap();

@@ -282,7 +282,7 @@ had to agree for that to happen:
    free for whatever else you run. See [Split DNS](/concepts/split-dns/).
 2. **TLS.** The connection lands on `fghjd`'s proxy on port 443, which mints
    a leaf certificate for that exact name on the fly, signed by a local CA
-   that `fghj daemon start` asked macOS to trust when you installed fghj. See
+   that your first `fghj wire` asked macOS to trust. See
    [Local CA & TLS proxy](/concepts/local-ca-and-tls-proxy/).
 3. **Dispatch.** The proxy reads the SNI name, finds the route registered
    for it, and relays to your container's published port.

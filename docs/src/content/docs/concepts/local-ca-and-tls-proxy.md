@@ -43,9 +43,9 @@ would re-prompt for a password on every single restart. The same
 check-first design doubles as a self-healing path: if trust is ever
 missing (first-ever run, or you manually revoke it while the CA files
 remain on disk), the next start notices and re-installs it, prompting
-exactly once. Under `brew services` that start is
-[`fghj daemon start` or `restart`](/cli/daemon/), run from a terminal — see
-the caution below.
+exactly once. Under `brew services` that's done by your first
+[`fghj wire`](/cli/wire/), or later by [`fghj doctor --fix`](/cli/doctor/),
+both run from a terminal — see the caution below.
 
 ## Two CAs, because one key has to leave the daemon
 
@@ -118,7 +118,7 @@ sudo rm /var/lib/fghjd/ca/ca-cert.pem /var/lib/fghjd/ca/ca-key.pem \
 sudo brew services start fghj
 
 # 4. trust the new root — from a terminal, see below
-fghj daemon restart
+fghj doctor --fix
 ```
 
 :::caution[Step 4 has to come from a terminal]
@@ -130,8 +130,8 @@ with `SecTrustSettingsSetTrustSettings: The authorization was denied since
 no user interaction was possible`. It logs that and carries on serving,
 and `fghj doctor` reports the CA as untrusted.
 
-So `fghj daemon start` and `fghj daemon restart`, which run in your
-terminal, do the same check and ask for the password there. After that the
+So `fghj wire` and `fghj doctor --fix`, which run in your terminal, do the
+same check and ask for the password there. After that the
 check at the top of every start is a no-op. The command they run is:
 
 ```sh

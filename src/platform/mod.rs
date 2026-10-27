@@ -11,6 +11,7 @@
 use std::sync::OnceLock;
 
 mod dns;
+mod linux;
 mod loopback;
 mod macos;
 mod nat;
@@ -45,6 +46,7 @@ pub fn current() -> &'static Platform {
 fn select() -> Platform {
     match std::env::consts::OS {
         "macos" => macos::platform(),
+        "linux" => linux::platform(),
         _ => unsupported::platform(),
     }
 }

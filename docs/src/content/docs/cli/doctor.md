@@ -4,7 +4,8 @@ description: Check that everything fghj needs from this machine is actually ther
 ---
 
 ```bash
-fghj doctor
+fghj doctor          # report only
+fghj doctor --fix    # and fix what it can
 ```
 
 fghj takes more from your machine than most dev tools do: a Docker daemon
@@ -57,12 +58,33 @@ A failing check prints what it found and what to do about it:
 | Mark | Meaning |
 |---|---|
 | `✓` | Checked, and it's the way it should be. |
+| `·` | Not set up yet, and nothing to do: your first [`fghj wire`](/cli/wire/) sets it up. |
 | `!` | Not how it should be, but nothing is broken *yet* — it affects one feature, or fghj will fix it on the next start. |
 | `✗` | Something fghj needs is missing or wrong, and it will visibly misbehave until it's fixed. |
 
 Only a `✗` sets a non-zero exit code, so `fghj doctor && …` gates on "is
-fghj broken", not on "is anything less than perfect". The two things that
-warn rather than fail are worth knowing:
+fghj broken", not on "is anything less than perfect".
+
+## Before anything is wired
+
+Your first `fghj wire` is what finishes setup: it tells `fghjd` which Docker
+is yours and trusts the CA. Until something is wired, the Docker and CA
+checks show `·` — not set up yet, nothing to fix — and the summary says so:
+
+```
+· Docker Engine reachable: not set up yet — your first `fghj wire` tells fghjd which Docker to use
+· BuildKit available: checked once Docker is set up
+· root CA trusted by the system: /private/var/lib/fghjd/ca/ca-cert.pem isn't trusted yet — your first `fghj wire` asks to trust it
+
+nothing broken; 3 check(s) wait for your first `fghj wire`
+```
+
+Once something is wired, the same two fail with `✗` if they go missing,
+because then something really is wrong.
+
+## Warnings worth knowing
+
+The two things that warn rather than fail:
 
 - **`fghjd is active`** warns when the daemon is idle. That's a state you can
   ask for with [`fghj daemon stop`](/cli/daemon/), and every host check below
@@ -86,16 +108,26 @@ the file. It asks your OS to resolve a name in the zone, exactly as a browser
 would, and checks that the answer is fghj's proxy address. `fghj daemon
 restart` is the fix, and the hint says so.
 
-## It only reports; it never repairs
+## Reporting, and `--fix`
 
-No check changes anything on your machine. That's deliberate: a doctor that
-fixes things as it finds them is always green on the second run, which makes
-a problem that keeps coming back invisible.
+Plain `fghj doctor` changes nothing on your machine. That's deliberate: its
+output goes into bug reports, and a doctor that fixes things as it finds them
+is always green on the second run, which makes a problem that keeps coming
+back invisible.
 
-Almost every hint points at [`fghj daemon start`](/cli/daemon/) or `restart`,
-because that's already the repair path — activating re-adds the loopback
-alias, rebinds 80/443, rewrites the resolver files and reinstalls CA trust,
-every time it runs.
+`fghj doctor --fix` runs the checks, fixes the ones it knows how to, says
+what it did, then runs the checks again and prints the result:
+
+- **Docker** — points `fghjd` at the Docker your `docker` command uses, as
+  `fghj wire` does. `fghjd` restarts onto it if it changed.
+- **fghjd idle** — activates it, as [`fghj daemon start`](/cli/daemon/) does.
+- **CA not trusted** — trusts it, from your terminal. On macOS that's the
+  password dialog.
+
+Everything else — a port taken by another process, Docker not running at
+all — it can't fix, and the hint says what to do. Most of those point at
+`fghj daemon start` or `restart`, because activating re-adds the loopback
+alias, rebinds 80/443 and rewrites the resolver files every time it runs.
 
 ## The same checks in the UI
 

@@ -7,7 +7,7 @@ mod network;
 mod volume;
 
 pub use container::*;
-pub use host::find_docker_host;
+pub use host::{DEFAULT_SOCKET, is_live_socket, users_docker_host};
 pub use image::*;
 pub use network::*;
 pub use volume::*;
