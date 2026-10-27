@@ -108,7 +108,8 @@ daemon made. It lists what it will delete and asks first; `-y` skips the
 prompt, and `--keep-ca` / `--keep-state` leave either behind if you are
 reinstalling rather than leaving.
 
-Docker containers, networks and volumes are *not* removed by either command,
+Docker containers, networks and volumes are *not* removed by either command
+(removing each workspace from its Config tab first does that),
 and neither are repositories fghj cloned into your workspace. For the
 complete inventory of every file, system setting and Docker resource fghj
 creates — and how to verify nothing is left — see [What fghj touches, and

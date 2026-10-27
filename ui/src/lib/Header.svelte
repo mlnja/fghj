@@ -21,7 +21,6 @@
     onSwitchFlow,
     envBusy,
     onOpenActivity,
-    onOpenSwitch,
     onOpenTelemetry,
     workspaces,
     currentWorkspaceId,
@@ -267,10 +266,10 @@
       <span class="ops-link" onclick={() => onOpenActivity('pulls')} title="this workspace's downloads">☰</span>
     </div>
   {:else if activeTab === 'containers'}
-    <!-- While a switch runs, the button opens its plan instead. -->
+    <!-- While a switch runs, the button opens its steps in the Activity tab instead. -->
     <button
       class="pull-btn"
-      onclick={switchingFlow || envBusy ? onOpenSwitch : switchFlow}
+      onclick={switchingFlow || envBusy ? () => onOpenActivity('containers') : switchFlow}
       disabled={!currentFlow}
       title={switchingFlow || envBusy
         ? "see what the switch has done and what's left"

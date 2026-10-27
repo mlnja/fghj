@@ -45,8 +45,8 @@
     <section class="danger-zone">
       <span class="eyebrow">Remove from fghj</span>
       <p class="body-sm">
-        Stops and removes this workspace's containers and network, and takes it off this list.
-        Volumes and the repos on disk are kept, so <code>fghj wire</code> brings it back with its data.
+        Deletes this workspace's containers, network and volumes, and takes it off this list.
+        The data in its databases and other stores is gone for good. The repos on disk are kept.
       </p>
       {#if confirming}
         <div class="confirm">

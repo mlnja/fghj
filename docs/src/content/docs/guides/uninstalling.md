@@ -131,6 +131,12 @@ there is nothing separate to delete for it.
 These are **not** removed by stopping or uninstalling fghj. Containers stop
 being reachable, but they keep running under Docker's own supervision.
 
+The simplest way to clear them is before you uninstall: remove each
+workspace from its Config tab in the UI. That deletes the workspace's
+containers, sidecar, network and volumes, and the Activity tab shows each
+removal finishing. The commands below are for what's left after that, or for
+cleaning up once fghjd is already gone.
+
 Everything fghj creates is prefixed `fghj-`:
 
 | Resource | Name |

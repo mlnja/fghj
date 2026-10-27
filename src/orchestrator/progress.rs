@@ -9,6 +9,13 @@ use crate::state::{ContainerInfo, PendingAction};
 
 #[derive(Debug, Clone)]
 pub enum RunProgress {
+    /// Sent once, before any node: what the run may start, in start order,
+    /// and what it will stop. A node to start can turn out current and be
+    /// left alone, so it may get no other report.
+    Planned {
+        start: Vec<String>,
+        stop: Vec<String>,
+    },
     /// Sent before the Docker work so the node reads "starting…" during a build.
     /// `None` clears the mark after a failure.
     Working {

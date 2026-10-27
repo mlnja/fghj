@@ -44,6 +44,13 @@ pub async fn list_volumes(docker: &Docker, project: &str) -> Result<Vec<String>>
         .collect())
 }
 
+pub async fn remove_volume(docker: &Docker, name: &str) -> Result<()> {
+    docker
+        .remove_volume(name, None::<bollard::query_parameters::RemoveVolumeOptions>)
+        .await
+        .with_context(|| format!("docker remove_volume {name} failed"))
+}
+
 /// What a container's data is: each volume it mounts, named or anonymous, as
 /// `name@created`, so a volume removed and made again reads as new data. With
 /// no volume the data lives and dies with the container, so it's the container.

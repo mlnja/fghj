@@ -192,14 +192,22 @@ impl Orchestrator {
         state.sidecar_container_name = sidecar_container_name;
         state.sidecar_ip = Some(sidecar_ip);
 
-        if matches!(spec, EnvSpec::Flow(_)) {
-            self.stop_outside(graph, &target_ids, &mut state, progress)
-                .await;
-        }
+        let ordered_ids = topological_start_order(&target_ids, &graph.edges);
+        let outside = match spec {
+            EnvSpec::Flow(_) => stop_order(graph, &target_ids, &state),
+            EnvSpec::Node(_) => Vec::new(),
+        };
+        report(
+            progress,
+            RunProgress::Planned {
+                start: ordered_ids.clone(),
+                stop: outside.clone(),
+            },
+        );
+        self.stop_outside(&outside, &mut state, progress).await;
 
         let node_map: HashMap<&str, &Node> =
             graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-        let ordered_ids = topological_start_order(&target_ids, &graph.edges);
         let waited = waited_on(&target_ids, &graph.edges);
         let mut outcomes = StartOutcomes::new(&target_ids, &graph.edges);
         let mut recreated: HashSet<String> = HashSet::new();
@@ -350,23 +358,14 @@ impl Orchestrator {
     }
 
     /// Stops what's running outside `keep`, dependents first. Best effort.
+    /// `outside` in `stop_order`'s order.
     async fn stop_outside(
         &self,
-        graph: &Graph,
-        keep: &[String],
+        outside: &[String],
         state: &mut EnvState,
         progress: Option<&ProgressSink>,
     ) {
-        let outside: Vec<String> = state
-            .containers
-            .values()
-            .filter(|c| c.observed.status == "running" && !keep.contains(&c.node_id))
-            .map(|c| c.node_id.clone())
-            .collect();
-        for node_id in topological_start_order(&outside, &graph.edges)
-            .into_iter()
-            .rev()
-        {
+        for node_id in outside.iter().cloned() {
             let container = state.containers[&node_id].clone();
             working(progress, &node_id, Some(PendingAction::Stopping));
             match self.stop_container(&node_id, &container).await {
@@ -383,6 +382,20 @@ impl Orchestrator {
             }
         }
     }
+}
+
+/// The running containers a switch to a flow of `keep` stops, dependents
+/// before what they depend on.
+fn stop_order(graph: &Graph, keep: &[String], state: &EnvState) -> Vec<String> {
+    let outside: Vec<String> = state
+        .containers
+        .values()
+        .filter(|c| c.observed.status == "running" && !keep.contains(&c.node_id))
+        .map(|c| c.node_id.clone())
+        .collect();
+    let mut order = topological_start_order(&outside, &graph.edges);
+    order.reverse();
+    order
 }
 
 fn working(progress: Option<&ProgressSink>, node_id: &str, action: Option<PendingAction>) {

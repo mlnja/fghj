@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::task::AbortHandle;
 
 use crate::action::Action;
-use crate::activity::{ActivityGuard, ActivityHandle, ActivityKind};
+use crate::activity::{ActivityGuard, ActivityHandle, ActivityKind, ActivityStatus};
 use crate::actor::ActorHandle;
 use crate::daemon_log;
 use crate::effects::Effect;
@@ -183,8 +183,8 @@ fn open_activity(
     job.settle_on_drop("called off")
 }
 
-/// Each node a run touches becomes a child of `job`, settled by the node's
-/// own report. The node `job` itself is for gets lines, not a child.
+/// Each node a run plans or touches becomes a child of `job`, settled by the
+/// node's own report. The node `job` itself is for gets lines, not a child.
 struct NodeActivities {
     job: ActivityHandle,
     own: Option<String>,
@@ -192,6 +192,21 @@ struct NodeActivities {
 }
 
 impl NodeActivities {
+    /// Lists the plan as queued steps before any of it runs.
+    fn planned(&mut self, start: &[String], stop: &[String]) {
+        let steps = start
+            .iter()
+            .map(|id| (id, ActivityKind::Start))
+            .chain(stop.iter().map(|id| (id, ActivityKind::Stop)));
+        for (node_id, kind) in steps {
+            if self.own.as_deref() == Some(node_id.as_str()) || self.open.contains_key(node_id) {
+                continue;
+            }
+            let child = self.job.queued_child_of_kind(Some(kind), node_id);
+            self.open.insert(node_id.clone(), child);
+        }
+    }
+
     fn working(&mut self, node_id: &str, action: Option<PendingAction>) {
         let job = &self.job;
         let own = self.own.as_deref() == Some(node_id);
@@ -202,10 +217,12 @@ impl NodeActivities {
                     job.append(&line);
                     return;
                 }
-                self.open
+                let child = self
+                    .open
                     .entry(node_id.to_string())
-                    .or_insert_with(|| job.child_of_kind(Some(activity_kind(action)), node_id))
-                    .append(&line);
+                    .or_insert_with(|| job.child_of_kind(Some(activity_kind(action)), node_id));
+                child.begin();
+                child.append(&line);
             }
             None => {
                 // The node's events pane has the error itself.
@@ -232,6 +249,28 @@ impl NodeActivities {
             None => job.append(&line),
         }
     }
+
+    /// Settles the planned steps the run never reported on: nodes it found
+    /// current and left alone. After a failure, one that isn't up was blocked
+    /// and is left for the job's settle to cancel.
+    fn finish(self, env: Option<&EnvState>, succeeded: bool) {
+        for (node_id, child) in self.open {
+            if child.status() != Some(ActivityStatus::Queued) {
+                continue;
+            }
+            let observed = env
+                .and_then(|env| env.containers.get(&node_id))
+                .map(|c| &c.observed);
+            let line = match observed {
+                Some(o) if o.status == "running" => "already up to date",
+                Some(o) if o.exit_code == Some(0) => "already done",
+                _ if succeeded => "nothing to do",
+                _ => continue,
+            };
+            child.append(&format!("{node_id}: {line}\n"));
+            child.settle(&Ok(()));
+        }
+    }
 }
 
 /// Turns a run's progress into actions, so the UI follows each node as it goes,
@@ -242,11 +281,15 @@ fn forward_progress(
     actor: ActorHandle,
     skip: Option<String>,
     mut nodes: NodeActivities,
-) -> (ProgressSink, tokio::task::JoinHandle<()>) {
+) -> (ProgressSink, tokio::task::JoinHandle<NodeActivities>) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RunProgress>();
     let drain = tokio::spawn(async move {
         while let Some(p) = rx.recv().await {
             let action = match p {
+                RunProgress::Planned { start, stop } => {
+                    nodes.planned(&start, &stop);
+                    continue;
+                }
                 RunProgress::Working { node_id, action } => {
                     if skip.as_ref() == Some(&node_id) {
                         continue;
@@ -275,6 +318,7 @@ fn forward_progress(
             };
             let _ = actor.dispatch(action).await;
         }
+        nodes
     });
     (tx, drain)
 }
@@ -423,7 +467,7 @@ impl DockerConvergeEffect {
             let mut cascaded = Vec::new();
             let nodes = NodeActivities {
                 job: (*job).clone(),
-                own: None,
+                own: Some(entry.node_id.clone()),
                 open: HashMap::new(),
             };
             let (tx, drain) = forward_progress(actor.clone(), Some(entry.node_id.clone()), nodes);
@@ -435,8 +479,11 @@ impl DockerConvergeEffect {
             };
             // Drained first, so a late progress report can't land after the settle.
             drop(tx);
-            if let Err(e) = drain.await {
-                daemon_log::warn(format!("container-action progress drain task failed: {e}"));
+            match drain.await {
+                Ok(nodes) => nodes.finish(actor.current().env.as_ref(), result.is_ok()),
+                Err(e) => {
+                    daemon_log::warn(format!("container-action progress drain task failed: {e}"))
+                }
             }
             for info in &cascaded {
                 job.append(&format!("{} {}\n", info.node_id, info.observed.status));
@@ -489,8 +536,9 @@ impl DockerConvergeEffect {
             // Closing the channel lets the drain finish first, so a late progress report
             // can't land after `EnvCreateSettled`.
             drop(tx);
-            if let Err(e) = drain.await {
-                daemon_log::warn(format!("env-create progress drain task failed: {e}"));
+            match drain.await {
+                Ok(nodes) => nodes.finish(actor.current().env.as_ref(), result.is_ok()),
+                Err(e) => daemon_log::warn(format!("env-create progress drain task failed: {e}")),
             }
             // The HTTP caller got its 200 long ago; this is the only trace of a failure.
             if let Err(e) = &result {
@@ -570,7 +618,6 @@ mod tests {
 
     #[test]
     fn each_node_a_switch_touches_is_a_child_settled_by_its_report() {
-        use crate::activity::ActivityStatus;
         let (log, mut nodes) = node_activities(None);
         nodes.working("db", Some(PendingAction::Starting));
         nodes.working("old", Some(PendingAction::Stopping));
@@ -591,6 +638,54 @@ mod tests {
         assert!(switch.log.contains("starting db\n"), "{}", switch.log);
         assert!(switch.log.contains("db running\n"), "{}", switch.log);
         assert!(switch.log.contains("api failed"), "{}", switch.log);
+    }
+
+    #[test]
+    fn the_plan_is_listed_waiting_and_what_the_run_left_alone_is_settled_by_finish() {
+        let (log, mut nodes) = node_activities(None);
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        nodes.planned(&ids(&["db", "api", "web"]), &ids(&["old"]));
+        let status = |key: &str| {
+            log.list(Some("ws"))
+                .into_iter()
+                .find(|a| a.key == key)
+                .unwrap()
+                .status
+        };
+        assert_eq!(status("db"), ActivityStatus::Queued);
+        assert_eq!(status("old"), ActivityStatus::Queued);
+
+        nodes.working("old", Some(PendingAction::Stopping));
+        assert_eq!(status("old"), ActivityStatus::Running);
+        nodes.working("db", Some(PendingAction::Starting));
+        nodes.done(&container("db", None));
+
+        let mut api = container("api", None);
+        api.observed.status = "running".into();
+        let env = state_with(vec![api]).env;
+        let job = nodes.job.clone();
+        nodes.finish(env.as_ref(), false);
+        job.settle(&Err(anyhow::anyhow!("old wouldn't stop")));
+
+        let all = log.list(Some("ws"));
+        assert_eq!(all.len(), 5, "one child per node, no duplicates");
+        assert_eq!(status("db"), ActivityStatus::Done);
+        assert_eq!(status("api"), ActivityStatus::Done);
+        // Never reached and not up after a failure: blocked.
+        assert_eq!(status("web"), ActivityStatus::Cancelled);
+        assert_eq!(status("old"), ActivityStatus::Cancelled);
+        assert_eq!(
+            all.iter().find(|a| a.key == "old").unwrap().kind,
+            ActivityKind::Stop
+        );
+    }
+
+    #[test]
+    fn the_node_a_job_is_for_is_not_a_planned_step() {
+        let (log, mut nodes) = node_activities(Some("web"));
+        nodes.planned(&["db".to_string(), "web".to_string()], &[]);
+        let keys: Vec<String> = log.list(Some("ws")).into_iter().map(|a| a.key).collect();
+        assert_eq!(keys, ["db", "app"]);
     }
 
     #[test]

@@ -145,8 +145,12 @@ doesn't exist yet. `docker::ensure_volume` creates it explicitly instead,
 right before use in `Orchestrator::start_node`, attaching the usual
 `com.docker.compose.project` label (the workspace name).
 `docker::list_volumes` finds them again by that label, which is how
-`EnvState::volumes` gets populated. Nothing deletes them: removing a
-workspace keeps volumes, because they hold the data the next start expects to find.
+`EnvState::volumes` gets populated, and how removing the workspace finds
+them to delete. Nothing else deletes them: stopping and switching leave them,
+because they hold the data the next start expects to find. Removing a
+workspace is discarding it, so its volumes go, along with the anonymous ones
+its containers' images declared (`docker::discard` removes a container with
+`v`).
 
 ## Stopping a container is not the same as deleting it
 
@@ -267,8 +271,12 @@ progress instead:
 - **Scope**: the log is the daemon's, shared by every workspace, and in
   memory only — a restart forgets finished pulls, which are safe to run
   again.
+- **Queued steps**: `queued_child` lists a step before it runs (status
+  `queued`) so the plan shows up front; `step` begins it, runs it and settles
+  it. A parent settling cancels its queued steps like its running ones.
 - **Other kinds**: the same log holds workspace removals (`remove`, see
-  [[run-lifecycle-and-registry]]) and the converge effect's `switch`,
+  [[run-lifecycle-and-registry]], in three queued steps: containers, network,
+  volumes) and the converge effect's `switch`,
   `start`, `stop` and `delete` jobs (see [[state-and-effects]]). A handle
   whose job was since replaced writes nowhere instead of panicking: a
   superseded switch's task can still be reporting.

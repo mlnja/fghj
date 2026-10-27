@@ -295,9 +295,9 @@ migration rather than a silent adoption of somebody else's data.
 | `container` | string | Mount path inside the container. |
 | `read_only` | bool | Mounts read-only. Defaults to `false`. |
 
-A volume is never deleted by fghj: stopping a node, switching flows or
-stopping the whole environment leaves it in place, and the next start
-mounts the same data. Removing one is a `docker volume rm` you run yourself.
+Stopping a node or switching flows leaves a volume in place, and the next
+start mounts the same data. Removing the workspace (the Config tab's "Remove
+workspace") deletes its volumes along with its containers.
 
 ## Additional hosts
 

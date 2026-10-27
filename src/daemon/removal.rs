@@ -6,7 +6,8 @@
 //! The job reads what to remove from Docker (the compose project label every
 //! container of the workspace carries), not from what fghjd remembers
 //! running, so it can be run again from any point and catches containers of
-//! runs fghjd has forgotten. Volumes stay.
+//! runs fghjd has forgotten. Removing is discarding: the workspace's volumes,
+//! and the data in them, go too.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -87,16 +88,38 @@ pub(crate) fn spawn_teardown(
     snapshot
 }
 
-/// Containers are listed again after each sweep: one a cancelled start had
-/// already asked Docker for can appear after the first listing.
+/// Three steps, each a child of `job` listed from the start: the
+/// containers (and the routes their sidecar served), the network, the
+/// volumes. Each needs the one before it gone.
 async fn teardown(docker: &bollard::Docker, path: &Path, job: &ActivityHandle) -> Result<()> {
-    const SWEEPS: usize = 3;
     let name = workspace_name(path);
     let network = network_name(&name);
     job.append(&format!("removing {} ({network})\n", path.display()));
+    let [containers, net, volumes] =
+        ["containers", "network", "volumes"].map(|k| job.queued_child(k));
 
+    containers
+        .step(remove_containers(docker, &name, &network, &containers))
+        .await?;
+    net.step(remove_network(docker, &network, &net)).await?;
+    volumes
+        .step(remove_volumes(docker, &name, &volumes))
+        .await?;
+    job.append("removed\n");
+    Ok(())
+}
+
+/// Containers are listed again after each sweep: one a cancelled start had
+/// already asked Docker for can appear after the first listing.
+async fn remove_containers(
+    docker: &bollard::Docker,
+    name: &str,
+    network: &str,
+    step: &ActivityHandle,
+) -> Result<()> {
+    const SWEEPS: usize = 3;
     for _ in 0..SWEEPS {
-        let mut found: Vec<String> = docker::list_statuses(docker, &network)
+        let mut found: Vec<String> = docker::list_statuses(docker, network)
             .await
             .context("failed to list the workspace's containers")?
             .into_keys()
@@ -106,19 +129,19 @@ async fn teardown(docker: &bollard::Docker, path: &Path, job: &ActivityHandle) -
         }
         found.sort();
         for container in &found {
-            job.append(&format!("removing container {container}\n"));
+            step.append(&format!("removing container {container}\n"));
         }
         join_all(
             found
                 .iter()
-                .map(|container| docker::stop_and_remove(docker, container)),
+                .map(|container| docker::discard(docker, container)),
         )
         .await;
     }
     // Labelled like the rest; by name too, in case one predates the label.
-    docker::stop_and_remove(docker, &sidecar_name(&name)).await;
+    docker::discard(docker, &sidecar_name(name)).await;
 
-    let left = docker::list_statuses(docker, &network)
+    let left = docker::list_statuses(docker, network)
         .await
         .context("failed to list the workspace's containers")?;
     if !left.is_empty() {
@@ -127,18 +150,37 @@ async fn teardown(docker: &bollard::Docker, path: &Path, job: &ActivityHandle) -
         bail!("containers still there: {}", left.join(", "));
     }
 
-    let routes = sidecar_routes_dir(&network);
+    let routes = sidecar_routes_dir(network);
     if routes.exists() {
         std::fs::remove_dir_all(&routes)
             .with_context(|| format!("failed to remove {}", routes.display()))?;
     }
+    Ok(())
+}
 
-    job.append(&format!("removing network {network}\n"));
-    docker::remove_network(docker, &network).await;
-    if docker.inspect_network(&network, None).await.is_ok() {
+async fn remove_network(
+    docker: &bollard::Docker,
+    network: &str,
+    step: &ActivityHandle,
+) -> Result<()> {
+    step.append(&format!("removing network {network}\n"));
+    docker::remove_network(docker, network).await;
+    if docker.inspect_network(network, None).await.is_ok() {
         bail!("network {network} is still there");
     }
-    job.append("removed; volumes are kept\n");
+    Ok(())
+}
+
+/// Labelled with the workspace's name, not its network: see `ensure_volume`.
+async fn remove_volumes(docker: &bollard::Docker, name: &str, step: &ActivityHandle) -> Result<()> {
+    let mut volumes = docker::list_volumes(docker, name)
+        .await
+        .context("failed to list the workspace's volumes")?;
+    volumes.sort();
+    for volume in &volumes {
+        step.append(&format!("removing volume {volume}\n"));
+        docker::remove_volume(docker, volume).await?;
+    }
     Ok(())
 }
 
@@ -155,24 +197,26 @@ mod tests {
         assert!(status.success(), "docker {args:?} failed");
     }
 
-    /// Running and exited containers both go, then the network; the volume
-    /// stays. A second run over nothing succeeds.
+    /// Running and exited containers go, then the network, then the volumes:
+    /// the labelled one and the anonymous one an image declared. A second run
+    /// over nothing succeeds.
     #[tokio::test]
     #[ignore = "needs a Docker daemon: see concepts/release-and-delivery.md"]
-    async fn teardown_removes_what_docker_has_under_the_label_and_keeps_volumes() {
+    async fn teardown_removes_what_docker_has_under_the_label_volumes_included() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp
             .path()
             .join(format!("rm-test-{}", crate::docker::rand_suffix()));
         let network = network_name(&workspace_name(&path));
         let label = format!("com.docker.compose.project={network}");
+        let name = workspace_name(&path);
         let volume = format!("{network}-vol");
         let docker = crate::daemon::connect_docker().expect("docker client");
 
         docker::ensure_network(&docker, &network, &network)
             .await
             .unwrap();
-        docker::ensure_volume(&docker, &volume, &network)
+        docker::ensure_volume(&docker, &volume, &name)
             .await
             .unwrap();
         for (suffix, cmd) in [("up", "sleep 300"), ("exited", "true")] {
@@ -188,12 +232,26 @@ mod tests {
                 &network,
                 "-v",
                 &format!("{volume}:/data"),
+                "-v",
+                "/anon",
                 "busybox",
                 "sh",
                 "-c",
                 cmd,
             ]);
         }
+
+        let anonymous: Vec<String> = docker
+            .inspect_container(&format!("{network}-up"), None)
+            .await
+            .unwrap()
+            .mounts
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| m.name)
+            .filter(|n| *n != volume)
+            .collect();
+        assert_eq!(anonymous.len(), 1, "{anonymous:?}");
 
         let activities = Arc::new(ActivityLog::default());
         let job = activities
@@ -208,11 +266,21 @@ mod tests {
                 .is_empty()
         );
         assert!(docker.inspect_network(&network, None).await.is_err());
-        assert!(docker.inspect_volume(&volume).await.is_ok());
+        assert!(docker.inspect_volume(&volume).await.is_err());
+        assert!(docker.inspect_volume(&anonymous[0]).await.is_err());
         assert!(job.snapshot().log.contains(&format!("{network}-exited")));
+        assert!(
+            job.snapshot()
+                .log
+                .contains(&format!("removing volume {volume}"))
+        );
+        let steps = activities.list(Some("test"));
+        for key in ["containers", "network", "volumes"] {
+            let step = steps.iter().find(|a| a.key == key).unwrap();
+            assert_eq!(step.status, crate::activity::ActivityStatus::Done, "{key}");
+        }
 
         teardown(&docker, &path, &job).await.unwrap();
-        docker_cli(&["volume", "rm", &volume]);
     }
 
     #[test]

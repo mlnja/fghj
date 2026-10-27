@@ -11,8 +11,6 @@
     onListJobs,
     activityScope = 'all',
     workspaceId = null,
-    env,
-    nodes,
   } = $props();
 
   let activeTab = $state(initialTab);
@@ -145,50 +143,42 @@
   }
 
   let job = $derived(jobs.find((j) => j.id === selectedJob) ?? null);
-  let children = $derived(job ? activities.filter((a) => a.parent === job.id).reverse() : []);
-  let shown = $derived(children.find((c) => c.id === selectedChild) ?? job);
-
-  // Switch tab: where the switch in flight stands, node by node. Derived from
-  // the same live `env` the graph draws, so it needs no poll of its own: the
-  // flow's members come up, everything else running goes down.
-  const STEPS = {
-    starting: 'starting',
-    stopping: 'stopping',
-    waiting: 'to start',
-    'to-stop': 'to stop',
-    ok: 'up',
-    done: 'done',
-  };
-  const STEP_ORDER = Object.keys(STEPS);
-
-  let switchFlow = $derived(env?.pending_create?.flow ?? null);
-  let switchPlan = $derived.by(() => {
-    if (!switchFlow) return [];
-    const containers = env?.containers ?? {};
-    const inFlow = new Set((nodes ?? []).filter((n) => n.flows?.includes(switchFlow)).map((n) => n.id));
-    const rows = [];
-    for (const id of inFlow) {
-      const c = containers[id];
-      const step =
-        c?.pending_action === 'starting' || c?.pending_action === 'restarting'
-          ? 'starting'
-          : c?.condition === 'running'
-            ? 'ok'
-            : c?.condition === 'completed'
-              ? 'done'
-              : 'waiting';
-      rows.push({ id, step });
-    }
-    for (const [id, c] of Object.entries(containers)) {
-      if (inFlow.has(id)) continue;
-      if (c.pending_action === 'stopping') rows.push({ id, step: 'stopping' });
-      else if (c.observed.status === 'running') rows.push({ id, step: 'to-stop' });
-    }
-    return rows.sort(
-      (a, b) => STEP_ORDER.indexOf(a.step) - STEP_ORDER.indexOf(b.step) || a.id.localeCompare(b.id),
-    );
+  // In the order they were planned or reached; a job with none is its own
+  // single step.
+  let steps = $derived.by(() => {
+    if (!job) return [];
+    const children = activities.filter((a) => a.parent === job.id).reverse();
+    return children.length ? children : [job];
   });
-  let switchLeft = $derived(switchPlan.filter((r) => r.step !== 'ok' && r.step !== 'done').length);
+  let shown = $derived(steps.find((c) => c.id === selectedChild) ?? job);
+
+  const RUNNING = {
+    start: 'starting',
+    stop: 'stopping',
+    delete: 'deleting',
+    pull: 'downloading',
+    remove: 'removing',
+    switch: 'switching',
+  };
+  const DONE = { start: 'up', stop: 'stopped', delete: 'deleted', pull: 'downloaded', remove: 'removed' };
+
+  function stepStatus(a) {
+    if (a.status === 'queued') return 'waiting';
+    if (a.status === 'running') return RUNNING[a.kind] ?? 'running';
+    if (a.status === 'done') return `✓ ${DONE[a.kind] ?? 'done'}`;
+    if (a.status === 'error') return '✕ failed';
+    return 'cancelled';
+  }
+
+  // A step is named for what it acts on: the node, the clone, the resource.
+  function stepLabel(a) {
+    return a.id === job?.id ? jobLabel(a) : a.key;
+  }
+
+  function seconds(a) {
+    const ms = (a.finished_ms ?? Date.now()) - a.started_ms;
+    return a.status === 'queued' ? '' : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
+  }
 
   function openDoctor() {
     activeTab = 'doctor';
@@ -262,7 +252,6 @@
     <div class="tab" class:active={activeTab === 'logs'} onclick={() => (activeTab = 'logs')}>Logs</div>
     <div class="tab" class:active={activeTab === 'activity'} onclick={() => (activeTab = 'activity')}>Activity</div>
     <div class="tab" class:active={activeTab === 'doctor'} onclick={openDoctor}>Doctor</div>
-    <div class="tab" class:active={activeTab === 'switch'} onclick={() => (activeTab = 'switch')}>Switch</div>
     <div class="tab" class:active={activeTab === 'help'} onclick={() => (activeTab = 'help')}>Help</div>
   </div>
 
@@ -313,15 +302,21 @@
         {/each}
       </div>
       <div class="ops-log">
-        {#if children.length}
-          <div class="ops-children">
-            <button class="ops-child" class:active={selectedChild == null} onclick={() => (selectedChild = null)}
-              >whole log</button
-            >
-            {#each children as c (c.id)}
-              <button class="ops-child" class:active={c.id === selectedChild} onclick={() => (selectedChild = c.id)}>
-                <span class="dot" class:running={c.status === 'running'} class:done={c.status === 'done'} class:error={c.status === 'error'}></span>
-                {jobLabel(c)}
+        {#if job}
+          <div class="ops-steps">
+            {#each steps as c (c.id)}
+              <button
+                class="row step-{c.status}"
+                class:picked={c.id === selectedChild}
+                disabled={c.id === job.id}
+                onclick={() => (selectedChild = selectedChild === c.id ? null : c.id)}
+                title={c.id === job.id ? null : selectedChild === c.id ? 'back to the whole log' : 'only this step’s log'}
+              >
+                <span class="k">{stepLabel(c)}</span>
+                <span class="v">
+                  {#if c.status === 'running'}<span class="dot running"></span>{/if}
+                  {stepStatus(c)}<span class="secs">{seconds(c)}</span>
+                </span>
               </button>
             {/each}
           </div>
@@ -339,27 +334,6 @@
       <p><b>Solid line</b> — <code>depends_on</code>: the left node needs the right one to start. It starts after it, waits for it, and is blocked if it fails. <b>Dashed</b> — <code>required: false</code>: the left node needs the right one at runtime. Nothing waits, and it starts only if a flow lists it.</p>
       <p><b>Tinted block</b> — infrastructure (postgres, redis): fixed image, no branch.</p>
       <p>Click a node to see its resolved repo, branch and domain. Switch flows with the picker top-left — a flow is <code>repo/flow</code>, and what starting it would start highlights in accent color; every known repo still renders regardless of flow.</p>
-    </div>
-  {:else if activeTab === 'switch'}
-    <div class="net">
-      {#if !switchFlow}
-        <div class="empty">no switch in flight</div>
-      {:else}
-        <div class="net-meta">
-          switching to <b>{switchFlow}</b>: {switchLeft ? `${switchLeft} left to do` : 'finishing up'}
-        </div>
-        <div class="section">
-          {#each switchPlan as r (r.id)}
-            <div class="row step-{r.step}">
-              <span class="k">{r.id}</span>
-              <span class="v">
-                {#if r.step === 'starting' || r.step === 'stopping'}<span class="dot running"></span>{/if}
-                {STEPS[r.step]}
-              </span>
-            </div>
-          {/each}
-        </div>
-      {/if}
     </div>
   {:else}
     <div class="net">
@@ -439,14 +413,20 @@
   .ops-row.active { background: var(--panel-2); border-color: var(--line-strong); color: var(--ink); }
   .ops-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; flex-direction: column; }
   .ops-scopes { display: flex; gap: 4px; margin-bottom: 10px; }
-  .ops-scope, .ops-child {
+  .ops-scope {
     padding: 3px 8px; border-radius: 3px; background: none; border: 1px solid var(--line);
     color: var(--ink-dim); font: 600 10.5px var(--font-mono); cursor: pointer;
     display: inline-flex; align-items: center; gap: 5px;
   }
-  .ops-scope:hover, .ops-child:hover { color: var(--ink); }
-  .ops-scope.active, .ops-child.active { background: var(--panel-2); border-color: var(--line-strong); color: var(--ink); }
-  .ops-children { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+  .ops-scope:hover { color: var(--ink); }
+  .ops-scope.active { background: var(--panel-2); border-color: var(--line-strong); color: var(--ink); }
+  .ops-steps { display: flex; flex-direction: column; margin-bottom: 10px; max-height: 40%; overflow-y: auto; flex: 0 0 auto; }
+  .ops-steps .row { border: 1px solid transparent; width: 100%; text-align: left; cursor: pointer; }
+  .ops-steps .row:disabled { cursor: default; }
+  .ops-steps .row:not(:disabled):hover, .ops-steps .row.picked { border-color: var(--line-strong); }
+  .ops-steps .row .k { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ops-steps .row .v { white-space: nowrap; }
+  .secs { color: var(--ink-faint); margin-left: 8px; font-size: 0.9em; }
   .ops-ws { color: var(--ink-faint); font-size: 0.9em; overflow: hidden; text-overflow: ellipsis; }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: var(--ink-faint); }
   .dot.running { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
@@ -467,9 +447,10 @@
   .row .v { color: var(--ink-dim); word-break: break-all; text-align: right; }
 
   .row .v .dot { display: inline-block; margin-right: 6px; }
-  .row.step-starting .v, .row.step-stopping .v { color: var(--accent); }
-  .row.step-ok .v, .row.step-done .v { color: #4ac97e; }
-  .row.step-waiting .v, .row.step-to-stop .v { color: var(--ink-faint); }
+  .row.step-running .v { color: var(--accent); }
+  .row.step-done .v { color: #4ac97e; }
+  .row.step-error .v { color: var(--danger); }
+  .row.step-queued .v, .row.step-cancelled .v { color: var(--ink-faint); }
 
   .doc-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .rerun {

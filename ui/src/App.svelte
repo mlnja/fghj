@@ -66,7 +66,7 @@
   }
 
   // fghjd forgets the workspace at once and tears its containers and network
-  // down in the background (volumes stay). We move to whichever workspace is
+  // down in the background, volumes included. We move to whichever workspace is
   // left and open the Activity tab, where the teardown's log is.
   async function removeWorkspace(id) {
     const res = await fetch('/workspaces/remove', {
@@ -709,7 +709,6 @@
       activityScope = scope;
       telemetryTab = 'activity';
     }}
-    onOpenSwitch={() => (telemetryTab = 'switch')}
     onOpenTelemetry={() => (telemetryTab = 'logs')}
     workspaces={workspaces}
     currentWorkspaceId={currentWorkspaceId}
@@ -840,8 +839,6 @@
       onFetchDaemonLogs={fetchDaemonLogs}
       onFetchNetStatus={fetchDaemonNetStatus}
       onFetchDoctor={fetchDaemonDoctor}
-      {env}
-      nodes={universe?.nodes}
     />
   {/if}
 </div>

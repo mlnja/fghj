@@ -225,6 +225,24 @@ pub async fn stop_and_remove(docker: &Docker, name: &str) {
         .await;
 }
 
+/// `stop_and_remove`, and the anonymous volumes the container's image
+/// declared (postgres keeps its data in one): for a container that won't be
+/// made again.
+pub async fn discard(docker: &Docker, name: &str) {
+    let _ = docker.stop_container(name, None).await;
+    let _ = docker
+        .remove_container(
+            name,
+            Some(
+                RemoveContainerOptionsBuilder::default()
+                    .force(true)
+                    .v(true)
+                    .build(),
+            ),
+        )
+        .await;
+}
+
 /// `Ok(None)` if the container doesn't exist.
 pub(super) async fn inspect(
     docker: &Docker,

@@ -178,10 +178,9 @@ rarely: the usual reason to want it — several services behind one database
 therefore one container and one volume, with no name coincidence carrying
 any weight.
 
-Volumes are never deleted by `fghj` — stopping the environment tears down
-its containers and network only, which is what lets a volume survive a
-restart in the first place. Removing one is a `docker volume rm` you run
-yourself.
+Stopping a node or switching flows never deletes a volume, which is what
+lets its data survive a restart. Only removing the workspace does: that
+discards its containers, network and volumes together.
 
 ## Two log-reading modes
 

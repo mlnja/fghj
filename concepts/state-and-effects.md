@@ -129,9 +129,14 @@ The same reports feed the activity log ([[docker-and-downloads]]), which is
 what the UI shows as a workspace's history of switches, starts and stops.
 Each `pending_create` opens a top-level job — `switch` for a flow, `start`
 for a node — and each `pending_action` one of its action's kind (`start`,
-`stop`, `delete`). Every other node a job touches becomes a child of the
-kind its report says, settled by the node's own done or failed report; the
-job itself settles with the effect's result. Opening a job supersedes a
+`stop`, `delete`). The run reports its plan first (`RunProgress::Planned`:
+what it may start, in start order, and what it will stop), and every node in
+it but the job's own becomes a queued child; a node the plan didn't list
+becomes one when it is first reported. Each is settled by the node's own done
+or failed report. A planned node the run left alone (already current) gets
+no report, so once the run ends the effect settles it as done if it is up, or
+had nothing to do; after a failure, one that isn't up was blocked, and the
+job's settle cancels it. The job itself settles with the effect's result. Opening a job supersedes a
 running one under the same key (it is cancelled, then replaced), and the
 handle is dropped through a guard, so an aborted effect reads as cancelled
 rather than running forever. The log is only a record: the reducer, not it,

@@ -33,11 +33,20 @@ pub enum ActivityKind {
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivityStatus {
+    /// A step its job will get to: listed so the plan shows before it runs.
+    Queued,
     Running,
     Done,
     Error,
     /// Called off, or its parent finished without it.
     Cancelled,
+}
+
+impl ActivityStatus {
+    /// Not settled yet.
+    fn is_open(self) -> bool {
+        matches!(self, Self::Queued | Self::Running)
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -255,6 +264,11 @@ impl ActivityHandle {
             .unwrap_or_default()
     }
 
+    /// `None` once the job was replaced.
+    pub fn status(&self) -> Option<ActivityStatus> {
+        self.with(|a| a.status)
+    }
+
     /// Only for a handle its caller just started: a job replaced since is gone.
     pub fn snapshot(&self) -> Activity {
         self.with(Activity::clone)
@@ -264,6 +278,38 @@ impl ActivityHandle {
     /// A job under this one, in the same workspace and of the same kind.
     pub fn child(&self, key: &str) -> ActivityHandle {
         self.child_of_kind(None, key)
+    }
+
+    /// A child that waits, `Queued`, until `begin`.
+    pub fn queued_child(&self, key: &str) -> ActivityHandle {
+        self.queued_child_of_kind(None, key)
+    }
+
+    pub fn queued_child_of_kind(&self, kind: Option<ActivityKind>, key: &str) -> ActivityHandle {
+        let child = self.child_of_kind(kind, key);
+        if let Some(a) = self.log.inner.lock().unwrap().find_mut(child.id) {
+            a.status = ActivityStatus::Queued;
+        }
+        child
+    }
+
+    /// Starts a queued job; its clock starts now.
+    pub fn begin(&self) {
+        if let Some(a) = self.log.inner.lock().unwrap().find_mut(self.id)
+            && a.status == ActivityStatus::Queued
+        {
+            a.status = ActivityStatus::Running;
+            a.started_ms = now_ms();
+        }
+    }
+
+    /// Runs `work` as this queued step: begins it, then settles it with the
+    /// result, which it hands back.
+    pub async fn step(&self, work: impl Future<Output = anyhow::Result<()>>) -> anyhow::Result<()> {
+        self.begin();
+        let result = work.await;
+        self.settle(&result);
+        result
     }
 
     /// A child of another kind: a node a switch starts is a `start`.
@@ -314,7 +360,7 @@ impl ActivityHandle {
             let Some(a) = inner.find_mut(id) else {
                 continue;
             };
-            if a.status != ActivityStatus::Running {
+            if !a.status.is_open() {
                 continue;
             }
             if id == self.id {
@@ -480,6 +526,25 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].status, ActivityStatus::Running);
         assert!(!all[0].log.contains("late"));
+    }
+
+    #[tokio::test]
+    async fn queued_steps_wait_run_in_turn_and_are_cancelled_after_a_failure() {
+        let log = log();
+        let job = log
+            .start(Some("ws"), ActivityKind::Remove, "remove")
+            .unwrap();
+        let [one, two, three] = ["one", "two", "three"].map(|k| job.queued_child(k));
+        assert_eq!(two.snapshot().status, ActivityStatus::Queued);
+
+        one.step(async { Ok(()) }).await.unwrap();
+        let failed = two.step(async { anyhow::bail!("stuck") }).await;
+        job.settle(&failed);
+
+        assert_eq!(one.snapshot().status, ActivityStatus::Done);
+        assert_eq!(two.snapshot().status, ActivityStatus::Error);
+        assert_eq!(three.snapshot().status, ActivityStatus::Cancelled);
+        assert_eq!(job.snapshot().status, ActivityStatus::Error);
     }
 
     #[test]

@@ -150,16 +150,20 @@ fresh from `graph.nodes`/`graph.edges` on every render (`$derived`):
   `Node.domain` section for exactly which run's address that link reflects
   and why it doesn't always resolve to the currently-selected run.
 - **`TelemetryDrawer`** (the "⚡" header button): the daemon's own view of
-  itself, not any workspace's — five tabs. `Logs` (the `daemon_log` ring
+  itself, not any workspace's — four tabs. `Logs` (the `daemon_log` ring
   buffer); `Activity`, top-level background jobs newest first with their logs
   (`GET /activities`), in three scopes: this workspace's `Downloads` (the ☰
   beside "Download all" opens it), its `Containers` — switches, starts,
-  stops and deletes (the ☰ beside "Switch to flow") — and `All workspaces`,
-  removals included (removing a workspace from the Config tab opens it). A
-  job with children (a pull's clones, the nodes a switch touched) lists them
-  above the log, each showing its own part of it; `Doctor`, the same report `fghj doctor` prints;
-  `Switch`, the switch in flight node by node (starting, stopping, still to
-  do, up), derived from the live environment; and `Help`, the key to the
+  stops and deletes (the ☰ beside "Switch to flow", or the button itself
+  while a switch runs) — and `All workspaces`,
+  removals included (removing a workspace from the Config tab opens it). The
+  selected job's steps — its children: a pull's clones, every node a switch
+  plans to start or stop, a removal's containers, network and volumes — sit
+  above its log as rows (waiting, a pulsing verb while running, ✓ or ✕, with
+  the time taken), and clicking one narrows the log to that step; a job with
+  no children is its own single row. This replaced a separate `Switch` tab
+  that rebuilt a switch's plan in the browser from the live environment;
+  `Doctor`, the same report `fghj doctor` prints; and `Help`, the key to the
   map. Doctor's DNS and NAT checks
   expand into what they cover: the managed `/etc/hosts` block, the
   `/etc/resolver` zones with the ephemeral port each points at, and the `pf`
