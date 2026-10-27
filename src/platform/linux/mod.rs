@@ -1,5 +1,4 @@
-//! Linux, starting with Ubuntu LTS: systemd-logind sessions, installed through
-//! apt and run by systemd.
+//! Linux, starting with Ubuntu LTS: installed through apt and run by systemd.
 //!
 //! DNS routing, CA trust and raw-port NAT aren't implemented yet and borrow
 //! the `unsupported` backends, which say so in `fghj doctor`. Loopback
@@ -8,7 +7,7 @@
 use super::{Platform, unsupported};
 
 mod apt;
-mod logind;
+mod runtime_dir;
 
 pub(super) fn platform() -> Platform {
     Platform {
@@ -16,7 +15,7 @@ pub(super) fn platform() -> Platform {
         trust: Box::new(unsupported::NoTrustStore),
         nat: Box::new(unsupported::NoRawNat::default()),
         loopback: Box::new(unsupported::NoLoopback),
-        session: Box::new(logind::LogindSession::system()),
+        session: Box::new(runtime_dir::RuntimeDir::system()),
         packaging: Box::new(apt::Apt),
     }
 }

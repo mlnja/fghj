@@ -168,10 +168,6 @@ impl Session for PlainSession {
     fn is_session_agent(&self, _sock: &str) -> bool {
         false
     }
-
-    fn docker_sockets(&self, _uid: u32) -> Vec<String> {
-        Vec::new()
-    }
 }
 
 pub(super) struct NoPackaging;
