@@ -26,8 +26,9 @@ only in a commit message.
 
 ## Building
 
-You need macOS on Apple Silicon, Rust (stable), Node 22+ and Docker. `cue` is
-optional and only needed for `fghj validate` and the schema check.
+You need a [supported OS](https://fghj.mlops.ninja/getting-started/installation/#prerequisites),
+Rust (stable), Node 22+ and Docker. `cue` is optional and only needed for
+`fghj validate` and the schema check.
 
 ```bash
 # The Svelte UI is embedded into the daemon at compile time: build it first

@@ -91,7 +91,8 @@ port 80, a local nginx or a `docker run -p 80:80`, it keeps working and
 ### Building from source
 
 If you'd rather not use the tap, you need Rust (stable), Node 22+, Docker,
-and macOS. `cue` is optional — only `fghj validate` needs it.
+and a [supported OS](https://fghj.mlops.ninja/getting-started/installation/#prerequisites).
+`cue` is optional — only `fghj validate` needs it.
 
 ```bash
 git clone https://github.com/mlnja/fghj.git

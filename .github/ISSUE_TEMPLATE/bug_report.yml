@@ -34,10 +34,10 @@ body:
     validations:
       required: true
   - type: input
-    id: macos
+    id: os
     attributes:
-      label: macOS version
-      placeholder: "15.1"
+      label: OS and version
+      placeholder: "macOS 15.1, Ubuntu 24.04"
   - type: dropdown
     id: docker
     attributes:
@@ -46,6 +46,7 @@ body:
         - Docker Desktop
         - OrbStack
         - Colima
+        - Docker Engine
         - Other
   - type: textarea
     id: logs

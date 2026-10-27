@@ -62,7 +62,8 @@ version.
 
 You need:
 
-- **macOS.** `fghjd` writes `/etc/resolver/fghj.internal` and installs a CA
+- **A supported OS** — see [Installation](/getting-started/installation/#prerequisites).
+  On macOS, `fghjd` writes `/etc/resolver/fghj.internal` and installs a CA
   with `security`; neither has a Linux path yet.
 - **Docker** running — Docker Desktop, OrbStack, or Colima.
 - **`fghj` and `fghjd` installed**, and `fghjd` running. See

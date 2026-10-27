@@ -8,7 +8,7 @@ config, so security reports get priority over everything else.
 Please report privately through GitHub's
 [private vulnerability reporting](https://github.com/mlnja/fghj/security/advisories/new)
 rather than in a public issue. Include the fghj version (`fghj --version`),
-your macOS version, and the steps to reproduce.
+your OS and its version, and the steps to reproduce.
 
 You should get a first response within a few days. Fixes ship as a new
 release, and the advisory is published once that release is out.
