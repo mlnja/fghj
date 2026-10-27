@@ -95,7 +95,7 @@ async fn docker_checks(docker: &Docker) -> Vec<Check> {
                     "docker",
                     "Docker Engine reachable",
                     format!("{e}"),
-                    "start Docker (Docker Desktop, OrbStack, colima…) and make sure \
+                    "start Docker (Docker Engine, Docker Desktop, OrbStack, Colima…) and make sure \
                      `docker ps` works, then restart fghjd",
                 ),
                 Check::warn(

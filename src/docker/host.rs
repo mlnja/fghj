@@ -15,24 +15,37 @@ const DEFAULT_SOCKET: &str = "/var/run/docker.sock";
 /// `unix://…` to dial, or `None` when no socket is there. `DOCKER_HOST` isn't
 /// consulted: bollard reads it itself.
 pub fn find_docker_host() -> Option<String> {
-    let from_context = docker_config_dir()
-        .and_then(|dir| active_context_host(&dir))
+    let user = docker_user();
+    let from_context = user
+        .as_ref()
+        .and_then(|(_, config_dir)| active_context_host(config_dir))
         .filter(|host| socket_exists(host));
-    from_context.or_else(|| {
-        let default = format!("unix://{DEFAULT_SOCKET}");
-        socket_exists(&default).then_some(default)
-    })
+    from_context
+        .or_else(|| {
+            let default = format!("unix://{DEFAULT_SOCKET}");
+            socket_exists(&default).then_some(default)
+        })
+        .or_else(|| {
+            let (uid, _) = user?;
+            crate::platform::current()
+                .session
+                .docker_sockets(uid)
+                .into_iter()
+                .find(|host| socket_exists(host))
+        })
 }
 
-/// The `~/.docker` of whoever is at the console, when fghjd runs as root;
-/// otherwise fghjd's own.
-fn docker_config_dir() -> Option<PathBuf> {
-    if unsafe { libc::geteuid() } != 0 {
-        return std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".docker"));
+/// Whose Docker to follow, and their `~/.docker`: whoever is at the console
+/// when fghjd runs as root, otherwise fghjd's own.
+fn docker_user() -> Option<(u32, PathBuf)> {
+    let euid = unsafe { libc::geteuid() };
+    if euid != 0 {
+        let home = std::env::var_os("HOME")?;
+        return Some((euid, PathBuf::from(home).join(".docker")));
     }
     let uid = crate::platform::current().session.console_uid()?;
     let home = crate::persistence::workspace_owner::home_dir_of(uid)?;
-    Some(PathBuf::from(home).join(".docker"))
+    Some((uid, PathBuf::from(home).join(".docker")))
 }
 
 /// The endpoint of `currentContext`, or `None` for the built-in `default`

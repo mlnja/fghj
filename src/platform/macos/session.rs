@@ -47,6 +47,11 @@ impl Session for MacSession {
     fn is_session_agent(&self, sock: &str) -> bool {
         sock.contains(&format!("/{LAUNCHD_SOCKET_PREFIX}"))
     }
+
+    /// Every macOS engine registers a docker context.
+    fn docker_sockets(&self, _uid: u32) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 const LAUNCHD_SOCKET_PREFIX: &str = "com.apple.launchd.";

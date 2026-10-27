@@ -1,6 +1,7 @@
 //! An OS fghj has no implementation for: the daemon still runs and serves the
 //! container-side names, and every host integration says it isn't there
-//! instead of failing.
+//! instead of failing. A platform that has some capabilities but not yet
+//! others borrows the missing ones from here.
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -23,7 +24,7 @@ pub(super) fn platform() -> Platform {
     }
 }
 
-struct NoDnsRouting;
+pub(super) struct NoDnsRouting;
 
 impl DnsRouting for NoDnsRouting {
     fn sync(&self, port: u16, _zones: &[&str]) -> Result<()> {
@@ -46,7 +47,7 @@ impl DnsRouting for NoDnsRouting {
     }
 }
 
-struct NoTrustStore;
+pub(super) struct NoTrustStore;
 
 impl TrustStore for NoTrustStore {
     fn install(&self, ca_cert_path: &Path) -> Result<()> {
@@ -80,7 +81,7 @@ impl TrustStore for NoTrustStore {
 }
 
 #[derive(Default)]
-struct NoRawNat {
+pub(super) struct NoRawNat {
     warned: OnceLock<()>,
 }
 
@@ -129,7 +130,7 @@ impl RawNat for NoRawNat {
 }
 
 /// Elsewhere all of `127/8` already routes to loopback.
-struct NoLoopback;
+pub(super) struct NoLoopback;
 
 impl Loopback for NoLoopback {
     fn add_alias(&self, _ip: Ipv4Addr) -> Result<()> {
@@ -149,7 +150,7 @@ impl Loopback for NoLoopback {
     }
 }
 
-struct PlainSession;
+pub(super) struct PlainSession;
 
 impl Session for PlainSession {
     fn state_root(&self) -> PathBuf {
@@ -167,9 +168,13 @@ impl Session for PlainSession {
     fn is_session_agent(&self, _sock: &str) -> bool {
         false
     }
+
+    fn docker_sockets(&self, _uid: u32) -> Vec<String> {
+        Vec::new()
+    }
 }
 
-struct NoPackaging;
+pub(super) struct NoPackaging;
 
 impl Packaging for NoPackaging {
     fn start_service_hint(&self) -> &'static str {

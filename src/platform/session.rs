@@ -17,4 +17,8 @@ pub trait Session: Send + Sync {
 
     /// Whether `sock` is that session agent, rather than one `fghj wire` sent.
     fn is_session_agent(&self, sock: &str) -> bool;
+
+    /// Docker sockets of `uid`'s own to try, as `unix://…`, when neither their
+    /// docker context nor `/var/run/docker.sock` names a live one.
+    fn docker_sockets(&self, uid: u32) -> Vec<String>;
 }
