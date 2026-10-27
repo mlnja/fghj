@@ -24,8 +24,8 @@ first start creates it. Two verbs act on it:
 There is no "stop the environment" action: stopping single nodes, or
 switching flows, covers day-to-day use. The environment's containers,
 network and sidecar are only torn down when the workspace itself is
-stopped (`POST /workspaces/stop`), and even then every volume stays, so
-the next start mounts the same data.
+removed (`POST /workspaces/remove`, the Config tab's "Remove workspace"),
+and even then every volume stays, so wiring it again mounts the same data.
 
 Liveness is checked directly against Docker on every call, never trusted
 from persisted state alone — a container can be stopped or removed

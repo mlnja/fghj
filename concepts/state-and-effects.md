@@ -125,6 +125,18 @@ as work on it begins and the moment it comes up. `effects::docker::converge`
 owns the receiving end and translates each report into
 `Action::EnvCreateWorking` / `Action::EnvCreateProgress`.
 
+The same reports feed the activity log ([[docker-and-downloads]]), which is
+what the UI shows as a workspace's history of switches, starts and stops.
+Each `pending_create` opens a top-level job — `switch` for a flow, `start`
+for a node — and each `pending_action` one of its action's kind (`start`,
+`stop`, `delete`). Every other node a job touches becomes a child of the
+kind its report says, settled by the node's own done or failed report; the
+job itself settles with the effect's result. Opening a job supersedes a
+running one under the same key (it is cancelled, then replaced), and the
+handle is dropped through a guard, so an aborted effect reads as cancelled
+rather than running forever. The log is only a record: the reducer, not it,
+decides what runs.
+
 It is a plain channel rather than an `ActorHandle` on purpose: `orchestrator/`
 knows how to talk to Docker and nothing about actors, actions, or reducers.
 Handing it an `ActorHandle` would invert that and make the orchestration
@@ -138,12 +150,19 @@ container the settle just dropped.
 ## Tearing the environment down is not an action
 
 There is no teardown action. The only thing that removes an environment is
-unwiring its workspace (`daemon::WorkspaceRegistry::stop`, behind
-`POST /workspaces/stop`), which reads the environment off the actor,
-deregisters the actor and aborts its converge task, and only *then* calls
-`Orchestrator::stop`. The order is the point: once the actor is gone there
+removing its workspace (`daemon::WorkspaceRegistry::remove`, behind
+`POST /workspaces/remove`), which marks it in `removing.json`, deregisters
+the actor and aborts its converge task, and only *then* starts the teardown
+job (`daemon::removal`). The order is the point: once the actor is gone there
 is no state left for a late `EnvCreateProgress` or `EnvCreateSettled` to
 put a container back into.
+
+The teardown doesn't read the actor's environment at all. It lists the
+workspace's containers by their `com.docker.compose.project` label and
+removes them, sweeping again in case a start the abort cut short still lands
+one, then the sidecar, the routes directory and the network. Every step can
+run again, so a fghjd that dies mid-teardown just runs it again on start: an
+id in `removing.json` is dropped from the index and never loaded.
 
 This replaced `RunStopRequested` / `RunTeardownSettled`, which had to guard
 every later report against resurrecting a run the teardown had removed

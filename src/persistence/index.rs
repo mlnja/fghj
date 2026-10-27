@@ -17,8 +17,12 @@ pub fn save_index(path: &Path, index: &HashMap<String, PathBuf>) -> Result<()> {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create {}", dir.display()))?;
     }
-    std::fs::write(path, serde_json::to_string_pretty(index)?)
-        .with_context(|| format!("failed to write {}", path.display()))
+    // Renamed into place: a crash mid-write would otherwise leave a corrupt
+    // index, which reads as no workspaces at all.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(index)?)
+        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("failed to write {}", path.display()))
 }
 
 #[cfg(test)]

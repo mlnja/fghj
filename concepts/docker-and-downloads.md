@@ -145,13 +145,13 @@ doesn't exist yet. `docker::ensure_volume` creates it explicitly instead,
 right before use in `Orchestrator::start_node`, attaching the usual
 `com.docker.compose.project` label (the workspace name).
 `docker::list_volumes` finds them again by that label, which is how
-`EnvState::volumes` gets populated. Nothing deletes them: `Orchestrator::stop`
-keeps volumes, because they hold the data the next start expects to find.
+`EnvState::volumes` gets populated. Nothing deletes them: removing a
+workspace keeps volumes, because they hold the data the next start expects to find.
 
 ## Stopping a container is not the same as deleting it
 
 Every teardown path in `fghj` goes through `docker::stop_and_remove`: the
-whole-environment `Orchestrator::stop`, the per-node `restart_node`, and
+workspace removal's teardown, the per-node `restart_node`, and
 the sidecar. For a long time that
 function was a single call — `remove_container` with `force: true`.
 
@@ -237,8 +237,8 @@ function itself returns and only the `Sse` response stream lives on.
 
 Cloning a repo can take anywhere from under a second to tens of seconds, and
 a `pull-all` might clone several repos in sequence — far too slow for a
-synchronous HTTP handler. `downloads::DownloadRegistry` runs each clone job
-on its own OS thread (not a tokio task — `git clone`'s own process spawn and
+synchronous HTTP handler. `downloads::start_pull_all` / `start_node` run
+each job as an `activity::Activity` (kind `pull`) on its own OS thread (not a tokio task — `git clone`'s own process spawn and
 blocking I/O don't need the async runtime) and lets the UI poll for
 progress instead:
 
@@ -249,20 +249,29 @@ progress instead:
   pull and the whole-graph one are tracked independently, so both can be
   polled — or even run — at once without one clobbering the other's
   status.
-- **Idempotent starts**: `spawn` checks whether a job under this key is
-  already `"running"` and, if so, just returns its current snapshot instead
-  of starting a second concurrent clone of the same thing.
+- **Idempotent starts**: `ActivityLog::start` checks whether a job under
+  this key is already running in this workspace and, if so, hands back its
+  snapshot instead of starting a second concurrent clone of the same thing.
+  A finished job under the key is replaced, so each key keeps one record.
+- **Children**: `pull_all_logged` makes each clone a child job keyed by the
+  folder it lands in. A child's output is appended to its parent's log too,
+  so the parent's log stays the whole transcript.
 - **Log streaming**: `run_git_clone_logged` pipes the child's stdout *and*
   stderr (git's own progress meter writes to stderr, not stdout) into the
   same growing log string the UI polls, translating `\r` (a real terminal's
   "overwrite this line" convention for progress meters) into `\n` since
   that reads far better inside a `<pre>` block than a wall of
   carriage-returns.
-- **Ordering**: the registry is backed by a `Vec`, not a map, specifically
-  so iteration order reflects "job first started" rather than key sort
-  order — `OperationsDrawer.svelte`'s job list relies on this to show jobs
-  in a sensible, most-recent-first order (`DownloadRegistry::list` reverses
-  the vec).
+- **Ordering**: the log is a `Vec`, not a map, so `ActivityLog::list` can
+  return jobs newest-first by start rather than by key.
+- **Scope**: the log is the daemon's, shared by every workspace, and in
+  memory only — a restart forgets finished pulls, which are safe to run
+  again.
+- **Other kinds**: the same log holds workspace removals (`remove`, see
+  [[run-lifecycle-and-registry]]) and the converge effect's `switch`,
+  `start`, `stop` and `delete` jobs (see [[state-and-effects]]). A handle
+  whose job was since replaced writes nowhere instead of panicking: a
+  superseded switch's task can still be reporting.
 
 ## `pull_all_logged`: a fixpoint, because cloning can reveal more repos
 
@@ -290,7 +299,7 @@ resolver used to have a second privilege-dropped clone path,
 
 Implemented: `src/docker/` (build/run/inspect/logs/`stop_and_remove` over
 `bollard`),
-`src/downloads.rs` (`DownloadRegistry`, single-node/pull-all/pull-flow
-jobs, log streaming). `daemon/` exposes all of it over HTTP (see
+`src/downloads.rs` (single-node/pull-all/pull-flow jobs, log streaming) on
+`src/activity.rs`. `daemon/` exposes all of it over HTTP (see
 [[control-api-and-cli]]); `OperationsDrawer.svelte` and `Drawer.svelte` are
 the two UI surfaces that poll it (see [[ui-architecture]]).

@@ -51,20 +51,24 @@ to the right `WorkspaceState` via `WorkspaceExtractor` (a custom
 looks it up in the shared `WorkspaceRegistry`, or rejects with a 400 that
 tells the caller to `POST /workspaces` first). This is what lets one `fghjd`
 process serve the UI for several independently-wired workspaces
-simultaneously, each with its own graph, runs, and download jobs, without
+simultaneously, each with its own graph and runs, without
 any of that being duplicated per-request.
 
 Routes, grouped by what they front:
 
 - **Workspace management**: `GET`/`POST /workspaces` (list / wire),
-  `POST /workspaces/stop` (unwire it and tear its environment down — the
-  only way to unwire; neither the CLI nor the UI calls it yet).
+  `POST /workspaces/remove` (unwire it now, `202` with the job that tears
+  its environment down in the background — the only way to unwire; the UI's
+  Config tab calls it, the CLI doesn't yet).
+- **Background jobs**: `GET /activities` (`?workspace=` optional) — every
+  pull, removal, switch, start, stop and delete in `activity::ActivityLog`,
+  newest first, children included. Not workspace-scoped, so a removed workspace's job stays visible.
 - **Graph resolution**: `GET /universe.json` → `resolver::resolve_universe`,
   run in a blocking task since it shells out to `git` (see
   [[node-identity-and-domains]]).
 - **Downloads**: `POST`/`GET /pull-all`(`/status`), `POST`/`GET /pull/{node_id}`
-  (`/status`), `GET /pull-jobs` — thin wrappers over
-  `downloads::DownloadRegistry` (see [[docker-and-downloads]]).
+  (`/status`), `GET /pull-jobs` (top-level pulls only) — thin wrappers
+  over `downloads` and the activity log (see [[docker-and-downloads]]).
 - **Environment**: `GET /environment` (the one `EnvState`, or `null`),
   `POST /switch` (body `{"flow": …}` — start a flow's nodes and stop
   everything outside it), and per-node `POST /nodes/{node_id}/start`|`stop`|

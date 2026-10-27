@@ -24,7 +24,8 @@ use control::{
     post_daemon_docker, post_daemon_start, post_daemon_stop,
 };
 use downloads::{
-    get_pull_all_status, get_pull_jobs, get_pull_node_status, post_pull_all, post_pull_node,
+    get_activities, get_pull_all_status, get_pull_jobs, get_pull_node_status, post_pull_all,
+    post_pull_node,
 };
 use env::{
     get_environment, post_node_debug_wait, post_node_delete, post_node_start, post_node_stop,
@@ -35,20 +36,21 @@ use logs::{
     get_node_events, get_node_logs, get_node_logs_stream, get_run_node_log_generations,
     get_run_node_log_history,
 };
-use workspaces::{get_universe, get_workspaces, post_workspaces, post_workspaces_stop};
+use workspaces::{get_universe, get_workspaces, post_workspaces, post_workspaces_remove};
 
 use crate::web::ui::static_handler;
 
 pub(crate) fn build_router(registry: Arc<WorkspaceRegistry>, daemon: Arc<DaemonControl>) -> Router {
     let api = Router::new()
         .route("/workspaces", get(get_workspaces).post(post_workspaces))
-        .route("/workspaces/stop", post(post_workspaces_stop))
+        .route("/workspaces/remove", post(post_workspaces_remove))
         .route("/universe.json", get(get_universe))
         .route("/pull-all", post(post_pull_all))
         .route("/pull-all/status", get(get_pull_all_status))
         .route("/pull/{node_id}", post(post_pull_node))
         .route("/pull/{node_id}/status", get(get_pull_node_status))
         .route("/pull-jobs", get(get_pull_jobs))
+        .route("/activities", get(get_activities))
         .route("/repos", get(repos::get_repos))
         .route("/repos/{path}/fetch", post(repos::post_repo_fetch))
         .route("/repos/{path}/pull", post(repos::post_repo_pull))

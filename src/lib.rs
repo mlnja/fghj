@@ -5,6 +5,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 pub mod action;
+pub mod activity;
 pub mod actor;
 pub mod buildx;
 pub mod daemon;

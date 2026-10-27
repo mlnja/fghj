@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::task::AbortHandle;
 
 use crate::action::Action;
+use crate::activity::{ActivityGuard, ActivityHandle, ActivityKind};
 use crate::actor::ActorHandle;
 use crate::daemon_log;
 use crate::effects::Effect;
@@ -159,12 +160,88 @@ async fn perform(
     }
 }
 
-/// Turns a run's progress into actions, so the UI follows each node as it goes.
-/// `skip` is the node a container action is for: its own settle reports it, and
-/// clearing its mark early would make the reducer drop that settle.
+fn activity_kind(action: PendingAction) -> ActivityKind {
+    match action {
+        PendingAction::Starting | PendingAction::Restarting => ActivityKind::Start,
+        PendingAction::Stopping => ActivityKind::Stop,
+        PendingAction::Removing => ActivityKind::Delete,
+    }
+}
+
+/// Opens the activity a create or container action reports into. One just
+/// like it still running is stale: `converge` never runs two at once, so it
+/// belongs to an aborted task whose guard hasn't dropped yet.
+fn open_activity(
+    old: &server::WorkspaceState,
+    kind: ActivityKind,
+    key: &str,
+    opening: &str,
+) -> ActivityGuard {
+    let job = old.activities.start_superseding(Some(&old.id), kind, key);
+    job.append(&format!("{opening}\n"));
+    // Aborted with its task when a Stop calls a start off.
+    job.settle_on_drop("called off")
+}
+
+/// Each node a run touches becomes a child of `job`, settled by the node's
+/// own report. The node `job` itself is for gets lines, not a child.
+struct NodeActivities {
+    job: ActivityHandle,
+    own: Option<String>,
+    open: HashMap<String, ActivityHandle>,
+}
+
+impl NodeActivities {
+    fn working(&mut self, node_id: &str, action: Option<PendingAction>) {
+        let job = &self.job;
+        let own = self.own.as_deref() == Some(node_id);
+        match action {
+            Some(action) => {
+                let line = format!("{action} {node_id}\n");
+                if own {
+                    job.append(&line);
+                    return;
+                }
+                self.open
+                    .entry(node_id.to_string())
+                    .or_insert_with(|| job.child_of_kind(Some(activity_kind(action)), node_id))
+                    .append(&line);
+            }
+            None => {
+                // The node's events pane has the error itself.
+                let line = format!("{node_id} failed\n");
+                match self.open.remove(node_id) {
+                    Some(child) => {
+                        child.append(&line);
+                        child.settle(&Err(anyhow::anyhow!("see {node_id}'s events")));
+                    }
+                    None => job.append(&line),
+                }
+            }
+        }
+    }
+
+    fn done(&mut self, info: &ContainerInfo) {
+        let job = &self.job;
+        let line = format!("{} {}\n", info.node_id, info.observed.status);
+        match self.open.remove(&info.node_id) {
+            Some(child) => {
+                child.append(&line);
+                child.settle(&Ok(()));
+            }
+            None => job.append(&line),
+        }
+    }
+}
+
+/// Turns a run's progress into actions, so the UI follows each node as it goes,
+/// and into `nodes`. `skip` is the node a container action is for: its own
+/// settle reports it, and clearing its mark early would make the reducer drop
+/// that settle.
 fn forward_progress(
     actor: ActorHandle,
     skip: Option<String>,
+    mut nodes: NodeActivities,
 ) -> (ProgressSink, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RunProgress>();
     let drain = tokio::spawn(async move {
@@ -174,6 +251,7 @@ fn forward_progress(
                     if skip.as_ref() == Some(&node_id) {
                         continue;
                     }
+                    nodes.working(&node_id, action);
                     Action::EnvCreateWorking { node_id, action }
                 }
                 RunProgress::Done(done) => {
@@ -186,6 +264,7 @@ fn forward_progress(
                     if skip.as_ref() == Some(&info.node_id) {
                         continue;
                     }
+                    nodes.done(&info);
                     Action::EnvCreateProgress {
                         network,
                         sidecar_container_name,
@@ -334,9 +413,20 @@ impl DockerConvergeEffect {
         };
         let run = self.actor.current().env.clone();
         let actor = self.actor.clone();
+        let job = open_activity(
+            &old,
+            activity_kind(entry.action),
+            &entry.node_id,
+            &format!("{} {}", entry.action, entry.node_id),
+        );
         supervisor::supervise("container action", async move {
             let mut cascaded = Vec::new();
-            let (tx, drain) = forward_progress(actor.clone(), Some(entry.node_id.clone()));
+            let nodes = NodeActivities {
+                job: (*job).clone(),
+                own: None,
+                open: HashMap::new(),
+            };
+            let (tx, drain) = forward_progress(actor.clone(), Some(entry.node_id.clone()), nodes);
             let result = match run {
                 Some(run) => perform(&old, &entry, &run, &mut cascaded, &tx)
                     .await
@@ -348,6 +438,15 @@ impl DockerConvergeEffect {
             if let Err(e) = drain.await {
                 daemon_log::warn(format!("container-action progress drain task failed: {e}"));
             }
+            for info in &cascaded {
+                job.append(&format!("{} {}\n", info.node_id, info.observed.status));
+            }
+            job.settle(
+                &result
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|e| anyhow::anyhow!("{e}")),
+            );
             for info in cascaded {
                 let _ = actor
                     .dispatch(Action::ContainerActionSettled {
@@ -369,9 +468,23 @@ impl DockerConvergeEffect {
         };
         let actor = self.actor.clone();
         let prior = self.actor.current().env.clone();
+        let (kind, key, own) = match &plan {
+            EnvSpec::Flow(flow) => (ActivityKind::Switch, flow, None),
+            EnvSpec::Node(node) => (ActivityKind::Start, node, Some(node.clone())),
+        };
+        let opening = match kind {
+            ActivityKind::Switch => format!("switching to {key}"),
+            _ => format!("starting {key}"),
+        };
+        let job = open_activity(&old, kind, key, &opening);
         supervisor::supervise("env create", async move {
+            let nodes = NodeActivities {
+                job: (*job).clone(),
+                own,
+                open: HashMap::new(),
+            };
             // Translated here: `orchestrator/` knows nothing about actors.
-            let (tx, drain) = forward_progress(actor.clone(), None);
+            let (tx, drain) = forward_progress(actor.clone(), None, nodes);
             let result = perform_create(&old, &plan, prior.as_ref(), Some(&tx)).await;
             // Closing the channel lets the drain finish first, so a late progress report
             // can't land after `EnvCreateSettled`.
@@ -388,6 +501,12 @@ impl DockerConvergeEffect {
                     e.message
                 ));
             }
+            job.settle(
+                &result
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|e| anyhow::anyhow!("{}", e.message)),
+            );
             guard.settle(result);
         });
     }
@@ -437,6 +556,51 @@ mod tests {
     use super::*;
     use crate::state::testing::{self, workspace as state_with};
     use std::time::Duration;
+
+    fn node_activities(own: Option<&str>) -> (Arc<crate::activity::ActivityLog>, NodeActivities) {
+        let log = Arc::new(crate::activity::ActivityLog::default());
+        let job = log.start(Some("ws"), ActivityKind::Switch, "app").unwrap();
+        let nodes = NodeActivities {
+            job,
+            own: own.map(str::to_string),
+            open: HashMap::new(),
+        };
+        (log, nodes)
+    }
+
+    #[test]
+    fn each_node_a_switch_touches_is_a_child_settled_by_its_report() {
+        use crate::activity::ActivityStatus;
+        let (log, mut nodes) = node_activities(None);
+        nodes.working("db", Some(PendingAction::Starting));
+        nodes.working("old", Some(PendingAction::Stopping));
+        nodes.working("api", Some(PendingAction::Starting));
+        let mut db = testing::container("db");
+        db.observed.status = "running".into();
+        nodes.done(&db);
+        nodes.working("api", None);
+
+        let all = log.list(Some("ws"));
+        let child = |key: &str| all.iter().find(|a| a.key == key).unwrap().clone();
+        assert_eq!(child("db").kind, ActivityKind::Start);
+        assert_eq!(child("db").status, ActivityStatus::Done);
+        assert_eq!(child("old").kind, ActivityKind::Stop);
+        assert_eq!(child("old").status, ActivityStatus::Running);
+        assert_eq!(child("api").status, ActivityStatus::Error);
+        let switch = child("app");
+        assert!(switch.log.contains("starting db\n"), "{}", switch.log);
+        assert!(switch.log.contains("db running\n"), "{}", switch.log);
+        assert!(switch.log.contains("api failed"), "{}", switch.log);
+    }
+
+    #[test]
+    fn the_node_a_job_is_for_gets_lines_not_a_child() {
+        let (log, mut nodes) = node_activities(Some("web"));
+        nodes.working("web", Some(PendingAction::Starting));
+        nodes.done(&testing::container("web"));
+        assert_eq!(log.list(Some("ws")).len(), 1);
+        assert!(log.list(Some("ws"))[0].log.contains("starting web"));
+    }
 
     fn container(node_id: &str, pending: Option<PendingAction>) -> ContainerInfo {
         let mut c = testing::container(node_id);

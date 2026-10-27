@@ -4,6 +4,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
@@ -21,7 +22,7 @@ pub(crate) struct StartRequest {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct StopRequest {
+pub(crate) struct RemoveRequest {
     id: String,
 }
 pub(crate) async fn get_workspaces(State(registry): State<Arc<WorkspaceRegistry>>) -> Response {
@@ -48,14 +49,22 @@ pub(crate) async fn post_workspaces(
     }
 }
 
-pub(crate) async fn post_workspaces_stop(
+/// 202 with the removal job: the workspace is gone from `/workspaces` at
+/// once, its containers and network go in the background (`/activities`).
+pub(crate) async fn post_workspaces_remove(
     State(registry): State<Arc<WorkspaceRegistry>>,
     body: Bytes,
 ) -> Response {
-    match serde_json::from_slice::<StopRequest>(&body) {
-        Ok(req) => {
-            Json(serde_json::json!({ "stopped": registry.stop(&req.id).await })).into_response()
-        }
+    match serde_json::from_slice::<RemoveRequest>(&body) {
+        Ok(req) => match registry.remove(&req.id) {
+            Ok(Some(job)) => (StatusCode::ACCEPTED, Json(serde_json::json!(job))).into_response(),
+            Ok(None) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("no workspace {}", req.id) })),
+            )
+                .into_response(),
+            Err(e) => err_response(e),
+        },
         Err(e) => bad_request(e),
     }
 }

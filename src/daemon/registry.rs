@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, bail};
 use tokio::sync::watch;
 
+use crate::activity::{Activity, ActivityLog};
 use crate::actor::ActorHandle;
+use crate::daemon::removal::{self, Removals};
 use crate::daemon::workspace_id::workspace_id;
 use crate::server::WorkspaceState;
 use crate::web::traffic::TrafficStore;
@@ -76,6 +78,8 @@ pub struct WorkspaceRegistry {
     docker_converge_tasks: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     /// Recorded proxy traffic. In memory only: it is gone when fghjd stops.
     traffic: TrafficStore,
+    activities: Arc<ActivityLog>,
+    removals: Arc<Removals>,
 }
 
 impl WorkspaceRegistry {
@@ -84,8 +88,22 @@ impl WorkspaceRegistry {
     }
 
     pub(crate) async fn load_from(index_path: PathBuf, docker: Arc<bollard::Docker>) -> Self {
+        let activities = Arc::new(ActivityLog::default());
+        let removals = Arc::new(Removals::beside(&index_path));
+        let pending = removals.pending();
+        let mut index = persistence::load_index(&index_path);
+        // Marked before it left the index: fghjd stopped in between.
+        let stale = pending
+            .keys()
+            .filter(|id| index.remove(*id).is_some())
+            .count();
+        if stale > 0
+            && let Err(e) = persistence::save_index(&index_path, &index)
+        {
+            daemon_log::warn(format!("fghjd: {e:#}"));
+        }
         let mut by_id = HashMap::new();
-        for (id, path) in persistence::load_index(&index_path) {
+        for (id, path) in index {
             if !path.exists() {
                 daemon_log::warn(format!(
                     "fghjd: skipping missing workspace {id} ({})",
@@ -93,7 +111,9 @@ impl WorkspaceRegistry {
                 ));
                 continue;
             }
-            match WorkspaceState::new(path.clone(), docker.clone()).await {
+            match WorkspaceState::new(id.clone(), path.clone(), docker.clone(), activities.clone())
+                .await
+            {
                 Ok(state) => {
                     by_id.insert(id, Arc::new(state));
                 }
@@ -130,6 +150,8 @@ impl WorkspaceRegistry {
             actors: watch::Sender::new(Arc::new(BTreeMap::new())),
             docker_converge_tasks: Mutex::new(HashMap::new()),
             traffic: TrafficStore::default(),
+            activities,
+            removals,
         };
         let loaded: Vec<(String, Arc<WorkspaceState>)> = registry
             .by_id
@@ -140,6 +162,13 @@ impl WorkspaceRegistry {
             .collect();
         for (id, state) in loaded {
             registry.wire_actor(&id, &state);
+        }
+        for (id, path) in pending {
+            daemon_log::warn(format!(
+                "fghjd: finishing the removal of workspace {id} ({})",
+                path.display()
+            ));
+            registry.spawn_teardown(&id, path);
         }
         registry
     }
@@ -243,14 +272,36 @@ impl WorkspaceRegistry {
                 }
             }
         }
+        // Its Docker names would be this one's, so its teardown would take
+        // this one's containers too.
+        if let Some(path) = self
+            .removals
+            .pending()
+            .into_values()
+            .find(|path| domain_label(path) == domain_label(&canonical))
+        {
+            bail!(
+                "{} is still being removed, and {} would get the same \
+                 container and network names. Wire it again once that's done.",
+                path.display(),
+                canonical.display(),
+            );
+        }
 
         let id = workspace_id(&canonical);
         let existing = self.by_id.lock().unwrap().get(&id).cloned();
         let state = match existing {
             Some(state) => state,
             None => {
-                let state =
-                    Arc::new(WorkspaceState::new(canonical.clone(), self.docker.clone()).await?);
+                let state = Arc::new(
+                    WorkspaceState::new(
+                        id.clone(),
+                        canonical.clone(),
+                        self.docker.clone(),
+                        self.activities.clone(),
+                    )
+                    .await?,
+                );
                 self.by_id.lock().unwrap().insert(id.clone(), state.clone());
                 self.wire_actor(&id, &state);
 
@@ -271,6 +322,10 @@ impl WorkspaceRegistry {
 
     pub fn traffic(&self) -> &TrafficStore {
         &self.traffic
+    }
+
+    pub fn activities(&self) -> &ActivityLog {
+        &self.activities
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<WorkspaceState>> {
@@ -302,28 +357,44 @@ impl WorkspaceRegistry {
             .collect()
     }
 
-    pub async fn stop(&self, id: &str) -> bool {
-        let removed = self.by_id.lock().unwrap().remove(id);
-        match removed {
-            Some(state) => {
-                // Before deregistering: the actor's state is the only record of what runs.
-                let env = self.actor(id).and_then(|actor| actor.current().env.clone());
-                self.actors.send_modify(|actors| {
-                    Arc::make_mut(actors).remove(id);
-                });
-                if let Some(task) = self.docker_converge_tasks.lock().unwrap().remove(id) {
-                    task.abort();
-                }
-                if let Some(env) = env {
-                    let _ = state.orchestrator.stop(&env).await;
-                }
-                let mut index = persistence::load_index(&self.index_path);
-                index.remove(id);
-                let _ = persistence::save_index(&self.index_path, &index);
-                true
-            }
-            None => false,
+    /// Takes `id` off the registry and the index now and starts tearing its
+    /// containers and network down in the background. `None` if `id` is
+    /// neither wired nor being removed. A removal that failed is retried.
+    pub fn remove(&self, id: &str) -> Result<Option<Activity>> {
+        let Some(state) = self.get(id) else {
+            return Ok(self
+                .removals
+                .pending()
+                .remove(id)
+                .map(|path| self.spawn_teardown(id, path)));
+        };
+        // First, so a crash past this point finishes the removal on start.
+        self.removals.add(id, &state.path)?;
+
+        self.by_id.lock().unwrap().remove(id);
+        self.actors.send_modify(|actors| {
+            Arc::make_mut(actors).remove(id);
+        });
+        if let Some(task) = self.docker_converge_tasks.lock().unwrap().remove(id) {
+            task.abort();
         }
+        let mut index = persistence::load_index(&self.index_path);
+        index.remove(id);
+        if let Err(e) = persistence::save_index(&self.index_path, &index) {
+            // Not fatal: `load_from` drops what `removing.json` lists.
+            daemon_log::warn(format!("fghjd: {e:#}"));
+        }
+        Ok(Some(self.spawn_teardown(id, state.path.clone())))
+    }
+
+    fn spawn_teardown(&self, id: &str, path: PathBuf) -> Activity {
+        removal::spawn_teardown(
+            self.docker.clone(),
+            &self.activities,
+            self.removals.clone(),
+            id,
+            path,
+        )
     }
 }
 
@@ -496,18 +567,63 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn stop_removes_workspace_from_registry_and_index() {
+    async fn remove_takes_the_workspace_off_at_once_and_marks_it_until_torn_down() {
         let tmp = tempfile::tempdir().unwrap();
-        let registry =
-            WorkspaceRegistry::load_from(tmp.path().join("workspaces.json"), test_docker()).await;
+        let index_path = tmp.path().join("workspaces.json");
+        let registry = WorkspaceRegistry::load_from(index_path.clone(), test_docker()).await;
         let (id, _) = registry
             .resolve(None, Some(tmp.path().join("root")), None)
             .await
             .unwrap();
 
-        assert!(registry.stop(&id).await);
+        let job = registry.remove(&id).unwrap().expect("a removal job");
+        assert_eq!(job.workspace_id.as_deref(), Some(id.as_str()));
         assert!(registry.get(&id).is_none());
-        assert!(!persistence::load_index(&tmp.path().join("workspaces.json")).contains_key(&id));
-        assert!(!registry.stop(&id).await);
+        assert!(!persistence::load_index(&index_path).contains_key(&id));
+        // The undialled Docker fails the teardown, so the mark stays.
+        assert!(registry.removals.pending().contains_key(&id));
+        assert!(registry.remove("no-such-workspace").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_removal_interrupted_before_leaving_the_index_is_not_loaded_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_path = tmp.path().join("workspaces.json");
+        let root = tmp.path().join("root");
+        let id = {
+            let registry = WorkspaceRegistry::load_from(index_path.clone(), test_docker()).await;
+            let (id, path) = registry.resolve(None, Some(root), None).await.unwrap();
+            registry.removals.add(&id, &path).unwrap();
+            id
+        };
+
+        let registry = WorkspaceRegistry::load_from(index_path.clone(), test_docker()).await;
+        assert!(registry.get(&id).is_none());
+        assert!(!persistence::load_index(&index_path).contains_key(&id));
+        let job = registry
+            .activities()
+            .get(
+                Some(&id),
+                crate::activity::ActivityKind::Remove,
+                removal::ACTIVITY_KEY,
+            )
+            .expect("the removal resumed");
+        assert_eq!(job.kind, crate::activity::ActivityKind::Remove);
+    }
+
+    #[tokio::test]
+    async fn a_folder_named_like_one_being_removed_cannot_be_wired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry =
+            WorkspaceRegistry::load_from(tmp.path().join("workspaces.json"), test_docker()).await;
+        registry
+            .removals
+            .add("old", &tmp.path().join("a").join("shop"))
+            .unwrap();
+        let err = registry
+            .resolve(None, Some(tmp.path().join("b").join("shop")), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("is still being removed"), "{err}");
     }
 }

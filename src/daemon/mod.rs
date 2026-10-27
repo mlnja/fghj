@@ -10,6 +10,7 @@ pub mod control;
 mod heal;
 pub mod reconcile;
 pub mod registry;
+mod removal;
 pub mod routing;
 pub mod workspace_id;
 

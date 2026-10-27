@@ -3,7 +3,7 @@
   import GraphView from './lib/GraphView.svelte';
   import Drawer from './lib/Drawer.svelte';
   import RepoDrawer from './lib/RepoDrawer.svelte';
-  import Placeholder from './lib/Placeholder.svelte';
+  import WorkspaceConfig from './lib/WorkspaceConfig.svelte';
   import TelemetryDrawer from './lib/TelemetryDrawer.svelte';
   import GraphSkeleton from './lib/GraphSkeleton.svelte';
 
@@ -24,6 +24,9 @@
   let repoStatus = $state({});
   // `null` when closed, else the tab it opens on.
   let telemetryTab = $state(null);
+  // Which jobs the Activity tab opens on: 'pulls' or 'containers' of this
+  // workspace, or 'all' of every workspace's.
+  let activityScope = $state('all');
   // The workspace's one environment (`GET /environment`), or null before
   // anything has been started.
   let env = $state(null);
@@ -60,6 +63,37 @@
     repoStatus = {};
     env = null;
     load();
+  }
+
+  // fghjd forgets the workspace at once and tears its containers and network
+  // down in the background (volumes stay). We move to whichever workspace is
+  // left and open the Activity tab, where the teardown's log is.
+  async function removeWorkspace(id) {
+    const res = await fetch('/workspaces/remove', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+    activityScope = 'all';
+    telemetryTab = 'activity';
+    // A reload must not come back to the id that's gone.
+    const url = new URL(location.href);
+    url.searchParams.delete('workspace');
+    history.replaceState(null, '', url);
+    await loadWorkspaces();
+    const next = workspaces[0]?.id;
+    if (next) {
+      activeTab = 'repos';
+      selectWorkspace(next);
+    } else {
+      currentWorkspaceId = null;
+      localStorage.removeItem('fghj:workspace');
+      universe = null;
+      env = null;
+      load();
+    }
   }
 
   // Polled (see the effect below), so every outcome has to be able to
@@ -212,8 +246,9 @@
     await loadEnv();
   }
 
-  async function listPullJobs() {
-    const res = await fetch(withWs('/pull-jobs'));
+  // Daemon-global, children included: the drawer scopes and nests them.
+  async function listActivities() {
+    const res = await fetch('/activities');
     if (!res.ok) return [];
     return await res.json();
   }
@@ -670,7 +705,10 @@
     {missingInFlow}
     onSwitchFlow={switchFlow}
     envBusy={env?.pending_create != null}
-    onOpenOperations={() => (telemetryTab = 'pulls')}
+    onOpenActivity={(scope) => {
+      activityScope = scope;
+      telemetryTab = 'activity';
+    }}
     onOpenSwitch={() => (telemetryTab = 'switch')}
     onOpenTelemetry={() => (telemetryTab = 'logs')}
     workspaces={workspaces}
@@ -688,6 +726,13 @@
         title="fghjd isn't answering. Retrying the connection…"
         detail={"It may be restarting or upgrading. If it was stopped with `fghj daemon stop`, run `fghj daemon start`; otherwise `fghj doctor` shows what is wrong."}
         onRetry={load}
+      />
+    {:else if activeTab === 'config'}
+      <!-- Ahead of `error`: a workspace that no longer resolves still has to be removable. -->
+      <WorkspaceConfig
+        workspace={workspaces.find((w) => w.id === currentWorkspaceId)}
+        workspaceName={universe?.workspace_name}
+        onRemove={removeWorkspace}
       />
     {:else if error}
       <GraphSkeleton
@@ -728,11 +773,6 @@
         <GraphView graph={reposGraph} {currentFlow} mode="repos" onSelectNode={(n) => (selectedRepoId = n.id)} />
       {:else if activeTab === 'containers'}
         <GraphView graph={containersGraph} {currentFlow} mode="containers" {runContainers} {recordingNodes} {showSeeds} onSelectNode={(n) => (selectedNode = n)} />
-      {:else}
-        <Placeholder
-          eyebrow="Config — secrets, split-DNS, root CA"
-          text="Not available yet. The subsystems behind it are running — split DNS, the local root CA, the TLS proxy — but this view doesn't surface them yet. Until it does, the ⚡ telemetry drawer in the header shows live DNS and DNAT status."
-        />
       {/if}
     {/if}
   </div>
@@ -793,8 +833,10 @@
   {#if telemetryTab}
     <TelemetryDrawer
       initialTab={telemetryTab}
+      {activityScope}
+      workspaceId={currentWorkspaceId}
       onClose={() => (telemetryTab = null)}
-      onListJobs={listPullJobs}
+      onListJobs={listActivities}
       onFetchDaemonLogs={fetchDaemonLogs}
       onFetchNetStatus={fetchDaemonNetStatus}
       onFetchDoctor={fetchDaemonDoctor}

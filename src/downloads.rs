@@ -1,116 +1,64 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
 
+use crate::activity::{Activity, ActivityHandle, ActivityKind, ActivityLog};
 use crate::persistence::WorkspaceOwner;
 use crate::resolver::{self, BuildSource, Node};
 
-#[derive(Debug, Serialize, Clone)]
-pub struct DownloadState {
-    pub status: String, // "running" | "done" | "error"
-    pub log: String,
+/// Clones `node_id`'s repo (or its build source) in the background.
+pub fn start_node(
+    activities: &Arc<ActivityLog>,
+    workspace_id: &str,
+    workspace: PathBuf,
+    node_id: String,
+    owner: Option<WorkspaceOwner>,
+) -> Activity {
+    spawn(
+        activities,
+        workspace_id,
+        &format!("node:{node_id}"),
+        move |job| clone_node_logged(&workspace, &node_id, owner.as_ref(), job),
+    )
 }
 
-#[derive(Debug, Serialize, Clone)]
-pub struct DownloadJob {
-    pub key: String,
-    pub status: String,
-    pub log: String,
+/// `flow` scopes the pull and gets its own job key.
+pub fn start_pull_all(
+    activities: &Arc<ActivityLog>,
+    workspace_id: &str,
+    workspace: PathBuf,
+    owner: Option<WorkspaceOwner>,
+    flow: Option<String>,
+) -> Activity {
+    spawn(
+        activities,
+        workspace_id,
+        &pull_all_key(flow.as_deref()),
+        move |job| pull_all_logged(&workspace, owner.as_ref(), flow.as_deref(), job),
+    )
 }
 
-/// Background `git clone` jobs the UI polls, in start order.
-#[derive(Default)]
-pub struct DownloadRegistry {
-    jobs: Mutex<Vec<(String, Arc<Mutex<DownloadState>>)>>,
-}
-
-impl DownloadRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn status(&self, key: &str) -> Option<DownloadState> {
-        self.jobs
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, s)| s.lock().unwrap().clone())
-    }
-
-    pub fn list(&self) -> Vec<DownloadJob> {
-        self.jobs
-            .lock()
-            .unwrap()
-            .iter()
-            .rev()
-            .map(|(key, s)| {
-                let snapshot = s.lock().unwrap();
-                DownloadJob {
-                    key: key.clone(),
-                    status: snapshot.status.clone(),
-                    log: snapshot.log.clone(),
-                }
-            })
-            .collect()
-    }
-
-    fn spawn(
-        &self,
-        key: String,
-        run: impl FnOnce(Arc<Mutex<DownloadState>>) + Send + 'static,
-    ) -> DownloadState {
-        let mut jobs = self.jobs.lock().unwrap();
-        if let Some((_, existing)) = jobs.iter().find(|(k, _)| *k == key) {
-            let snapshot = existing.lock().unwrap().clone();
-            if snapshot.status == "running" {
-                return snapshot;
-            }
+/// Joins a pull already running under `key` rather than starting a second.
+fn spawn(
+    activities: &Arc<ActivityLog>,
+    workspace_id: &str,
+    key: &str,
+    run: impl FnOnce(&ActivityHandle) -> Result<()> + Send + 'static,
+) -> Activity {
+    match activities.start(Some(workspace_id), ActivityKind::Pull, key) {
+        Err(running) => *running,
+        Ok(job) => {
+            let snapshot = job.snapshot();
+            thread::spawn(move || {
+                let result = run(&job);
+                job.settle(&result);
+            });
+            snapshot
         }
-        let state = Arc::new(Mutex::new(DownloadState {
-            status: "running".to_string(),
-            log: String::new(),
-        }));
-        if let Some(slot) = jobs.iter_mut().find(|(k, _)| *k == key) {
-            slot.1 = state.clone();
-        } else {
-            jobs.push((key, state.clone()));
-        }
-        let snapshot = state.lock().unwrap().clone();
-        thread::spawn(move || run(state));
-        snapshot
-    }
-
-    pub fn start_node(
-        &self,
-        workspace: PathBuf,
-        node_id: String,
-        owner: Option<WorkspaceOwner>,
-    ) -> DownloadState {
-        let key = format!("node:{node_id}");
-        self.spawn(key, move |state| {
-            let result = clone_node_logged(&workspace, &node_id, owner.as_ref(), &state);
-            finish(&state, result);
-        })
-    }
-
-    /// `flow` scopes the pull and gets its own job key.
-    pub fn start_pull_all(
-        &self,
-        workspace: PathBuf,
-        owner: Option<WorkspaceOwner>,
-        flow: Option<String>,
-    ) -> DownloadState {
-        let key = pull_all_key(flow.as_deref());
-        self.spawn(key, move |state| {
-            let result = pull_all_logged(&workspace, owner.as_ref(), flow.as_deref(), &state);
-            finish(&state, result);
-        })
     }
 }
 
@@ -121,29 +69,14 @@ pub fn pull_all_key(flow: Option<&str>) -> String {
     }
 }
 
-fn finish(state: &Arc<Mutex<DownloadState>>, result: Result<()>) {
-    let mut s = state.lock().unwrap();
-    match result {
-        Ok(()) => s.status = "done".to_string(),
-        Err(e) => {
-            s.log.push_str(&format!("\nerror: {e}\n"));
-            s.status = "error".to_string();
-        }
-    }
-}
-
-fn append_log(state: &Arc<Mutex<DownloadState>>, text: &str) {
-    state.lock().unwrap().log.push_str(text);
-}
-
-fn stream_to_log(mut pipe: impl Read, state: Arc<Mutex<DownloadState>>) {
+fn stream_to_log(mut pipe: impl Read, job: ActivityHandle) {
     let mut buf = [0u8; 512];
     loop {
         match pipe.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 let chunk = String::from_utf8_lossy(&buf[..n]).replace('\r', "\n");
-                append_log(&state, &chunk);
+                job.append(&chunk);
             }
             Err(_) => break,
         }
@@ -179,7 +112,7 @@ fn run_git_clone_logged(
     branch: &str,
     local_path: &str,
     owner: Option<&WorkspaceOwner>,
-    state: &Arc<Mutex<DownloadState>>,
+    job: &ActivityHandle,
 ) -> Result<()> {
     let dest = workspace.join(local_path);
     if dest.exists() {
@@ -188,10 +121,9 @@ fn run_git_clone_logged(
         return ensure_checkout_is(&dest, repo);
     }
 
-    append_log(
-        state,
-        &format!("$ git clone --branch {branch} {repo} {local_path}\n"),
-    );
+    job.append(&format!(
+        "$ git clone --branch {branch} {repo} {local_path}\n"
+    ));
 
     let mut cmd = Command::new("git");
     cmd.args(["clone", "--progress", "--branch", branch, "--single-branch"])
@@ -201,38 +133,38 @@ fn run_git_clone_logged(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    run_git_logged(cmd, owner, state)
+    run_git_logged(cmd, owner, job)
         .with_context(|| format!("git clone failed for {repo} (branch {branch})"))
 }
 
 fn run_git_logged(
     mut cmd: Command,
     owner: Option<&WorkspaceOwner>,
-    state: &Arc<Mutex<DownloadState>>,
+    job: &ActivityHandle,
 ) -> Result<()> {
     if let Some(owner) = owner {
         owner.apply_to_command(&mut cmd);
     }
     crate::persistence::harden_git_ssh(&mut cmd);
 
-    let log_start = state.lock().unwrap().log.len();
+    let log_start = job.log_len();
     let mut child = cmd.spawn().context("failed to spawn git")?;
 
     let stderr = child.stderr.take().expect("piped stderr");
     let stdout = child.stdout.take().expect("piped stdout");
-    let stderr_state = state.clone();
-    let stdout_state = state.clone();
-    let stderr_handle = thread::spawn(move || stream_to_log(stderr, stderr_state));
-    let stdout_handle = thread::spawn(move || stream_to_log(stdout, stdout_state));
+    let stderr_job = job.clone();
+    let stdout_job = job.clone();
+    let stderr_handle = thread::spawn(move || stream_to_log(stderr, stderr_job));
+    let stdout_handle = thread::spawn(move || stream_to_log(stdout, stdout_job));
 
     let status = child.wait().context("failed waiting for git")?;
     let _ = stderr_handle.join();
     let _ = stdout_handle.join();
 
     if !status.success() {
-        let output = state.lock().unwrap().log[log_start..].to_string();
+        let output = job.log_from(log_start);
         if let Some(hint) = refusal_hint(&output, owner) {
-            append_log(state, &format!("\nhint: {hint}\n"));
+            job.append(&format!("\nhint: {hint}\n"));
         }
         bail!("git exited with {status}");
     }
@@ -309,7 +241,7 @@ fn clone_source_logged(
     workspace: &Path,
     source: &BuildSource,
     owner: Option<&WorkspaceOwner>,
-    state: &Arc<Mutex<DownloadState>>,
+    job: &ActivityHandle,
 ) -> Result<()> {
     let dest = workspace.join(&source.path);
     if dest.exists() {
@@ -340,30 +272,27 @@ fn clone_source_logged(
         .arg(&dest)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    append_log(
-        state,
-        &format!(
-            "$ git clone {}{} {}\n",
-            match (&source.reference, commit) {
-                (Some(r), None) => format!("--branch {r} "),
-                _ => String::new(),
-            },
-            source.url,
-            source.path
-        ),
-    );
-    run_git_logged(cmd, owner, state)
+    job.append(&format!(
+        "$ git clone {}{} {}\n",
+        match (&source.reference, commit) {
+            (Some(r), None) => format!("--branch {r} "),
+            _ => String::new(),
+        },
+        source.url,
+        source.path
+    ));
+    run_git_logged(cmd, owner, job)
         .with_context(|| format!("git clone failed for {}", source.url))?;
 
     if let Some(commit) = commit {
-        append_log(state, &format!("$ git checkout --detach {commit}\n"));
+        job.append(&format!("$ git checkout --detach {commit}\n"));
         let mut cmd = Command::new("git");
         cmd.arg("-C")
             .arg(&dest)
             .args(["checkout", "--detach", commit])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Err(e) = run_git_logged(cmd, owner, state) {
+        if let Err(e) = run_git_logged(cmd, owner, job) {
             // Left at the default branch it would build the wrong version.
             let _ = std::fs::remove_dir_all(&dest);
             return Err(e.context(format!("{} has no commit {commit}", source.url)));
@@ -383,7 +312,7 @@ fn clone_stub_logged(
     workspace: &Path,
     node: &Node,
     owner: Option<&WorkspaceOwner>,
-    state: &Arc<Mutex<DownloadState>>,
+    job: &ActivityHandle,
 ) -> Result<()> {
     let repo = node
         .repo
@@ -391,14 +320,14 @@ fn clone_stub_logged(
         .with_context(|| format!("stub node {} has no repo to clone", node.id))?;
     let branch = node.branch.as_deref().unwrap_or("main");
     let local_path = node.local_path.as_deref().unwrap_or(&node.id);
-    run_git_clone_logged(workspace, repo, branch, local_path, owner, state)
+    run_git_clone_logged(workspace, repo, branch, local_path, owner, job)
 }
 
 fn clone_node_logged(
     workspace: &Path,
     node_id: &str,
     owner: Option<&WorkspaceOwner>,
-    state: &Arc<Mutex<DownloadState>>,
+    job: &ActivityHandle,
 ) -> Result<()> {
     let graph = resolver::resolve_universe(workspace)?;
     let node = graph
@@ -408,21 +337,21 @@ fn clone_node_logged(
         .with_context(|| format!("no such node: {node_id}"))?;
 
     if let Some(source) = missing_source(node) {
-        return clone_source_logged(workspace, source, owner, state);
+        return clone_source_logged(workspace, source, owner, job);
     }
     if node.downloaded {
-        append_log(state, "already downloaded\n");
+        job.append("already downloaded\n");
         return Ok(());
     }
 
-    clone_stub_logged(workspace, node, owner, state)
+    clone_stub_logged(workspace, node, owner, job)
 }
 
 fn pull_all_logged(
     workspace: &Path,
     owner: Option<&WorkspaceOwner>,
     flow: Option<&str>,
-    state: &Arc<Mutex<DownloadState>>,
+    job: &ActivityHandle,
 ) -> Result<()> {
     std::fs::create_dir_all(workspace)
         .with_context(|| format!("failed to create workspace dir {}", workspace.display()))?;
@@ -442,15 +371,22 @@ fn pull_all_logged(
         sources.dedup_by(|a, b| a.path == b.path);
 
         if missing.is_empty() && sources.is_empty() {
-            append_log(state, "\nnothing left to pull\n");
+            job.append("\nnothing left to pull\n");
             return Ok(());
         }
 
+        // One child per clone, keyed by where it lands.
         for source in sources {
-            clone_source_logged(workspace, source, owner, state)?;
+            let clone = job.child(&source.path);
+            let result = clone_source_logged(workspace, source, owner, &clone);
+            clone.settle(&result);
+            result?;
         }
         for node in missing {
-            clone_stub_logged(workspace, node, owner, state)?;
+            let clone = job.child(node.local_path.as_deref().unwrap_or(&node.id));
+            let result = clone_stub_logged(workspace, node, owner, &clone);
+            clone.settle(&result);
+            result?;
         }
     }
 }
@@ -629,12 +565,12 @@ mod tests {
             }
 
             fn pull(&self, flow: Option<&str>) -> Result<Vec<String>> {
-                let state = Arc::new(Mutex::new(DownloadState {
-                    status: "running".into(),
-                    log: String::new(),
-                }));
-                let result = pull_all_logged(&self.ws(), None, flow, &state);
-                let log = state.lock().unwrap().log.clone();
+                let activities = Arc::new(ActivityLog::default());
+                let job = activities
+                    .start(Some("test"), ActivityKind::Pull, "pull-all")
+                    .unwrap();
+                let result = pull_all_logged(&self.ws(), None, flow, &job);
+                let log = job.snapshot().log;
                 result.map_err(|e| anyhow::anyhow!("{e}\nlog:\n{log}"))?;
                 Ok(log
                     .lines()

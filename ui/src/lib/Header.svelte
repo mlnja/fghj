@@ -20,7 +20,7 @@
     missingInFlow = null,
     onSwitchFlow,
     envBusy,
-    onOpenOperations,
+    onOpenActivity,
     onOpenSwitch,
     onOpenTelemetry,
     workspaces,
@@ -264,7 +264,7 @@
           >{pullState === 'done' ? '✓' : '✕'}</span
         >
       {/if}
-      <span class="ops-link" onclick={onOpenOperations} title="download queue">☰</span>
+      <span class="ops-link" onclick={() => onOpenActivity('pulls')} title="this workspace's downloads">☰</span>
     </div>
   {:else if activeTab === 'containers'}
     <!-- While a switch runs, the button opens its plan instead. -->
@@ -278,6 +278,7 @@
     >
       {#if switchingFlow || envBusy}<span class="spinner"></span> switching…{:else}Switch to flow{/if}
     </button>
+    <span class="ops-link" onclick={() => onOpenActivity('containers')} title="this workspace's switches, starts and stops">☰</span>
     {#if showSeeds != null}
       <button
         class="pull-btn seeds-btn"

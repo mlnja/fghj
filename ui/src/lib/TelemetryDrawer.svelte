@@ -9,6 +9,8 @@
     onFetchNetStatus,
     onFetchDoctor,
     onListJobs,
+    activityScope = 'all',
+    workspaceId = null,
     env,
     nodes,
   } = $props();
@@ -84,23 +86,67 @@
     }
   }
 
-  // Pull queue tab: clones and downloads, each with its own log.
-  let jobs = $state([]);
+  // Activity tab: background jobs, each with its own log. This workspace's
+  // downloads or its switches, starts and stops; or every workspace's jobs,
+  // removals included: a removed workspace's job outlives the workspace.
+  const SCOPES = {
+    pulls: { label: 'Downloads', kinds: ['pull'] },
+    containers: { label: 'Containers', kinds: ['switch', 'start', 'stop', 'delete'] },
+    all: { label: 'All workspaces', kinds: null },
+  };
+  let scope = $state(activityScope);
+  let activities = $state([]);
   let selectedJob = $state(null);
+  // One of the selected job's children, whose part of the log to show.
+  let selectedChild = $state(null);
+
+  let jobs = $derived.by(() => {
+    const { kinds } = SCOPES[scope];
+    return activities.filter(
+      (a) => a.parent == null && (!kinds || (a.workspace_id === workspaceId && kinds.includes(a.kind))),
+    );
+  });
 
   async function pollJobs() {
     if (!onListJobs) return;
-    jobs = (await onListJobs()) ?? [];
-    if (!selectedJob && jobs.length) selectedJob = jobs[0].key;
+    activities = (await onListJobs()) ?? [];
   }
 
-  function jobLabel(key) {
-    if (key === 'pull-all') return 'Pull all repos';
-    if (key.startsWith('node:')) return `Download ${key.slice('node:'.length)}`;
-    return key;
+  // Newest job of the scope until one is picked; a pick that left the list
+  // (replaced by a rerun) falls back the same way.
+  $effect(() => {
+    if (!jobs.some((j) => j.id === selectedJob)) {
+      selectedJob = jobs[0]?.id ?? null;
+      selectedChild = null;
+    }
+  });
+
+  function pickJob(id) {
+    selectedJob = id;
+    selectedChild = null;
   }
 
-  let job = $derived(jobs.find((j) => j.key === selectedJob) ?? null);
+  // A workspace id is its folder name plus a 16-hex-digit hash.
+  function workspaceLabel(id) {
+    return id ? id.replace(/-[0-9a-f]{16}$/, '') : 'fghjd';
+  }
+
+  function jobLabel(j) {
+    if (j.kind === 'remove') return 'Remove workspace';
+    if (j.kind === 'switch') return `Switch to ${j.key}`;
+    if (j.kind === 'start') return `Start ${j.key}`;
+    if (j.kind === 'stop') return `Stop ${j.key}`;
+    if (j.kind === 'delete') return `Delete ${j.key}`;
+    if (j.key === 'pull-all') return 'Pull all repos';
+    if (j.key.startsWith('pull-flow:')) return `Pull ${j.key.slice('pull-flow:'.length)}`;
+    if (j.key.startsWith('node:')) return `Download ${j.key.slice('node:'.length)}`;
+    // A pull's child is one clone, keyed by its path.
+    return j.key;
+  }
+
+  let job = $derived(jobs.find((j) => j.id === selectedJob) ?? null);
+  let children = $derived(job ? activities.filter((a) => a.parent === job.id).reverse() : []);
+  let shown = $derived(children.find((c) => c.id === selectedChild) ?? job);
 
   // Switch tab: where the switch in flight stands, node by node. Derived from
   // the same live `env` the graph draws, so it needs no poll of its own: the
@@ -157,7 +203,7 @@
       const timer = setInterval(pollLogs, 1500);
       return () => clearInterval(timer);
     }
-    if (activeTab === 'pulls') {
+    if (activeTab === 'activity') {
       pollJobs();
       const timer = setInterval(pollJobs, 800);
       return () => clearInterval(timer);
@@ -214,7 +260,7 @@
 
   <div class="tabs">
     <div class="tab" class:active={activeTab === 'logs'} onclick={() => (activeTab = 'logs')}>Logs</div>
-    <div class="tab" class:active={activeTab === 'pulls'} onclick={() => (activeTab = 'pulls')}>Pull queue</div>
+    <div class="tab" class:active={activeTab === 'activity'} onclick={() => (activeTab = 'activity')}>Activity</div>
     <div class="tab" class:active={activeTab === 'doctor'} onclick={openDoctor}>Doctor</div>
     <div class="tab" class:active={activeTab === 'switch'} onclick={() => (activeTab = 'switch')}>Switch</div>
     <div class="tab" class:active={activeTab === 'help'} onclick={() => (activeTab = 'help')}>Help</div>
@@ -246,24 +292,44 @@
         <LogPane lines={visibleLines} />
       {/if}
     </div>
-  {:else if activeTab === 'pulls'}
+  {:else if activeTab === 'activity'}
+    <div class="ops-scopes">
+      {#each Object.entries(SCOPES) as [id, { label }] (id)}
+        <button class="ops-scope" class:active={scope === id} onclick={() => (scope = id)}>{label}</button>
+      {/each}
+    </div>
     <div class="ops">
       <div class="ops-list">
         {#if !jobs.length}
-          <div class="empty">no pulls yet</div>
+          <div class="empty">nothing has run yet</div>
         {/if}
-        {#each jobs as j (j.key)}
-          <div class="ops-row" class:active={j.key === selectedJob} onclick={() => (selectedJob = j.key)}>
+        {#each jobs as j (j.id)}
+          <div class="ops-row" class:active={j.id === selectedJob} onclick={() => pickJob(j.id)}>
             <span class="dot" class:running={j.status === 'running'} class:done={j.status === 'done'} class:error={j.status === 'error'}></span>
-            <span class="ops-label">{jobLabel(j.key)}</span>
+            <span class="ops-label"
+              >{jobLabel(j)}{#if scope === 'all'}<span class="ops-ws">{workspaceLabel(j.workspace_id)}</span>{/if}</span
+            >
           </div>
         {/each}
       </div>
       <div class="ops-log">
-        {#if job}
-          <LogPane lines={textLines(job.log || '(no output yet)')} />
+        {#if children.length}
+          <div class="ops-children">
+            <button class="ops-child" class:active={selectedChild == null} onclick={() => (selectedChild = null)}
+              >whole log</button
+            >
+            {#each children as c (c.id)}
+              <button class="ops-child" class:active={c.id === selectedChild} onclick={() => (selectedChild = c.id)}>
+                <span class="dot" class:running={c.status === 'running'} class:done={c.status === 'done'} class:error={c.status === 'error'}></span>
+                {jobLabel(c)}
+              </button>
+            {/each}
+          </div>
+        {/if}
+        {#if shown}
+          <LogPane lines={textLines(shown.log || '(no output yet)')} />
         {:else}
-          <div class="empty">select a pull to see its log</div>
+          <div class="empty">select a job to see its log</div>
         {/if}
       </div>
     </div>
@@ -371,7 +437,17 @@
   }
   .ops-row:hover { background: var(--panel-2); }
   .ops-row.active { background: var(--panel-2); border-color: var(--line-strong); color: var(--ink); }
-  .ops-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ops-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; flex-direction: column; }
+  .ops-scopes { display: flex; gap: 4px; margin-bottom: 10px; }
+  .ops-scope, .ops-child {
+    padding: 3px 8px; border-radius: 3px; background: none; border: 1px solid var(--line);
+    color: var(--ink-dim); font: 600 10.5px var(--font-mono); cursor: pointer;
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+  .ops-scope:hover, .ops-child:hover { color: var(--ink); }
+  .ops-scope.active, .ops-child.active { background: var(--panel-2); border-color: var(--line-strong); color: var(--ink); }
+  .ops-children { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+  .ops-ws { color: var(--ink-faint); font-size: 0.9em; overflow: hidden; text-overflow: ellipsis; }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: var(--ink-faint); }
   .dot.running { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
   .dot.done { background: var(--success, #6fdc8c); }

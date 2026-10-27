@@ -1,29 +1,11 @@
 use anyhow::Result;
 
 use crate::docker;
-use crate::state::{ContainerInfo, EnvState};
+use crate::state::ContainerInfo;
 
 use super::registry::Orchestrator;
-use super::route_table::sidecar_routes_dir;
 
 impl Orchestrator {
-    /// Tears the environment down. Volumes are kept.
-    pub async fn stop(&self, state: &EnvState) -> Result<()> {
-        for c in state.containers.values() {
-            let ev = self.events(&c.node_id, "stop");
-            ev.begin().await;
-            ev.running("stopping container").await;
-            docker::stop_and_remove(&self.docker, &c.desired.container_name).await;
-            ev.ok("stopping container").await;
-        }
-        if !state.sidecar_container_name.is_empty() {
-            docker::stop_and_remove(&self.docker, &state.sidecar_container_name).await;
-        }
-        let _ = std::fs::remove_dir_all(sidecar_routes_dir(&state.network));
-        docker::remove_network(&self.docker, &state.network).await;
-        Ok(())
-    }
-
     /// Stops one node's container without removing it.
     pub async fn stop_container(
         &self,

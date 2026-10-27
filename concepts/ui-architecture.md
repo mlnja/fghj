@@ -149,13 +149,15 @@ fresh from `graph.nodes`/`graph.edges` on every render (`$derived`):
   status/name and an "open" link — see [[node-identity-and-domains]]'s
   `Node.domain` section for exactly which run's address that link reflects
   and why it doesn't always resolve to the currently-selected run.
-- **`OperationsDrawer`** (the "☰" queue view): lists every download job
-  ever started this daemon lifetime (`DownloadRegistry::list`, most-recent
-  first) with its live log — the one place to see a `pull-all` or
-  individual clone's raw git output.
 - **`TelemetryDrawer`** (the "⚡" header button): the daemon's own view of
   itself, not any workspace's — five tabs. `Logs` (the `daemon_log` ring
-  buffer); `Pull queue`; `Doctor`, the same report `fghj doctor` prints;
+  buffer); `Activity`, top-level background jobs newest first with their logs
+  (`GET /activities`), in three scopes: this workspace's `Downloads` (the ☰
+  beside "Download all" opens it), its `Containers` — switches, starts,
+  stops and deletes (the ☰ beside "Switch to flow") — and `All workspaces`,
+  removals included (removing a workspace from the Config tab opens it). A
+  job with children (a pull's clones, the nodes a switch touched) lists them
+  above the log, each showing its own part of it; `Doctor`, the same report `fghj doctor` prints;
   `Switch`, the switch in flight node by node (starting, stopping, still to
   do, up), derived from the live environment; and `Help`, the key to the
   map. Doctor's DNS and NAT checks
