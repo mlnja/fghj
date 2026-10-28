@@ -3,8 +3,8 @@
 //! each result back as an action. Changes nobody asked for are picked up by
 //! `observe`.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use tokio::task::AbortHandle;
 
@@ -82,6 +82,31 @@ fn plan(in_flight: &HashMap<String, PendingAction>, snapshot: &[PendingEntry]) -
         }
     }
     plan
+}
+
+/// Nodes a running action is starting on its way to its own node, counted
+/// per action. Their marks are that action's progress, not jobs of their own.
+type Driven = Arc<Mutex<HashMap<String, usize>>>;
+
+/// `pending` without the start marks an in-flight action set on the nodes it
+/// drives. Acting on them started each one a second time, as a job of its own
+/// that was then called off. A Stop or Delete there is still the user's.
+fn without_progress(
+    pending: &[PendingEntry],
+    driven: &HashMap<String, usize>,
+    in_flight: &HashMap<String, PendingAction>,
+) -> Vec<PendingEntry> {
+    pending
+        .iter()
+        .filter(|e| {
+            !(matches!(
+                e.action,
+                PendingAction::Starting | PendingAction::Restarting
+            ) && driven.contains_key(&e.node_id)
+                && !in_flight.contains_key(&e.node_id))
+        })
+        .cloned()
+        .collect()
 }
 
 /// At most one create at a time: two would fight over the same containers.
@@ -281,9 +306,11 @@ fn forward_progress(
     actor: ActorHandle,
     skip: Option<String>,
     mut nodes: NodeActivities,
+    driven: Driven,
 ) -> (ProgressSink, tokio::task::JoinHandle<NodeActivities>) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RunProgress>();
     let drain = tokio::spawn(async move {
+        let mut mine = HashSet::new();
         while let Some(p) = rx.recv().await {
             let action = match p {
                 RunProgress::Planned { start, stop } => {
@@ -295,6 +322,10 @@ fn forward_progress(
                         continue;
                     }
                     nodes.working(&node_id, action);
+                    // Before the dispatch, so `converge` never sees the mark unclaimed.
+                    if action.is_some() && mine.insert(node_id.clone()) {
+                        *driven.lock().unwrap().entry(node_id.clone()).or_default() += 1;
+                    }
                     Action::EnvCreateWorking { node_id, action }
                 }
                 RunProgress::Done(done) => {
@@ -317,6 +348,15 @@ fn forward_progress(
                 }
             };
             let _ = actor.dispatch(action).await;
+        }
+        let mut driven = driven.lock().unwrap();
+        for node_id in mine {
+            if let Some(n) = driven.get_mut(&node_id) {
+                *n -= 1;
+                if *n == 0 {
+                    driven.remove(&node_id);
+                }
+            }
         }
         nodes
     });
@@ -416,6 +456,7 @@ pub struct DockerConvergeEffect {
     actor: ActorHandle,
     in_flight: HashMap<String, (PendingAction, AbortHandle)>,
     create_in_flight: bool,
+    driven: Driven,
 }
 
 impl DockerConvergeEffect {
@@ -425,6 +466,7 @@ impl DockerConvergeEffect {
             actor,
             in_flight: HashMap::new(),
             create_in_flight: false,
+            driven: Driven::default(),
         }
     }
 
@@ -457,6 +499,7 @@ impl DockerConvergeEffect {
         };
         let run = self.actor.current().env.clone();
         let actor = self.actor.clone();
+        let driven = self.driven.clone();
         let job = open_activity(
             &old,
             activity_kind(entry.action),
@@ -470,7 +513,8 @@ impl DockerConvergeEffect {
                 own: Some(entry.node_id.clone()),
                 open: HashMap::new(),
             };
-            let (tx, drain) = forward_progress(actor.clone(), Some(entry.node_id.clone()), nodes);
+            let (tx, drain) =
+                forward_progress(actor.clone(), Some(entry.node_id.clone()), nodes, driven);
             let result = match run {
                 Some(run) => perform(&old, &entry, &run, &mut cascaded, &tx)
                     .await
@@ -514,6 +558,7 @@ impl DockerConvergeEffect {
             outcome: None,
         };
         let actor = self.actor.clone();
+        let driven = self.driven.clone();
         let prior = self.actor.current().env.clone();
         let (kind, key, own) = match &plan {
             EnvSpec::Flow(flow) => (ActivityKind::Switch, flow, None),
@@ -531,7 +576,7 @@ impl DockerConvergeEffect {
                 open: HashMap::new(),
             };
             // Translated here: `orchestrator/` knows nothing about actors.
-            let (tx, drain) = forward_progress(actor.clone(), None, nodes);
+            let (tx, drain) = forward_progress(actor.clone(), None, nodes, driven);
             let result = perform_create(&old, &plan, prior.as_ref(), Some(&tx)).await;
             // Closing the channel lets the drain finish first, so a late progress report
             // can't land after `EnvCreateSettled`.
@@ -576,13 +621,14 @@ impl Effect for DockerConvergeEffect {
             .iter()
             .map(|(node_id, (action, _))| (node_id.clone(), *action))
             .collect();
-        let Plan { spawn, abort } = plan(&actions, &snapshot.pending);
+        let pending = without_progress(&snapshot.pending, &self.driven.lock().unwrap(), &actions);
+        let Plan { spawn, abort } = plan(&actions, &pending);
         for node_id in abort {
             self.abort_start(&node_id);
         }
         // Settled ones drop out; their tasks are done or finishing.
         self.in_flight
-            .retain(|node_id, _| snapshot.pending.iter().any(|e| e.node_id == *node_id));
+            .retain(|node_id, _| pending.iter().any(|e| e.node_id == *node_id));
         for entry in spawn {
             let task = self.spawn_action(entry.clone());
             self.in_flight.insert(entry.node_id, (entry.action, task));
@@ -810,6 +856,57 @@ mod tests {
         let plan = plan(&in_flight, &[]);
         assert_eq!(plan.abort, vec!["web".to_string()]);
         assert!(plan.spawn.is_empty());
+    }
+
+    #[test]
+    fn a_start_mark_on_a_node_an_action_is_driving_is_its_progress_not_a_job() {
+        let driven = HashMap::from([("db".to_string(), 1), ("web".to_string(), 1)]);
+        let pending = vec![
+            entry("api", PendingAction::Starting),
+            entry("db", PendingAction::Starting),
+            entry("web", PendingAction::Restarting),
+        ];
+        let kept = without_progress(
+            &pending,
+            &driven,
+            &in_flight(&[("api", PendingAction::Starting)]),
+        );
+        assert_eq!(kept, vec![entry("api", PendingAction::Starting)]);
+    }
+
+    #[test]
+    fn a_stop_on_a_node_an_action_is_driving_is_still_the_users() {
+        let driven = HashMap::from([("db".to_string(), 1)]);
+        let pending = vec![entry("db", PendingAction::Stopping)];
+        assert_eq!(
+            without_progress(&pending, &driven, &HashMap::new()),
+            pending
+        );
+    }
+
+    #[tokio::test]
+    async fn forwarding_claims_the_nodes_it_marks_until_the_action_is_done() {
+        let (_log, nodes) = node_activities(Some("api"));
+        let driven = Driven::default();
+        let actor = crate::actor::spawn(WorkspaceState::default());
+        let (tx, drain) = forward_progress(actor, Some("api".into()), nodes, driven.clone());
+        for node_id in ["api", "db"] {
+            tx.send(RunProgress::Working {
+                node_id: node_id.into(),
+                action: Some(PendingAction::Starting),
+            })
+            .unwrap();
+        }
+        while !driven.lock().unwrap().contains_key("db") {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            !driven.lock().unwrap().contains_key("api"),
+            "its own node is the job"
+        );
+        drop(tx);
+        drain.await.unwrap();
+        assert!(driven.lock().unwrap().is_empty());
     }
 
     #[test]
