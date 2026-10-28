@@ -12,14 +12,13 @@ shims.
 
 ## Prerequisites
 
-- **macOS on Apple Silicon.** Intel Macs aren't supported. **Linux support is in progress.**
-  Split DNS goes through systemd-resolved there, and its trust-store
-  handling (shelling out to `security` on macOS) still needs a Linux
-  counterpart. Until it lands there is no Linux build to install —
-  the release publishes `darwin-arm64` only. Windows would
-  need the same work again and nobody is doing it.
-- **Docker** — Docker Desktop, OrbStack, or Colima. `fghjd` uses the same
-  one your `docker` command does; your first `fghj wire` tells it which.
+- **macOS on Apple Silicon**, through [Homebrew](#homebrew). Intel Macs
+  aren't supported.
+- **Ubuntu 22.04 LTS or newer**, `amd64` or `arm64`, through [apt](#ubuntu).
+  Other Linux distributions aren't packaged yet. Windows isn't supported.
+- **Docker** — Docker Desktop, OrbStack, or Colima on macOS; Docker Engine,
+  rootless Docker or Docker Desktop on Linux. `fghjd` uses the same one your
+  `docker` command does; your first `fghj wire` tells it which.
 - **[CUE](https://cuelang.org/docs/install/)** — only needed for
   `fghj validate`, which shells out to the `cue` CLI to check an
   `.fghj.yaml` against fghj's schema. Everything else works without it: the
@@ -112,6 +111,50 @@ and neither are repositories fghj cloned into your workspace. For the
 complete inventory of every file, system setting and Docker resource fghj
 creates — and how to verify nothing is left — see [What fghj touches, and
 how to remove it](/guides/uninstalling/).
+
+## Ubuntu
+
+```bash
+sudo curl -fsSLo /etc/apt/keyrings/mlops-ninja.asc https://apt.mlops.ninja/key.asc
+echo "deb [signed-by=/etc/apt/keyrings/mlops-ninja.asc] https://apt.mlops.ninja stable main" \
+  | sudo tee /etc/apt/sources.list.d/mlops-ninja.list
+sudo apt update
+sudo apt install fghj
+```
+
+That's all of it. The package installs `fghj` and `fghjd` into `/usr/bin`
+and runs `fghjd` as the `fghjd` systemd unit, enabled and started, and
+restarted on every upgrade. `sudo apt upgrade` keeps it current, like
+everything else on the machine. Each release is also on the [releases
+page](https://github.com/mlnja/fghj/releases) as a `.deb`, for
+`sudo apt install ./fghj_<version>_<arch>.deb`.
+
+On Linux nothing needs your password after that. `fghjd` runs as root, so on
+every start it puts fghj's root CA into the system store
+(`/usr/local/share/ca-certificates`, for curl, Python, Go and the rest) and
+routes `*.fghj.internal` through systemd-resolved. Browsers keep their own
+certificate stores, so it also adds the CA to the Firefox profiles and Chrome
+database in each workspace owner's home, running `certutil` as that user so
+the files stay theirs. Your first `fghj wire` does that for you before it
+returns; restart a browser that was already open.
+
+```bash
+systemctl status fghjd   # running
+fghj doctor              # Docker and the CA show as pending until your first wire
+journalctl -u fghjd      # its log
+```
+
+### Uninstalling
+
+```bash
+sudo apt remove fghj     # stops fghjd, and takes the CA out of every store
+sudo apt purge fghj      # also deletes /var/lib/fghjd: workspaces, CA keys, run state
+```
+
+Removing the package runs `fghj uninstall` before the binaries go, so no
+trusted root outlives the software holding its key. As with Homebrew,
+Docker resources and the repositories fghj cloned stay; see [What fghj
+touches, and how to remove it](/guides/uninstalling/).
 
 ## Build from source
 

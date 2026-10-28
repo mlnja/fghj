@@ -3,7 +3,7 @@
 [![Release](https://img.shields.io/github/v/release/mlnja/fghj?sort=semver)](https://github.com/mlnja/fghj/releases/latest)
 [![CI](https://github.com/mlnja/fghj/actions/workflows/ci.yml/badge.svg)](https://github.com/mlnja/fghj/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Platform: macOS (Apple Silicon)](https://img.shields.io/badge/platform-macOS%20arm64-lightgrey)
+![Platform: macOS arm64 | Ubuntu](https://img.shields.io/badge/platform-macOS%20arm64%20%7C%20Ubuntu-lightgrey)
 
 **Local dev environments scoped to a user flow, not your whole fleet.**
 
@@ -18,9 +18,9 @@ outward from whichever repos you're actually working on, and brings up just
 that subgraph — with real `*.fghj.internal` HTTPS domains, locally trusted
 certificates, and no `docker-compose.yml` to hand-maintain.
 
-> **Status: early.** macOS on Apple Silicon today, with Linux support in
-> progress. Released and installable from the Homebrew tap; building from
-> source (below) also works. The config language is settled enough to write
+> **Status: early.** macOS on Apple Silicon and Ubuntu 22.04+ (`amd64`,
+> `arm64`). Released through the Homebrew tap and apt.mlops.ninja; building
+> from source (below) also works. The config language is settled enough to write
 > against; the `version: "2.0"` field in `.fghj.yaml` is the compatibility
 > hook.
 
@@ -65,6 +65,16 @@ start lists, like `checkout: [web, catalog/browse]` — and you start one of
 those instead.
 
 ## Install
+
+On Ubuntu 22.04 or newer, from [apt.mlops.ninja](https://apt.mlops.ninja/),
+which also keeps it updated:
+
+```bash
+sudo curl -fsSLo /etc/apt/keyrings/mlops-ninja.asc https://apt.mlops.ninja/key.asc
+echo "deb [signed-by=/etc/apt/keyrings/mlops-ninja.asc] https://apt.mlops.ninja stable main" \
+  | sudo tee /etc/apt/sources.list.d/mlops-ninja.list
+sudo apt update && sudo apt install fghj
+```
 
 Via Homebrew (macOS on Apple Silicon):
 

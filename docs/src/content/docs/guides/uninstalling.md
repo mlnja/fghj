@@ -10,9 +10,12 @@ This page is the complete list.
 The short version, if you just want it gone:
 
 ```bash
-sudo fghj uninstall
-brew uninstall fghj
+sudo fghj uninstall && brew uninstall fghj   # macOS
+sudo apt purge fghj                          # Ubuntu: runs `fghj uninstall` itself
 ```
+
+Most of this page is macOS; what Linux touches instead is in
+[On Linux](#on-linux).
 
 `fghj uninstall` does everything `brew uninstall` can't: it stops the
 daemon, unwinds its system configuration, deletes the root CA from your
@@ -179,6 +182,45 @@ They are ordinary git clones with a normal `origin`, so nothing special is
 needed to remove them — `rm -rf` the ones you did not create. Check for
 unpushed work first; fghj never deletes them for you precisely because it
 cannot know whether you have been editing them.
+
+## On Linux
+
+The same kinds of change, made the Linux way. `sudo apt remove fghj` runs
+`fghj uninstall --yes --keep-state` before the binaries go, which undoes the
+first three rows and the CA rows; `sudo apt purge fghj` also deletes
+`/var/lib/fghjd`.
+
+| What | Where | Undone by |
+|---|---|---|
+| Managed hosts block | `/etc/hosts`, as on macOS | stopping fghjd |
+| Split DNS | the `fghj0` dummy link, which carries fghjd's DNS server and `~fghj.internal ~fghj.raw.internal` as its routing domains in systemd-resolved | stopping fghjd deletes the link |
+| Loopback addresses | none: all of `127/8` is already local | — |
+| The root CA, for programs | `/usr/local/share/ca-certificates/fghj-local-ca.crt`, folded into `/etc/ssl/certs/ca-certificates.crt` | `fghj uninstall` |
+| The root CA, for browsers | `fghj local CA` in each workspace owner's Firefox profiles and Chrome/Chromium NSS database, snap ones included | `fghj uninstall`, for the user who ran `sudo` |
+| Daemon state | `/var/lib/fghjd` | `apt purge`, or `fghj uninstall` |
+| The service | `fghjd.service`, under `/usr/lib/systemd/system` | `apt remove` |
+
+To check by hand:
+
+```bash
+grep -n fghj /etc/hosts
+ip link show fghj0 && resolvectl domain fghj0
+ls /usr/local/share/ca-certificates/
+certutil -d sql:"$HOME/.pki/nssdb" -L | grep -i fghj
+for p in ~/.mozilla/firefox/*/ ~/snap/firefox/common/.mozilla/firefox/*/; do
+  [ -f "$p/cert9.db" ] && certutil -d "sql:$p" -L | grep -i fghj
+done
+```
+
+And by hand, if the package is already gone:
+
+```bash
+sudo ip link del fghj0
+sudo rm /usr/local/share/ca-certificates/fghj-local-ca.crt
+sudo update-ca-certificates --fresh
+certutil -d sql:"$HOME/.pki/nssdb" -D -n "fghj local CA"   # and each Firefox profile
+sudo rm -rf /var/lib/fghjd
+```
 
 ## Homebrew's own files
 
