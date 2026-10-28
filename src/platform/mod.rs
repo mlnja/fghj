@@ -26,13 +26,15 @@ pub use dns::{DnsRouting, OsRouting};
 pub use loopback::Loopback;
 pub use packaging::Packaging;
 pub use session::Session;
-pub use trust::TrustStore;
+pub use trust::{TrustStore, UserTrust};
 
 /// One implementation of each capability. Constructing one must not touch the
 /// system: the CLI builds it too, unprivileged.
 pub struct Platform {
     pub dns: Box<dyn DnsRouting>,
     pub trust: Box<dyn TrustStore>,
+    /// Browsers' own stores, where they don't read the OS's. Empty where they do.
+    pub browser_trust: Box<dyn UserTrust>,
     pub loopback: Box<dyn Loopback>,
     pub session: Box<dyn Session>,
     pub packaging: Box<dyn Packaging>,

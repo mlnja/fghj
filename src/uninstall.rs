@@ -59,7 +59,8 @@ pub fn purge(opts: Options, stop_daemon: impl FnOnce() -> Result<bool>) -> Outco
     // Trust before disk: a trusted cert whose key we deleted is still a trusted
     // root.
     if !opts.keep_ca {
-        outcome.certificates_removed = platform.trust.remove();
+        outcome.certificates_removed = platform.trust.remove()
+            + invoking_user().map_or(0, |user| platform.browser_trust.remove(&user));
     }
 
     if !opts.keep_state {
@@ -74,6 +75,19 @@ pub fn purge(opts: Options, stop_daemon: impl FnOnce() -> Result<bool>) -> Outco
     }
 
     outcome
+}
+
+/// Under `sudo`, as `fghj uninstall` runs, whoever ran it: their browsers are
+/// the ones fghj filled.
+fn invoking_user() -> Option<persistence::WorkspaceOwner> {
+    let uid: u32 = std::env::var("SUDO_UID").ok()?.parse().ok()?;
+    let gid: u32 = std::env::var("SUDO_GID").ok()?.parse().ok()?;
+    Some(persistence::WorkspaceOwner {
+        uid,
+        gid,
+        home: persistence::workspace_owner::home_dir_of(uid)?,
+        ssh_auth_sock: None,
+    })
 }
 
 fn remove_state_dir(root: &std::path::Path) -> Result<bool> {

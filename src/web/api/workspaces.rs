@@ -41,7 +41,17 @@ pub(crate) async fn post_workspaces(
     match serde_json::from_slice::<StartRequest>(&body) {
         Ok(req) => match registry.resolve(req.entry, req.workspace, req.owner).await {
             Ok((id, workspace)) => {
-                Json(serde_json::json!({ "id": id, "workspace": workspace })).into_response()
+                // Before answering, so `fghj wire` returns with the browsers
+                // already trusting the CA, or says why they don't.
+                let mut warnings = Vec::new();
+                if let Some(state) = registry.get(&id)
+                    && let Some(owner) =
+                        persistence::workspace_owner(state.db.clone(), &state.path).await
+                {
+                    warnings = crate::daemon::browser_trust::trust_for(vec![owner]).await;
+                }
+                Json(serde_json::json!({ "id": id, "workspace": workspace, "warnings": warnings }))
+                    .into_response()
             }
             Err(e) => err_response(e),
         },

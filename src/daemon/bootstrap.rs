@@ -147,6 +147,18 @@ pub async fn run_control_api() -> Result<()> {
     // Before the cert resolver, which gates reserved-TLD alias certs on routes.
     let registry = Arc::new(WorkspaceRegistry::load(Arc::clone(&docker)).await);
 
+    // Every owner's browsers, every start: a reset profile or a new browser
+    // trusts the CA again without anyone asking.
+    {
+        let registry = Arc::clone(&registry);
+        supervisor::supervise("browser trust", async move {
+            let owners = super::browser_trust::owners(&registry).await;
+            for problem in super::browser_trust::trust_for(owners).await {
+                daemon_log::warn(format!("fghjd: browsers don't trust the CA yet: {problem}"));
+            }
+        });
+    }
+
     let cert_resolver = Arc::new(ca::DynamicCertResolver::new(
         signing_ca,
         provider.clone(),

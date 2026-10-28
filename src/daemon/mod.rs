@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use crate::persistence;
 
 pub mod bootstrap;
+pub(crate) mod browser_trust;
 mod capture;
 pub mod control;
 mod heal;

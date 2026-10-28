@@ -342,6 +342,7 @@ fn wire(entry: String, workspace: Option<PathBuf>) -> Result<()> {
         .as_str()
         .context("fghjd response missing workspace id")?;
 
+    print_warnings(&resp);
     trust_ca();
     println!("data is wired — open the UI to see it: https://fghj.internal/?workspace={id}");
 
@@ -410,12 +411,22 @@ fn daemon_start() -> Result<()> {
 fn trust_ca() {
     let trust = &fghj::platform::current().trust;
     let cert = fghj::web::ca::ca_cert_path(&fghj::daemon::ca_dir());
-    if !cert.exists() || trust.is_trusted(&cert) != Some(false) {
+    // A store fghjd fills itself, as root, isn't the CLI's to touch.
+    if !trust.installed_by_user() || !cert.exists() || trust.is_trusted(&cert) != Some(false) {
         return;
     }
     println!("{}", trust.install_notice());
     if let Err(e) = trust.install(&cert) {
         eprintln!("{e:#}");
+    }
+}
+
+/// fghjd's own account of what it couldn't set up, one line each.
+fn print_warnings(resp: &serde_json::Value) {
+    for warning in resp["warnings"].as_array().into_iter().flatten() {
+        if let Some(warning) = warning.as_str() {
+            eprintln!("warning: {warning}");
+        }
     }
 }
 
@@ -784,11 +795,12 @@ fn fetch_report() -> Result<fghj::doctor::Report> {
 
 /// The fixes for checks that didn't pass, in an order that makes sense:
 /// Docker first, since switching it restarts fghjd. Says what it did.
-fn apply_fixes(report: &fghj::doctor::Report) -> bool {
+fn apply_fixes(report: &fghj::doctor::Report, client: &[fghj::doctor::Check]) -> bool {
     let needs = |name: &str| {
         report
             .checks
             .iter()
+            .chain(client)
             .any(|c| c.name == name && c.verdict != Verdict::Pass)
     };
     let mut fixed = false;
@@ -804,6 +816,16 @@ fn apply_fixes(report: &fghj::doctor::Report) -> bool {
             Ok(resp) if resp.get("error").is_none() => println!("fixed: fghjd is active"),
             Ok(resp) => eprintln!("couldn't start fghjd: {}", resp["error"]),
             Err(e) => eprintln!("couldn't start fghjd: {e:#}"),
+        }
+        fixed = true;
+    }
+    if needs("browser-trust") {
+        match http_post_json("/daemon/trust", &serde_json::json!({})) {
+            Ok(resp) => {
+                print_warnings(&resp);
+                println!("fixed: fghjd added the CA to your browsers' certificate databases");
+            }
+            Err(e) => eprintln!("couldn't fix browser trust: {e:#}"),
         }
         fixed = true;
     }
@@ -830,7 +852,7 @@ fn doctor(fix: bool) -> Result<()> {
     }
 
     let mut report = fetch_report()?;
-    if fix && apply_fixes(&report) {
+    if fix && apply_fixes(&report, &client) {
         println!();
         report = fetch_report()?;
     }

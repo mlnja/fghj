@@ -1,7 +1,7 @@
 //! macOS: `/etc/resolver`, the System keychain and `lo0` aliases,
 //! installed through Homebrew and run by launchd.
 
-use super::{Platform, run};
+use super::{Platform, run, unsupported};
 
 mod homebrew;
 mod keychain;
@@ -13,6 +13,8 @@ pub(super) fn platform() -> Platform {
     Platform {
         dns: Box::new(resolver_dir::ResolverDir),
         trust: Box::new(keychain::SystemKeychain),
+        // Safari, Chrome and (by default) Firefox all read the keychain.
+        browser_trust: Box::new(unsupported::NoBrowserTrust),
         loopback: Box::new(lo0::Lo0),
         session: Box::new(session::MacSession),
         packaging: Box::new(homebrew::Homebrew),

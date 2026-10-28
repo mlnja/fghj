@@ -14,6 +14,12 @@ const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
 pub(super) struct SystemKeychain;
 
 impl TrustStore for SystemKeychain {
+    /// macOS asks for a password before trusting a root, and a launchd daemon
+    /// has no session to ask in.
+    fn installed_by_user(&self) -> bool {
+        true
+    }
+
     fn install(&self, ca_cert_path: &Path) -> Result<()> {
         install_trust(ca_cert_path)
     }

@@ -21,7 +21,7 @@ use crate::daemon::control::DaemonControl;
 use crate::daemon::registry::WorkspaceRegistry;
 use control::{
     get_daemon_doctor, get_daemon_logs, get_daemon_net_status, get_daemon_status,
-    post_daemon_docker, post_daemon_start, post_daemon_stop,
+    post_daemon_docker, post_daemon_start, post_daemon_stop, post_daemon_trust,
 };
 use downloads::{
     get_activities, get_pull_all_status, get_pull_jobs, get_pull_node_status, post_pull_all,
@@ -79,6 +79,7 @@ pub(crate) fn build_router(registry: Arc<WorkspaceRegistry>, daemon: Arc<DaemonC
         .route("/daemon/start", post(post_daemon_start))
         .route("/daemon/stop", post(post_daemon_stop))
         .route("/daemon/docker", post(post_daemon_docker))
+        .route("/daemon/trust", post(post_daemon_trust))
         .route("/daemon/status", get(get_daemon_status))
         .route("/daemon/logs", get(get_daemon_logs))
         .route("/daemon/net-status", get(get_daemon_net_status))

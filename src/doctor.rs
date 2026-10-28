@@ -394,6 +394,49 @@ fn ca_trust_check(
     }
 }
 
+/// Per workspace owner: browsers that keep their own store need the CA in
+/// it too. Nothing to say where none of them has one, or browsers read the
+/// system store.
+fn browser_trust_check(
+    cert: &Path,
+    owners: &[crate::persistence::WorkspaceOwner],
+    store: &dyn platform::UserTrust,
+) -> Option<Check> {
+    let name = "browser-trust";
+    let title = "browsers trust the root CA";
+    if !cert.exists() {
+        return None;
+    }
+    let verdicts: Vec<(&str, bool)> = owners
+        .iter()
+        .filter_map(|o| Some((o.home.as_str(), store.is_trusted(o, cert)?)))
+        .collect();
+    if verdicts.is_empty() {
+        return None;
+    }
+    let homes = |trusted: bool| -> String {
+        verdicts
+            .iter()
+            .filter(|(_, t)| *t == trusted)
+            .map(|(home, _)| *home)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if verdicts.iter().all(|(_, trusted)| *trusted) {
+        return Some(Check::pass(
+            name,
+            title,
+            format!("in {} under {}", store.store_name(), homes(true)),
+        ));
+    }
+    Some(Check::warn(
+        name,
+        title,
+        format!("not yet in {} under {}", store.store_name(), homes(false)),
+        store.untrusted_hint(),
+    ))
+}
+
 fn raw_routes_check(health: (Vec<raw_net::RouteSpec>, Vec<raw_net::RouteSpec>)) -> Check {
     let (routes, unserved) = health;
     let name = "raw-routes";
@@ -426,20 +469,25 @@ fn raw_routes_check(health: (Vec<raw_net::RouteSpec>, Vec<raw_net::RouteSpec>)) 
 }
 
 /// Off the async runtime wholesale; the set takes well under a second.
-fn host_checks(wired: bool) -> Vec<Check> {
-    vec![
+fn host_checks(wired: bool, owners: &[crate::persistence::WorkspaceOwner]) -> Vec<Check> {
+    let cert = web::ca::ca_cert_path(&crate::daemon::ca_dir());
+    let mut checks = vec![
         loopback_alias_check(platform::current().loopback.alias_present(PROXY_IP)),
         proxy_port_check(HTTPS_PORT, "proxy-https", "proxy listening on 443"),
         proxy_port_check(HTTP_PORT, "proxy-http", "proxy listening on 80"),
         resolver_files_check(platform::current().dns.status()),
         dns_resolution_check(),
         raw_routes_check(raw_net::route_health()),
-        ca_trust_check(
-            &web::ca::ca_cert_path(&crate::daemon::ca_dir()),
-            wired,
-            |cert| platform::current().trust.is_trusted(cert),
-        ),
-    ]
+        ca_trust_check(&cert, wired, |cert| {
+            platform::current().trust.is_trusted(cert)
+        }),
+    ];
+    checks.extend(browser_trust_check(
+        &cert,
+        owners,
+        &*platform::current().browser_trust,
+    ));
+    checks
 }
 
 /// In cascade order: Docker, then whether fghjd is active, then the rest.
@@ -603,7 +651,8 @@ pub async fn daemon_report(docker: &Docker, daemon: &DaemonControl) -> Report {
     let mut checks = docker_checks(docker, &setup).await;
     checks.push(daemon_check(daemon));
     checks.extend(sidecars_check(&sidecar_facts(docker, daemon).await));
-    match tokio::task::spawn_blocking(move || host_checks(setup.wired)).await {
+    let owners = crate::daemon::browser_trust::owners(&daemon.registry).await;
+    match tokio::task::spawn_blocking(move || host_checks(setup.wired, &owners)).await {
         Ok(host) => checks.extend(host),
         Err(e) => checks.push(Check::fail(
             "host",
@@ -888,7 +937,62 @@ mod tests {
         );
         let untrusted = ca_trust_check(&cert, true, |_| Some(false));
         assert_eq!(untrusted.verdict, Verdict::Fail);
-        assert!(untrusted.hint.unwrap().contains("fghj doctor --fix"));
+        assert_eq!(
+            untrusted.hint.as_deref(),
+            Some(platform::current().trust.untrusted_hint())
+        );
+    }
+
+    /// Trusted for uid 1000 only; uid 1002 has no browsers at all.
+    struct FakeBrowsers;
+
+    impl platform::UserTrust for FakeBrowsers {
+        fn install(&self, _: &crate::persistence::WorkspaceOwner, _: &Path) -> Result<()> {
+            Ok(())
+        }
+        fn remove(&self, _: &crate::persistence::WorkspaceOwner) -> usize {
+            0
+        }
+        fn is_trusted(&self, user: &crate::persistence::WorkspaceOwner, _: &Path) -> Option<bool> {
+            match user.uid {
+                1002 => None,
+                uid => Some(uid == 1000),
+            }
+        }
+        fn store_name(&self) -> &'static str {
+            "the browsers' certificate databases"
+        }
+        fn untrusted_hint(&self) -> &'static str {
+            "run `fghj doctor --fix`"
+        }
+    }
+
+    fn owner(uid: u32) -> crate::persistence::WorkspaceOwner {
+        crate::persistence::WorkspaceOwner {
+            uid,
+            gid: uid,
+            home: format!("/home/u{uid}"),
+            ssh_auth_sock: None,
+        }
+    }
+
+    #[test]
+    fn browser_trust_names_each_owner_still_missing_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cert = tmp.path().join("ca.pem");
+        std::fs::write(&cert, "not inspected").unwrap();
+
+        let ok = browser_trust_check(&cert, &[owner(1000), owner(1002)], &FakeBrowsers).unwrap();
+        assert_eq!(ok.verdict, Verdict::Pass);
+        assert!(ok.detail.contains("/home/u1000") && !ok.detail.contains("u1002"));
+
+        let some = browser_trust_check(&cert, &[owner(1000), owner(1001)], &FakeBrowsers).unwrap();
+        assert_eq!(some.verdict, Verdict::Warn);
+        assert!(some.detail.contains("/home/u1001") && !some.detail.contains("u1000"));
+
+        // Nobody wired, or nobody with a browser of their own: nothing to say.
+        assert!(browser_trust_check(&cert, &[], &FakeBrowsers).is_none());
+        assert!(browser_trust_check(&cert, &[owner(1002)], &FakeBrowsers).is_none());
     }
 
     #[test]

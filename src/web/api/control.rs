@@ -63,6 +63,14 @@ pub(crate) async fn post_daemon_docker(
     }
 }
 
+/// `fghj doctor --fix`: every wired workspace owner's browsers trust the CA
+/// again. What it couldn't do comes back as `warnings`.
+pub(crate) async fn post_daemon_trust(State(daemon): State<Arc<DaemonControl>>) -> Response {
+    let owners = crate::daemon::browser_trust::owners(&daemon.registry).await;
+    let warnings = crate::daemon::browser_trust::trust_for(owners).await;
+    Json(serde_json::json!({ "warnings": warnings })).into_response()
+}
+
 /// `fghj daemon stop`: release 80/443/DNS but keep serving this API; containers
 /// are left alone. Persisted so a restart stays idle.
 pub(crate) async fn post_daemon_stop(State(daemon): State<Arc<DaemonControl>>) -> Response {

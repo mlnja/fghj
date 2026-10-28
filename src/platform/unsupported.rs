@@ -8,13 +8,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use super::{DnsRouting, Loopback, OsRouting, Packaging, Platform, Session, TrustStore};
+use super::{DnsRouting, Loopback, OsRouting, Packaging, Platform, Session, TrustStore, UserTrust};
 use crate::daemon_log;
+use crate::persistence::WorkspaceOwner;
 
 pub(super) fn platform() -> Platform {
     Platform {
         dns: Box::new(NoDnsRouting),
         trust: Box::new(NoTrustStore),
+        browser_trust: Box::new(NoBrowserTrust),
         loopback: Box::new(NoLoopback),
         session: Box::new(PlainSession),
         packaging: Box::new(NoPackaging),
@@ -47,6 +49,10 @@ impl DnsRouting for NoDnsRouting {
 pub(super) struct NoTrustStore;
 
 impl TrustStore for NoTrustStore {
+    fn installed_by_user(&self) -> bool {
+        false
+    }
+
     fn install(&self, ca_cert_path: &Path) -> Result<()> {
         eprintln!(
             "fghjd: automatic system trust installation isn't implemented on this platform yet — \
@@ -79,6 +85,32 @@ impl TrustStore for NoTrustStore {
 }
 
 /// Elsewhere all of `127/8` already routes to loopback.
+/// Browsers that read the OS's own store, or a platform where fghj can't
+/// reach theirs.
+pub(super) struct NoBrowserTrust;
+
+impl UserTrust for NoBrowserTrust {
+    fn install(&self, _user: &WorkspaceOwner, _ca_cert_path: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    fn remove(&self, _user: &WorkspaceOwner) -> usize {
+        0
+    }
+
+    fn is_trusted(&self, _user: &WorkspaceOwner, _ca_cert_path: &Path) -> Option<bool> {
+        None
+    }
+
+    fn store_name(&self) -> &'static str {
+        "the system trust store"
+    }
+
+    fn untrusted_hint(&self) -> &'static str {
+        ""
+    }
+}
+
 pub(super) struct NoLoopback;
 
 impl Loopback for NoLoopback {
