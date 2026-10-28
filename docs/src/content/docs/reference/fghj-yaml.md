@@ -563,7 +563,7 @@ services:
   repo's. The URL's own `.fghj.yaml`, if it has one, means nothing here; use
   [`include`](#include) for that.
 - **Pull clones it, start never does.** The clone goes to
-  `<workspace>/.fghj/sources/<name>@<ref>`, made by Pull all, a flow's pull or
+  `<workspace>/_fghj_sources/<name>@<ref>`, made by Pull all, a flow's pull or
   the node's Pull button, as the workspace owner. Starting a service whose
   source isn't pulled fails with "source not pulled". An existing clone is
   never fetched again: change the ref to move to a new version.
@@ -627,7 +627,7 @@ services:
 `exited` means opposite things for a service and a task — drift for one,
 success for the other — which is why fghj has to know. See
 [Terminating nodes](/concepts/terminating-nodes/) for the full argument, and
-[tutorial chapter 3](/tutorial/03-a-migration/) for a worked example.
+[tutorial chapter 3](/tutorial/03-migrations-and-a-seed/) for a worked example.
 
 | Field | Description |
 |---|---|

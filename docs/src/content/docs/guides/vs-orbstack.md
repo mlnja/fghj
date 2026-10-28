@@ -107,7 +107,7 @@ serves DNS and terminates TLS for every node in that run, whatever repo it
 came from. That's why a storefront container can call
 `https://api.catalog.shop.fghj.internal` and get a valid certificate, with
 the *same* address the host uses — see
-[tutorial chapter 4](/tutorial/04-a-second-repo/#why-https-works-from-inside-the-container-too).
+[tutorial chapter 2](/tutorial/02-two-stores/#the-same-name-from-inside-the-container).
 
 ## 4. A TLD that survives a hostile resolver
 

@@ -216,7 +216,7 @@ browser.
 
 ## Next
 
-- [The tutorial](/tutorial/) — build a two-repo workspace from nothing, one
+- [The tutorial](/tutorial/) — run a four-repo example app, one
   chapter at a time. Start here if you want to understand fghj.
 - [Quickstart](/getting-started/quickstart/) — the short version, if you
   already know what you're doing.

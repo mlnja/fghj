@@ -6,7 +6,8 @@ sidebar:
 ---
 
 Everything worked in the first five chapters because it was written to. This
-chapter is the one you'll come back to.
+chapter is the one you'll come back to. It adds nothing to the example, so
+the repos have a `ch6` tag that's the same as `ch5`.
 
 ## A node's status is a pair, read as one word
 
@@ -75,6 +76,10 @@ nodes whose config changed and reports why:
 recreating container: config changed since it was started
 ```
 
+You've already caused drift on purpose. Every `git checkout chN` in this
+tutorial changed what a repo would build, and every Start or Switch after it
+recreated what had drifted.
+
 **orphaned** is worth understanding because its usual cause is innocent: you
 ran `git switch` in a workspace checkout, and the branch you moved to
 doesn't declare that service. fghj is a passive observer of branch state, so
@@ -110,18 +115,17 @@ the file-level half first, which is most typos.
 ## Three places to look
 
 **1. The node drawer.** Click any node. Its kind, repo, branch and dirtiness;
-its image; every port with both addresses to reach it on (the node's raw
-domain, and the `127.0.0.1:port` Docker actually published it to — each one a
-click to copy); its container name; its condition; its drift verdict; and its
+its image; every port and the address to reach it on (its domain if it has
+one, otherwise the raw name, a click to copy); its container name; its condition; its drift verdict; and its
 container logs. Nine times in ten the answer is in the logs and the trip to
 the terminal is unnecessary.
 
 **2. `fghj exec`.** The container is up but behaving oddly:
 
 ```bash
-fghj exec web.storefront -- sh
-fghj exec web.storefront -- env
-fghj exec web.storefront -- getent hosts db.storefront.shop.fghj.raw.internal
+fghj exec api.files-api -- sh
+fghj exec api.files-api -- env
+fghj exec api.files-api -- getent hosts db.files-api.files.fghj.raw.internal
 ```
 
 Those three answer, in order: what's in there, did my templates expand to
@@ -129,8 +133,28 @@ what I expected, and does in-network DNS agree. The second one is the reason
 `exec` is the first thing to reach for after the logs — the container's own
 environment is the only place the expanded templates are visible. A literal
 `${FGHJ_SERVICE_FQDN:...}` still sitting in that output means the name didn't
-match any sibling: usually a typo, or a node you didn't actually declare a
-dependency on.
+match any service: usually a typo, or an `alias/name` whose alias isn't in
+this file's `include:`.
+
+The api has one more of its own: `/api/status` reports what it can reach
+and at which address, so when something isn't connecting you can ask the
+service rather than guess.
+
+```bash
+curl https://api.files-api.files.fghj.internal/api/status
+```
+
+```json
+{
+  "db": "PostgreSQL 16.… on aarch64-unknown-linux-musl, …",
+  "s3": { "endpoint": "https://s3.files-api.files.fghj.internal", "buckets": ["files"] },
+  "redis": "PONG"
+}
+```
+
+An endpoint like that is worth adding to your own services. It's the
+`getent` above, plus "and it answered", from the one place that knows
+which addresses the service was given.
 
 **3. The daemon.** The ⚡ button opens `fghjd`'s own telemetry: its log, DNS
 and port-forwarding status, and a **Doctor** tab. Start from the CLI:
@@ -169,8 +193,9 @@ can check every time.
 
 **A name resolves but you get fghj's 404 page.** DNS and TLS both worked and
 there's no route registered for that name — so the node isn't running, or
-isn't the one you think. Check the node's status, and check whether you're
-using a run-scoped name for a node in a different run.
+isn't the one you think. Check the node's status, and check the workspace
+part of the name: a copy of the example in `~/code/files2` answers on
+`*.files2.fghj.internal`, not `*.files.fghj.internal`.
 
 **`fghjd` won't start.** It needs root (ports 80/443, the loopback alias, DNS, the trust store,
 `/etc/hosts`) and it needs to reach Docker. It refuses to start rather than
@@ -181,24 +206,28 @@ its job: a non-zero migration blocks its dependents rather than letting them
 start against a half-migrated database. Read the task's logs in the drawer,
 fix the cause, and start again — `on_start` tasks re-run on every top-up.
 
-**Everything is slow the very first time.** The first run of a workspace
-pulls the sidecar image, then builds your service images. Later runs reuse
-both.
+**Everything is slow the very first time.** The first start in a workspace
+pulls the sidecar image and every backing image, then builds your service
+images. Later starts reuse all of them.
+
+**`https://files.test` goes to the wrong copy, or nowhere.** An additional
+host is one name on the whole machine. If another workspace's running
+container claimed it first, that one keeps it. Stop the other copy, or use
+this one's derived domain.
 
 ---
 
 ## Where to go from here
 
 One chapter left, and it's optional: [attaching a
-debugger](/tutorial/07-attaching-a-debugger/) adds a Python service and a Go
-service to the shop, catches a request mid-flight in one and startup code in
-the other, and is the only chapter that touches something you *can't*
-declare in `.fghj.yaml`.
+debugger](/tutorial/07-attaching-a-debugger/) catches a request mid-flight
+in the api and startup work in the worker, and is the only chapter that
+touches something you *can't* declare in `.fghj.yaml`.
 
 Otherwise, what's left is breadth rather than new concepts:
 
 - [.fghj.yaml reference](/reference/fghj-yaml/) — every field, including the
-  ones this tutorial skipped: `env_file`, `additional_hosts`, `extra_hosts`,
+  ones this tutorial skipped: `env_file`, `extra_hosts`,
   `platform`, build secrets and ssh-agent forwarding,
   bind-mounting your source for live reload.
 - [HTTP vs. raw: choosing a zone](/guides/networking-http-vs-raw/) — the long

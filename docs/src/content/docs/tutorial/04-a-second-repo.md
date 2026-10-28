@@ -1,6 +1,6 @@
 ---
 title: 4. A second repo
-description: A cross-repo dependency, the fog of war before it's pulled, and how two containers reach each other.
+description: The frontend, a cross-repo dependency, one origin for the browser, and a hostname of your own for a login callback.
 sidebar:
   order: 4
 ---
@@ -9,366 +9,243 @@ Everything so far lived in one repo. This is the chapter where fghj starts
 doing something Compose can't: a dependency on a repository that has never
 heard of yours.
 
-## Declare the dependency before the repo exists
+`files-api` grows the rest of its API at `ch4`: login, a file list, uploads
+and downloads. The frontend that uses it is a second repo, `files-web`:
 
-In `storefront/.fghj.yaml`, add an `include:` at the top, and one more
-entry to `web`'s `depends_on`:
+```bash
+git -C files-api checkout ch4
+git clone https://github.com/fghj-examples/files-web.git
+git -C files-web checkout ch4
+```
+
+Press **Start** on `api` first, so it's running this chapter's code. Start
+recreates the node you press it on. A dependency that's already running is
+left as it is, so starting `web` alone would leave `api` on chapter 3.
+
+`files-web` is a folder in the workspace with a `.fghj.yaml` at its root, and
+that's all it takes to join: the daemon notices the new checkout and adds
+its nodes to the graph a moment later. There's nothing to wire.
+
+## Declare the dependency
+
+`files-web/.fghj.yaml`:
 
 ```yaml
 version: "2.0"
 
 include:
-  catalog: https://github.com/you/catalog.git
+  api: https://github.com/fghj-examples/files-api.git
 
 services:
   web:
-    # ...as before
+    build: .
+    ports:
+      "80":
+        primary: true
+    additional_hosts:
+      - files.test
+    environment:
+      API_UPSTREAM: http://${FGHJ_SERVICE_FQDN:api/api}:3000
     depends_on:
-      db: {condition: service_healthy}
-      catalog: {}
+      api: {}
 ```
 
-`include:` is the only way a file links to another repo. `catalog` is an
-alias — what the rest of this file calls that repo — and `depends_on:
-catalog` means "wait until all of it is up". No service name, no port, no
-path: you don't know what's in `catalog`, and you don't have to.
+`include:` is the only way a file links to another repo. `api` is an
+alias, what the rest of this file calls that repo, and `depends_on: api`
+means "wait until all of it is up". No service name, no port, no path:
+you don't know what's in `files-api`, and you don't have to.
 
-There is one more field you could add, and it's worth knowing what it's for:
+`files-api`'s file mentions `files-web` nowhere. It never will. An include
+points one way only, and the pointing repo is the one that has to know
+anything.
+
+There's one more field an include can have, and it's worth knowing what
+it's for:
 
 ```yaml
 include:
-  catalog:
-    repo: https://github.com/you/catalog.git
+  api:
+    repo: https://github.com/fghj-examples/files-api.git
     default_branch: main
 ```
 
-`default_branch` answers exactly one question: **when fghj clones this repo for
-the first time, which branch should it land on so the thing is ready to run?**
-You're the one including it, so you're the one who knows — maybe
-`catalog`'s default branch is `master`, or maybe `main` is a release branch and
-the branch that actually works against your service is `develop`. Say so here
-and a teammate who pulls your graph gets a working checkout without having to
-be told. Omitted, it clones `main`.
+`default_branch` answers exactly one question: **when fghj clones this repo
+for the first time, which branch should it land on so the thing is ready to
+run?** You're the one including it, so you're the one who knows. Maybe the
+repo's default branch is `master`, or maybe `main` is a release branch and
+the one that actually works against yours is `develop`. Omitted, it clones
+`main`.
 
-It's used in one place, once: the clone.
+It's used in one place, once, the clone:
 
 ```
-git clone --branch main --single-branch https://github.com/you/catalog.git
+git clone --branch main --single-branch https://github.com/fghj-examples/files-api.git
 ```
 
-That's the whole extent of it. Note `--single-branch` — only that branch is
-fetched, so it's a genuine "get me a runnable checkout" instruction and not a
-full mirror. After that, `default_branch` is never consulted again:
+After that it's never consulted again. A repo on disk reports whatever git
+says it's on right now, and **pulling a repo that's already checked out
+never changes its branch**. fghj checks that the `origin` matches and
+otherwise leaves your tree alone. That's why your `git checkout ch4` stands:
+nothing fghj does will move you off it.
 
-- A **stub** node (declared, not on disk) reports the declared value as its
-  `branch`, because that's the branch it *would* be cloned at. That's the node
-  the cloner reads.
-- A **real** node (on disk) reports whatever `git` says it's on right now.
-  fghj reads your working tree; it doesn't hold the declared value against it.
-- **Pulling a repo that's already checked out never changes its branch.** fghj
-  verifies the `origin` matches and otherwise leaves your tree alone — it will
-  not move you off a branch you're working on.
+It's also why two repos can disagree about it harmlessly. One include
+saying `main` and another saying `develop` is not a conflict, because
+there's exactly **one checkout per repo, workspace-wide**. Whichever include
+gets there first clones it, and from then on the only thing that decides the
+branch is you, in that directory. If an include could *pin* a branch rather
+than seed one, two of them could pin different ones and there'd be no
+correct answer. That failure mode isn't handled here, because it can't be
+written down. See [Branch ownership model](/concepts/branch-ownership-model/).
 
-Which is why two repos can disagree about it harmlessly. One repo including
-`catalog` with `default_branch: main` and another with
-`default_branch: develop` is not a conflict, because there's exactly **one
-checkout per repo, workspace-wide** — whichever include gets there first
-clones it, and from then on the only thing that decides the branch is you, in that
-directory. If an include could *pin* a branch rather than seed one, two of them
-could pin different ones and there'd be no correct answer. That failure mode
-isn't resolved here; it's unrepresentable. See
-[Branch ownership model](/concepts/branch-ownership-model/).
-
-Resolve, *before* creating anything:
+## Seven nodes
 
 ```bash
-cd ~/code/shop
-fghj graph https://github.com/you/storefront.git
+fghj graph https://github.com/fghj-examples/files-web.git
 ```
 
-```json
-{
-  "id": "catalog",
-  "label": "catalog",
-  "kind": "service",
-  "repo": "https://github.com/you/catalog.git",
-  "local_path": "catalog",
-  "domain": "catalog.shop.fghj.internal",
-  "downloaded": false,
-  "dirty": false,
-  "flows": []
-}
-```
+Any repo can be the entry. Starting from `files-web` walks into `files-api`
+through the include, so the graph has all seven nodes: `web.files-web`, and
+the six from `files-api`.
 
-This is the **fog of war**. fghj knows a node is there, because your repo
-said so, and knows nothing else about it — not its service name, not its
-ports, not its own dependencies. A repo's dependencies aren't knowable until
-that repo is on disk. `downloaded: false` is the UI's cue to draw it as a
-placeholder with a pull button.
-
-The stub's id is `catalog`, from the folder name the URL implies. Once the
-real repo lands, the stub is replaced by the nodes its file declares — the
-placeholder stands for a repo whose contents nobody has read yet.
-
-In the normal case you'd click **Download all** here: the daemon clones what's
-missing, re-resolves, and repeats until nothing new turns up — a loop,
-because each clone can reveal dependencies of its own. We're writing
-`catalog` by hand instead, so there's nothing to fetch.
-
-## The second repo
-
-```bash
-mkdir -p ~/code/shop/catalog
-cd ~/code/shop/catalog
-git init
-git remote add origin https://github.com/you/catalog.git
-```
-
-fghj finds an included repo by its `origin` remote, not its folder name, so
-this folder could be called anything. `catalog` — the URL's last segment —
-is just what **Pull** would have named it, and what node ids are built
-from.
-
-`Dockerfile`:
-
-```docker
-FROM node:22-alpine
-WORKDIR /app
-COPY server.js ./
-CMD ["node", "server.js"]
-```
-
-`server.js` — a product list, plus a liveness ping to its own Redis:
-
-```js
-const http = require('node:http');
-const net = require('node:net');
-
-const port = Number(process.env.PORT || 4000);
-
-const ITEMS = [
-  { name: 'Reading lamp', price: 42 },
-  { name: 'Oak stool', price: 79 },
-  { name: 'Wool blanket', price: 55 },
-];
-
-// Redis' wire protocol is simple enough to speak by hand, which keeps this
-// tutorial free of npm dependencies: send PING, expect +PONG.
-function cachePing() {
-  return new Promise((resolve) => {
-    const socket = net.connect({ host: process.env.REDIS_HOST, port: 6379 });
-    socket.setTimeout(2000);
-    socket.on('connect', () => socket.write('PING\r\n'));
-    socket.on('data', (chunk) => {
-      socket.destroy();
-      resolve(chunk.toString().trim());
-    });
-    socket.on('timeout', () => {
-      socket.destroy();
-      resolve('timeout');
-    });
-    socket.on('error', (err) => resolve(err.code));
-  });
-}
-
-http
-  .createServer(async (req, res) => {
-    if (req.url === '/health') {
-      res.writeHead(200).end('ok');
-      return;
-    }
-    if (req.url === '/items') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(ITEMS));
-      return;
-    }
-    res.writeHead(200, { 'content-type': 'text/plain' });
-    res.end(`catalog api\ncache says: ${await cachePing()}\n`);
-  })
-  .listen(port, () => console.log(`catalog listening on ${port}`));
-```
-
-And `.fghj.yaml`:
-
-```yaml
-version: "2.0"
-
-services:
-  api:
-    build:
-      context: .
-    ports:
-      "4000":
-        primary: true
-    environment:
-      PORT: "4000"
-      REDIS_HOST: ${FGHJ_SERVICE_FQDN:cache}
-    depends_on:
-      cache: {condition: service_healthy}
-
-  cache:
-    image: redis:7
-    ports: ["6379"]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 2
-      retries: 15
-```
-
-This file mentions `storefront` nowhere. It never will. An include points
-one way only, and the pointing repo is the one that has to know anything.
-
-Validate it and resolve again:
-
-```bash
-fghj validate .fghj.yaml
-cd ~/code/shop
-fghj graph https://github.com/you/storefront.git
-```
-
-## Six nodes
+The new edges:
 
 ```
-service   id=api.catalog         domain=api.catalog.shop.fghj.internal
-backing   id=cache.catalog       domain=cache.catalog.shop.fghj.internal
-backing   id=db.storefront       domain=db.storefront.shop.fghj.internal
-task      id=migrate.storefront  domain=migrate.storefront.shop.fghj.internal
-task      id=seed.storefront     domain=seed.storefront.shop.fghj.internal
-service   id=web.storefront      domain=web.storefront.shop.fghj.internal
+web.files-web → api.files-api         via_flow=files-api
+web.files-web → db.files-api          via_flow=files-api
+web.files-web → s3.files-api          via_flow=files-api
+web.files-web → migrate-db.files-api  via_flow=files-api
+web.files-web → migrate-s3.files-api  via_flow=files-api
 ```
 
-```
-web.storefront      -> db.storefront        depends-on
-web.storefront      -> migrate.storefront   depends-on
-migrate.storefront  -> db.storefront        depends-on
-seed.storefront     -> db.storefront        depends-on
-seed.storefront     -> migrate.storefront   depends-on
-api.catalog         -> cache.catalog        depends-on
-web.storefront      -> api.catalog          depends-on  via_flow=catalog
-web.storefront      -> cache.catalog        depends-on  via_flow=catalog
-```
+`depends_on: api` became one edge per node in `files-api`, each labelled
+with the repo it came through. Two repos can both wait on `files-api` and
+there's still exactly one of each node.
 
-(plus a `uses` edge for each hostname template, as in chapter 2.)
+One node isn't there: `seed`. "All of it" means everything that would run
+if you started `files-api` on its own, and that doesn't include a seed,
+because nothing waits on a seed.
 
-The stub is gone, replaced by `api.catalog` and `cache.catalog` — the
-service named `api` and the one named `cache`, in the folder `catalog`. This
-is why the service in that repo isn't called `catalog`: it would have
-resolved to the id `catalog.catalog`, which is legal, unambiguous, and reads
-like a mistake.
+## Why not just `api/api`?
 
-`depends_on: catalog` became one edge per node in `catalog`, each labelled
-`via_flow=catalog` — the name you waited on. Two repos can both wait on
-`catalog` and there is still exactly one of each node.
-
-## Why not just `catalog/api`?
-
-Because `api` is `catalog`'s business, not yours. Write
-`depends_on: [catalog/api]` and fghj refuses it:
+Because `files-api`'s services are `files-api`'s business, not yours. Write
+`depends_on: [api/api]` and fghj refuses it:
 
 ```
-'web.storefront' names 'catalog/api', which is a service — catalog's services are internal; it publishes none, so name 'catalog' to start all of it
+'web.files-web' names 'api/api', which is a service — api's services are internal; it publishes none, so name 'api' to start all of it
 ```
 
-If `web` could name `catalog`'s services, `storefront`'s file would go stale
-every time `catalog` renamed, split or added one — on every branch. Across
-repos, `depends_on` names either a whole repo or a **flow** that repo
-publishes: a list of its parts it's willing to be depended on by. `catalog`
-publishes none yet, so all of it is what you get. The next chapter fixes
-that from `catalog`'s side.
+If `web` could name `files-api`'s services, `files-web`'s file would go
+stale every time `files-api` renamed, split or added one, on every branch.
+Across repos, `depends_on` names either a whole repo or a **flow** that repo
+publishes: a list of its parts it's willing to be depended on by.
+`files-api` publishes none yet, so all of it is what you get. The next
+chapter fixes that from `files-api`'s side.
 
 ## Reaching across
 
-Give `web` the catalog's address. In `storefront/.fghj.yaml`:
+`API_UPSTREAM` is `${FGHJ_SERVICE_FQDN:api/api}`: "service `api` in the repo
+included as `api`". It expands to `api.files-api.files.fghj.raw.internal`.
+Raw zone, plain HTTP, port 3000: the container's real port, one hop, no TLS.
 
-```yaml
-      CATALOG_URL: http://${FGHJ_SERVICE_FQDN:catalog/api}:4000
-```
+So a hostname *can* name another repo's service, where `depends_on` can't.
+That's deliberate: an address is the network contract, and production config
+has the api's address in it too. The two rules, exactly:
 
-`${FGHJ_SERVICE_FQDN:catalog/api}` is "service `api` in the repo included
-as `catalog`", and expands to `api.catalog.shop.fghj.raw.internal`. Raw
-zone, plain HTTP, port 4000: the container's real port, one hop, no TLS.
-
-So a hostname *can* name another repo's service, when `depends_on` can't.
-That's deliberate: an address is the network contract, and production
-config has `catalog`'s address in it too. The two rules, exactly:
-
-- A bare name — `${FGHJ_SERVICE_FQDN:db}` — is a service in this repo.
+- A bare name, `${FGHJ_SERVICE_FQDN:db}`, is a service in this repo.
 - `alias/name` is service `name` in the repo included as `alias`.
 
 A name that matches nothing is a blocking warning. And a hostname never
-makes anything wait: it's drawn as a dotted **uses** edge, `web.storefront
-→ api.catalog`. Two services that call each other is normal; if a hostname
-meant waiting, they would wait on each other forever.
+makes anything wait. It's drawn as a dotted **uses** edge. Two services
+calling each other is normal, and if a hostname meant waiting, they'd wait
+on each other forever.
 
-Then in `storefront/server.js`:
+nginx is what uses the upstream. `files-web`'s image is the built React app
+plus this config, which the nginx image fills in from the environment at
+startup:
 
-```js
-async function catalogItems() {
-  const res = await fetch(`${process.env.CATALOG_URL}/items`);
-  if (!res.ok) throw new Error(`catalog answered ${res.status}`);
-  return res.json();
+```nginx
+server {
+  listen 80;
+  root /usr/share/nginx/html;
+
+  location /api/ {
+    proxy_pass ${API_UPSTREAM};
+    proxy_set_header Host $host;
+  }
+
+  location / {
+    try_files $uri /index.html;
+  }
 }
 ```
 
-and in the handler:
+So the browser only ever talks to one origin, the frontend's. `/api/` goes
+through to the api over the raw zone, with no CORS and no second hostname
+for the frontend to be configured with. File bytes are the one exception,
+and that's on purpose: a download is a presigned link to
+`s3.files-api.files.fghj.internal`, which chapter 2 made sure the browser
+can reach.
 
-```js
-let items;
-try {
-  items = (await catalogItems())
-    .map((item) => `<li>${item.name} — $${item.price}</li>`)
-    .join('');
-} catch (err) {
-  items = `<li>catalog unavailable: ${err.message}</li>`;
-}
+## A name of your own
+
+`web`'s derived domain is `web.files-web.files.fghj.internal`, and it has a
+problem: the last-but-two segment is *your workspace's folder name*. Call
+the folder `files2` and the domain changes with it.
+
+Usually that's fine. Here it isn't, because login is done by
+[Descope](https://www.descope.com), and an OAuth provider only redirects back
+to callback URLs registered with it in advance. A URL with somebody's folder
+name in it can't be registered in advance. So `web` claims a hostname of
+its own as well:
+
+```yaml
+    additional_hosts:
+      - files.test
 ```
 
-Press **Start** on `web`, and reload:
+`files.test` routes to the same port as the derived domain, and it's the
+same everywhere. `https://files.test/callback` is registered with the
+example's Descope project once, and it works for anyone who runs the
+example.
+
+Two details make it work:
+
+- **It's HTTPS** because `.test` is a reserved TLD (RFC 2606), so fghj
+  mints certificates for it from its CA, as it does for `*.fghj.internal`.
+  A name under a real TLD would be proxied over plain HTTP only. fghj's CA
+  is trusted by your whole machine, and it won't sign for a domain somebody
+  else could own.
+- **It resolves** because fghjd pins exactly that name in a marked block of
+  `/etc/hosts` while a running container claims it. It doesn't take over the
+  whole `.test` suffix, so every other `.test` name is left alone. See
+  [Resolving additional hosts](/concepts/local-ca-and-tls-proxy/#resolving-additional-hosts).
+
+An alias is a claim on one name across your machine, not just in this
+workspace. Run a second copy of the example in another workspace and both
+declare `files.test`. The first running container to claim it keeps it,
+and the second copy is reachable on its derived domain only.
+
+## Start it
+
+Press **Start** on `web`. Its dependencies are already up, so this builds
+the frontend and creates one container. Then open:
 
 ```
-storefront
-I answer at https://web.storefront.shop.fghj.internal
-database: listening at db.storefront.shop.fghj.raw.internal:5432
- • Reading lamp — $42
- • Oak stool — $79
- • Wool blanket — $55
+https://files.test
 ```
 
-Both services are also reachable from your browser under their own HTTPS
-names — `https://api.catalog.shop.fghj.internal` shows the catalog's own
-page, `cache says: +PONG`. Same node, two addresses, two audiences.
+Log in, and you land on your files. The four samples from the seed are
+there, visible to everyone because their owner is null. Upload something of
+your own and it appears in the list. Download it, and the browser fetches it
+from `s3.files-api.files.fghj.internal` with the signature the api put in
+the link.
 
-## Why HTTPS works from inside the container too
-
-Every run gets one extra container you didn't declare: a **sidecar** that is
-simultaneously the DNS authority for `fghj.internal` inside the run's
-network and a TLS proxy identical to the one on your host. Every node in the
-run has its `--dns` pointed at it.
-
-So if `web` asked for `https://api.catalog.shop.fghj.internal`, it would get
-the sidecar's address, and the sidecar would dispatch by SNI exactly as the
-host proxy does — the same hostname means the same thing inside and outside
-the network. Anything the sidecar doesn't recognise is forwarded to Docker's
-own resolver, which is how raw-zone names and ordinary internet names keep
-working.
-
-One catch, and it's why this chapter used plain HTTP over the raw zone
-instead: the *container* must also trust fghj's CA for that TLS handshake to
-succeed, and `node:22-alpine` has never heard of it. Your host trusts it
-because `fghjd` installed it into the system keychain; a container is its own
-world. If you need the proxied HTTPS name from inside a container — a
-service minting URLs it hands back out, an OAuth redirect, a presigned link
-— copy the CA in:
-
-```docker
-COPY ca-cert.pem /usr/local/share/ca-certificates/fghj.crt
-RUN update-ca-certificates
-```
-
-The certificate lives at `/private/var/lib/fghjd/ca/ca-cert.pem`. For plain
-service-to-service calls, don't bother — the raw zone is faster and needs
-nothing.
+The derived name, `https://web.files-web.files.fghj.internal`, serves the
+same app, but you can't log in there. The frontend asks Descope to send you
+back to `/callback` on whatever origin it's served from, and Descope refuses
+a callback that isn't registered.
 
 ---
 
-**Next:** [Flows](/tutorial/05-flows/) — naming the journey.
+**Next:** [Flows](/tutorial/05-flows/): repos you haven't cloned yet, and
+starting less than everything.

@@ -338,7 +338,8 @@ hit — Delve is attached and simply disagrees about which file you meant.
 
 [Attaching a debugger](/guides/debugging/) has the whole contract, and
 [tutorial chapter 7](/tutorial/07-attaching-a-debugger/) walks through
-catching Go startup code with the halt switch.
+catching startup work with the halt switch (in Node, but the switch is the
+same).
 
 ## Trusting fghj's CA from a Go container
 

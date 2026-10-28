@@ -10,8 +10,8 @@ and that the repo you're pointing at has an `.fghj.yaml` — see
 time.
 
 :::tip[New to fghj?]
-Read [the tutorial](/tutorial/) instead. It builds a two-repo workspace from
-an empty directory, so you end up understanding *why* each piece is there
+Read [the tutorial](/tutorial/) instead. It runs a four-repo example app one
+chapter at a time, so you end up understanding *why* each piece is there
 rather than which button to click. This page is the short version for when you
 already do.
 :::
@@ -100,9 +100,9 @@ for exactly how that domain was derived.
 
 ## Where next
 
-The [tutorial](/tutorial/) builds the same thing from an empty directory and
-keeps going: a database next to your service, a migration that gates it, a
-second repo, flows, and attaching a debugger to a running container.
+The [tutorial](/tutorial/) does the same with an example app and keeps
+going: two stores next to your service, migrations that gate it, a second
+repo, flows, and attaching a debugger to a running container.
 
 If something didn't come up the way this page describes, run
 [`fghj doctor`](/cli/doctor/) — it checks everything fghj needs from your

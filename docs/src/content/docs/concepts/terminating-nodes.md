@@ -122,8 +122,8 @@ whether the work is still needed.
 
 **`once` is deliberately not keyed on the config hash.** It could be: the
 spec hash covers the checkout's HEAD commit, so a `git pull` that adds a
-migration does move it (see [config sync in tutorial chapter
-7](/tutorial/06-when-it-goes-wrong/)). It still shouldn't be. `once` means "at most once per run", and an author reaches
+migration does move it (see [drift in tutorial chapter
+6](/tutorial/06-when-it-goes-wrong/#drift-the-container-no-longer-matches-the-file)). It still shouldn't be. `once` means "at most once per run", and an author reaches
 for it exactly when re-running the task is expensive or destructive. "New code
 arrived" is not a reason to re-run something they marked as unsafe to re-run
 — if it were, they'd have left it `on_start`.
@@ -192,5 +192,5 @@ gets.
   one is modelled on.
 - [Node identity & domains](/concepts/node-identity-and-domains/) — a task's
   id is the same `name.owning-service-id` shape a backing dependency gets.
-- [Tutorial chapter 3](/tutorial/03-a-migration/) — the same idea, worked
+- [Tutorial chapter 3](/tutorial/03-migrations-and-a-seed/) — the same idea, worked
   through against a real Postgres.

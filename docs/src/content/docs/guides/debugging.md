@@ -63,8 +63,9 @@ determine on its own. Everything else — which port, which debugger, whether
 to load it at all — you already decided when you built the image.
 
 [Tutorial chapter 7](/tutorial/07-attaching-a-debugger/) runs both halves of
-this end to end: a Python breakpoint catching a request in flight, and the
-halt switch catching Go startup code that attaching cannot reach.
+this end to end on the `files` example: a breakpoint catching an api request
+in flight, and the halt switch catching a worker's startup work that
+attaching cannot reach.
 
 ## Recipes
 
@@ -101,7 +102,8 @@ exec "$@"
 
 `0.0.0.0` is required: Node's inspector binds `127.0.0.1` by default, which
 inside a container means nothing outside it can connect. Match the number in
-`debug: 9229`, and attach to `api.shop.fghj.raw.internal:9229`.
+`debug: 9229`, and attach to `api.files-api.files.fghj.raw.internal:9229`
+(see [Attaching](#attaching) for the one client that can't).
 
 ### JVM (Java, Kotlin, Scala)
 
@@ -240,25 +242,51 @@ extension to start a session per request — no restart, no always-on cost.
 The address is the node's raw domain plus the port you declared:
 
 ```
-api.shop.fghj.raw.internal:9229
+api.files-api.files.fghj.raw.internal:9229
 ```
 
-That works from your host (your IDE) and from inside the run's network. It
-does not collide with the same port on another node, or with the same node
-in a parallel run, because each node has its own address.
+That works from your host (your IDE) and from inside the workspace's
+network. It does not collide with the same port on another node, because
+each node has its own address.
 
-In VS Code:
+Node has one wrinkle. Its inspector refuses discovery requests whose `Host`
+header isn't an IP address or `localhost` (a guard against DNS rebinding).
+VS Code and Zed attach through vscode-js-debug, which always sends
+`Host: localhost`, so the raw name works for them:
 
 ```json title=".vscode/launch.json"
 {
   "type": "node",
   "request": "attach",
   "name": "api (fghj)",
-  "address": "api.shop.fghj.raw.internal",
+  "address": "api.files-api.files.fghj.raw.internal",
   "port": 9229,
   "localRoot": "${workspaceFolder}",
   "remoteRoot": "/app"
 }
+```
+
+```json title=".zed/debug.json"
+[
+  {
+    "adapter": "JavaScript",
+    "label": "api (fghj)",
+    "type": "node",
+    "request": "attach",
+    "address": "api.files-api.files.fghj.raw.internal",
+    "port": 9229,
+    "localRoot": "$ZED_WORKTREE_ROOT",
+    "remoteRoot": "/app"
+  }
+]
+```
+
+Clients that send the real hostname, like `chrome://inspect`, are turned
+away. Point those at the port Docker published on localhost, which is
+picked fresh each time the container is created:
+
+```bash
+docker port fghj-files-default-api-files-api 9229
 ```
 
 `localRoot`/`remoteRoot` matter: your breakpoints are on paths in your

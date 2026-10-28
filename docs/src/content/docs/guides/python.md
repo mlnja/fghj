@@ -236,7 +236,8 @@ remote debugger speaks to its own `pydevd-pycharm` package rather than
 
 [Attaching a debugger](/guides/debugging/) has the whole contract, and
 [tutorial chapter 7](/tutorial/07-attaching-a-debugger/) walks through a
-Python breakpoint catching a request mid-flight.
+breakpoint catching a request mid-flight (in Node, but the shape is the
+same).
 
 ## Gotchas, collected
 

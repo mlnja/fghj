@@ -89,8 +89,8 @@ export default defineConfig({
           items: [
             { label: 'Start here', slug: 'tutorial' },
             { label: '1. One service', slug: 'tutorial/01-one-service' },
-            { label: '2. A database', slug: 'tutorial/02-a-database' },
-            { label: '3. A migration', slug: 'tutorial/03-a-migration' },
+            { label: '2. Two stores', slug: 'tutorial/02-two-stores' },
+            { label: '3. Migrations and a seed', slug: 'tutorial/03-migrations-and-a-seed' },
             { label: '4. A second repo', slug: 'tutorial/04-a-second-repo' },
             { label: '5. Flows', slug: 'tutorial/05-flows' },
             { label: '6. When it goes wrong', slug: 'tutorial/06-when-it-goes-wrong' },
