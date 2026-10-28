@@ -74,7 +74,10 @@ On the **Repos** tab, press **Download all**. The daemon clones what's
 missing, re-resolves, and repeats until nothing new turns up. It's a loop
 because each clone can reveal includes of its own: here the worker includes
 the platform and the api too, which are already accounted for, so it stops
-after one round.
+after one round. Then it pulls the images the services run as they are —
+Postgres, MinIO, Redis, dbmate — each its own entry under **images**, so
+starting the flow later only has to build. From a terminal, `fghj pull`
+does the same.
 
 The clones land on `main`, which is the finished example. Put them on this
 chapter like the others:

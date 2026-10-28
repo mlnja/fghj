@@ -7,22 +7,37 @@ use std::thread;
 use anyhow::{Context, Result, bail};
 
 use crate::activity::{Activity, ActivityHandle, ActivityKind, ActivityLog};
+use crate::docker;
 use crate::persistence::WorkspaceOwner;
 use crate::resolver::{self, BuildSource, Node};
 
-/// Clones `node_id`'s repo (or its build source) in the background.
+/// fghjd's Docker, for the images a pull fetches. The pull runs on its own
+/// thread, so it carries the runtime to drive the client with.
+pub struct ImagePuller {
+    pub docker: Arc<bollard::Docker>,
+    pub runtime: tokio::runtime::Handle,
+}
+
+/// Clones `node_id`'s repo (or its build source) in the background, then
+/// pulls its image if it runs one.
 pub fn start_node(
     activities: &Arc<ActivityLog>,
     workspace_id: &str,
     workspace: PathBuf,
     node_id: String,
     owner: Option<WorkspaceOwner>,
+    images: ImagePuller,
 ) -> Activity {
     spawn(
         activities,
         workspace_id,
         &format!("node:{node_id}"),
-        move |job| clone_node_logged(&workspace, &node_id, owner.as_ref(), job),
+        move |job| {
+            clone_node_logged(&workspace, &node_id, owner.as_ref(), job)?;
+            let graph = resolver::resolve_universe(&workspace)?;
+            let node: Vec<&Node> = graph.nodes.iter().filter(|n| n.id == node_id).collect();
+            pull_images_logged(&node, &images, job)
+        },
     )
 }
 
@@ -33,12 +48,21 @@ pub fn start_pull_all(
     workspace: PathBuf,
     owner: Option<WorkspaceOwner>,
     flow: Option<String>,
+    images: ImagePuller,
 ) -> Activity {
     spawn(
         activities,
         workspace_id,
         &pull_all_key(flow.as_deref()),
-        move |job| pull_all_logged(&workspace, owner.as_ref(), flow.as_deref(), job),
+        move |job| {
+            pull_all_logged(
+                &workspace,
+                owner.as_ref(),
+                flow.as_deref(),
+                Some(&images),
+                job,
+            )
+        },
     )
 }
 
@@ -302,6 +326,61 @@ fn clone_source_logged(
     Ok(())
 }
 
+/// An `images` child holding one queued child per image a node in `nodes`
+/// runs and the machine lacks, pulled in turn. Built images aren't here:
+/// BuildKit fetches a build's base images itself.
+fn pull_images_logged(nodes: &[&Node], puller: &ImagePuller, job: &ActivityHandle) -> Result<()> {
+    let mut missing = Vec::new();
+    for (reference, platform) in images_run_by(nodes) {
+        if !puller
+            .runtime
+            .block_on(docker::image_is_local(&puller.docker, reference))?
+        {
+            missing.push((reference, platform));
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let group = job.child("images");
+    // All queued first, so the plan shows before the first one starts.
+    let steps: Vec<ActivityHandle> = missing.iter().map(|(r, _)| group.queued_child(r)).collect();
+    let mut result = Ok(());
+    for ((reference, platform), step) in missing.iter().zip(&steps) {
+        step.begin();
+        step.append(&match platform {
+            Some(platform) => format!("$ docker pull --platform {platform} {reference}\n"),
+            None => format!("$ docker pull {reference}\n"),
+        });
+        let pulled = puller.runtime.block_on(docker::pull_image(
+            &puller.docker,
+            reference,
+            *platform,
+            &|line| step.append(line),
+        ));
+        step.settle(&pulled);
+        if pulled.is_err() {
+            result = pulled;
+            break;
+        }
+    }
+    group.settle(&result);
+    result
+}
+
+/// Each image `nodes` run as is, once per platform. Built ones aren't here.
+fn images_run_by<'a>(nodes: &[&'a Node]) -> Vec<(&'a str, Option<&'a str>)> {
+    let mut images: Vec<(&str, Option<&str>)> = nodes
+        .iter()
+        .filter(|n| n.build.is_none())
+        .filter_map(|n| Some((n.image.as_deref()?, n.platform.as_deref())))
+        .collect();
+    images.sort();
+    images.dedup();
+    images
+}
+
 fn missing_source(node: &Node) -> Option<&BuildSource> {
     node.build
         .as_ref()
@@ -348,10 +427,13 @@ fn clone_node_logged(
     clone_stub_logged(workspace, node, owner, job)
 }
 
+/// Clones layer by layer until nothing is missing, then pulls the images
+/// the wanted nodes run. `images` is `None` in tests, which only clone.
 fn pull_all_logged(
     workspace: &Path,
     owner: Option<&WorkspaceOwner>,
     flow: Option<&str>,
+    images: Option<&ImagePuller>,
     job: &ActivityHandle,
 ) -> Result<()> {
     std::fs::create_dir_all(workspace)
@@ -372,6 +454,9 @@ fn pull_all_logged(
         sources.dedup_by(|a, b| a.path == b.path);
 
         if missing.is_empty() && sources.is_empty() {
+            if let Some(images) = images {
+                pull_images_logged(&wanted, images, job)?;
+            }
             job.append("\nnothing left to pull\n");
             return Ok(());
         }
@@ -570,7 +655,7 @@ mod tests {
                 let job = activities
                     .start(Some("test"), ActivityKind::Pull, "pull-all")
                     .unwrap();
-                let result = pull_all_logged(&self.ws(), None, flow, &job);
+                let result = pull_all_logged(&self.ws(), None, flow, None, &job);
                 let log = job.snapshot().log;
                 result.map_err(|e| anyhow::anyhow!("{e}\nlog:\n{log}"))?;
                 Ok(log
@@ -860,6 +945,30 @@ services:
             .checkout("a");
             let err = w.pull(None).unwrap_err().to_string();
             assert!(err.contains("gone"), "{err}");
+        }
+
+        #[test]
+        fn only_images_run_as_is_are_pulled_once_each() {
+            let world = World::new();
+            world
+                .remote(
+                    "shop",
+                    "version: \"2.0\"\nservices:\n  \
+                     db:\n    image: postgres:16-alpine\n  \
+                     replica:\n    image: postgres:16-alpine\n  \
+                     arm:\n    image: postgres:16-alpine\n    platform: linux/arm64\n  \
+                     web:\n    build: .\n",
+                )
+                .checkout("shop");
+            let graph = world.graph();
+            let nodes: Vec<&Node> = graph.nodes.iter().collect();
+            assert_eq!(
+                images_run_by(&nodes),
+                vec![
+                    ("postgres:16-alpine", None),
+                    ("postgres:16-alpine", Some("linux/arm64")),
+                ]
+            );
         }
 
         #[test]

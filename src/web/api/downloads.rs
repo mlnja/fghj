@@ -16,7 +16,15 @@ pub(crate) struct FlowQuery {
     flow: Option<String>,
 }
 
+fn image_puller(registry: &WorkspaceRegistry) -> downloads::ImagePuller {
+    downloads::ImagePuller {
+        docker: registry.docker(),
+        runtime: tokio::runtime::Handle::current(),
+    }
+}
+
 pub(crate) async fn post_pull_all(
+    State(registry): State<Arc<WorkspaceRegistry>>,
     Query(q): Query<FlowQuery>,
     WorkspaceExtractor(state): WorkspaceExtractor,
 ) -> Response {
@@ -27,6 +35,7 @@ pub(crate) async fn post_pull_all(
         state.path.clone(),
         owner,
         q.flow,
+        image_puller(&registry),
     );
     Json(serde_json::json!(s)).into_response()
 }
@@ -50,6 +59,7 @@ pub(crate) async fn get_pull_all_status(
 }
 
 pub(crate) async fn post_pull_node(
+    State(registry): State<Arc<WorkspaceRegistry>>,
     AxumPath(node_id): AxumPath<String>,
     WorkspaceExtractor(state): WorkspaceExtractor,
 ) -> Response {
@@ -60,6 +70,7 @@ pub(crate) async fn post_pull_node(
         state.path.clone(),
         node_id,
         owner,
+        image_puller(&registry),
     );
     Json(serde_json::json!(s)).into_response()
 }

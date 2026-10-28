@@ -76,6 +76,21 @@ impl Orchestrator {
             .map(|ip| vec![ip.to_string(), "127.0.0.11".to_string()])
             .unwrap_or_default();
 
+        // `fghj pull` fetches images ahead of time; this is for a node started
+        // without one, or whose image changed or was pruned since.
+        if let Ok(false) = docker::image_is_local(&self.docker, &spec.image).await {
+            let step = format!("pulling {}", spec.image);
+            ev.running(&step).await;
+            let pulled =
+                docker::pull_image(&self.docker, &spec.image, node.platform.as_deref(), &|_| {})
+                    .await;
+            if let Err(e) = pulled {
+                ev.failed(&step, &e).await;
+                return Err(e);
+            }
+            ev.ok(&step).await;
+        }
+
         ev.running("creating container").await;
         if let Err(e) = docker::run_container(
             &self.docker,

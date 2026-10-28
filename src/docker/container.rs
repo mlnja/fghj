@@ -60,7 +60,7 @@ pub struct RunOpts<'a> {
     pub extra_hosts: &'a [String],
     pub dns: &'a [String],
     pub healthcheck: Option<&'a Healthcheck>,
-    /// Only helps when that platform's image is already local: fghj doesn't pull.
+    /// Only picks among local images; `docker::pull_image` fetches one.
     pub platform: Option<&'a str>,
 }
 

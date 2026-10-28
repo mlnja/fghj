@@ -37,7 +37,14 @@ pub async fn ensure_built(docker: &Docker) -> Result<()> {
     }
 
     if std::env::var_os(LOCAL_BUILD_ENV).is_none_or(|v| v.is_empty()) {
-        match docker::pull_image(docker, SIDECAR_REPOSITORY, env!("CARGO_PKG_VERSION")).await {
+        match docker::pull_image(
+            docker,
+            &format!("{SIDECAR_REPOSITORY}:{}", env!("CARGO_PKG_VERSION")),
+            None,
+            &|_| {},
+        )
+        .await
+        {
             Ok(()) => {
                 daemon_log::info(format!("fghjd: pulled prebuilt sidecar image {tag}"));
                 return Ok(());

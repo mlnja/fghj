@@ -30,17 +30,63 @@ pub struct BuildOpts<'a> {
 /// set around the build; this lock keeps two ssh builds from overlapping.
 static SSH_AUTH_SOCK_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Anonymous pull; only used for fghj's own public sidecar image.
-pub async fn pull_image(docker: &Docker, repository: &str, tag: &str) -> Result<()> {
-    let options = CreateImageOptionsBuilder::default()
+/// Anonymous pull, of `platform`'s variant when one is given. `log` gets each
+/// layer's milestones and the final digest, not every progress tick.
+pub async fn pull_image(
+    docker: &Docker,
+    reference: &str,
+    platform: Option<&str>,
+    log: &(dyn Fn(&str) + Sync),
+) -> Result<()> {
+    let (repository, tag) = split_reference(reference);
+    let mut options = CreateImageOptionsBuilder::default()
         .from_image(repository)
-        .tag(tag)
-        .build();
-    let mut stream = docker.create_image(Some(options), None, None);
+        .tag(tag);
+    if let Some(platform) = platform {
+        options = options.platform(platform);
+    }
+    let mut stream = docker.create_image(Some(options.build()), None, None);
     while let Some(item) = stream.next().await {
-        item.with_context(|| format!("failed to pull {repository}:{tag}"))?;
+        let info = item.with_context(|| format!("failed to pull {reference}"))?;
+        let Some(status) = info.status.as_deref() else {
+            continue;
+        };
+        if matches!(
+            status,
+            "Downloading" | "Extracting" | "Waiting" | "Verifying Checksum"
+        ) {
+            continue;
+        }
+        match info.id.as_deref() {
+            Some(id) if id != tag => log(&format!("{id}: {status}\n")),
+            _ => log(&format!("{status}\n")),
+        }
     }
     Ok(())
+}
+
+/// The Engine API, unlike `docker run`, never pulls on its own: creating a
+/// container from a missing image is a 404.
+pub async fn image_is_local(docker: &Docker, reference: &str) -> Result<bool> {
+    match docker.inspect_image(reference).await {
+        Ok(_) => Ok(true),
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("failed to inspect image {reference}")),
+    }
+}
+
+/// `name[:tag]` or `name@digest`, where a `:` before the last `/` is a
+/// registry's port, not a tag. No tag means `latest`, as with `docker pull`.
+fn split_reference(reference: &str) -> (&str, &str) {
+    if let Some((name, digest)) = reference.split_once('@') {
+        return (name, digest);
+    }
+    match reference.rfind(':') {
+        Some(i) if !reference[i..].contains('/') => (&reference[..i], &reference[i + 1..]),
+        _ => (reference, "latest"),
+    }
 }
 
 #[derive(Debug)]
@@ -713,6 +759,36 @@ mod tests {
         );
         assert_eq!(step, Some("/bin/sh -c echo did not complete successfully"));
         assert_eq!(exit, Some("2"));
+    }
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::split_reference;
+
+    #[test]
+    fn references_split_into_name_and_tag_the_way_docker_pull_reads_them() {
+        assert_eq!(
+            split_reference("postgres:16-alpine"),
+            ("postgres", "16-alpine")
+        );
+        assert_eq!(split_reference("redis"), ("redis", "latest"));
+        assert_eq!(
+            split_reference("cgr.dev/chainguard/minio:latest"),
+            ("cgr.dev/chainguard/minio", "latest")
+        );
+        assert_eq!(
+            split_reference("localhost:5000/team/app"),
+            ("localhost:5000/team/app", "latest")
+        );
+        assert_eq!(
+            split_reference("localhost:5000/team/app:v2"),
+            ("localhost:5000/team/app", "v2")
+        );
+        assert_eq!(
+            split_reference("busybox@sha256:abc123"),
+            ("busybox", "sha256:abc123")
+        );
     }
 }
 

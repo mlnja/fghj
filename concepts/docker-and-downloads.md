@@ -260,6 +260,19 @@ progress instead:
 - **Children**: `pull_all_logged` makes each clone a child job keyed by the
   folder it lands in. A child's output is appended to its parent's log too,
   so the parent's log stays the whole transcript.
+- **Images**: once the clones stop turning up anything new, so every node in
+  scope is known, `pull_images_logged` adds an `images` child holding one
+  queued child per image, keyed by its reference: each image a node runs as
+  is (`image:`, not `build:`, since BuildKit fetches a build's bases itself)
+  that the machine lacks, once per platform. They're listed before the first
+  starts, then pulled in turn through fghjd's own Docker client, the job
+  thread driving it on the daemon's runtime. A child's log is its
+  `$ docker pull` line, each layer's milestones and the digest, not every
+  progress tick. A single-node pull pulls that node's image the same way.
+  The Engine API never pulls on its own (creating a container from a
+  missing image is a 404), so a pull is what makes `fghj up` only build.
+  Starting a node still pulls a missing image as a step of its own, for one
+  started without a pull or whose image changed or was pruned since.
 - **Log streaming**: `run_git_clone_logged` pipes the child's stdout *and*
   stderr (git's own progress meter writes to stderr, not stdout) into the
   same growing log string the UI polls, translating `\r` (a real terminal's
