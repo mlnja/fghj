@@ -172,7 +172,7 @@ mod tests {
             source: Some(crate::resolver::BuildSource {
                 url: "https://example.com/geocoder.git".to_string(),
                 reference: Some("v1".to_string()),
-                path: ".fghj/sources/geocoder@v1".to_string(),
+                path: "_fghj_sources/geocoder@v1".to_string(),
                 downloaded: true,
                 head: Some(head.to_string()),
                 dirty: false,

@@ -391,7 +391,7 @@
           <div class="row"><span class="k">image</span><span class="v">{node.image}</span></div>
         {/if}
         <!-- A git build context (`concepts/git-build-sources.md`): the code is
-             a clone in .fghj/sources, made by pull, never by start. -->
+             a clone in _fghj_sources, made by pull, never by start. -->
         {#if node.build?.source}
           {@const bs = node.build.source}
           <div class="row">

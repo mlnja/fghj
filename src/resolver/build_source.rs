@@ -6,7 +6,10 @@ use std::path::Path;
 use super::git::{git_head_sha, git_status_dirty};
 use super::graph::BuildSource;
 
-pub const SOURCES_DIR: &str = ".fghj/sources";
+/// A visible folder of its own, not under `.fghj`: these are checkouts you
+/// may edit while debugging. It has no `.fghj.yaml`, so the workspace scan
+/// never takes it for a repo.
+pub const SOURCES_DIR: &str = "_fghj_sources";
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct RemoteContext {
@@ -43,7 +46,7 @@ pub fn parse_remote(context: &str) -> Option<RemoteContext> {
     })
 }
 
-/// `.fghj/sources/<name>@<ref>`; a `/` in a branch becomes `-`.
+/// `_fghj_sources/<name>@<ref>`; a `/` in a branch becomes `-`.
 pub fn source_path(url: &str, reference: Option<&str>) -> String {
     let name = url
         .trim_end_matches('/')
@@ -124,15 +127,15 @@ mod tests {
     fn the_clone_path_is_named_after_the_url_and_ref() {
         assert_eq!(
             source_path("https://github.com/acme/geocoder.git", Some("v2.3.1")),
-            ".fghj/sources/geocoder@v2.3.1"
+            "_fghj_sources/geocoder@v2.3.1"
         );
         assert_eq!(
             source_path("git@github.com:geocoder.git", None),
-            ".fghj/sources/geocoder"
+            "_fghj_sources/geocoder"
         );
         assert_eq!(
             source_path("https://x/y.git", Some("feature/z")),
-            ".fghj/sources/y@feature-z"
+            "_fghj_sources/y@feature-z"
         );
     }
 

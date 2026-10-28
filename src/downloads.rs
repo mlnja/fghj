@@ -247,12 +247,13 @@ fn clone_source_logged(
     if dest.exists() {
         return ensure_checkout_is(&dest, &source.url);
     }
-    // `.fghj` is the daemon's, so this folder is made here and handed over.
+    // Made by root `fghjd`, so handed over before cloning into it as the owner.
     let sources = workspace.join(resolver::build_source::SOURCES_DIR);
     std::fs::create_dir_all(&sources)
         .with_context(|| format!("failed to create {}", sources.display()))?;
     if let Some(owner) = owner {
-        std::os::unix::fs::chown(&sources, Some(owner.uid), Some(owner.gid))
+        owner
+            .take(&sources)
             .with_context(|| format!("failed to hand {} to the owner", sources.display()))?;
     }
 
@@ -730,7 +731,7 @@ flows:
 
             assert_eq!(
                 w.pull(Some("shop/maps")).unwrap(),
-                [".fghj/sources/geocoder@v1"]
+                ["_fghj_sources/geocoder@v1"]
             );
             let graph = w.graph();
             let source = source_of(&graph, "geocoder.shop");
@@ -761,7 +762,7 @@ flows:
             sourced_shop(&w, "v9");
 
             assert!(w.pull(None).is_err());
-            assert!(!w.ws().join(".fghj/sources/geocoder@v9").exists());
+            assert!(!w.ws().join("_fghj_sources/geocoder@v9").exists());
         }
 
         #[test]

@@ -27,6 +27,10 @@ impl WorkspaceDb {
         let mut conn = Connection::open(&db_path)
             .with_context(|| format!("failed to open {}", db_path.display()))?;
         schema::init(&mut conn)?;
+        // Until a wire records who it's for, the folder's owner stands in.
+        if let Some(owner) = crate::persistence::WorkspaceOwner::of_folder(workspace) {
+            owner.take_workspace(workspace)?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })

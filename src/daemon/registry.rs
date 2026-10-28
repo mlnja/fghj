@@ -314,6 +314,7 @@ impl WorkspaceRegistry {
 
         // On every wire: the ssh-agent socket is only valid for the CLI's session.
         if let Some(owner) = owner {
+            owner.take_workspace(&canonical)?;
             state.db.clone().set_owner(owner).await?;
         }
 

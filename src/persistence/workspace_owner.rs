@@ -32,6 +32,37 @@ impl WorkspaceOwner {
         })
     }
 
+    /// Gives `path` to this user. Root `fghjd` makes some of what's in a
+    /// workspace, and the user who wired it has to be able to change or delete
+    /// all of it without sudo.
+    pub fn take(&self, path: &Path) -> std::io::Result<()> {
+        if unsafe { libc::geteuid() } != 0 {
+            return Ok(());
+        }
+        std::os::unix::fs::chown(path, Some(self.uid), Some(self.gid))
+    }
+
+    /// Everything `fghjd` itself makes in `workspace`: the folder when it made
+    /// it, `.fghj`, the db and `_fghj_sources`. Clones and builds are already
+    /// done as this user.
+    pub fn take_workspace(&self, workspace: &Path) -> anyhow::Result<()> {
+        use anyhow::Context;
+        use std::os::unix::fs::MetadataExt;
+        let made_by_root = std::fs::metadata(workspace).is_ok_and(|m| m.uid() == 0);
+        let dot = workspace.join(".fghj");
+        let paths = [
+            made_by_root.then(|| workspace.to_path_buf()),
+            Some(dot.clone()),
+            Some(dot.join("fghj.db")),
+            Some(workspace.join(crate::resolver::build_source::SOURCES_DIR)),
+        ];
+        for path in paths.into_iter().flatten().filter(|p| p.exists()) {
+            self.take(&path)
+                .with_context(|| format!("failed to hand {} to its owner", path.display()))?;
+        }
+        Ok(())
+    }
+
     /// Root bypasses the permission check on the user's ssh-agent socket; it just
     /// needs `HOME` and `SSH_AUTH_SOCK`.
     pub fn apply_to_command(&self, cmd: &mut std::process::Command) {
@@ -58,8 +89,9 @@ pub async fn workspace_owner(
     db: std::sync::Arc<crate::persistence::WorkspaceDb>,
     folder: &Path,
 ) -> Option<WorkspaceOwner> {
+    // The db is the user's file, so a recorded owner is never taken to be root.
     match db.load_owner().await {
-        Ok(Some(owner)) => Some(owner),
+        Ok(Some(owner)) if owner.uid != 0 => Some(owner),
         _ => WorkspaceOwner::of_folder(folder),
     }
 }

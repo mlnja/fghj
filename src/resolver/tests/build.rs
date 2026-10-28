@@ -91,7 +91,7 @@ fn a_git_context_builds_this_repos_service_from_a_clone() {
     let source = build.source.unwrap();
     assert_eq!(source.url, "https://github.com/acme/geocoder.git");
     assert_eq!(source.reference.as_deref(), Some("v2.3.1"));
-    assert_eq!(source.path, ".fghj/sources/geocoder@v2.3.1");
+    assert_eq!(source.path, "_fghj_sources/geocoder@v2.3.1");
     assert!(!source.downloaded);
     assert!(graph.warnings.iter().all(|w| !w.is_blocking()));
 }
@@ -166,6 +166,6 @@ fn two_repos_wanting_the_same_clone_folder_is_blocking() {
     );
     let graph = resolve_universe(tmp.path()).unwrap();
     assert!(graph.warnings.iter().any(|w| w.is_blocking()
-        && w.message.contains(".fghj/sources/geocoder@main")
+        && w.message.contains("_fghj_sources/geocoder@main")
         && w.message.contains("maps.maps, shop.shop")));
 }

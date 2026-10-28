@@ -41,6 +41,9 @@ pub fn resolve_workspace(
     let workspace = workspace.unwrap_or_else(|| PathBuf::from("."));
     fs::create_dir_all(&workspace)
         .with_context(|| format!("failed to create workspace dir {}", workspace.display()))?;
+    if let Some(owner) = owner {
+        owner.take_workspace(&workspace)?;
+    }
 
     if let Some(url) = entry {
         let local_path = resolver::repo_name_from_url(&url);

@@ -101,6 +101,14 @@ mod tests {
     }
 
     #[test]
+    fn a_build_source_with_its_own_fghj_yaml_is_not_a_repo() {
+        let source = format!("{}/geocoder@v1", super::super::build_source::SOURCES_DIR);
+        let dir = workspace_with(&[("alpha", GOOD), (source.as_str(), GOOD)]);
+        let scanned = scan_workspace(dir.path()).expect("scan");
+        assert_eq!(scanned.components.keys().collect::<Vec<_>>(), ["alpha"]);
+    }
+
+    #[test]
     fn a_malformed_repo_is_reported_without_taking_the_others_with_it() {
         let dir = workspace_with(&[("good", GOOD), ("broken", "services: [this is not a map")]);
         let scanned = scan_workspace(dir.path()).expect("scan");
