@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+# cargo-deb's systemd stop goes here, so fghjd is down before what it set up
+# is unwound below.
+#DEBHELPER#
+
+# Removing, not upgrading: a root CA trusted after the software that holds
+# its key is gone is exactly what nobody should be left with. This takes it
+# out of the system store and the browsers of whoever ran `sudo apt`, and
+# clears the DNS link and the /etc/hosts block. The state stays for a
+# reinstall; `apt purge` deletes it.
+if [ "$1" = remove ] && [ -x /usr/bin/fghj ]; then
+    /usr/bin/fghj uninstall --yes --keep-state || true
+fi
+
+exit 0

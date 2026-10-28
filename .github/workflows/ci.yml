@@ -91,6 +91,41 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # The same build and check the release's `deb` job does, on every push, so
+  # a broken package shows up before a tag is cut. amd64 only: the arm64 one
+  # differs by the runner, not the packaging.
+  package:
+    name: Debian package
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build the package
+        run: cargo deb --output dist/
+
+      - name: Check the package
+        run: packaging/check-deb.sh dist/*.deb
+
   # `schema/*.cue` is an authoring aid, not the enforcing boundary (see
   # concepts/config-language.md) — but its one obligation is to never accept
   # something the daemon would reject, and a schema that doesn't even parse

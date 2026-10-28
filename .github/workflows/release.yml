@@ -19,9 +19,7 @@ env:
   SIDECAR_IMAGE: ghcr.io/mlnja/fghj-sidecar
 
 jobs:
-  # ── fghj + fghjd: macOS only (fghjd shells out to macOS's `security` CLI
-  # and writes macOS-specific paths for CA/trust-store management), and
-  # Apple Silicon only ──────────────────────────────────────────────────────
+  # ── fghj + fghjd for macOS, Apple Silicon only, for the Homebrew tap ────
   build:
     name: Build (${{ matrix.suffix }})
     strategy:
@@ -68,6 +66,61 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: fghj-${{ matrix.suffix }}
+          path: dist/
+
+  # ── Ubuntu: a .deb with fghj, fghjd and the fghjd systemd unit ────────────
+  #
+  # Built on the oldest supported LTS, so the glibc it links against is one
+  # every later LTS has, and natively per architecture. Then installed into a
+  # clean container of each LTS, the cheapest proof it actually runs there.
+  # The package's own dependencies are in Cargo.toml's [package.metadata.deb].
+  deb:
+    name: Debian package (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: amd64
+          - runner: ubuntu-22.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build the package
+        run: cargo deb --output dist/
+
+      - name: Check the package
+        run: packaging/check-deb.sh dist/*.deb
+
+      - name: Checksum
+        working-directory: dist
+        run: for f in *.deb; do sha256sum "$f" > "$f.sha256"; done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fghj-deb-${{ matrix.arch }}
           path: dist/
 
   # ── fghj-sidecar: the in-network TLS/DNS proxy, one container per run ─────
@@ -208,7 +261,7 @@ jobs:
   # release. Re-run the workflow once the push succeeds.
   create-release:
     name: Create Release
-    needs: [build, sidecar-merge]
+    needs: [build, deb, sidecar-merge]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -216,7 +269,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Only the macOS binary artifact. Without a pattern this
+      # Only the macOS binaries and the .debs. Without a pattern this
       # downloads everything the run produced, which also means the
       # `.dockerbuild` build records `docker/build-push-action` uploads and
       # the `sidecar-digest-*` scratch files — none of which this job reads,
@@ -224,13 +277,13 @@ jobs:
       # fetch. That is exactly how v0.1.1 failed.
       - uses: actions/download-artifact@v4
         with:
-          pattern: fghj-darwin-*
+          pattern: fghj-*
           path: artifacts
 
       - name: Collect release assets
         run: |
           mkdir -p release-assets
-          find artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" \) \
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.deb" -o -name "*.sha256" \) \
             -exec cp {} release-assets/ \;
           ls -lh release-assets/
 
@@ -240,6 +293,34 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── apt.mlops.ninja ───────────────────────────────────────────────────────
+  #
+  # mlnja/apt rebuilds its signed index from the .deb assets of each product's
+  # releases. This tells it to now, so `apt upgrade` sees the release within
+  # minutes rather than at its next daily run.
+  #
+  # Needs APT_DISPATCH_TOKEN: a fine-grained PAT with Contents:write on
+  # mlnja/apt. The default GITHUB_TOKEN can't reach another repo. Without it
+  # this only warns, and the daily run still picks the release up.
+  apt:
+    name: Publish to apt.mlops.ninja
+    needs: [create-release]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Tell mlnja/apt to rebuild
+        env:
+          GH_TOKEN: ${{ secrets.APT_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::APT_DISPATCH_TOKEN isn't set; apt.mlops.ninja picks this release up on its next daily run"
+            exit 0
+          fi
+          gh api repos/mlnja/apt/dispatches \
+            -f event_type=release \
+            -f "client_payload[repository]=${{ github.repository }}" \
+            -f "client_payload[tag]=${{ github.ref_name }}"
 
   # ── Homebrew tap ──────────────────────────────────────────────────────────
   #

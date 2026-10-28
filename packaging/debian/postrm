@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+#DEBHELPER#
+
+# Purge is the "everything" one: wired workspaces, both CAs' keys, run state.
+# Docker resources are left alone, as `fghj uninstall` leaves them.
+if [ "$1" = purge ]; then
+    rm -rf /var/lib/fghjd
+fi
+
+exit 0

@@ -67,8 +67,8 @@ cause.
 Everything OS-specific sits behind `src/platform/`, and Linux (Ubuntu LTS) has
 its own implementations there: systemd-resolved for split DNS, Debian's CA
 store and the browsers' NSS databases for trust. What it doesn't have yet is a
-package, so the release still ships macOS binaries only; see [The Debian
-package](#the-debian-package-planned) below. The Homebrew formula says
+package of its own, built by the release beside the macOS binaries; see [The
+Debian package](#the-debian-package) below. The Homebrew formula says
 `depends_on :macos`, because the tap is the macOS install path.
 
 The sidecar is the opposite: it is a Linux container by definition, and it has
@@ -110,9 +110,10 @@ and edits `/etc/resolver` and `/etc/hosts`. `sudo brew services start fghj` is
 the documented start, and the privilege split that makes that safe to run as
 root is [[persistence-and-workspace-store]]'s subject.
 
-## The Debian package (planned)
+## The Debian package
 
-Not built yet; this is what it's decided to contain. Ubuntu installs fghj
+Built by the release's `deb` job from `[package.metadata.deb]` in
+`Cargo.toml` and `packaging/debian/`. Ubuntu installs fghj
 from `apt.mlops.ninja` (`mlnja/apt`, a signed static repository on GitHub
 Pages), which rebuilds its index from each product's GitHub release assets.
 
@@ -124,8 +125,16 @@ Pages), which rebuilds its index from each product's GitHub release assets.
   starts it on the new socket ([[docker-and-downloads]]). The package's
   scripts enable and (re)start the unit, so installing is the whole setup
   until the first `fghj wire`.
-- **Published** by attaching the `.deb`s to the GitHub release and sending
-  `mlnja/apt` a `repository_dispatch` of type `release`.
+- **Removing** it runs `fghj uninstall --yes --keep-state` from `prerm`,
+  while the binary still exists, so no trusted root outlives the software
+  that holds its key; `apt purge` also deletes `/var/lib/fghjd`.
+- **Checked** by installing it into clean `ubuntu:22.04`, `24.04` and
+  `26.04` containers in the same job, before anything is published.
+- **Published** by attaching the `.deb`s to the GitHub release, then the
+  `apt` job sending `mlnja/apt` a `repository_dispatch` of type `release`.
+  That needs `APT_DISPATCH_TOKEN`, a fine-grained token with Contents:write
+  on `mlnja/apt`; without it the job only warns, and `mlnja/apt`'s daily run
+  picks the release up.
 
 Its dependencies are everything `fghjd` runs:
 

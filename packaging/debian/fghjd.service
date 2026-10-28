@@ -1,0 +1,17 @@
+[Unit]
+Description=fghj daemon: local HTTPS, DNS and raw ports for fghj workspaces
+Documentation=https://fghj.mlops.ninja/
+# Split DNS goes through resolved; Docker may not be here yet, or at all,
+# and fghjd reports that in `fghj doctor` rather than refusing to start.
+Wants=network-online.target systemd-resolved.service
+After=network-online.target systemd-resolved.service docker.service
+
+[Service]
+ExecStart=/usr/bin/fghjd
+# fghjd exits on purpose when `fghj wire` names a different Docker, so the
+# service manager starts it again on the new socket.
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

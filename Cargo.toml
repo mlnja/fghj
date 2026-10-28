@@ -3,6 +3,31 @@ name = "fghj"
 version = "0.1.56"
 edition = "2024"
 license = "MIT"
+description = "Local dev environments scoped to a user flow, with real HTTPS domains"
+homepage = "https://fghj.mlops.ninja"
+repository = "https://github.com/mlnja/fghj"
+
+# `cargo deb` builds the Ubuntu package; see concepts/release-and-delivery.md.
+[package.metadata.deb]
+maintainer = "mlops.ninja <apt@mlops.ninja>"
+section = "devel"
+priority = "optional"
+extended-description = """\
+fghj reads a small .fghj.yaml in each repo, follows the dependencies outward \
+from the repos you're working on, and brings up just that subgraph in Docker, \
+with real *.fghj.internal HTTPS domains and locally trusted certificates. \
+fghjd, its root daemon, runs as the fghjd systemd unit."""
+depends = "$auto, libnss3-tools, ca-certificates, systemd-resolved | systemd (<< 251), iproute2, git"
+recommends = "docker.io | docker-ce | docker-desktop"
+assets = [
+    ["target/release/fghj", "usr/bin/", "755"],
+    ["target/release/fghjd", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/fghj/README.md", "644"],
+]
+maintainer-scripts = "packaging/debian/"
+# Generates the scripts that enable and start fghjd on install, restart it on
+# upgrade, and stop it on removal.
+systemd-units = { unit-name = "fghjd", enable = true, start = true, restart-after-upgrade = true }
 
 [dependencies]
 anyhow = "1.0.104"
