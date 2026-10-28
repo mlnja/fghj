@@ -9,11 +9,33 @@
     onFetchNetStatus,
     onFetchDoctor,
     onListJobs,
-    activityScope = 'all',
     workspaceId = null,
+    workspaceName = null,
   } = $props();
 
+  // Two halves, never mixed: what this workspace has been doing, and fghjd
+  // itself, which every workspace shares. Every workspace's jobs go on
+  // fghjd's side: a removed workspace's job outlives the workspace.
+  const SECTIONS = {
+    workspace: [
+      ['downloads', 'Downloads'],
+      ['containers', 'Containers'],
+    ],
+    fghjd: [
+      ['logs', 'Logs'],
+      ['activity', 'All activity'],
+      ['doctor', 'Doctor'],
+      ['help', 'Help'],
+    ],
+  };
+
   let activeTab = $state(initialTab);
+  let section = $derived(SECTIONS.workspace.some(([id]) => id === activeTab) ? 'workspace' : 'fghjd');
+
+  function select(tab) {
+    activeTab = tab;
+    if (tab === 'doctor' && doctorChecks === null) runDoctor();
+  }
 
   // Logs tab: polling tail, same pattern as the pull queue below — daemon lifecycle/reconcile messages are low-volume enough that a
   // poll is just as responsive as SSE and much simpler.
@@ -47,8 +69,9 @@
     return rows.map((l) => ({ key: l.seq, ts: l.ts_ms, warn: l.level === 'warn', text: clean(l.message) }));
   });
 
-  // What fghjd has installed — /etc/hosts lines, /etc/resolver zones, pf NAT
-  // routes — read alongside the doctor, and shown under the check it backs.
+  // What fghjd has installed — /etc/hosts lines, /etc/resolver zones, the
+  // raw zone's listeners — read alongside the doctor, and shown under the
+  // check it backs.
   let netStatus = $state(null);
   let expanded = $state({});
 
@@ -84,22 +107,23 @@
     }
   }
 
-  // Activity tab: background jobs, each with its own log. This workspace's
-  // downloads or its switches, starts and stops; or every workspace's jobs,
-  // removals included: a removed workspace's job outlives the workspace.
-  const SCOPES = {
-    pulls: { label: 'Downloads', kinds: ['pull'] },
-    containers: { label: 'Containers', kinds: ['switch', 'start', 'stop', 'delete'] },
-    all: { label: 'All workspaces', kinds: null },
+  // The job tabs: background jobs, each with its own log. This workspace's
+  // downloads, or its switches, starts and stops; `null` is every
+  // workspace's, removals included.
+  const JOB_KINDS = {
+    downloads: ['pull'],
+    containers: ['switch', 'start', 'stop', 'delete'],
+    activity: null,
   };
-  let scope = $state(activityScope);
+  let jobTab = $derived(activeTab in JOB_KINDS);
   let activities = $state([]);
   let selectedJob = $state(null);
   // One of the selected job's children, whose part of the log to show.
   let selectedChild = $state(null);
 
   let jobs = $derived.by(() => {
-    const { kinds } = SCOPES[scope];
+    if (!jobTab) return [];
+    const kinds = JOB_KINDS[activeTab];
     return activities.filter(
       (a) => a.parent == null && (!kinds || (a.workspace_id === workspaceId && kinds.includes(a.kind))),
     );
@@ -180,11 +204,6 @@
     return a.status === 'queued' ? '' : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
   }
 
-  function openDoctor() {
-    activeTab = 'doctor';
-    if (doctorChecks === null) runDoctor();
-  }
-
   if (initialTab === 'doctor') runDoctor();
 
   $effect(() => {
@@ -193,7 +212,7 @@
       const timer = setInterval(pollLogs, 1500);
       return () => clearInterval(timer);
     }
-    if (activeTab === 'activity') {
+    if (jobTab) {
       pollJobs();
       const timer = setInterval(pollJobs, 800);
       return () => clearInterval(timer);
@@ -243,16 +262,25 @@
 
 <SideDrawer onClose={onClose} width="55vw">
   <div class="head">
-    <span class="eyebrow">fghjd telemetry</span>
+    <div class="sections">
+      <button class="section-btn" class:active={section === 'workspace'} onclick={() => select(SECTIONS.workspace[0][0])}
+        >{workspaceName ?? 'workspace'}</button
+      >
+      <button class="section-btn" class:active={section === 'fghjd'} onclick={() => select(SECTIONS.fghjd[0][0])}>fghjd</button>
+    </div>
     <div class="close" onclick={onClose}>×</div>
   </div>
-  <h3 class="stencil">Daemon</h3>
+  <h3 class="stencil">{section === 'workspace' ? (workspaceName ?? 'This workspace') : 'fghjd'}</h3>
+  <p class="scope-note">
+    {section === 'workspace'
+      ? 'What fghj has done in this workspace.'
+      : 'The daemon every workspace shares.'}
+  </p>
 
   <div class="tabs">
-    <div class="tab" class:active={activeTab === 'logs'} onclick={() => (activeTab = 'logs')}>Logs</div>
-    <div class="tab" class:active={activeTab === 'activity'} onclick={() => (activeTab = 'activity')}>Activity</div>
-    <div class="tab" class:active={activeTab === 'doctor'} onclick={openDoctor}>Doctor</div>
-    <div class="tab" class:active={activeTab === 'help'} onclick={() => (activeTab = 'help')}>Help</div>
+    {#each SECTIONS[section] as [id, label] (id)}
+      <div class="tab" class:active={activeTab === id} onclick={() => select(id)}>{label}</div>
+    {/each}
   </div>
 
   {#if activeTab === 'logs'}
@@ -281,12 +309,7 @@
         <LogPane lines={visibleLines} />
       {/if}
     </div>
-  {:else if activeTab === 'activity'}
-    <div class="ops-scopes">
-      {#each Object.entries(SCOPES) as [id, { label }] (id)}
-        <button class="ops-scope" class:active={scope === id} onclick={() => (scope = id)}>{label}</button>
-      {/each}
-    </div>
+  {:else if jobTab}
     <div class="ops">
       <div class="ops-list">
         {#if !jobs.length}
@@ -296,7 +319,7 @@
           <div class="ops-row" class:active={j.id === selectedJob} onclick={() => pickJob(j.id)}>
             <span class="dot" class:running={j.status === 'running'} class:done={j.status === 'done'} class:error={j.status === 'error'}></span>
             <span class="ops-label"
-              >{jobLabel(j)}{#if scope === 'all'}<span class="ops-ws">{workspaceLabel(j.workspace_id)}</span>{/if}</span
+              >{jobLabel(j)}{#if activeTab === 'activity'}<span class="ops-ws">{workspaceLabel(j.workspace_id)}</span>{/if}</span
             >
           </div>
         {/each}
@@ -377,7 +400,13 @@
 
 <style>
   .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-  .eyebrow { font: 700 10px var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-faint); }
+  .sections { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 6px; }
+  .section-btn {
+    padding: 4px 10px; border: none; border-radius: 4px; background: none; cursor: pointer;
+    font: 600 11px var(--font-mono); color: var(--ink-faint);
+  }
+  .section-btn.active { background: var(--panel-2); color: var(--ink); }
+  .scope-note { font: 500 12px var(--font-mono); color: var(--ink-faint); margin: -14px 0 16px; }
   .close { width: 22px; height: 22px; border-radius: 50%; background: var(--panel-2); display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--ink-dim); font-size: 14px; }
   h3 { font-size: 20px; color: var(--ink); margin-bottom: 20px; }
 
@@ -412,14 +441,6 @@
   .ops-row:hover { background: var(--panel-2); }
   .ops-row.active { background: var(--panel-2); border-color: var(--line-strong); color: var(--ink); }
   .ops-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; flex-direction: column; }
-  .ops-scopes { display: flex; gap: 4px; margin-bottom: 10px; }
-  .ops-scope {
-    padding: 3px 8px; border-radius: 3px; background: none; border: 1px solid var(--line);
-    color: var(--ink-dim); font: 600 10.5px var(--font-mono); cursor: pointer;
-    display: inline-flex; align-items: center; gap: 5px;
-  }
-  .ops-scope:hover { color: var(--ink); }
-  .ops-scope.active { background: var(--panel-2); border-color: var(--line-strong); color: var(--ink); }
   .ops-steps { display: flex; flex-direction: column; margin-bottom: 10px; max-height: 40%; overflow-y: auto; flex: 0 0 auto; }
   .ops-steps .row { border: 1px solid transparent; width: 100%; text-align: left; cursor: pointer; }
   .ops-steps .row:disabled { cursor: default; }

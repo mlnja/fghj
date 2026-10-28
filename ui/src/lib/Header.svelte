@@ -20,8 +20,9 @@
     missingInFlow = null,
     onSwitchFlow,
     envBusy,
-    onOpenActivity,
-    onOpenTelemetry,
+    // Opens the drawer on a tab: 'downloads' or 'containers' for this
+    // workspace's jobs, 'logs' for fghjd's.
+    onOpenDrawer,
     workspaces,
     currentWorkspaceId,
     onOpenWorkspaces,
@@ -32,6 +33,7 @@
   } = $props();
   let menuOpen = $state(false);
   let wsMenuOpen = $state(false);
+  let actionsOpen = $state(false);
   let pulling = $state(false);
   let pullState = $state(null); // null | 'running' | 'done' | 'error'
   let pollTimer = null;
@@ -45,6 +47,10 @@
   let flowPullState = $state(null); // null | 'running' | 'done' | 'error'
   let flowPollTimer = null;
   let switchingFlow = $state(false);
+  // How the last finished download went, flow or all, shown by the menu.
+  let pullResult = $derived(
+    [flowPullState, pullState].find((s) => s === 'done' || s === 'error') ?? null,
+  );
 
   // Only tracks completion so the graph can be reloaded and the button's
   // spinner cleared — the actual log lives in the shared operations drawer.
@@ -119,6 +125,12 @@
       if (flowPollTimer) clearInterval(flowPollTimer);
     };
   });
+
+  // Each action closes the menu first, so its progress shows on the trigger.
+  function act(fn) {
+    actionsOpen = false;
+    fn();
+  }
 
   function pick(flow) {
     menuOpen = false;
@@ -238,46 +250,54 @@
   </div>
 
   <div class="divider"></div>
-  <div class="help-btn" onclick={onOpenTelemetry} title="fghjd telemetry (logs, pull queue, doctor, help)">⚡</div>
+  <div class="help-btn" onclick={() => onOpenDrawer('logs')} title="fghjd telemetry (logs, pull queue, doctor, help)">⚡</div>
 
   <!-- Per-tab actions go last, so switching tabs never moves the rest. -->
   {#if activeTab === 'repos' || activeTab === 'containers'}
     <div class="divider"></div>
-  {/if}
-  {#if activeTab === 'repos'}
-    <button class="pull-btn" onclick={pullFlow} disabled={!currentFlow || flowPulling || missingInFlow === 0} title="clone every not-yet-downloaded repo in this flow">
-      {#if flowPulling}<span class="spinner"></span> downloading flow…{:else if missingInFlow === 0}Flow downloaded{:else}Download flow{missingInFlow ? ` (${missingInFlow})` : ''}{/if}
-    </button>
-    {#if flowPullState && flowPullState !== 'running'}
-      <span class="pull-result" class:ok={flowPullState === 'done'} class:error={flowPullState === 'error'}
-        >{flowPullState === 'done' ? '✓' : '✕'}</span
-      >
-    {/if}
-    <div class="divider"></div>
-    <div class="pull-wrap">
-      <button class="pull-btn" onclick={pullAll} disabled={pulling || missingAll === 0} title="clone every not-yet-downloaded repo">
-        {#if pulling}<span class="spinner"></span> downloading…{:else if missingAll === 0}All downloaded{:else}Download all{missingAll ? ` (${missingAll})` : ''}{/if}
+    <div class="flow-picker pull-wrap">
+      <button class="pull-btn actions-btn" onclick={() => (actionsOpen = !actionsOpen)} aria-expanded={actionsOpen}>
+        {#if activeTab === 'repos' && (pulling || flowPulling)}<span class="spinner"></span> downloading…
+        {:else if activeTab === 'containers' && (switchingFlow || envBusy)}<span class="spinner"></span> switching…
+        {:else}Actions ▾{/if}
       </button>
-      {#if pullState && pullState !== 'running'}
-        <span class="pull-result" class:ok={pullState === 'done'} class:error={pullState === 'error'}
-          >{pullState === 'done' ? '✓' : '✕'}</span
-        >
+      {#if activeTab === 'repos'}
+        {#if pullResult}
+          <span
+            class="pull-result"
+            class:ok={pullResult === 'done'}
+            class:error={pullResult === 'error'}
+            onclick={() => onOpenDrawer('downloads')}
+            title="show downloads">{pullResult === 'done' ? '✓' : '✕'}</span
+          >
+        {/if}
       {/if}
-      <span class="ops-link" onclick={() => onOpenActivity('pulls')} title="this workspace's downloads">☰</span>
+      {#if actionsOpen}
+        <div class="flow-menu actions-menu">
+          {#if activeTab === 'repos'}
+            <button class="flow-row" onclick={() => act(pullFlow)} disabled={!currentFlow || flowPulling || missingInFlow === 0} title="clone every not-yet-downloaded repo in this flow">
+              {missingInFlow === 0 ? 'Flow downloaded' : `Download flow${missingInFlow ? ` (${missingInFlow})` : ''}`}
+            </button>
+            <button class="flow-row" onclick={() => act(pullAll)} disabled={pulling || missingAll === 0} title="clone every not-yet-downloaded repo">
+              {missingAll === 0 ? 'All downloaded' : `Download all${missingAll ? ` (${missingAll})` : ''}`}
+            </button>
+            <button class="flow-row secondary" onclick={() => act(() => onOpenDrawer('downloads'))}>Show downloads</button>
+          {:else}
+            <button
+              class="flow-row"
+              onclick={() => act(switchFlow)}
+              disabled={!currentFlow || switchingFlow || envBusy}
+              title="start this flow's containers and stop (not remove) every other running one"
+            >
+              Switch to flow
+            </button>
+            <button class="flow-row secondary" onclick={() => act(() => onOpenDrawer('containers'))}>Show container activity</button>
+          {/if}
+        </div>
+      {/if}
     </div>
-  {:else if activeTab === 'containers'}
-    <!-- While a switch runs, the button opens its steps in the Activity tab instead. -->
-    <button
-      class="pull-btn"
-      onclick={switchingFlow || envBusy ? () => onOpenActivity('containers') : switchFlow}
-      disabled={!currentFlow}
-      title={switchingFlow || envBusy
-        ? "see what the switch has done and what's left"
-        : "start this flow's containers and stop (not remove) every other running one"}
-    >
-      {#if switchingFlow || envBusy}<span class="spinner"></span> switching…{:else}Switch to flow{/if}
-    </button>
-    <span class="ops-link" onclick={() => onOpenActivity('containers')} title="this workspace's switches, starts and stops">☰</span>
+  {/if}
+  {#if activeTab === 'containers'}
     {#if showSeeds != null}
       <button
         class="pull-btn seeds-btn"
@@ -349,11 +369,15 @@
     animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 2px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .pull-result { font: 700 13px var(--font-mono); }
+  .pull-result { font: 700 13px var(--font-mono); cursor: pointer; }
   .pull-result.ok { color: var(--success); }
   .pull-result.error { color: var(--danger); }
-  .ops-link { cursor: pointer; color: var(--ink-faint); font-size: 13px; }
-  .ops-link:hover { color: var(--ink); }
+  .actions-btn { min-width: 120px; }
+  .actions-menu { left: auto; right: 0; min-width: 240px; }
+  .actions-menu .flow-row { display: block; width: 100%; text-align: left; background: none; border: none; border-bottom: 1px solid var(--line); }
+  .actions-menu .flow-row:last-child { border-bottom: none; }
+  .actions-menu .flow-row:disabled { color: var(--ink-faint); cursor: default; background: none; }
+  .actions-menu .secondary { color: var(--ink-dim); font-weight: 500; }
 
   .view-switch { display: flex; padding: 2px; background: var(--panel-2); border-radius: 6px; gap: 2px; }
   .view-tab { padding: 6px 14px; border-radius: 4px; font: 700 11px var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer; color: var(--ink-faint); }

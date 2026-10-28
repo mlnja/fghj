@@ -24,9 +24,6 @@
   let repoStatus = $state({});
   // `null` when closed, else the tab it opens on.
   let telemetryTab = $state(null);
-  // Which jobs the Activity tab opens on: 'pulls' or 'containers' of this
-  // workspace, or 'all' of every workspace's.
-  let activityScope = $state('all');
   // The workspace's one environment (`GET /environment`), or null before
   // anything has been started.
   let env = $state(null);
@@ -76,7 +73,6 @@
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-    activityScope = 'all';
     telemetryTab = 'activity';
     // A reload must not come back to the id that's gone.
     const url = new URL(location.href);
@@ -705,11 +701,7 @@
     {missingInFlow}
     onSwitchFlow={switchFlow}
     envBusy={env?.pending_create != null}
-    onOpenActivity={(scope) => {
-      activityScope = scope;
-      telemetryTab = 'activity';
-    }}
-    onOpenTelemetry={() => (telemetryTab = 'logs')}
+    onOpenDrawer={(tab) => (telemetryTab = tab)}
     workspaces={workspaces}
     currentWorkspaceId={currentWorkspaceId}
     onOpenWorkspaces={loadWorkspaces}
@@ -832,7 +824,7 @@
   {#if telemetryTab}
     <TelemetryDrawer
       initialTab={telemetryTab}
-      {activityScope}
+      workspaceName={universe?.workspace_name}
       workspaceId={currentWorkspaceId}
       onClose={() => (telemetryTab = null)}
       onListJobs={listActivities}
