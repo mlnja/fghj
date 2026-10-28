@@ -27,21 +27,23 @@ $ fghj doctor
 ✓ Docker Engine reachable: server 29.4.0, API 1.54
 ✓ BuildKit available: API 1.54 supports the BuildKit session endpoint
 ✓ fghjd is active: serving DNS, 80 and 443
-✓ shop's sidecar: fghj-shop-default-sidecar is running at 192.168.97.2, capture on 127.0.0.1:32768
+✓ environment sidecars: all 2 running: shop, files
 ✓ proxy loopback alias: 127.222.0.1 is up on lo0
 ✓ proxy listening on 443: 127.222.0.1:443 accepts connections
 ✓ proxy listening on 80: 127.222.0.1:80 accepts connections
 ✓ /etc/resolver entries: fghj.internal -> 127.0.0.1:49969, fghj.raw.internal -> 127.0.0.1:49969
+✓ raw-zone listeners: fghjd is listening on all 11
 ✓ fghj.internal resolves through the OS: doctor.fghj.internal -> 127.222.0.1
 ✓ root CA trusted by the system: /private/var/lib/fghjd/ca/ca-cert.pem verifies against the System keychain
 
 all clear
 ```
 
-There's one sidecar line per workspace with an environment. It warns when the
-sidecar is missing (fghjd brings it back within a second), when it predates
-traffic capture, or when its network predates fixed sidecar addresses; the
-last two go away when you recreate the environment. It fails, with the
+There's one sidecar line for all workspaces with an environment, and it names
+only the sidecars with a problem. It warns when a sidecar is missing (fghjd
+brings it back within a second), when it predates traffic capture, or when
+its network predates fixed sidecar addresses; the last two go away when you
+recreate the environment. It fails, with the
 error, when fghjd can't start it again.
 
 A failing check prints what it found and what to do about it:

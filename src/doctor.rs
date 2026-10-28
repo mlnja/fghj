@@ -21,7 +21,8 @@ use crate::daemon::control::DaemonControl;
 use crate::web::proxy::{HTTP_PORT, HTTPS_PORT, PROXY_IP};
 use crate::{dns, platform, raw_net, web};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Ordered from best to worst.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
     Pass,
@@ -507,11 +508,49 @@ fn sidecar_check(f: &SidecarFacts) -> Check {
     )
 }
 
+/// One line for every workspace's sidecar, spelling out only the ones with a
+/// problem. `None` with no environments.
+fn sidecars_check(all: &[SidecarFacts]) -> Option<Check> {
+    let name = "sidecars";
+    let title = "environment sidecars";
+    let checks: Vec<Check> = all.iter().map(sidecar_check).collect();
+    let worst = checks.iter().map(|c| c.verdict).max()?;
+    if worst == Verdict::Pass {
+        let workspaces: Vec<&str> = all.iter().map(|f| f.workspace.as_str()).collect();
+        return Some(Check::pass(
+            name,
+            title,
+            format!("all {} running: {}", all.len(), workspaces.join(", ")),
+        ));
+    }
+    let problems: Vec<&Check> = checks
+        .iter()
+        .filter(|c| c.verdict != Verdict::Pass)
+        .collect();
+    let mut hints: Vec<&str> = problems
+        .iter()
+        .filter(|c| c.verdict == worst)
+        .filter_map(|c| c.hint.as_deref())
+        .collect();
+    hints.dedup();
+    Some(Check {
+        name: name.to_string(),
+        title: title.to_string(),
+        verdict: worst,
+        detail: problems
+            .iter()
+            .map(|c| c.detail.as_str())
+            .collect::<Vec<_>>()
+            .join("; "),
+        hint: (!hints.is_empty()).then(|| hints.join("; ")),
+    })
+}
+
 /// One per workspace with an environment. Skipped while Docker doesn't answer:
 /// the Docker checks already say so.
-async fn sidecar_checks(docker: &Docker, daemon: &DaemonControl) -> Vec<Check> {
+async fn sidecar_facts(docker: &Docker, daemon: &DaemonControl) -> Vec<SidecarFacts> {
     let paths: std::collections::HashMap<_, _> = daemon.registry.list().into_iter().collect();
-    let mut checks = Vec::new();
+    let mut facts = Vec::new();
     for (id, state) in daemon.registry.states() {
         let Some(env) = &state.env else {
             continue;
@@ -542,7 +581,7 @@ async fn sidecar_checks(docker: &Docker, daemon: &DaemonControl) -> Vec<Check> {
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or(id.clone());
-        checks.push(sidecar_check(&SidecarFacts {
+        facts.push(SidecarFacts {
             workspace,
             name: env.sidecar_container_name.clone(),
             running,
@@ -551,9 +590,9 @@ async fn sidecar_checks(docker: &Docker, daemon: &DaemonControl) -> Vec<Check> {
             pinned,
             failure: daemon.sidecar_failures.lock().unwrap().get(&id).cloned(),
             active: daemon.is_active(),
-        }));
+        });
     }
-    checks
+    facts
 }
 
 pub async fn daemon_report(docker: &Docker, daemon: &DaemonControl) -> Report {
@@ -563,7 +602,7 @@ pub async fn daemon_report(docker: &Docker, daemon: &DaemonControl) -> Report {
     };
     let mut checks = docker_checks(docker, &setup).await;
     checks.push(daemon_check(daemon));
-    checks.extend(sidecar_checks(docker, daemon).await);
+    checks.extend(sidecars_check(&sidecar_facts(docker, daemon).await));
     match tokio::task::spawn_blocking(move || host_checks(setup.wired)).await {
         Ok(host) => checks.extend(host),
         Err(e) => checks.push(Check::fail(
@@ -690,6 +729,50 @@ mod tests {
         });
         assert_eq!(unpinned.verdict, Verdict::Warn);
         assert!(unpinned.hint.unwrap().contains("recreate the environment"));
+    }
+
+    #[test]
+    fn healthy_sidecars_collapse_into_one_line() {
+        let files = SidecarFacts {
+            workspace: "files".into(),
+            ..sidecar()
+        };
+        let check = sidecars_check(&[sidecar(), files]).unwrap();
+        assert_eq!(check.verdict, Verdict::Pass);
+        assert_eq!(check.detail, "all 2 running: aikido, files");
+    }
+
+    #[test]
+    fn the_worst_sidecar_sets_the_verdict_and_only_problems_are_listed() {
+        let broken = SidecarFacts {
+            workspace: "files".into(),
+            name: "fghj-files-default-sidecar".into(),
+            running: false,
+            ip: None,
+            failure: Some("no such image".into()),
+            ..sidecar()
+        };
+        let old = SidecarFacts {
+            workspace: "shop".into(),
+            name: "fghj-shop-default-sidecar".into(),
+            capture_port: None,
+            ..sidecar()
+        };
+        let check = sidecars_check(&[sidecar(), broken, old]).unwrap();
+        assert_eq!(check.verdict, Verdict::Fail);
+        assert!(!check.detail.contains("aikido"), "{}", check.detail);
+        assert!(check.detail.contains("no such image"), "{}", check.detail);
+        assert!(
+            check.detail.contains("predates traffic capture"),
+            "{}",
+            check.detail
+        );
+        assert!(check.hint.unwrap().contains("retries every second"));
+    }
+
+    #[test]
+    fn no_environments_means_no_sidecar_line() {
+        assert!(sidecars_check(&[]).is_none());
     }
 
     #[test]
