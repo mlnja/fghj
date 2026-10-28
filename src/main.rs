@@ -1,3 +1,5 @@
+mod cli;
+
 use std::fs;
 use std::io::{IsTerminal, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -98,6 +100,8 @@ enum Commands {
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
     },
+    #[command(flatten)]
+    Env(cli::EnvCommand),
 }
 
 #[derive(Subcommand)]
@@ -606,27 +610,7 @@ async fn exec_cmd(
         );
     }
 
-    let canonical = workspace_root(workspace)?;
-
-    let workspaces = http_get_json("/workspaces")?;
-    let id = workspaces
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|w| {
-            w["workspace"]
-                .as_str()
-                .map(PathBuf::from)
-                .is_some_and(|p| p == canonical)
-        })
-        .and_then(|w| w["id"].as_str())
-        .with_context(|| {
-            format!(
-                "{} isn't wired into fghjd — run `fghj wire` first",
-                canonical.display()
-            )
-        })?
-        .to_string();
+    let id = cli::workspace_id(workspace).await?;
 
     let tty = !no_tty && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let (cols, rows) = if tty { terminal_size() } else { (80, 24) };
@@ -879,7 +863,6 @@ fn doctor(fix: bool) -> Result<()> {
     std::process::exit(1);
 }
 
-// Only `exec` needs async.
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -906,6 +889,7 @@ async fn main() -> Result<()> {
             no_tty,
             cmd,
         } => exec_cmd(node, workspace, no_tty, cmd).await,
+        Commands::Env(command) => cli::run(command).await,
     }
 }
 

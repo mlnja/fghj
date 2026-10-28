@@ -56,7 +56,8 @@ one](/cli/wire/#workspaces-cannot-nest), in either direction.
 ## Requirements
 
 `fghjd` must be running and the workspace must already be
-[wired](/cli/wire/) with the target node's container started (from the UI) — `exec` fails immediately with a clear error if
+[wired](/cli/wire/) with the target node's container started (from the UI or
+[`fghj up`](/cli/up/)) — `exec` fails immediately with a clear error if
 either isn't true.
 
 ## TTY behavior
