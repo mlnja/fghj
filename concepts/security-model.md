@@ -65,7 +65,7 @@ for.
 
 **`fghjd` runs as root.** It has to: binding ports 80 and 443, writing
 `/etc/hosts` and `/etc/resolver`, installing a CA into the System keychain,
-and loading `pf` rules all require it. There is no design in which the proxy
+and adding loopback aliases all require it. There is no design in which the proxy
 listens on 443 unprivileged.
 
 **It does not do everything as root.** `WorkspaceOwner` is a snapshot of the
@@ -86,24 +86,17 @@ A real, internet-routable hostname is never certified, whatever a
 for a domain someone else owns. See [[host-aliases]] and
 [[local-ca-and-tls-proxy]].
 
-**It edits three system files, each inside a marked block it owns.**
-`/etc/hosts` (between `# fghj-managed-begin`/`-end`), `/etc/resolver/<zone>`
-files it can recognize as its own by parsing its own template, and one
-`rdr-anchor "fghjd"` hook line in `/etc/pf.conf`. Each mechanism reads the
-file, replaces only its own region, and preserves everything else verbatim.
-`fghj daemon stop` removes all of them.
+**It edits system files only inside a marked block it owns.**
+`/etc/hosts` (between `# fghj-managed-begin`/`-end`) and `/etc/resolver/<zone>`
+files it can recognize as its own by parsing its own template. Each
+mechanism reads the file, replaces only its own region, and preserves
+everything else verbatim. `fghj daemon stop` removes all of them.
 
-**The `pf` rule is the sharpest edge, and it is why the anchor is
-top-level.** Two earlier designs were tried and abandoned. Nesting under
-`com.apple/*` didn't reliably fire. Owning the top-level ruleset — reading
-`/etc/pf.conf`, splicing in rules, reloading — worked, and then silently
-erased Docker Desktop's *live-only* NAT rules on every tick, breaking all
-published-port connectivity on the machine within a second of `fghjd`
-starting. The rule that came out of that is the one stated in
-[[two-zones-and-raw-ports]]: **fghjd must never be the one who breaks
-someone else's networking**, even though someone else reloading pf is allowed
-to transiently break fghjd. A dedicated top-level anchor can only ever
-replace its own contents.
+**It doesn't touch the firewall.** The firewall is shared state other
+programs rewrite: fghjd editing it risks breaking someone else's networking,
+and anything fghjd served through it could be switched off by someone else.
+So every address fghjd serves, the proxy's and the raw zone's, is a socket
+it holds itself (see [[two-zones-and-raw-ports]]).
 
 ## What is deliberately *not* defended against
 
@@ -142,7 +135,7 @@ These are real properties, not aspirations:
 - [[local-ca-and-tls-proxy]] — the CA and what it will sign.
 - [[host-aliases]] — `cert_eligible` in full.
 - [[build-inputs]] — why `ssh` is a boolean and not a path.
-- [[two-zones-and-raw-ports]] — the pf anchor rule.
+- [[two-zones-and-raw-ports]] — why the raw zone is sockets, not NAT.
 
 ## Status
 

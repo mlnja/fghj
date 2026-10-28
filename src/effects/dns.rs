@@ -1,5 +1,5 @@
 //! Routes every workspace's `wildcard_hosts` suffixes to fghj's DNS server
-//! via `/etc/resolver`. The only writer of that directory.
+//! through the OS resolver (`platform::DnsRouting`). Its only caller.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

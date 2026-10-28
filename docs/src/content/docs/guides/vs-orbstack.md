@@ -25,7 +25,7 @@ Be clear about this first, because it's a large share of real cases.
 If what you want is **one HTTP port, on one container, in one Compose
 project, reached from the host**, OrbStack does it with less machinery than
 fghj and you should use OrbStack. It owns the VM and the network stack, so
-it needs no loopback alias, no `pf` rules, no `/etc/resolver` files and no
+it needs no loopback alias, no port forwarder, no `/etc/resolver` files and no
 root daemon. It even detects your listening port by probing it, so you don't
 declare one.
 
@@ -39,7 +39,7 @@ Kubernetes, and OrbStack is a reasonable thing to run fghj's containers on.
 Today both run on macOS; where they can go differs. OrbStack *is* the VM, so
 on Linux there would be nothing for it to be — Docker runs natively there.
 fghj is macOS-specific only in its mechanisms (`/etc/resolver`, the System
-keychain, `pf`), each of which has a Linux counterpart, and that port is in
+keychain), each of which has a Linux counterpart, and that port is in
 progress. For where it actually stands, read
 [installation](/getting-started/installation/) rather than trusting this
 paragraph.

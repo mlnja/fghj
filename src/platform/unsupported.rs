@@ -5,19 +5,17 @@
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use anyhow::Result;
 
-use super::{DnsRouting, Loopback, OsRouting, Packaging, Platform, RawNat, Session, TrustStore};
+use super::{DnsRouting, LegacyNat, Loopback, OsRouting, Packaging, Platform, Session, TrustStore};
 use crate::daemon_log;
-use crate::raw_net::RouteSpec;
 
 pub(super) fn platform() -> Platform {
     Platform {
         dns: Box::new(NoDnsRouting),
         trust: Box::new(NoTrustStore),
-        nat: Box::new(NoRawNat::default()),
+        legacy_nat: Box::new(NoLegacyNat),
         loopback: Box::new(NoLoopback),
         session: Box::new(PlainSession),
         packaging: Box::new(NoPackaging),
@@ -81,52 +79,12 @@ impl TrustStore for NoTrustStore {
     }
 }
 
-#[derive(Default)]
-pub(super) struct NoRawNat {
-    warned: OnceLock<()>,
-}
+/// Nothing older to clean up.
+pub(super) struct NoLegacyNat;
 
-impl RawNat for NoRawNat {
-    fn apply(&self, routes: &[RouteSpec]) -> Result<()> {
-        if !routes.is_empty() {
-            self.warned.get_or_init(|| {
-                daemon_log::warn(
-                    "fghjd: host-reachable raw ports (*.fghj.raw.internal) aren't implemented on \
-                     this platform yet — raw-zone names will resolve to a virtual IP, but \
-                     nothing will answer on it"
-                        .to_string(),
-                );
-            });
-        }
+impl LegacyNat for NoLegacyNat {
+    fn retire(&self) -> Result<()> {
         Ok(())
-    }
-
-    fn clear(&self) -> Result<()> {
-        Ok(())
-    }
-
-    fn status(&self) -> Vec<RouteSpec> {
-        Vec::new()
-    }
-
-    fn unserved(&self, _routes: &[RouteSpec]) -> Option<Result<Vec<RouteSpec>>> {
-        None
-    }
-
-    fn name(&self) -> &'static str {
-        "not implemented"
-    }
-
-    fn location(&self) -> &'static str {
-        "nowhere"
-    }
-
-    fn inspect_command(&self) -> &'static str {
-        "there is nothing to inspect on this platform"
-    }
-
-    fn footprint(&self) -> Option<&'static str> {
-        None
     }
 }
 
@@ -148,6 +106,10 @@ impl Loopback for NoLoopback {
 
     fn interface(&self) -> &'static str {
         "loopback"
+    }
+
+    fn needs_aliases(&self) -> bool {
+        false
     }
 }
 
@@ -195,21 +157,6 @@ mod tests {
         assert_eq!(NoTrustStore.remove(), 0);
         assert_eq!(NoTrustStore.is_trusted(&cert), None);
         assert_eq!(NoTrustStore.store_name(), "the system trust store");
-    }
-
-    #[test]
-    fn raw_nat_accepts_routes_but_serves_none() {
-        let nat = NoRawNat::default();
-        let route = RouteSpec {
-            virtual_ip: Ipv4Addr::new(10, 222, 1, 1),
-            container_port: 9000,
-            host_port: 54321,
-        };
-        assert!(nat.apply(&[]).is_ok());
-        assert!(nat.apply(&[route]).is_ok());
-        assert!(nat.clear().is_ok());
-        assert!(nat.status().is_empty());
-        assert!(nat.unserved(&[route]).is_none());
     }
 
     #[test]

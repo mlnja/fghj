@@ -1115,11 +1115,11 @@ argument.
   both of which still describe one zone.~~ **Closed** by
   [[two-zones-and-raw-ports]], with [[split-dns]] and
   [[node-identity-and-domains]] both corrected to point at it.
-- ~~**`raw_net`**: per-node virtual IPs NAT'd via `pf`, with a hash-based allocator
+- ~~**`raw_net`**: per-node virtual IPs served on the host, with a hash-based allocator
   that can collide and a sticky in-memory reconciler on top. A substantial new
   invariant surface with zero concept coverage.~~ **Closed** by
-  [[two-zones-and-raw-ports]], including the two abandoned `pf` designs and
-  the "fghjd must never break someone else's networking" rule they produced.
+  [[two-zones-and-raw-ports]], including why the host side is fghjd's own
+  sockets rather than kernel NAT.
 - ~~The **actor / action / reducer / effects architecture** (`src/action.rs`,
   `src/reducer/`, `src/effects/`, `src/state/`) — the single largest structural
   change in the codebase, described nowhere. [[run-lifecycle-and-registry]] still
@@ -1297,7 +1297,7 @@ Findings that were not path-level:
 
 - **The raw zone's reachability.** Three documents still said
   `*.fghj.raw.internal` was resolvable "only from inside the run's own docker
-  network" and "never reachable from the host". The virtual-IP + `pf` NAT work
+  network" and "never reachable from the host". The host-side virtual IPs
   ([[two-zones-and-raw-ports]]) made that false, and one of the three used it
   as the *entire argument* for why a presigned URL must use the http zone.
   The real argument is that the raw zone has no proxy in front of it, so

@@ -393,52 +393,35 @@ fn ca_trust_check(
     }
 }
 
-fn raw_routes_check(
-    health: Option<Result<(Vec<raw_net::RouteSpec>, Vec<raw_net::RouteSpec>)>>,
-) -> Check {
+fn raw_routes_check(health: (Vec<raw_net::RouteSpec>, Vec<raw_net::RouteSpec>)) -> Check {
+    let (routes, unserved) = health;
     let name = "raw-routes";
-    let nat = &platform::current().nat;
-    let title = &format!("raw-zone port routes ({})", nat.name());
-    match health {
-        None => Check::warn(
-            name,
-            "raw-zone port routes",
-            "not implemented on this platform".to_string(),
-            "use the https domains: *.fghj.raw.internal names resolve, but nothing answers",
-        ),
-        Some(Ok((routes, unserved))) if unserved.is_empty() => Check::pass(
+    let title = "raw-zone listeners";
+    if unserved.is_empty() {
+        return Check::pass(
             name,
             title,
             match routes.len() {
-                0 => "no raw ports to route".to_string(),
-                n => format!("{n} loaded in {}", nat.location()),
+                0 => "no raw ports to serve".to_string(),
+                n => format!("fghjd is listening on all {n}"),
             },
-        ),
-        Some(Ok((routes, unserved))) => Check::fail(
-            name,
-            title,
-            format!(
-                "{} of {} not loaded: {}",
-                unserved.len(),
-                routes.len(),
-                unserved
-                    .iter()
-                    .map(|r| format!("{}:{}", r.virtual_ip, r.container_port))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            &format!(
-                "restart fghjd — it reloads {} on start",
-                nat.footprint().unwrap_or("its routes")
-            ),
-        ),
-        Some(Err(e)) => Check::warn(
-            name,
-            title,
-            format!("{e:#}"),
-            &format!("inspect the rules by hand: `{}`", nat.inspect_command()),
-        ),
+        );
     }
+    Check::fail(
+        name,
+        title,
+        format!(
+            "{} of {} have no listener: {}",
+            unserved.len(),
+            routes.len(),
+            unserved
+                .iter()
+                .map(|r| format!("{}:{}", r.virtual_ip, r.container_port))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        "fghjd's log says why it couldn't listen; restart fghjd to retry",
+    )
 }
 
 /// Off the async runtime wholesale; the set takes well under a second.
@@ -729,20 +712,19 @@ mod tests {
     }
 
     #[test]
-    fn raw_routes_fail_when_one_is_not_loaded() {
+    fn raw_routes_fail_when_one_has_no_listener() {
         let route = raw_net::RouteSpec {
             virtual_ip: std::net::Ipv4Addr::new(127, 77, 0, 5),
             container_port: 5432,
             host_port: 54321,
         };
         assert_eq!(
-            raw_routes_check(Some(Ok((vec![route], vec![])))).verdict,
+            raw_routes_check((vec![route], vec![])).verdict,
             Verdict::Pass
         );
-        let broken = raw_routes_check(Some(Ok((vec![route], vec![route]))));
+        let broken = raw_routes_check((vec![route], vec![route]));
         assert_eq!(broken.verdict, Verdict::Fail);
         assert!(broken.detail.contains("127.77.0.5:5432"));
-        assert_eq!(raw_routes_check(None).verdict, Verdict::Warn);
     }
 
     #[test]

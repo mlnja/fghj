@@ -141,7 +141,7 @@ clobber, and Docker would reject the duplicate binding anyway.
 
 `start_node` used to build the container's observed port map from
 `node.ports`. With `debug:`, the port was published by Docker and then never
-recorded — so `raw_endpoints` never saw it, `raw_net` never NATed it, and
+recorded — so `raw_endpoints` never saw it, `raw_net` never forwarded it, and
 the debugger was reachable at the ephemeral localhost port and nowhere else.
 It now keys off `spec.port_list`, the set actually published.
 
@@ -248,7 +248,7 @@ A debug port is arbitrary code execution: an attached debugger can evaluate
 expressions, call functions, and read every secret in the process.
 
 In fghj it is local-only by construction, not by policy. Published ports are
-bound to `127.0.0.1` only, and the raw-zone addresses are `10.222.x`
+bound to `127.0.0.1` only, and the raw-zone addresses are `127.223.x`
 loopback aliases, which RFC 1122 forbids from leaving the machine. There is
 no configuration that exposes a debug port to a network, because there is no
 configuration at all beyond the port number. See [[security-model]] for the

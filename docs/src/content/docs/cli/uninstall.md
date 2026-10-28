@@ -24,10 +24,10 @@ disk. This command is the one that clears them.
 
 1. Stops `fghjd` if it is running, so the daemon unwinds its own system
    configuration.
-2. Clears the managed `/etc/hosts` block, `/etc/resolver/fghj*`, the `lo0`
-   aliases and the pf anchor directly. This is belt and braces: a daemon
-   that was killed with `SIGKILL` never ran its own teardown, so these can
-   still be installed with nothing alive to remove them. Each step is a
+2. Clears the managed `/etc/hosts` block, `/etc/resolver/fghj*` and the
+   `lo0` aliases directly. This is belt and braces: a daemon that was
+   killed with `SIGKILL` never ran its own teardown, so these can still be
+   installed with nothing alive to remove them. Each step is a
    no-op when there is nothing to undo.
 3. Deletes every `fghj local CA` certificate from the System keychain.
 4. Removes `/var/lib/fghjd`.

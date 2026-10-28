@@ -8,7 +8,10 @@
 //! Every implementation compiles on every target. They only shell out and
 //! parse what comes back, so their tests run anywhere.
 
+use std::process::Command;
 use std::sync::OnceLock;
+
+use anyhow::{Context, Result, bail};
 
 mod dns;
 mod linux;
@@ -22,7 +25,7 @@ mod unsupported;
 
 pub use dns::{DnsRouting, OsRouting};
 pub use loopback::Loopback;
-pub use nat::RawNat;
+pub use nat::LegacyNat;
 pub use packaging::Packaging;
 pub use session::Session;
 pub use trust::TrustStore;
@@ -32,7 +35,7 @@ pub use trust::TrustStore;
 pub struct Platform {
     pub dns: Box<dyn DnsRouting>,
     pub trust: Box<dyn TrustStore>,
-    pub nat: Box<dyn RawNat>,
+    pub legacy_nat: Box<dyn LegacyNat>,
     pub loopback: Box<dyn Loopback>,
     pub session: Box<dyn Session>,
     pub packaging: Box<dyn Packaging>,
@@ -49,6 +52,19 @@ fn select() -> Platform {
         "linux" => linux::platform(),
         _ => unsupported::platform(),
     }
+}
+
+fn run(cmd: &mut Command) -> Result<()> {
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to run {cmd:?}"))?;
+    if !output.status.success() {
+        bail!(
+            "{cmd:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// Against the real OS, so they hold for whichever platform runs them.

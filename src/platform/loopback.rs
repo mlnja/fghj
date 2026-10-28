@@ -15,4 +15,7 @@ pub trait Loopback: Send + Sync {
 
     /// For messages, e.g. `lo0`.
     fn interface(&self) -> &'static str;
+
+    /// Whether addresses in `127/8` other than `127.0.0.1` have to be added.
+    fn needs_aliases(&self) -> bool;
 }

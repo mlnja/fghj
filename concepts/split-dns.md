@@ -40,25 +40,21 @@ most specific bind. Taking a dedicated address leaves `127.0.0.1:80`,
 setup that was already working. This is a deliberate adoption property: the
 tool has to be safe to *try*.
 
-**Why `127/8` and not the `10.222.0.0/16` raw pool.** RFC 1122 forbids a
-host from emitting a loopback-destined datagram onto the wire, and routers
-drop it — so no LAN, VPN or corporate network can ever collide with an
-address in `127/8`. `10/8` is ordinary RFC 1918 space that real sites do
-carve up (a `10.222.x.x` corporate subnet is entirely plausible), and a
-virtual IP there can shadow a host the developer actually needs. Docker's
-embedded resolver (`127.0.0.11`) and systemd-resolved (`127.0.0.53`) rely on
-the same guarantee. Note this argument applies equally to the raw-zone pool
-in [[two-zones-and-raw-ports]], which is still on `10.222.0.0/16` — moving
-it is deferred, not rejected.
+**Why `127/8`.** RFC 1122 forbids a host from emitting a loopback-destined
+datagram onto the wire, and routers drop it — so no LAN, VPN or corporate
+network can ever collide with an address in `127/8`. `10/8` is ordinary
+RFC 1918 space that real sites do carve up, and a virtual IP there can
+shadow a host the developer actually needs; the raw zone's pool,
+`127.223.0.0/16`, is in loopback for the same reason (see
+[[two-zones-and-raw-ports]]). Docker's embedded resolver (`127.0.0.11`) and
+systemd-resolved (`127.0.0.53`) rely on the same guarantee.
 
-**Why an alias rather than pf/DNAT.** Redirecting `PROXY_IP:443` to an
-unprivileged high port with a `pf` `rdr` rule was considered, and would
+**Why an alias rather than DNAT.** Redirecting `PROXY_IP:443` to an
+unprivileged high port with a kernel NAT rule was considered, and would
 additionally free ports 80/443 machine-wide. It was rejected because it puts
-the *primary* user-facing path behind `raw_net`'s pf machinery — see the
-module doc in `src/raw_net/macos.rs` for two abandoned pf designs — where
-today it is a plain socket that cannot fail. The failure modes are
-asymmetric: if pf breaks now, only the raw zone breaks and the UI still
-loads to diagnose it; behind DNAT, nothing would resolve at all. The one
+the user-facing path behind firewall rules, which any other program that
+reloads the firewall can switch off. A plain socket cannot be turned off from
+outside, and the raw zone listens on its own sockets for the same reason. The one
 case an alias does not cover is a server binding `0.0.0.0:80` *without*
 `SO_REUSEADDR`; that is rare (nginx, Apache, Caddy, Docker, Go and Node all
 set it) and such a server already fails against any other holder of port 80.
@@ -103,7 +99,18 @@ template); a hand-written `/etc/resolver` file for some unrelated domain is
 left alone. `clear_os_resolver_config` removes all of them on a clean
 shutdown, so a stopped `fghjd` doesn't leave names pointed at a dead port.
 
-Linux (`systemd-resolved`) and Windows (NRPT) integration are described in
+On Linux the same routing goes through systemd-resolved
+(`src/platform/linux/resolved.rs`). Resolved's global `DNS=` is always a
+default route, so pointing it at fghjd would send it every lookup on the
+machine; a per-link server only gets the domains the link claims. So
+`fghjd` creates a dummy link `fghj0`, gives it `127.222.0.53` (resolved
+ignores a link with no address wider than link scope), and sets its server
+to `127.0.0.1:<port>` and its domains to `~fghj.internal ~fghj.raw.internal`,
+with default-route, LLMNR, mDNS and DNSSEC off; DNSSEC because `.internal`
+is provably absent from the signed root. The settings are runtime-only:
+resolved keeps them across its own restarts, and deleting the link on stop
+drops them. systemd 258's `dns-delegate.d` would do this without a link,
+but Ubuntu 22.04 and 24.04 ship 249 and 255. Windows (NRPT) is described in
 `SPEC.md` §5 but not implemented.
 
 ## Related
@@ -118,5 +125,6 @@ Linux (`systemd-resolved`) and Windows (NRPT) integration are described in
 ## Status
 
 Implemented: `src/dns/` (wire-format parse/build, `bind`, `serve`,
-`in_zone`, macOS resolver-file install). macOS-only for OS integration;
-Linux/Windows print a manual-setup message instead of configuring anything.
+`in_zone`), with OS integration through `/etc/resolver` on macOS and
+systemd-resolved on Linux. Other platforms print a manual-setup message
+instead of configuring anything.

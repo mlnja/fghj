@@ -35,7 +35,7 @@ Action  ->  reducer::reduce(&state, action) -> Result<WorkspaceState, ActionReje
   for making some part of the outside world match what they see:
   containers (`docker::converge`), the SQLite store (`persist`), the
   sidecar route table (`routes`), `/etc/hosts` (`hosts`), the OS resolver
-  (`dns`), `pf` NAT rules (`raw_net`).
+  (`dns`), the raw-zone listeners (`raw_net`).
 
 ## Why an effect is `extract` + `converge`, not one function
 

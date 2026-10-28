@@ -44,10 +44,14 @@ pub fn purge(opts: Options, stop_daemon: impl FnOnce() -> Result<bool>) -> Outco
     let platform = platform::current();
     platform.dns.clear();
     if let Err(e) = raw_net::clear() {
-        outcome.warnings.push(format!(
-            "could not clear {}: {e:#}",
-            platform.nat.footprint().unwrap_or("the raw-port routes")
-        ));
+        outcome
+            .warnings
+            .push(format!("could not clear the raw-zone listeners: {e:#}"));
+    }
+    if let Err(e) = platform.legacy_nat.retire() {
+        outcome
+            .warnings
+            .push(format!("could not remove an older fghjd's pf rules: {e:#}"));
     }
     if let Err(e) = platform.loopback.remove_alias(crate::web::proxy::PROXY_IP) {
         outcome.warnings.push(format!(

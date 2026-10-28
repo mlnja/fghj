@@ -95,28 +95,30 @@ and an unpredictable port.
 
 `raw_net` closes that gap without asking the user to look anything up: each
 raw-zone name gets a **virtual IP** out of a `/16` fghjd owns exclusively
-(`10.222.0.0/16`), DNS answers with it, and the OS NATs
-`virtual_ip:container_port` → `127.0.0.1:host_port`. The result is that
+(`127.223.0.0/16`), DNS answers with it, and fghjd itself listens on
+`virtual_ip:container_port` and copies the bytes to `127.0.0.1:host_port`. The result is that
 `db.myworkspace.fghj.raw.internal:5432` works from the host with the port the
 author declared, not the one Docker picked.
 
-`10.222.0.0/16` is ordinary RFC 1918 space, chosen after `240.0.0.0/8`
-(Class E) was tried and rejected — BSD-derived stacks, macOS's included, have
-a real history of treating Class E as martian and silently dropping it even
-when locally aliased. A dedicated `/16` also gives the backend a clean "this
-entire range is mine" rule for pruning stale interface aliases.
+`127.223.0.0/16` sits inside loopback, next to the proxy's `127.222.0.1`. No
+VPN, LAN or proxy can route `127/8`, so the pool can't shadow a real network
+the way a `10/8` pool could on a corporate subnet. On Linux every
+address in `127/8` is already local, so there's nothing to alias; macOS has
+only `127.0.0.1` and gets one `lo0` alias per address in use. (Class E,
+`240.0.0.0/8`, was tried first and rejected: BSD-derived stacks drop it even
+when aliased.)
 
 ### The allocator is a hash, and then it isn't
 
 `virtual_ip_for` is a pure SHA-256 of the name, folded into the pool. Pure
-matters: the DNS answer path and the NAT reconciler never coordinate, and they
+matters: the DNS answer path and the listener reconciler never coordinate, and they
 must agree on the same address for the same name — a shared hash gets that for
 free, and it survives a daemon restart unchanged.
 
 A pure hash can also collide, and the module says so rather than waving it
 away. A collision only *matters* when it lands two **active** names on the
-same `(virtual_ip, container_port)` pair, since that pair is what a NAT rule
-keys on — two names sharing an address but declaring different ports is
+same `(virtual_ip, container_port)` pair, since that pair is what a listener
+binds — two names sharing an address but declaring different ports is
 harmless. So `assign`/`pick_ip` layer a thin sticky table on top:
 
 - an incumbent keeps its existing address unless one of its ports genuinely
@@ -125,7 +127,10 @@ harmless. So `assign`/`pick_ip` layer a thin sticky table on top:
   its ports is free;
 - incumbents are resolved before newcomers, each in sorted order, so a name
   never moves merely because a "better" slot opened up, and simultaneous
-  arrivals resolve deterministically.
+  arrivals resolve deterministically;
+- an address another program on the machine already holds is a claim too:
+  the bind fails with `AddrInUse`, `reconcile` records it, and the name moves
+  on the next round.
 
 The table is **in-memory only, deliberately not persisted**. Nothing about
 correctness depends on matching a previous process's addresses — only on
@@ -134,40 +139,23 @@ because they read the same table.
 
 A name with no running container still resolves, to its naive hash address.
 That is consistent with the http zone's "always answer in-zone" behaviour: the
-answer is just an address nothing NATs to yet.
+answer is just an address nothing listens on yet.
 
-### The backend owns one pf anchor and nothing else
+### fghjd listens; the kernel doesn't translate
 
-`RawNetBackend::apply` always receives the *complete* desired route set, never
-a diff — the same whole-state-every-tick contract `hosts_file::sync` uses, so
-each platform picks its own idempotency strategy. macOS gets `pf`/`ifconfig`;
-every other platform gets a `NoopBackend` that warns once, so the crate
-compiles everywhere and raw names still resolve (to an address nothing
-answers on) rather than failing differently per OS.
+`raw_net::forward` receives the *complete* desired route set every time,
+never a diff, and makes its listeners match: new addresses get a socket, gone
+ones are closed, and a route whose container moved to a new published port
+keeps its listener and just points new connections at the new port. Each
+connection is a plain two-way byte copy, so it works for any TCP protocol.
 
-The macOS backend's design is worth recording because two earlier attempts
-failed in instructive ways, both documented in `src/raw_net/macos.rs`:
-
-1. **Nesting under `com.apple/*`** — rules loaded two levels under stock
-   macOS's wildcard `rdr-anchor` simply never fired, on a clean boot, and no
-   amount of reloading or rebooting fixed it.
-2. **Owning the top-level ruleset** — reading `/etc/pf.conf`, splicing our
-   rules in, and reloading. This worked, and *silently erased Docker
-   Desktop's own live-only NAT rules within a second of startup*, breaking
-   every `127.0.0.1:<published-port>` on the machine. Docker injects those
-   rules into the live kernel ruleset without ever writing them to disk, so a
-   disk-based reload cannot preserve what it cannot see.
-
-The hard rule that failure established, and that the current design exists to
-honour: **fghjd must never be the one who breaks someone else's networking**,
-even though someone else reloading pf is allowed to transiently break fghjd.
-
-So the backend owns a dedicated top-level named anchor (`fghjd`). A one-time
-idempotent edit adds a bare `rdr-anchor "fghjd"` hook to `/etc/pf.conf` — the
-ordinary way third-party pf tools hook in — and every tick thereafter runs
-only `pfctl -a fghjd -f -`, which can replace nothing but our own anchor's
-contents. The hook line is removed on a clean `clear()` and is harmless if a
-killed daemon leaves it: an anchor with nothing loaded is a no-op.
+Kernel NAT would avoid the userspace hop, and it's the wrong trade. The
+firewall is shared machine state that fghjd doesn't own: any other program
+that reloads it can switch fghjd's rules off without a trace, while they
+still read back as loaded. A socket can't be switched off from outside,
+needs no firewall on any OS, and is the same mechanism the proxy already
+uses for `127.222.0.1:443`. The hop costs nothing that matters for local
+development.
 
 ## Naming a sibling without hardcoding the formula
 

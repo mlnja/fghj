@@ -30,7 +30,7 @@ Tells `fghjd` to go idle:
    suffix.
 3. Clears fghj's managed block from `/etc/hosts`, dropping every
    [additional host](/reference/fghj-yaml/#additional-hosts) alias.
-4. Tears down the raw zone's host-side plumbing — the NAT rules and
+4. Tears down the raw zone's host-side plumbing — the listeners and
    loopback aliases that make a `*.fghj.raw.internal` address reachable
    from the host (see [Networking: HTTP vs. raw](/guides/networking-http-vs-raw/)).
 

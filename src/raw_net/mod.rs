@@ -1,11 +1,13 @@
 //! Host-reachable raw ports for `fghj.raw.internal` nodes: a per-node virtual
-//! IP NAT'd by the OS ([`crate::platform::RawNat`]) to the node's published
+//! IP that fghjd listens on and forwards ([`forward`]) to the node's published
 //! `127.0.0.1:<host_port>`.
 //!
 //! `virtual_ip_for` can collide; that only matters for two active names on the
 //! same `(virtual_ip, port)`. `assign` keeps a sticky in-memory table that
 //! moves a name only on a live conflict. Not persisted: the DNS answer and the
-//! NAT rules only have to agree while the daemon is up.
+//! listeners only have to agree while the daemon is up.
+
+mod forward;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::Ipv4Addr;
@@ -17,12 +19,12 @@ use sha2::{Digest, Sha256};
 
 use crate::platform;
 
-/// Owned exclusively by fghjd, so alias pruning can claim the whole range.
-const POOL_BASE: u32 = u32::from_be_bytes([10, 222, 0, 0]);
+/// Inside `127/8`, so no VPN or LAN route can ever claim it, and on Linux every
+/// address in it is already local. Next to `web::proxy::PROXY_IP`, not over it.
+const POOL_BASE: u32 = u32::from_be_bytes([127, 223, 0, 0]);
 const POOL_SIZE: u32 = 1 << 16;
 
-/// Pure, so DNS and NAT agree without coordinating. `10.222/16` rather than
-/// Class E, which BSD stacks (macOS included) drop even when aliased.
+/// Pure, so DNS and the listeners agree without coordinating.
 pub fn virtual_ip_for(name: &str) -> Ipv4Addr {
     let digest = Sha256::digest(name.as_bytes());
     let hash = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
@@ -94,11 +96,13 @@ fn pick_ip(
 
 /// A name keeps its slot unless it conflicts; names no longer active are
 /// dropped.
+/// `taken` is what other programs on the machine hold.
 fn assign(
     endpoints: &[RawEndpoint],
     previous: &HashMap<String, Ipv4Addr>,
+    taken: &HashSet<(Ipv4Addr, u16)>,
 ) -> HashMap<String, Ipv4Addr> {
-    let mut claimed: HashSet<(Ipv4Addr, u16)> = HashSet::new();
+    let mut claimed: HashSet<(Ipv4Addr, u16)> = taken.clone();
     let mut next: HashMap<String, Ipv4Addr> = HashMap::new();
 
     // Incumbents first, so a name moves only on a live conflict; both groups in
@@ -150,31 +154,70 @@ pub fn resolve(name: &str) -> Ipv4Addr {
         .unwrap_or_else(|| virtual_ip_for(name))
 }
 
+fn forwarder() -> &'static forward::Forwarder {
+    static FORWARDER: OnceLock<forward::Forwarder> = OnceLock::new();
+    FORWARDER.get_or_init(forward::Forwarder::default)
+}
+
+/// Addresses another program held when fghjd tried them. Kept for the
+/// daemon's lifetime: the name moved, and moving it back gains nothing.
+fn taken() -> &'static Mutex<HashSet<(Ipv4Addr, u16)>> {
+    static TAKEN: OnceLock<Mutex<HashSet<(Ipv4Addr, u16)>>> = OnceLock::new();
+    TAKEN.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn desired() -> &'static Mutex<Vec<RouteSpec>> {
+    static DESIRED: OnceLock<Mutex<Vec<RouteSpec>>> = OnceLock::new();
+    DESIRED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Each round moves the names whose address turned out to be taken; one is
+/// almost always enough, and the bound only matters on a pathological host.
+const MAX_ROUNDS: usize = 8;
+
 pub fn reconcile(endpoints: &[RawEndpoint]) -> Result<()> {
-    let next = {
-        let mut table = assignments().lock().unwrap();
-        let next = assign(endpoints, &table);
-        *table = next.clone();
-        next
-    };
-    platform::current().nat.apply(&routes_for(endpoints, &next))
+    let loopback = &*platform::current().loopback;
+    for _ in 0..MAX_ROUNDS {
+        let routes = {
+            let mut table = assignments().lock().unwrap();
+            let next = assign(endpoints, &table, &taken().lock().unwrap());
+            *table = next.clone();
+            routes_for(endpoints, &next)
+        };
+        *desired().lock().unwrap() = routes.clone();
+        let busy = forwarder().apply(&routes, loopback)?;
+        if busy.is_empty() {
+            return Ok(());
+        }
+        taken().lock().unwrap().extend(busy);
+    }
+    Ok(())
 }
 
 pub fn clear() -> Result<()> {
     assignments().lock().unwrap().clear();
-    platform::current().nat.clear()
+    desired().lock().unwrap().clear();
+    forwarder().clear(&*platform::current().loopback);
+    Ok(())
 }
 
 pub fn current_routes() -> Vec<RouteSpec> {
-    platform::current().nat.status()
+    forwarder().status()
 }
 
-/// The applied routes, and those of them the OS isn't serving. `None` where
-/// raw routing isn't implemented.
-pub fn route_health() -> Option<Result<(Vec<RouteSpec>, Vec<RouteSpec>)>> {
-    let routes = current_routes();
-    let unserved = platform::current().nat.unserved(&routes)?;
-    Some(unserved.map(|unserved| (routes, unserved)))
+/// The routes fghjd should be serving, and those of them nothing listens on.
+pub fn route_health() -> (Vec<RouteSpec>, Vec<RouteSpec>) {
+    let listening: HashSet<(Ipv4Addr, u16)> = current_routes()
+        .into_iter()
+        .map(|r| (r.virtual_ip, r.container_port))
+        .collect();
+    let routes = desired().lock().unwrap().clone();
+    let unserved = routes
+        .iter()
+        .filter(|r| !listening.contains(&(r.virtual_ip, r.container_port)))
+        .copied()
+        .collect();
+    (routes, unserved)
 }
 
 #[cfg(test)]
@@ -198,10 +241,13 @@ mod tests {
         ] {
             let ip = virtual_ip_for(name);
             let octets = ip.octets();
-            assert_eq!(octets[0], 10, "{name} produced {ip}, outside 10.222.0.0/16");
             assert_eq!(
-                octets[1], 222,
-                "{name} produced {ip}, outside 10.222.0.0/16"
+                octets[0], 127,
+                "{name} produced {ip}, outside 127.223.0.0/16"
+            );
+            assert_eq!(
+                octets[1], 223,
+                "{name} produced {ip}, outside 127.223.0.0/16"
             );
         }
     }
@@ -293,16 +339,16 @@ mod tests {
 
     #[test]
     fn pick_ip_keeps_the_preferred_slot_when_free() {
-        let preferred = Ipv4Addr::new(10, 222, 1, 1);
-        let naive = Ipv4Addr::new(10, 222, 2, 2);
+        let preferred = Ipv4Addr::new(127, 223, 1, 1);
+        let naive = Ipv4Addr::new(127, 223, 2, 2);
         let ip = pick_ip(Some(preferred), naive, &[80], &HashSet::new());
         assert_eq!(ip, preferred);
     }
 
     #[test]
     fn pick_ip_probes_forward_when_the_preferred_slot_conflicts() {
-        let preferred = Ipv4Addr::new(10, 222, 1, 1);
-        let naive = Ipv4Addr::new(10, 222, 1, 1);
+        let preferred = Ipv4Addr::new(127, 223, 1, 1);
+        let naive = Ipv4Addr::new(127, 223, 1, 1);
         let mut claimed = HashSet::new();
         claimed.insert((preferred, 80));
         let ip = pick_ip(Some(preferred), naive, &[80], &claimed);
@@ -312,7 +358,7 @@ mod tests {
 
     #[test]
     fn pick_ip_ignores_conflicts_on_ports_it_does_not_use() {
-        let preferred = Ipv4Addr::new(10, 222, 1, 1);
+        let preferred = Ipv4Addr::new(127, 223, 1, 1);
         let mut claimed = HashSet::new();
         claimed.insert((preferred, 443)); // different port, same address
         let ip = pick_ip(Some(preferred), preferred, &[80], &claimed);
@@ -322,7 +368,7 @@ mod tests {
     #[test]
     fn assign_gives_new_uncontested_names_their_naive_hash() {
         let endpoints = vec![endpoint("solo.myworkspace.fghj.raw.internal", 80)];
-        let assigned = assign(&endpoints, &HashMap::new());
+        let assigned = assign(&endpoints, &HashMap::new(), &HashSet::new());
         assert_eq!(
             assigned["solo.myworkspace.fghj.raw.internal"],
             virtual_ip_for("solo.myworkspace.fghj.raw.internal")
@@ -334,9 +380,9 @@ mod tests {
         let mut previous = HashMap::new();
         previous.insert(
             "gone.myworkspace.fghj.raw.internal".to_string(),
-            Ipv4Addr::new(10, 222, 9, 9),
+            Ipv4Addr::new(127, 223, 9, 9),
         );
-        assert!(assign(&[], &previous).is_empty());
+        assert!(assign(&[], &previous, &HashSet::new()).is_empty());
     }
 
     #[test]
@@ -344,7 +390,7 @@ mod tests {
         let (a, b) = find_colliding_pair();
         let endpoints = vec![endpoint(&a, 80), endpoint(&b, 80)];
 
-        let assigned = assign(&endpoints, &HashMap::new());
+        let assigned = assign(&endpoints, &HashMap::new(), &HashSet::new());
         assert_ne!(
             assigned[&a], assigned[&b],
             "colliding names sharing a port must end up on different virtual IPs"
@@ -354,11 +400,20 @@ mod tests {
     }
 
     #[test]
+    fn assign_moves_a_name_off_an_address_another_program_holds() {
+        let name = "db.myworkspace.fghj.raw.internal";
+        let naive = virtual_ip_for(name);
+        let taken = HashSet::from([(naive, 5432)]);
+        let assigned = assign(&[endpoint(name, 5432)], &HashMap::new(), &taken);
+        assert_ne!(assigned[name], naive);
+    }
+
+    #[test]
     fn assign_does_not_collide_two_names_on_different_ports() {
-        // pf rules key on (ip, port), so sharing an IP on different ports is fine.
+        // Listeners key on (ip, port), so sharing an IP on different ports is fine.
         let (a, b) = find_colliding_pair();
         let endpoints = vec![endpoint(&a, 80), endpoint(&b, 81)];
-        let assigned = assign(&endpoints, &HashMap::new());
+        let assigned = assign(&endpoints, &HashMap::new(), &HashSet::new());
         assert_eq!(assigned[&a], virtual_ip_for(&a));
         assert_eq!(assigned[&b], virtual_ip_for(&b));
     }
@@ -367,10 +422,10 @@ mod tests {
     fn assign_keeps_an_incumbent_when_its_collision_partner_disappears() {
         let (a, b) = find_colliding_pair();
         let endpoints = vec![endpoint(&a, 80), endpoint(&b, 80)];
-        let first_round = assign(&endpoints, &HashMap::new());
+        let first_round = assign(&endpoints, &HashMap::new(), &HashSet::new());
 
         let remaining = vec![endpoint(&b, 80)];
-        let second_round = assign(&remaining, &first_round);
+        let second_round = assign(&remaining, &first_round, &HashSet::new());
 
         assert_eq!(
             second_round[&b], first_round[&b],

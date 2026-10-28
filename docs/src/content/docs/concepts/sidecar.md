@@ -201,7 +201,7 @@ one shared IP. The actual fix was splitting the zone in two —
 `fghj.internal` (HTTP(S)-canonical, proxied, safe to share one IP) and
 `fghj.raw.internal` (raw/direct, one address per node and never shared — the
 real container IP via Docker's native per-network DNS from inside the run,
-and a per-node virtual IP NAT'd to the container's published port from the
+and a per-node virtual IP forwarded to the container's published port from the
 host) — rather than trying to patch the sentinel further. Docker
 network aliases alone couldn't implement the http side of the split
 (they're exact-match only, and can't express `wildcard_hosts` or be added

@@ -167,7 +167,7 @@ proxied, same address in or out of the run's docker network — see [Split
 DNS](/concepts/split-dns/)) and `cart.myworkspace.fghj.raw.internal` (raw,
 never TLS-terminated: from inside the network it resolves straight to the
 container's own IP via Docker's native per-network DNS, and from the host
-`fghjd` answers with a per-node virtual IP out of a `/16` it owns, NAT'd to
+`fghjd` answers with a per-node virtual IP out of a `/16` it owns, forwarded to
 the port Docker published — so the name works from the host too, on the
 port the author declared, for declared ports only). Only the raw domain is ever a real Docker network alias on the
 node's own container; the http one is answered by the run's sidecar

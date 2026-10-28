@@ -168,7 +168,7 @@ happened.
 
 `running: false` is the load-bearing half. Every state projection filters on
 a container Docker reports as `running`, so a finished task drops out of route
-resolution, DNS zones, and raw-net NAT without any of them needing to know
+resolution, DNS zones, and the raw-zone listeners without any of them needing to know
 the kind exists. Had `running` stayed `true`, a completed migration would read
 as permanent drift and the proxy would keep hunting for a route into a
 container that's supposed to be gone.

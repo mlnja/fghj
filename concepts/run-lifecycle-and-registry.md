@@ -188,7 +188,7 @@ happened:
 
 - **Docker not answering** (`Unknown`) — `observe` reports the
   last reading again with `observed.unseen` set. The status stays what it
-  was, so routes, `/etc/hosts` and NAT don't churn on a blip, but the
+  was, so routes, `/etc/hosts` and the raw-zone listeners don't churn on a blip, but the
   condition says nothing is known and heal leaves it alone.
 - **Down without being asked** — `Interrupted` when it went down while
   fghjd couldn't watch (Docker unseen, or fghjd not running: the next fresh

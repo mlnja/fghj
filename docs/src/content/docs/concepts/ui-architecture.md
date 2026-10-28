@@ -112,7 +112,7 @@ the current node/edge set on every render:
 - **Telemetry** (the "⚡" button in the header) — the daemon's view of
   itself rather than of any one workspace: its recent log lines; a live
   listing of the managed `/etc/hosts` entries, the `/etc/resolver` zones
-  with the port each points at, and the NAT routes backing the raw zone;
+  with the port each points at, and the raw-zone routes fghjd listens on;
   the **pull queue** — every clone/download started this daemon lifetime,
   with its raw Git output (the "☰" next to **Download all** opens straight
   to it); **Doctor**; and **Help**, the key to the map's lines and

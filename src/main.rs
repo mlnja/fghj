@@ -449,7 +449,12 @@ fn uninstall(yes: bool, keep_ca: bool, keep_state: bool) -> Result<()> {
     if !yes {
         let system_config: Vec<&str> = std::iter::once("the fghjd-managed block in /etc/hosts")
             .chain(platform.dns.footprint())
-            .chain(platform.nat.footprint())
+            .chain(
+                platform
+                    .loopback
+                    .needs_aliases()
+                    .then_some("the loopback aliases for the proxy and the raw zone"),
+            )
             .collect();
         println!("This will remove:");
         println!(

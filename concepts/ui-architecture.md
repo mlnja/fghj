@@ -164,17 +164,16 @@ fresh from `graph.nodes`/`graph.edges` on every render (`$derived`):
   no children is its own single row. This replaced a separate `Switch` tab
   that rebuilt a switch's plan in the browser from the live environment;
   `Doctor`, the same report `fghj doctor` prints; and `Help`, the key to the
-  map. Doctor's DNS and NAT checks
+  map. Doctor's DNS and raw-zone checks
   expand into what they cover: the managed `/etc/hosts` block, the
-  `/etc/resolver` zones with the ephemeral port each points at, and the `pf`
-  NAT routes backing the raw zone, which `raw-routes` checks are loaded in the
-  anchor. Together these answer "is the plumbing actually up" without reading
+  `/etc/resolver` zones with the ephemeral port each points at, and the raw-zone
+  routes, which `raw-zone listeners` checks fghjd is actually listening on. Together these answer "is the plumbing actually up" without reading
   `fghjd`'s stdout — see [[split-dns]], [[host-aliases]],
   [[two-zones-and-raw-ports]], [[preflight-checks]].
 
   `Logs` polls (1.5s); `Doctor` deliberately does not. It fetches on tab open
   and then only from its own re-run button, because every check shells out to
-  the OS (`ifconfig`, `pfctl`, `getaddrinfo`, `security verify-cert`, three
+  the OS (`ifconfig`, `getaddrinfo`, `security verify-cert`, three
   TCP connects) and nothing it measures changes on its own — a missing
   loopback alias does not come back by itself. The interaction a doctor wants
   is read, go fix, re-run, which is a button, not a timer.

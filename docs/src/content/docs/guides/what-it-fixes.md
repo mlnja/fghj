@@ -14,7 +14,7 @@ docker network**:
 | | from your browser, `psql`, `curl` | from a container in the run |
 |---|---|---|
 | `minio.api.shop.fghj.internal` | the host proxy, on 443, trusted cert | the run's sidecar, on 443, same cert |
-| `db.web.shop.fghj.raw.internal` | a virtual IP NAT'd to the declared port | the container's own IP, same port |
+| `db.web.shop.fghj.raw.internal` | a virtual IP forwarded to the declared port | the container's own IP, same port |
 
 The hostname does not change. The port does not change. The scheme does not
 change. Nothing needs to know which side of the network boundary it's on.
@@ -36,7 +36,7 @@ Two mechanisms produce the symmetry, one per zone:
 - **The raw zone** (`*.fghj.raw.internal`) is a real Docker network alias
   inside the network, so it resolves to the container directly. From the
   host, `fghjd` answers with a per-node virtual IP out of a `/16` it owns
-  and NATs it to the port the author declared. See [Node identity &
+  and forwards it to the port the author declared. See [Node identity &
   domains](/concepts/node-identity-and-domains/).
 
 Which one to use for a given call is a short decision, covered in [HTTP vs.
@@ -80,7 +80,7 @@ connections and your teammate's notes all disagree, and you keep a mental
 lookup table of which number means which database.
 
 fghj publishes nothing you have to remember. Each raw node gets its own
-virtual IP, NAT'd to the port the author *declared* — so the canonical port
+virtual IP, forwarded to the port the author *declared* — so the canonical port
 is the port, for all of them at once:
 
 ```bash
@@ -188,4 +188,4 @@ network.
 | **Fog-of-war graph** | The graph shows [what's actually on disk](/concepts/fog-of-war-visibility/). Selecting a flow highlights its slice and dims the rest — it never hides it, so you can always see what you'd pull in next. |
 | **Federated config** | Every repo declares its own dependencies in [its own `.fghj.yaml`](/concepts/flat-workspace-model/). Peers, not a tree with one root, and no central file to merge-conflict over. |
 | **WebSockets and SSE** | Pass straight through. After routing on SNI the proxy relays bytes and rewrites no headers. |
-| **Leaves no trace** | [`sudo fghj uninstall`](/cli/uninstall/) reverses all of it: the trusted root CA, the resolver file, the loopback aliases, the pf rules, `/var/lib/fghjd`. |
+| **Leaves no trace** | [`sudo fghj uninstall`](/cli/uninstall/) reverses all of it: the trusted root CA, the resolver file, the loopback aliases, `/var/lib/fghjd`. |

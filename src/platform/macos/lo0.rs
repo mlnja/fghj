@@ -27,6 +27,10 @@ impl Loopback for Lo0 {
     fn interface(&self) -> &'static str {
         "lo0"
     }
+
+    fn needs_aliases(&self) -> bool {
+        true
+    }
 }
 
 pub(super) fn add_alias(ip: Ipv4Addr) -> Result<()> {

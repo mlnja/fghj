@@ -56,7 +56,7 @@ stating plainly: this container gets **a CA private key bind-mounted in**.
 whole reason the signing CA exists.)
 That deserves a minimal entrypoint someone can audit in one sitting, not a
 branch inside a binary that also requires root, installs trust stores, edits
-`/etc/pf.conf` and serves the full control API.
+`/etc/hosts` and serves the full control API.
 
 It also has no CLI arguments and no configuration. Every path is a hardcoded
 constant (`/etc/fghj-sidecar/ca`, `/etc/fghj-sidecar/routes/routes.json`), so

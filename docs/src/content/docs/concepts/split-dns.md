@@ -23,8 +23,8 @@ name — and `*.fghj.raw.internal` — raw/direct, one address *per node*. Both
 are served by the same `fghjd` DNS server and both are wired into the host's
 OS resolver, but they answer differently: an in-zone `fghj.internal` name
 gets the one shared `127.222.0.1`, while a `fghj.raw.internal` name gets that
-node's own virtual IP out of `10.222.0.0/16`, NAT'd through to the
-container's published port (see [Networking: HTTP vs
+node's own virtual IP out of `127.223.0.0/16`, where fghjd listens and
+forwards to the container's published port (see [Networking: HTTP vs
 raw](/guides/networking-http-vs-raw/)). Inside a run's network the raw name
 needs no help from `fghjd` at all — it's a real Docker network alias, so
 Docker's own embedded resolver already points a sibling container straight at
@@ -51,8 +51,7 @@ installing fghj can't collide with a local nginx or a `docker run -p 80:80`
 that was already working — and a `curl http://127.0.0.1/` still reaches
 whatever the developer expects, not fghj.
 
-It sits inside `127.0.0.0/8` rather than the `10.222.0.0/16` raw pool
-because RFC 1122 forbids a loopback-destined packet from ever reaching the
+It sits inside `127.0.0.0/8`, like the raw pool next to it, because RFC 1122 forbids a loopback-destined packet from ever reaching the
 wire: no LAN, VPN or corporate network can collide with it. `10/8` is
 ordinary private space that real sites do use, so an address there can
 shadow a host the developer actually needs. Docker's embedded resolver
@@ -108,6 +107,10 @@ touched.
 
 ## Limitations
 
-Linux (`systemd-resolved`) and Windows (NRPT) integration aren't
-implemented yet — `fghjd` currently prints a manual-setup message on those
-platforms instead of configuring anything.
+On Linux, `fghjd` routes the same zones through systemd-resolved instead
+of `/etc/resolver`: it creates a dummy link `fghj0` whose DNS server is
+`fghjd` and whose routing domains are `~fghj.internal` and
+`~fghj.raw.internal`, so only those names reach it. `resolvectl status
+fghj0` shows it; stopping `fghjd` deletes the link. Windows (NRPT)
+integration isn't implemented — `fghjd` prints a manual-setup message
+there instead of configuring anything.

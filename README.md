@@ -126,8 +126,7 @@ This is all of it:
 |---|---|---|
 | A managed block of host entries | `/etc/hosts`, between `# fghj-managed-begin`/`-end` | `fghj daemon stop` |
 | A split-DNS resolver for `*.fghj.internal` only | `/etc/resolver/fghj.internal` | `fghj daemon stop` |
-| Loopback aliases | `127.222.0.1` and `10.222.0.0/16` on `lo0` | `fghj daemon stop` |
-| A pf anchor for raw-port NAT, plus one hook line | the `fghjd` anchor, `/etc/pf.conf` | `fghj daemon stop` |
+| Loopback aliases | `127.222.0.1` and `127.223.0.0/16` on `lo0` | `fghj daemon stop` |
 | A local root CA, trusted for TLS | System keychain, as `fghj local CA` | `sudo fghj uninstall` |
 | Daemon state, including the CA's private key (root-only) | `/var/lib/fghjd` | `sudo fghj uninstall` |
 | Containers, networks and volumes, all prefixed `fghj-` | Docker | left alone, on purpose |

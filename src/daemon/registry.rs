@@ -334,7 +334,7 @@ impl WorkspaceRegistry {
     }
 
     /// Live reads go through the same actor state the effects converge from, so the
-    /// proxy and `pf`/`/etc/resolver` can't disagree.
+    /// proxy, the raw-zone listeners and the OS resolver can't disagree.
     pub fn states(&self) -> BTreeMap<String, Arc<state::WorkspaceState>> {
         self.actors
             .borrow()

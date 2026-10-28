@@ -13,11 +13,9 @@ shims.
 ## Prerequisites
 
 - **macOS on Apple Silicon.** Intel Macs aren't supported. **Linux support is in progress.**
-  Four pieces of `fghjd` are written against macOS interfaces and each needs a
-  Linux counterpart: its split-DNS integration (writing
-  `/etc/resolver/fghj.internal`), its trust-store handling (shelling out to
-  `security`), its raw-port NAT (`pf`), and its SSH-agent-socket recovery for
-  Git-over-SSH clones. Until those land there is no Linux build to install —
+  Split DNS goes through systemd-resolved there, and its trust-store
+  handling (shelling out to `security` on macOS) still needs a Linux
+  counterpart. Until it lands there is no Linux build to install —
   the release publishes `darwin-arm64` only. Windows would
   need the same work again and nobody is doing it.
 - **Docker** — Docker Desktop, OrbStack, or Colima. `fghjd` uses the same
@@ -30,7 +28,7 @@ shims.
 
 :::note[What this changes on your machine]
 `fghjd` edits `/etc/hosts` and `/etc/resolver`, aliases two loopback
-ranges, loads a `pf` anchor, and trusts a local root CA. Everything but the
+ranges, and trusts a local root CA. Everything but the
 CA and its state directory is undone by `fghj daemon stop`; those two are
 removed by `sudo fghj uninstall`. The full list, with commands to check it
 yourself, is [What fghj touches, and how to remove

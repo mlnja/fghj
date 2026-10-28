@@ -19,12 +19,11 @@ Every node gets **two** domains, always differing only in suffix:
 - **`{node}.{workspace}.fghj.raw.internal`** — raw/direct. From inside the
   run's own docker network it resolves straight to the real container IP,
   on any port the container listens on. From the **host** the same name
-  also works: fghjd hands out a per-node virtual IP and NATs it to the
-  port Docker published, so `db.myworkspace.fghj.raw.internal:5432` is the
+  also works: fghjd hands out a per-node virtual IP, listens on it, and
+  forwards to the port Docker published, so `db.myworkspace.fghj.raw.internal:5432` is the
   port the author declared, not the one Docker picked (see
   [Node identity & domains](/concepts/node-identity-and-domains/#domain-derivation-one-formula-no-exceptions-two-zones)).
-  The host side reaches only **declared** ports, and is a macOS `pf`
-  mechanism today. Either way: no TLS, no certificate, fastest path, no CA
+  The host side reaches only **declared** ports. Either way: no TLS, no certificate, fastest path, no CA
   trust needed.
 - **`{node}.{workspace}.fghj.internal`** — HTTP(S)-canonical, proxied.
   Resolves to the run's sidecar from inside the network, and to the host
@@ -158,7 +157,7 @@ Why not raw, and why not plain http, here specifically:
   and no certificate is ever issued for a `fghj.raw.internal` name. An S3
   client, a browser, or anything else that expects a `https://` endpoint
   has no raw option. (Plain `http://` against the raw zone *would* reach a
-  host-side caller on macOS, via the virtual-IP NAT above — it just can't
+  host-side caller on macOS, via the virtual-IP forwarder above — it just can't
   be the TLS endpoint this case needs, and it leans on host plumbing the
   http zone doesn't need.)
 - **Plain `http://` on the http zone always redirects to `https://`.**

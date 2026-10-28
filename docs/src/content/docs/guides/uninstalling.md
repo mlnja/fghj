@@ -49,27 +49,15 @@ uncleanly.
 | Managed hosts block | `/etc/hosts`, between `# fghj-managed-begin` and `# fghj-managed-end` |
 | Split-DNS resolver file | `/etc/resolver/fghj.internal` |
 | Proxy loopback alias | `127.222.0.1` on `lo0` |
-| Raw-zone loopback aliases | `10.222.0.0/16` addresses on `lo0` |
-| pf redirect rules | the `fghjd` pf anchor |
+| Raw-zone loopback aliases | `127.223.0.0/16` addresses on `lo0` |
 | Control socket | `/var/run/fghjd.sock` |
-
-A clean stop also reverts the one-time edit fghj makes to `/etc/pf.conf` —
-an `rdr-anchor "fghjd"` hook line wrapped in
-`# --- fghjd raw-net anchor hook ... ---` markers — and disables pf again if
-fghjd was the process that enabled it.
-
-If `fghjd` is killed with `SIGKILL` or the machine loses power, those two
-markers and the hook line can be left behind. That is harmless: an anchor
-hook with nothing loaded into it is a no-op. Delete the three marked lines
-if you want the file pristine.
 
 The next start self-heals all of the above. To verify by hand:
 
 ```bash
-grep -n "fghj" /etc/hosts /etc/pf.conf
+grep -n "fghj" /etc/hosts
 ls /etc/resolver/
-ifconfig lo0 | grep -E "127\.222|10\.222"
-sudo pfctl -a fghjd -s nat
+ifconfig lo0 | grep -E "127\.22[23]"
 ```
 
 ## Durable state on disk
@@ -218,7 +206,7 @@ pgrep -l fghjd; ls /var/run/fghjd.sock 2>/dev/null
 
 # No system config
 grep -c fghj /etc/hosts; ls /etc/resolver/fghj.internal 2>/dev/null
-ifconfig lo0 | grep -E "127\.222|10\.222"
+ifconfig lo0 | grep -E "127\.22[23]"
 security find-certificate -c "fghj local CA" \
   /Library/Keychains/System.keychain 2>/dev/null
 
