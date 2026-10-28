@@ -14,7 +14,6 @@ pub(super) fn platform() -> Platform {
     Platform {
         dns: Box::new(resolved::ResolvedLink),
         trust: Box::new(unsupported::NoTrustStore),
-        legacy_nat: Box::new(unsupported::NoLegacyNat),
         loopback: Box::new(unsupported::NoLoopback),
         session: Box::new(runtime_dir::RuntimeDir::system()),
         packaging: Box::new(apt::Apt),

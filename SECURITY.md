@@ -27,5 +27,6 @@ could without fghj installed. For example:
 - reading the root CA's private key without root;
 - reaching the control socket or API without the access it should require;
 - a container escaping its run's network through the sidecar or proxy;
-- changes to `/etc/hosts`, `/etc/resolver`, `pf` or the keychain beyond what
+- changes to `/etc/hosts`, the OS resolver configuration, loopback addresses
+  or the system trust store beyond what
   [What fghj touches](https://fghj.mlops.ninja/guides/uninstalling/) lists.

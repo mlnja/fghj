@@ -1,5 +1,5 @@
 //! `lo0` aliases: macOS assigns only `127.0.0.1` to loopback, so every other
-//! address fghj listens on or NATs from has to be added by hand.
+//! address fghj listens on has to be added by hand.
 
 use std::net::Ipv4Addr;
 use std::process::Command;
@@ -33,16 +33,16 @@ impl Loopback for Lo0 {
     }
 }
 
-pub(super) fn add_alias(ip: Ipv4Addr) -> Result<()> {
+fn add_alias(ip: Ipv4Addr) -> Result<()> {
     run(Command::new("ifconfig").args(["lo0", "alias", &ip.to_string(), "up"]))
 }
 
-pub(super) fn remove_alias(ip: Ipv4Addr) -> Result<()> {
+fn remove_alias(ip: Ipv4Addr) -> Result<()> {
     run(Command::new("ifconfig").args(["lo0", "-alias", &ip.to_string()]))
 }
 
 /// `ifconfig lo0`'s output.
-pub(super) fn addresses() -> Result<String> {
+fn addresses() -> Result<String> {
     let output = Command::new("ifconfig")
         .arg("lo0")
         .output()

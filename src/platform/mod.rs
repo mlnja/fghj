@@ -17,7 +17,6 @@ mod dns;
 mod linux;
 mod loopback;
 mod macos;
-mod nat;
 mod packaging;
 mod session;
 mod trust;
@@ -25,7 +24,6 @@ mod unsupported;
 
 pub use dns::{DnsRouting, OsRouting};
 pub use loopback::Loopback;
-pub use nat::LegacyNat;
 pub use packaging::Packaging;
 pub use session::Session;
 pub use trust::TrustStore;
@@ -35,7 +33,6 @@ pub use trust::TrustStore;
 pub struct Platform {
     pub dns: Box<dyn DnsRouting>,
     pub trust: Box<dyn TrustStore>,
-    pub legacy_nat: Box<dyn LegacyNat>,
     pub loopback: Box<dyn Loopback>,
     pub session: Box<dyn Session>,
     pub packaging: Box<dyn Packaging>,

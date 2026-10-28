@@ -8,14 +8,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use super::{DnsRouting, LegacyNat, Loopback, OsRouting, Packaging, Platform, Session, TrustStore};
+use super::{DnsRouting, Loopback, OsRouting, Packaging, Platform, Session, TrustStore};
 use crate::daemon_log;
 
 pub(super) fn platform() -> Platform {
     Platform {
         dns: Box::new(NoDnsRouting),
         trust: Box::new(NoTrustStore),
-        legacy_nat: Box::new(NoLegacyNat),
         loopback: Box::new(NoLoopback),
         session: Box::new(PlainSession),
         packaging: Box::new(NoPackaging),
@@ -76,15 +75,6 @@ impl TrustStore for NoTrustStore {
     fn untrusted_hint(&self) -> &'static str {
         "add the CA to your system trust store by hand; `fghj doctor --fix` can't on this \
          platform"
-    }
-}
-
-/// Nothing older to clean up.
-pub(super) struct NoLegacyNat;
-
-impl LegacyNat for NoLegacyNat {
-    fn retire(&self) -> Result<()> {
-        Ok(())
     }
 }
 

@@ -98,12 +98,6 @@ impl DaemonControl {
             )
         })?;
 
-        if let Err(e) = platform::current().legacy_nat.retire() {
-            daemon_log::warn(format!(
-                "fghjd: failed to remove an older fghjd's raw-zone NAT: {e:#}"
-            ));
-        }
-
         let http_listener = proxy::bind_http().await?;
         let https_listener = proxy::bind_https().await?;
         let http_task = supervisor::supervise_forever(
