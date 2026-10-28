@@ -62,13 +62,14 @@ from the last `npm run build`, so a stale UI compiles happily into a local
 binary, so the symptom is "my change didn't appear", which points at its own
 cause.
 
-## Why the binaries are macOS-only and the sidecar is not
+## Why the released binaries are macOS-only and the sidecar is not
 
-`fghjd` shells out to macOS's `security` CLI for trust-store management and
-writes macOS-specific paths (`/etc/resolver`, the Keychain) — see
-[[local-ca-and-tls-proxy]] and [[split-dns]]. The Homebrew formula says
-`depends_on :macos` and offers no source-build fallback, because building from
-source wouldn't run anywhere else either.
+Everything OS-specific sits behind `src/platform/`, and Linux (Ubuntu LTS) has
+its own implementations there: systemd-resolved for split DNS, Debian's CA
+store and the browsers' NSS databases for trust. What it doesn't have yet is a
+package, so the release still ships macOS binaries only; see [The Debian
+package](#the-debian-package-planned) below. The Homebrew formula says
+`depends_on :macos`, because the tap is the macOS install path.
 
 The sidecar is the opposite: it is a Linux container by definition, and it has
 to match whatever architecture the user's Docker runs. The release ships
@@ -108,6 +109,43 @@ not a per-user LaunchAgent: it binds 80/443, installs a system-trusted root CA,
 and edits `/etc/resolver` and `/etc/hosts`. `sudo brew services start fghj` is
 the documented start, and the privilege split that makes that safe to run as
 root is [[persistence-and-workspace-store]]'s subject.
+
+## The Debian package (planned)
+
+Not built yet; this is what it's decided to contain. Ubuntu installs fghj
+from `apt.mlops.ninja` (`mlnja/apt`, a signed static repository on GitHub
+Pages), which rebuilds its index from each product's GitHub release assets.
+
+- **Built** with `cargo-deb` on `ubuntu-22.04` and `ubuntu-22.04-arm`, the
+  oldest supported LTS, so the glibc it links against is one every later
+  LTS has. One `.deb` per architecture serves 22.04, 24.04 and 26.04.
+- **Ships** `fghj`, `fghjd` and `fghjd.service`, with `Restart=always`: when
+  `fghj wire` names a different Docker, fghjd exits so the service manager
+  starts it on the new socket ([[docker-and-downloads]]). The package's
+  scripts enable and (re)start the unit, so installing is the whole setup
+  until the first `fghj wire`.
+- **Published** by attaching the `.deb`s to the GitHub release and sending
+  `mlnja/apt` a `repository_dispatch` of type `release`.
+
+Its dependencies are everything `fghjd` runs:
+
+| Package | Why | Field |
+|---|---|---|
+| `libnss3-tools` | `certutil`, which adds the CA to Firefox's and Chrome's own databases | Depends |
+| `ca-certificates` | `update-ca-certificates`, for the system store | Depends |
+| `systemd-resolved \| systemd (<< 251)` | split DNS through the `fghj0` link; its own package from 24.04, part of `systemd` 249 on 22.04 | Depends |
+| `iproute2` | `ip`, to create the `fghj0` link | Depends |
+| `git` | cloning the repos a workspace includes | Depends |
+| `docker.io \| docker-ce \| docker-desktop` | the engine | Recommends |
+
+`libnss3-tools` is a hard dependency although fghj runs without it: without
+it, the one place the failure shows is the browser's certificate warning,
+which the doctor catches but nobody should have to meet. It also brings
+`libnss3`, which a machine whose only browser is the snap Firefox doesn't
+have, since snaps bundle their own. Docker is only recommended, because users
+install it in mutually exclusive ways (Ubuntu's, Docker's, Desktop, rootless)
+and a hard dependency would pick one for them; apt installs recommends by
+default, and the doctor covers the rest.
 
 ## What CI checks, and the one suite it can't run
 
