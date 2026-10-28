@@ -211,10 +211,76 @@ pub async fn serve_https(
                 Ok(tls_stream) => {
                     handle_https_connection(tls_stream, peer.ip(), control_port, routes).await
                 }
-                // Expected for out-of-zone SNI.
-                Err(e) => eprintln!("fghjd: TLS handshake error: {e}"),
+                Err(e) => report_handshake_failure(&e),
             }
         });
+    }
+}
+
+/// Why a TLS handshake didn't finish, for deciding whether anyone needs to
+/// hear about it.
+#[derive(Debug, PartialEq, Eq)]
+enum HandshakeFailure {
+    /// The client hung up first: browsers pre-connect and abandon sockets all
+    /// the time, and port probes never send a hello.
+    Abandoned,
+    /// A name fghj doesn't serve, so there was no certificate to offer.
+    NotOurs,
+    /// The client refused the certificate: it doesn't trust fghj's CA.
+    Untrusted(rustls::AlertDescription),
+    Other,
+}
+
+/// `tokio-rustls` wraps rustls's own error in the `io::Error`.
+fn classify_handshake_failure(e: &io::Error) -> HandshakeFailure {
+    use rustls::AlertDescription::{BadCertificate, CertificateUnknown, UnknownCA};
+    if matches!(
+        e.kind(),
+        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+    ) {
+        return HandshakeFailure::Abandoned;
+    }
+    match e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+    {
+        Some(rustls::Error::AlertReceived(
+            alert @ (UnknownCA | BadCertificate | CertificateUnknown),
+        )) => HandshakeFailure::Untrusted(*alert),
+        Some(rustls::Error::General(why)) if why.contains("no server certificate chain") => {
+            HandshakeFailure::NotOurs
+        }
+        _ => HandshakeFailure::Other,
+    }
+}
+
+/// Only what someone could act on, and a refused certificate at most once a
+/// minute: one browser that doesn't trust the CA refuses every connection.
+fn report_handshake_failure(e: &io::Error) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_UNTRUSTED_MS: AtomicU64 = AtomicU64::new(0);
+    const EVERY_MS: u64 = 60_000;
+
+    match classify_handshake_failure(e) {
+        HandshakeFailure::Abandoned | HandshakeFailure::NotOurs => {}
+        HandshakeFailure::Untrusted(alert) => {
+            let now = crate::util::time::now_ms();
+            let last = LAST_UNTRUSTED_MS.load(Ordering::Relaxed);
+            if now.saturating_sub(last) >= EVERY_MS
+                && LAST_UNTRUSTED_MS
+                    .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                crate::daemon_log::warn(format!(
+                    "fghjd: a client refused fghj's certificate ({alert:?}): it doesn't trust \
+                     fghj's CA yet. `fghj doctor` checks the system's and the browsers' stores; \
+                     restart a browser that was open when the CA was added"
+                ));
+            }
+        }
+        HandshakeFailure::Other => {
+            crate::daemon_log::warn(format!("fghjd: TLS handshake error: {e}"))
+        }
     }
 }
 
@@ -544,6 +610,43 @@ fn is_benign_disconnect(e: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_handshake_the_client_abandoned_is_not_worth_reporting() {
+        let eof = io::Error::new(io::ErrorKind::UnexpectedEof, "tls handshake eof");
+        assert_eq!(
+            classify_handshake_failure(&eof),
+            HandshakeFailure::Abandoned
+        );
+        let reset = io::Error::from(io::ErrorKind::ConnectionReset);
+        assert_eq!(
+            classify_handshake_failure(&reset),
+            HandshakeFailure::Abandoned
+        );
+    }
+
+    #[test]
+    fn a_refused_certificate_is_told_apart_from_other_failures() {
+        let wrap = |e: rustls::Error| io::Error::new(io::ErrorKind::InvalidData, e);
+        assert_eq!(
+            classify_handshake_failure(&wrap(rustls::Error::AlertReceived(
+                rustls::AlertDescription::UnknownCA
+            ))),
+            HandshakeFailure::Untrusted(rustls::AlertDescription::UnknownCA)
+        );
+        assert_eq!(
+            classify_handshake_failure(&wrap(rustls::Error::General(
+                "no server certificate chain resolved".into()
+            ))),
+            HandshakeFailure::NotOurs
+        );
+        assert_eq!(
+            classify_handshake_failure(&wrap(rustls::Error::AlertReceived(
+                rustls::AlertDescription::ProtocolVersion
+            ))),
+            HandshakeFailure::Other
+        );
+    }
     use std::collections::HashMap;
     use std::net::SocketAddr;
 
