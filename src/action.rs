@@ -77,6 +77,8 @@ pub enum Action {
     ConfigDriftObserved {
         node_id: String,
         drift: SyncStatus,
+        /// `Some` for a seed only; see `ContainerObserved::seeded`.
+        seeded: Option<bool>,
     },
 
     OwnerSet {

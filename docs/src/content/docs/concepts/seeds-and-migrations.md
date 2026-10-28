@@ -116,6 +116,11 @@ there it's the container id. Several stores are recorded together; new data
 in any of them reruns the seed, whose job is stores consistent with each
 other.
 
+- **The seed's card shows the record**, as a second segment of its status
+  bar: `seeded` or `not seeded`, checked against the stores every 15
+  seconds. It outlives the container: once the data is in, a seed whose
+  container was deleted reads `removed`, not `missing`. `fghj status` says
+  the same.
 - **A failed seed is never recorded**, so it always runs again.
 - **A store that can't be read runs the seed**, rather than skipping on a
   guess.

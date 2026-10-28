@@ -101,6 +101,11 @@ pub struct ContainerObserved {
     /// condition says nothing is known.
     #[serde(default)]
     pub unseen: bool,
+    /// A seed only: whether its stores still hold the data it filled, per
+    /// fghj's own record. Outlives the container, which is just how the data
+    /// got there. `None` until the drift check has looked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seeded: Option<bool>,
 }
 
 impl ContainerObserved {

@@ -329,7 +329,7 @@ impl Orchestrator {
                 )
                 .await;
             drop(guard);
-            let info = match started_node {
+            let mut info = match started_node {
                 Ok(info) => info,
                 Err(e) => {
                     working(progress, node_id, None);
@@ -342,7 +342,7 @@ impl Orchestrator {
                 bounced.insert(node.id.clone());
             }
             if !node.seeds.is_empty() {
-                self.record_seeded(graph, node).await;
+                info.observed.seeded = Some(self.record_seeded(graph, node).await);
             }
             // Per node, so a crash mid-create doesn't lose track of what started.
             report_done(progress, &state, info.clone());

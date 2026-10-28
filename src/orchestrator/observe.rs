@@ -86,11 +86,17 @@ impl Orchestrator {
     }
 
     /// Compares each live container's config hash with one recomputed from the
-    /// current graph. Informational only: never acts on drift.
+    /// current graph. Informational only: never acts on drift. A seed's record
+    /// is checked on the same schedule: it reads every store it fills.
     pub async fn config_drift(&self, graph: &Graph, env: &EnvState) -> Vec<DriftReport> {
         let mut reports = Vec::new();
         for c in env.containers.values() {
-            let sync = match graph.nodes.iter().find(|n| n.id == c.node_id) {
+            let node = graph.nodes.iter().find(|n| n.id == c.node_id);
+            let seeded = match node {
+                Some(node) if !node.seeds.is_empty() => Some(self.seeded(graph, node).await),
+                _ => None,
+            };
+            let sync = match node {
                 Some(node) => match self.resolve_node_spec(graph, node, false).await {
                     Ok(spec) => {
                         if spec_hash(node, &spec) == c.desired.config_hash {
@@ -106,6 +112,7 @@ impl Orchestrator {
             reports.push(DriftReport {
                 node_id: c.node_id.clone(),
                 sync,
+                seeded,
             });
         }
         reports
@@ -130,6 +137,7 @@ pub enum SidecarSeen {
 pub struct DriftReport {
     pub node_id: String,
     pub sync: SyncStatus,
+    pub seeded: Option<bool>,
 }
 
 #[cfg(test)]

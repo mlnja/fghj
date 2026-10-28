@@ -273,6 +273,7 @@ impl Orchestrator {
                 exit_code,
                 interrupted: false,
                 unseen: false,
+                seeded: None,
             },
             pending_action: None,
         })

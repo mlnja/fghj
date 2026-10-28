@@ -41,11 +41,19 @@ pub fn table(env: &Value) -> String {
     out
 }
 
-/// What fghj is doing to it wins over what it is.
+/// What fghj is doing to it wins over what it is. A seed adds whether its
+/// data is in, and once it is, a deleted container is just `removed`.
 fn state(c: &Value) -> String {
-    match c["pending_action"].as_str() {
-        Some(action) => format!("{action}…"),
-        None => c["condition"].as_str().unwrap_or("?").replace('_', " "),
+    let seeded = c["observed"]["seeded"].as_bool();
+    let state = match (c["pending_action"].as_str(), c["condition"].as_str()) {
+        (Some(action), _) => format!("{action}…"),
+        (None, Some("missing")) if seeded == Some(true) => "removed".to_string(),
+        (None, condition) => condition.unwrap_or("?").replace('_', " "),
+    };
+    match seeded {
+        Some(true) => format!("{state}, seeded"),
+        Some(false) => format!("{state}, not seeded"),
+        None => state,
     }
 }
 
@@ -125,6 +133,11 @@ mod tests {
                 "observed": { "status": "exited", "ports": {} },
                 "condition": "completed",
             },
+            "seed.files-api": {
+                "desired": { "raw_domain": "seed.files-api.files.fghj.raw.internal", "routes": [] },
+                "observed": { "status": "removed", "ports": {}, "seeded": true },
+                "condition": "missing",
+            },
         }})
     }
 
@@ -163,6 +176,13 @@ mod tests {
     }
 
     #[test]
+    fn a_seed_whose_data_is_in_is_not_missing() {
+        let table = table(&env());
+        let seed = table.lines().find(|l| l.starts_with("seed.")).unwrap();
+        assert!(seed.contains("removed, seeded"), "{seed}");
+    }
+
+    #[test]
     fn rows_are_sorted_under_a_header() {
         let table = table(&env());
         let first: Vec<&str> = table
@@ -175,7 +195,8 @@ mod tests {
                 "NODE",
                 "api.files-api",
                 "db.files-api",
-                "migrate-db.files-api"
+                "migrate-db.files-api",
+                "seed.files-api"
             ]
         );
     }

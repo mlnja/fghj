@@ -22,17 +22,24 @@ impl Orchestrator {
         Some(parts.join(";"))
     }
 
+    /// When the seed filled the data its stores hold now, if it did.
+    async fn seeded_at(&self, graph: &Graph, node: &Node) -> Option<i64> {
+        let data = self.seeded_data(graph, node).await?;
+        let seeded = self.db.clone().load_seed(node.id.clone()).await.ok()??;
+        (seeded.data == data).then_some(seeded.at)
+    }
+
+    /// For the seed's status bar: the data is the point, not the container
+    /// that put it there, which may be long gone.
+    pub async fn seeded(&self, graph: &Graph, node: &Node) -> bool {
+        self.seeded_at(graph, node).await.is_some()
+    }
+
     /// Narrated as the start it replaces, so the drawer says why nothing ran.
     pub(super) async fn already_seeded(&self, graph: &Graph, node: &Node) -> bool {
-        let Some(data) = self.seeded_data(graph, node).await else {
+        let Some(at) = self.seeded_at(graph, node).await else {
             return false;
         };
-        let Ok(Some(seeded)) = self.db.clone().load_seed(node.id.clone()).await else {
-            return false;
-        };
-        if seeded.data != data {
-            return false;
-        }
         let ev = self.events(&node.id, "start");
         ev.begin().await;
         ev.record(
@@ -42,28 +49,31 @@ impl Orchestrator {
                 "skipped: {} still hold{} the data this seeded {}",
                 node.seeds.join(", "),
                 if node.seeds.len() == 1 { "s" } else { "" },
-                ago(now_secs() - seeded.at)
+                ago(now_secs() - at)
             )),
         )
         .await;
         true
     }
 
-    /// After a clean exit only: a failed seed is never done.
-    pub(super) async fn record_seeded(&self, graph: &Graph, node: &Node) {
+    /// After a clean exit only: a failed seed is never done. Whether the
+    /// record was kept.
+    pub(super) async fn record_seeded(&self, graph: &Graph, node: &Node) -> bool {
         let Some(data) = self.seeded_data(graph, node).await else {
             daemon_log::warn(format!(
                 "fghjd: {} finished, but its stores couldn't be read, so it runs again next start",
                 node.id
             ));
-            return;
+            return false;
         };
         if let Err(e) = self.db.clone().save_seed(node.id.clone(), data).await {
             daemon_log::warn(format!(
                 "fghjd: {} finished, but recording it failed, so it runs again next start: {e:#}",
                 node.id
             ));
+            return false;
         }
+        true
     }
 }
 

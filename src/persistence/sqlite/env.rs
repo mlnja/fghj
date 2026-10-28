@@ -180,6 +180,7 @@ mod tests {
                 exit_code: None,
                 interrupted: false,
                 unseen: false,
+                seeded: None,
             },
             pending_action: None,
         }

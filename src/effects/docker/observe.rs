@@ -38,6 +38,7 @@ fn config_drift_observed(report: &DriftReport) -> Action {
     Action::ConfigDriftObserved {
         node_id: report.node_id.clone(),
         drift: report.sync,
+        seeded: report.seeded,
     }
 }
 
@@ -96,6 +97,7 @@ mod tests {
         let verdict = |sync| match config_drift_observed(&DriftReport {
             node_id: "web".into(),
             sync,
+            seeded: None,
         }) {
             Action::ConfigDriftObserved { drift, .. } => drift,
             other => panic!("expected ConfigDriftObserved, got {other:?}"),

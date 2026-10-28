@@ -60,6 +60,7 @@
     interrupted: 'went down while fghjd could not see Docker (the engine stopped, a reboot) — fghj starts it again',
     unknown: "Docker isn't answering, so nothing about this container is known right now",
     missing: 'the container was deleted outside fghj — open it to recreate or forget it',
+    removed: 'the container is gone, but the data it seeded is still there — nothing to do',
     restarting: "Docker is bouncing it under this node's own restart policy — not reachable while it does",
     rebounding: 'fghj is restarting it because something it needs came back: the same container and code, not a rebuild',
     paused: 'paused from outside fghj (docker pause) — not reachable, and Start will not help; docker unpause will',
@@ -279,7 +280,12 @@
          than as a differently-shaped card. A flow node never has a container
          of its own. -->
     {@const showDocker = mode === 'containers' && n.kind !== 'flow'}
-    {@const containerState = showDocker ? containerStateOf(live) : null}
+    <!-- A seed's container is only how its data got in. Once fghj's record
+         says the data is there, the container being gone is cleanup, not
+         the striped-red `missing` a service gets. -->
+    {@const seeded = n.seeds?.length ? (live?.observed.seeded ?? null) : null}
+    {@const rawState = showDocker ? containerStateOf(live) : null}
+    {@const containerState = seeded && rawState === 'missing' ? 'removed' : rawState}
     {@const sha = n.head ? n.head.slice(0, 7) : null}
     <!-- The checkout the running container was *built* from, recorded at
          start time (`ContainerDesired::source`) and never refreshed. `null`
@@ -477,6 +483,17 @@
               migrate {STATE_LABEL[migState] ?? migState}
             </button>
           {/if}
+          {#if seeded !== null}
+            <div
+              class="state seeded"
+              class:applied={seeded}
+              title={seeded
+                ? `${n.seeds.join(', ')} still hold${n.seeds.length === 1 ? 's' : ''} the data this seeded, so its next start skips it`
+                : `${n.seeds.join(', ')} ${n.seeds.length === 1 ? "doesn't" : "don't"} hold the data this seeds (new, recreated or never seeded), so its next start runs it`}
+            >
+              {seeded ? 'seeded' : 'not seeded'}
+            </div>
+          {/if}
         </div>
       {:else if migration}
         <div class="lane-line migration-line" title="{migration.label} migrates {n.label}">migrated by {migration.label}</div>
@@ -526,6 +543,12 @@
     font-size: 10px; cursor: pointer;
   }
   .state.migration:hover { filter: brightness(1.1); }
+  /* A seed's record, read off its stores rather than its container. */
+  .state.seeded {
+    flex: 0 0 auto; padding: 0 10px; border-left: 1px solid var(--panel-2);
+    font-size: 10px; background: var(--line-strong); color: var(--ink-faint);
+  }
+  .state.seeded.applied { background: var(--success-bg); color: var(--success); }
   .migration-line { margin-top: auto; }
   .state.state-running { background: var(--success); color: #ffffff; }
   .state.state-stopped { background: var(--warning); color: #ffffff; }
@@ -556,7 +579,7 @@
      there is nothing there to reach, so it shouldn't read as "live". */
   .state.state-completed { background: var(--success-bg); color: var(--success); }
   .state.state-failed { background: var(--danger); color: #ffffff; }
-  .state.state-none { background: var(--line-strong); color: var(--ink-faint); }
+  .state.state-none, .state.state-removed { background: var(--line-strong); color: var(--ink-faint); }
   .state.state-starting, .state.state-stopping, .state.state-removing, .state.state-rebounding {
     background: var(--accent); color: #ffffff; animation: status-pulse 1s ease-in-out infinite;
   }

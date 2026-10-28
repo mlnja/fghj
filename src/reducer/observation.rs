@@ -168,7 +168,11 @@ pub(super) fn reduce(
             Ok(next)
         }
 
-        Action::ConfigDriftObserved { node_id, drift } => {
+        Action::ConfigDriftObserved {
+            node_id,
+            drift,
+            seeded,
+        } => {
             let mut next = state.clone();
             if let Some(container) = next
                 .env
@@ -176,6 +180,7 @@ pub(super) fn reduce(
                 .and_then(|run| run.containers.get_mut(&node_id))
             {
                 container.observed.sync = drift;
+                container.observed.seeded = seeded;
             }
             Ok(next)
         }
@@ -574,6 +579,7 @@ mod tests {
             Action::ConfigDriftObserved {
                 node_id: "web".into(),
                 drift: SyncStatus::Drifted,
+                seeded: None,
             },
         )
         .unwrap();
@@ -581,6 +587,35 @@ mod tests {
             next.env.as_ref().unwrap().containers["web"].observed.sync,
             SyncStatus::Drifted
         );
+    }
+
+    #[test]
+    fn a_seed_stays_seeded_after_its_container_is_gone() {
+        let state = workspace(vec![container("seed")]);
+        let seeded = reduce(
+            &state,
+            Action::ConfigDriftObserved {
+                node_id: "seed".into(),
+                drift: SyncStatus::Synced,
+                seeded: Some(true),
+            },
+        )
+        .unwrap();
+        let gone = reduce(
+            &seeded,
+            Action::ContainerObserved {
+                node_id: "seed".into(),
+                status: "removed".into(),
+                published_port: None,
+                ports: BTreeMap::new(),
+                exit_code: None,
+                unseen: false,
+            },
+        )
+        .unwrap();
+        let observed = &gone.env.as_ref().unwrap().containers["seed"].observed;
+        assert_eq!(observed.status, "removed");
+        assert_eq!(observed.seeded, Some(true));
     }
 
     #[test]
