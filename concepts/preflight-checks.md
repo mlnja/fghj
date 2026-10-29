@@ -66,8 +66,9 @@ different problem with a different fix.
 
 ## Four verdicts, and why `Warn` and `Pending` exist
 
-`Pass`/`Pending`/`Warn`/`Fail`, and only `Fail` sets the exit code
-(`Report::has_failures`).
+`Pass`/`Pending`/`Warn`/`Fail`, and only `Fail` sets the exit code: the
+CLI's `doctor` counts the `Fail`s across both reports and exits 1 if there
+are any.
 
 `Pending` (`·`) is "not set up yet, and nothing to do": the first
 `fghj wire` is what tells fghjd which Docker to use and gets the CA trusted,

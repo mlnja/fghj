@@ -72,9 +72,9 @@ That distinction forces two different delivery mechanisms, because
   the markers — the user's own entries, macOS's default `localhost` line — is
   preserved byte for byte. The rewrite is a full-block replacement, sorted
   and deduped, so repeated syncs of the same logical set never produce a
-  spurious file change. `main.rs`'s `daemon_stop` can strip the block via
-  `sudo` without `fghjd` being alive, the same way it cleans up the pidfile
-  and resolver files.
+  spurious file change. `fghj uninstall` (`uninstall::purge`) strips the
+  block without `fghjd` being alive, the same way it clears the resolver
+  config.
 - **Wildcarded aliases** resolve only through fghjd's own DNS server.
   `install_os_resolver_config` routes the suffix to it — an `/etc/resolver`
   file on macOS, one more `~suffix` routing domain on the `fghj0` link on

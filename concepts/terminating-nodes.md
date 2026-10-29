@@ -192,7 +192,7 @@ place that branch lives.
 - [[concurrency-model]] — the health budget this one is modelled on.
 - [[node-identity-and-domains]] — a task's id is the same
   `name.owning-service-id` shape a backing dependency gets.
-- `docs/src/content/docs/tutorial/03-a-migration.md` — the same argument
+- `docs/src/content/docs/tutorial/03-migrations-and-a-seed.md` — the same argument
   worked through against a real Postgres, for a reader who has not read `src/`.
   Its site-side counterpart of this file is
   `docs/src/content/docs/concepts/terminating-nodes.md`.

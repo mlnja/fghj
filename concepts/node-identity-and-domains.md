@@ -2,8 +2,8 @@
 
 ## The problem
 
-Every node in the resolved graph — a service built from a repo, or a backing
-dependency like postgres — eventually needs three distinct things, and it's
+Every node in the resolved graph — a service built from a repo, or one run
+from an image, like postgres — eventually needs three distinct things, and it's
 easy to accidentally conflate them:
 
 1. **An id** — a stable key used internally (map keys, container names,
@@ -14,7 +14,7 @@ easy to accidentally conflate them:
    container reaches it at. Must be derivable without any author input, or
    two CUE authors who never talk to each other could hand-pick the same one.
 
-`.fghj.yaml` only ever declares the label (`#Service.name`, `#BackingDependency.name`).
+`.fghj.yaml` only ever declares the label: the service's key under `services:` (`#Service`).
 Everything else — id and domain — is derived by fghj itself, in `src/resolver/`
 and `src/orchestrator/`.
 
@@ -38,7 +38,10 @@ Every node id is a dotted chain, leaf (the specific thing) first, its owning
 scope after:
 
 - **Service**: `{service.name}.{repo's workspace folder name}` — e.g.
-  `bff.dept-a-repo`. Built in `resolver::visit_local_service`. The folder
+  `bff.dept-a-repo`. Built by `resolver::visit::node_id`, called from
+  `add_repo_nodes` for every service a scanned repo declares. A database is
+  no different: Postgres is a service in some repo (`db.files-api`), not a
+  dependency of one. The folder
   name is unique because `scan_workspace` can't have produced two components
   under the same folder — it's a real directory listing. Note what that does
   and doesn't buy: uniqueness holds because a colliding repo *cannot be
@@ -49,29 +52,17 @@ scope after:
   a second same-named peer repo later would change the *first* one's id
   retroactively (or silently rehost its domain), which is far worse than
   always paying the slightly longer id.
-- **Backing dependency**: `{dep.name}.{owner's node.id}` — e.g.
-  `s3.bff.dept-a-repo`. Built in `resolver::visit_dependency`'s
-  `Dependency::Backing` arm. This was flipped from an earlier
-  `{owner}.{dep.name}` ordering specifically to match the same leaf-first
-  convention already used by named ports (below) — the specific resource
-  comes first, its owning scope after, all the way down.
-- **Shared-backing reference**: `#SharedBackingDependency` (the CUE shape a
-  service uses to bind to *another* service's already-declared backing
-  dependency, rather than provisioning a second instance) identifies the
-  owning service by `repo` — the same way `#GitDependency` does — instead of
-  by that service's declared `#Service.name`. It has to: the owning
-  service's *name* alone isn't unique across peer repos anymore, but its
-  `repo` URL is a portable, unambiguous identifier regardless of which
-  workspace it's cloned into. `visit_dependency`'s `Dependency::SharedBacking`
-  arm resolves `repo` → `local_path` (via `repo_index`, falling back to the
-  URL's last path segment for not-yet-cloned repos) → `target_owner_id`,
-  using exactly the same `{service.name}.{local_path}` formula
-  `visit_local_service` used when it actually registered that node — so the
-  two computations can never drift apart and produce a dangling reference by
-  accident. A reference that genuinely doesn't resolve to a known backing
-  node is still caught, as a non-fatal warning (`resolve_universe`'s
-  "dangling shared-backing reference" pass), since a stub (not-yet-pulled)
-  repo can't be checked yet.
+- **A reference to another repo's service** — `depends_on: platform/cache`,
+  `${FGHJ_SERVICE_FQDN:platform/redis}` — names it by the include alias the
+  referring repo gave that repo, never by its folder.
+  `reference_target_id` resolves the alias through that repo's `include:`
+  map to the folder it lands in, then applies the same `node_id` formula
+  `add_repo_nodes` used when that repo's services were registered — so the
+  two computations can never drift apart and produce a dangling reference
+  by accident. A bare name is a service of the referring repo itself. A
+  reference that doesn't resolve is a blocking warning (`check_references`),
+  except into a repo that's still a stub (not pulled yet), which can't be
+  checked until it is.
 - **Named port**: `{port.name}.{node's own domain}` — see below; the pattern
   repeats one more level down, at the port granularity.
 
@@ -303,7 +294,7 @@ this field existed, that whole code path was silently dead.
 
 ## Status
 
-Implemented: `resolver::visit_local_service`/`visit_dependency` (ids),
+Implemented: `resolver::visit::node_id` and `reference_target_id` (ids),
 `resolver::PortConfig`/`check_ports` (ports), `orchestrator::derive_domain` (domain
 formula, shared by `orchestrator::start_node` and `resolver::resolve_universe`),
 `orchestrator::naming::derive_volume_name` (volumes), `orchestrator::node_spec` (container

@@ -229,7 +229,7 @@ enforces exactly what CUE accepts and the error names the field and the fix
 backs the Drawer's "load logs" button. `logs_follow` is continuous and never
 terminates on its own (until the container stops or the caller drops the
 stream) — backs the SSE live-follow endpoint
-(`daemon::get_run_logs_stream`), which `Drawer.svelte` opens automatically
+(`web::api::logs::get_node_logs_stream`, at `/nodes/{id}/logs/stream`), which `Drawer.svelte` opens automatically
 whenever the Logs tab is showing a running container. The comment on
 `logs_follow` calls out a real subtlety: bollard's `Docker::logs` clones
 what it needs out of `&self` up front, so the returned stream doesn't

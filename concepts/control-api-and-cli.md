@@ -20,30 +20,31 @@ all: `fghj wire` runs as the real user and can read `$HOME`/`$SSH_AUTH_SOCK`
 directly, so it's the natural place to capture that identity and hand it to
 the root daemon that otherwise couldn't get it.
 
-## Discovering the daemon without a fixed port
+## Finding the daemon: one well-known socket
 
-Neither the control API's port nor (historically) even its existence is
-assumed by the CLI. `fghj::daemon::read_port()` reads
-`/var/run/fghjd.port` (written by `run_control_api` right after binding —
-see [[local-ca-and-tls-proxy]]'s "ephemeral-port + `/var/run` discovery"
-section, which this follows the same pattern as); `probe_daemon` treats "can
-I open a TCP connection to that port" as "is `fghjd` up" — cheaper and more
-direct than also checking the pidfile. `fghj wire`'s success message points
-at `https://fghj.internal/...` (the well-known, fixed TLS proxy address),
-never a raw `127.0.0.1:<port>` URL — the control API's own ephemeral port is
-an implementation detail the end user never needs to know.
+The CLI talks to `fghjd` over a Unix socket at a fixed path,
+`/var/run/fghjd.sock` (`daemon::socket_path`), which `run_control_api` binds
+and opens to every local user (`0666`); access control is the socket's, the
+way `dockerd`'s is. `probe_daemon` treats "the socket accepts a connection"
+as "is `fghjd` up". The control API's TCP listener is on an ephemeral
+`127.0.0.1` port that only the HTTPS proxy dials, for the `fghj.internal`
+apex, so `fghj wire`'s success message points at `https://fghj.internal/...`
+(the well-known, fixed TLS proxy address), never at that port.
 
-## A hand-rolled HTTP client, deliberately
+## Two small HTTP clients, deliberately
 
-`http_post_json` builds a raw HTTP/1.1 POST over a plain `TcpStream` by
-hand — no `reqwest`/`ureq` dependency — because the one thing it needs to do
-(one POST, tiny JSON body, localhost, synchronous) doesn't justify pulling
-in a full HTTP client crate. This mirrors the same "hand-roll it, the actual
-surface is tiny" judgment call behind `src/dns/` (see [[split-dns]]).
+`http_request_json` in `main.rs` writes a raw HTTP/1.1 request to that
+socket by hand — no `reqwest`/`ureq` dependency — because what it needs to
+do (one request, tiny JSON body, synchronous) doesn't justify pulling in a
+full HTTP client crate. This mirrors the same "hand-roll it, the actual
+surface is tiny" judgment call behind `src/dns/` (see [[split-dns]]). The
+commands that drive a workspace (`up`, `status`, `logs -f`, …) use
+`src/cli/client.rs` instead, hyper over the same socket, because following
+logs needs a streamed, chunked body.
 
 ## The axum control API
 
-`daemon::build_router` is the one router every workspace's routes are served
+`web::api::build_router` is the one router every workspace's routes are served
 from — there's no per-workspace listener or thread; concurrent requests for
 different workspaces all flow through the same `axum::serve` loop, resolved
 to the right `WorkspaceState` via `WorkspaceExtractor` (a custom

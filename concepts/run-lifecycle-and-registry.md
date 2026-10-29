@@ -21,8 +21,9 @@ configuration, so "review a PR in a second run" was impossible by
 construction. What was left — a scratch copy with virgin volumes — did not
 justify a run id threaded through every type, action, route and table.
 
-`run_id` survives in exactly one place: as a private key fixed to
-`orchestrator::DEFAULT_RUN_ID` in Docker names and labels (`fghj.run`), in
+`run_id` survives in exactly one place: as the fixed segment `default` in
+Docker names (`orchestrator::naming`: `fghj-<workspace>-default-<node>`, and
+the network that doubles as the Compose project label), in
 the SQLite tables and in the events/logs API, so that existing containers,
 volumes and databases keep their names. Nothing above `orchestrator/` and
 `persistence/` sees it.
