@@ -83,7 +83,7 @@ enum Route {
 /// Plain HTTP, routed by `Host` exactly as 443 routes by SNI. A request is
 /// answered in the scheme it came in: nothing here redirects to HTTPS.
 pub async fn serve_http(listener: TcpListener, control_port: u16, routes: Arc<dyn RouteResolver>) {
-    println!("fghjd: HTTP listener on 127.0.0.1:{HTTP_PORT}, routing by Host");
+    println!("fghjd: HTTP listener on {PROXY_IP}:{HTTP_PORT}, routing by Host");
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(v) => v,
@@ -195,7 +195,7 @@ pub async fn serve_https(
     let acceptor = TlsAcceptor::from(Arc::new(config));
 
     println!(
-        "fghjd: HTTPS listener on 127.0.0.1:{HTTPS_PORT}, routing https://{} to the control API",
+        "fghjd: HTTPS listener on {PROXY_IP}:{HTTPS_PORT}, routing https://{} to the control API",
         dns::ZONE
     );
     loop {
