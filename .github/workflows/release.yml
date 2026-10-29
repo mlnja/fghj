@@ -300,13 +300,16 @@ jobs:
   # releases. This tells it to now, so `apt upgrade` sees the release within
   # minutes rather than at its next daily run.
   #
-  # Needs APT_DISPATCH_TOKEN: a fine-grained PAT with Contents:write on
-  # mlnja/apt. The default GITHUB_TOKEN can't reach another repo. Without it
-  # this only warns, and the daily run still picks the release up.
+  # Needs APT_DISPATCH_TOKEN, in the `prod` environment: a fine-grained PAT
+  # with Contents:write on mlnja/apt. The default GITHUB_TOKEN can't reach
+  # another repo. Without it this only warns, and the daily run still picks
+  # the release up.
   apt:
     name: Publish to apt.mlops.ninja
     needs: [create-release]
     runs-on: ubuntu-latest
+    # Environment secrets reach only the jobs that name the environment.
+    environment: prod
 
     steps:
       - name: Tell mlnja/apt to rebuild
@@ -331,9 +334,9 @@ jobs:
   # release; both drive the same `# darwin-<arch>` marker comments in the
   # formula, so they can't disagree about where a checksum goes.
   #
-  # Needs HOMEBREW_TAP_TOKEN: a fine-grained PAT with Contents:write on
-  # mlnja/homebrew-tap. The default GITHUB_TOKEN is scoped to this repo only
-  # and cannot push to the tap.
+  # Needs HOMEBREW_TAP_TOKEN, in the `prod` environment: a fine-grained PAT
+  # with Contents:write on mlnja/homebrew-tap. The default GITHUB_TOKEN is
+  # scoped to this repo only and cannot push to the tap.
   #
   # Gated on create-release so the formula never points at URLs that 404:
   # the release assets must exist before anything tells Homebrew to fetch
@@ -342,6 +345,7 @@ jobs:
     name: Update Homebrew tap
     needs: [create-release]
     runs-on: ubuntu-latest
+    environment: prod
 
     steps:
       - uses: actions/checkout@v4

@@ -132,7 +132,8 @@ Pages), which rebuilds its index from each product's GitHub release assets.
   `26.04` containers in the same job, before anything is published.
 - **Published** by attaching the `.deb`s to the GitHub release, then the
   `apt` job sending `mlnja/apt` a `repository_dispatch` of type `release`.
-  That needs `APT_DISPATCH_TOKEN`, a fine-grained token with Contents:write
+  That needs `APT_DISPATCH_TOKEN`, a `prod` environment secret (so only the
+  jobs that say `environment: prod` see it), a fine-grained token with Contents:write
   on `mlnja/apt`; without it the job only warns, and `mlnja/apt`'s daily run
   picks the release up.
 
