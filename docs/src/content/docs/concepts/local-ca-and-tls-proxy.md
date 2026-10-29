@@ -262,12 +262,17 @@ between the two, both "is this chain trustworthy" and "is this chain
 
 `fghjd` occupies ports 80 and 443, localhost-only:
 
-- **Port 80** redirects to the same path on `https://` for anything
-  in-zone or under a reserved alias TLD. The one exception is a declared,
-  currently-routed *non-reserved* additional host (e.g.
-  `app.local.aikido.io`) — since that alias can never get a certificate,
-  redirecting it to HTTPS would be a dead end, so it's relayed over plain
-  HTTP instead. This is the only path that ever serves plaintext.
+- **Port 80** relays plain HTTP, dispatched by the `Host` header the same
+  way 443 dispatches by SNI: the zone apex to the control API, a routed
+  name to its backend, anything else to the 404 page. It never redirects
+  to `https://`. A request is answered in the scheme it came in, so a
+  caller that doesn't want TLS, like an nginx `proxy_pass`, still goes
+  through the proxy and is still recorded. A browser keeps to `https://`
+  because every URL fghj hands out says `https://`, not because port 80
+  pushes it there; someone who types `http://` gets the plain page they
+  asked for, which isn't a secure context. A non-reserved additional host
+  (e.g. `app.local.aikido.io`) never gets a certificate, so plain HTTP is
+  the only way to reach it.
 - **Port 443** terminates TLS, then dispatches the decrypted request based
   on the SNI name it was negotiated for:
   - The zone apex (`fghj.internal` itself) relays to the control API —
@@ -314,7 +319,7 @@ pub trait RouteResolver: Send + Sync {
 ```
 
 Returning a full `Backend` (host *and* port), not just a port, is what lets
-the same trait and the same `proxy::serve_https`/`serve_http_redirect`
+the same trait and the same `proxy::serve_https`/`serve_http`
 logic back both the host-side proxy and the in-network sidecar proxy
 described below — the two differ only in what they resolve a hostname to.
 
@@ -343,7 +348,7 @@ that case.
 
 `fghjd` solves this with one dedicated sidecar container per run, attached
 to that run's own docker network, running the exact same `RouteResolver`
-+ `serve_https`/`serve_http_redirect` logic as the host-side proxy — a
++ `serve_https`/`serve_http` logic as the host-side proxy — a
 separate `fghj-sidecar` binary, not a mode flag on `fghjd`, since it needs
 a signing key mounted in and otherwise deserves the smallest possible
 attack surface. That key is the name-constrained signing CA's, never the

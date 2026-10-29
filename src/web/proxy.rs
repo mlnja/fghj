@@ -80,12 +80,10 @@ enum Route {
     Respond(Response<ProxyBody>),
 }
 
-/// Redirects in-zone and reserved-TLD names to HTTPS. A routed non-reserved
-/// `#AdditionalHost` never gets a cert, so it is relayed over plain HTTP instead.
-pub async fn serve_http_redirect(listener: TcpListener, routes: Arc<dyn RouteResolver>) {
-    println!(
-        "fghjd: HTTP listener on 127.0.0.1:{HTTP_PORT}, redirecting everything to https:// except routed non-reserved additional hosts"
-    );
+/// Plain HTTP, routed by `Host` exactly as 443 routes by SNI. A request is
+/// answered in the scheme it came in: nothing here redirects to HTTPS.
+pub async fn serve_http(listener: TcpListener, control_port: u16, routes: Arc<dyn RouteResolver>) {
+    println!("fghjd: HTTP listener on 127.0.0.1:{HTTP_PORT}, routing by Host");
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(v) => v,
@@ -96,7 +94,17 @@ pub async fn serve_http_redirect(listener: TcpListener, routes: Arc<dyn RouteRes
         };
         let routes = routes.clone();
         supervisor::supervise("http connection", async move {
-            let route = move |req: &Request<Incoming>| route_plain_http(req, routes.as_ref());
+            let route = move |req: &Request<Incoming>| {
+                let host = req
+                    .headers()
+                    .get(header::HOST)
+                    .and_then(|h| h.to_str().ok())
+                    .unwrap_or("");
+                match backend_for(&host_name(host), control_port, routes.as_ref()) {
+                    Some(backend) => Route::Forward(backend),
+                    None => Route::Respond(not_found_response()),
+                }
+            };
             if let Err(e) = serve_connection(stream, peer.ip(), "http", route).await {
                 eprintln!("fghjd: HTTP handler error: {e:#}");
             }
@@ -104,32 +112,26 @@ pub async fn serve_http_redirect(listener: TcpListener, routes: Arc<dyn RouteRes
     }
 }
 
-fn route_plain_http(req: &Request<Incoming>, routes: &dyn RouteResolver) -> Route {
-    let host = req
-        .headers()
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    let plain_backend = (!dns::in_zone(host) && !dns::is_reserved_alias(host))
-        .then(|| routes.resolve(host))
-        .flatten();
-    match plain_backend {
-        Some(backend) => Route::Forward(backend),
-        None => {
-            let path = req.uri().path_and_query().map_or("/", |p| p.as_str());
-            Route::Respond(redirect_response(host, path))
-        }
-    }
+/// A `Host` header as a route name: no port, no trailing dot, lowercase, the
+/// shape SNI already has.
+fn host_name(host: &str) -> String {
+    let name = match host.rsplit_once(':') {
+        Some((name, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => host,
+    };
+    name.trim_end_matches('.').to_ascii_lowercase()
 }
 
-fn redirect_response(host: &str, path: &str) -> Response<ProxyBody> {
-    let mut resp = Response::new(empty());
-    *resp.status_mut() = StatusCode::MOVED_PERMANENTLY;
-    // Both halves came out of an already-parsed request, so this can't fail.
-    if let Ok(location) = HeaderValue::from_str(&format!("https://{host}{path}")) {
-        resp.headers_mut().insert(header::LOCATION, location);
+/// The zone apex is the control API; any other name is its route, if it has one.
+fn backend_for(name: &str, control_port: u16, routes: &dyn RouteResolver) -> Option<Backend> {
+    if name == dns::ZONE {
+        return Some(Backend {
+            host: "127.0.0.1".to_string(),
+            port: control_port,
+            traffic: None,
+        });
     }
-    resp
+    routes.resolve(name)
 }
 
 fn not_found_response() -> Response<ProxyBody> {
@@ -298,15 +300,7 @@ async fn handle_https_connection(
         return;
     };
 
-    let backend = if name == dns::ZONE {
-        Some(Backend {
-            host: "127.0.0.1".to_string(),
-            port: control_port,
-            traffic: None,
-        })
-    } else {
-        routes.resolve(&name)
-    };
+    let backend = backend_for(&name, control_port, routes.as_ref());
 
     let route = move |_: &Request<Incoming>| match &backend {
         Some(backend) => Route::Forward(backend.clone()),
@@ -790,9 +784,16 @@ mod tests {
     }
 
     async fn http_proxy(routes: Arc<dyn RouteResolver>) -> SocketAddr {
+        http_proxy_with_control(0, routes).await
+    }
+
+    async fn http_proxy_with_control(
+        control_port: u16,
+        routes: Arc<dyn RouteResolver>,
+    ) -> SocketAddr {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve_http_redirect(listener, routes));
+        tokio::spawn(serve_http(listener, control_port, routes));
         addr
     }
 
@@ -985,16 +986,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plain_http_in_zone_name_redirects_to_https() {
-        let addr = http_proxy(no_routes()).await;
+    async fn plain_http_in_zone_name_is_relayed_not_redirected() {
+        let backend_port = header_echo_backend().await;
+        let addr = http_proxy(routes(&[("cart.fghj.internal", "127.0.0.1", backend_port)])).await;
 
         let mut client = client_over(TcpStream::connect(addr).await.unwrap()).await;
-        let (status, headers, _) = get(&mut client, "cart.fghj.internal", &[]).await;
-        assert_eq!(status, StatusCode::MOVED_PERMANENTLY);
-        assert_eq!(
-            headers.get(header::LOCATION).unwrap(),
-            "https://cart.fghj.internal/checkout?x=1"
-        );
+        let (status, headers, dump) = get(&mut client, "cart.fghj.internal", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.get(header::LOCATION).is_none());
+        assert_eq!(header_line(&dump, "x-forwarded-proto"), Some("http"));
+    }
+
+    #[tokio::test]
+    async fn plain_http_apex_proxies_to_the_control_backend() {
+        let backend_port = header_echo_backend().await;
+        let addr = http_proxy_with_control(backend_port, no_routes()).await;
+
+        let mut client = client_over(TcpStream::connect(addr).await.unwrap()).await;
+        let (status, _, dump) = get(&mut client, dns::ZONE, &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header_line(&dump, "x-forwarded-proto"), Some("http"));
+    }
+
+    #[tokio::test]
+    async fn plain_http_host_with_a_port_still_finds_its_route() {
+        let backend_port = header_echo_backend().await;
+        let addr = http_proxy(routes(&[("cart.fghj.internal", "127.0.0.1", backend_port)])).await;
+
+        let mut client = client_over(TcpStream::connect(addr).await.unwrap()).await;
+        let (status, _, _) = get(&mut client, "Cart.fghj.internal:80", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[test]
+    fn host_name_drops_the_port_and_the_trailing_dot() {
+        assert_eq!(host_name("api.fghj.internal:80"), "api.fghj.internal");
+        assert_eq!(host_name("API.fghj.internal."), "api.fghj.internal");
+        assert_eq!(host_name("api.fghj.internal"), "api.fghj.internal");
+        assert_eq!(host_name(""), "");
     }
 
     #[test]
@@ -1280,16 +1309,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plain_http_unrouted_host_redirects_to_https() {
+    async fn plain_http_unrouted_host_gets_a_404() {
         let addr = http_proxy(no_routes()).await;
 
         let mut client = client_over(TcpStream::connect(addr).await.unwrap()).await;
         let (status, headers, _) = get(&mut client, "example.com", &[]).await;
-        assert_eq!(status, StatusCode::MOVED_PERMANENTLY);
-        assert_eq!(
-            headers.get(header::LOCATION).unwrap(),
-            "https://example.com/checkout?x=1"
-        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(headers.get(header::LOCATION).is_none());
     }
 
     #[tokio::test]

@@ -28,9 +28,10 @@ Every node gets **two** domains, always differing only in suffix:
 - **`{node}.{workspace}.fghj.internal`** — HTTP(S)-canonical, proxied.
   Resolves to the run's sidecar from inside the network, and to the host
   proxy from the host/a browser outside it — **the same hostname either
-  way**. Only ever reachable on **80** (redirects to 443) or **443**
-  (terminates TLS with a real, locally-CA-signed cert). Never any other
-  port.
+  way**. Only ever reachable on **80** (plain HTTP, routed by `Host`) or
+  **443** (terminates TLS with a real, locally-CA-signed cert, routed by
+  SNI). Both are proxied and both are recorded; a request is answered in
+  the scheme it came in. Never any other port.
 
 Nearly every bug in this area comes from picking the wrong one of these
 two for a given call, or from combining the http domain with a raw port
@@ -58,8 +59,10 @@ an OAuth provider) ever need to dial this exact URL?**
 zone is proxied, so only a call to a `*.fghj.internal` name is ever
 recorded. A raw call goes straight from one container to the other with
 nothing in between to watch it. For an HTTP API you'll be debugging, a
-frontend's `/api/` proxy for instance, the http zone is worth the TLS hop.
-If the caller is nginx, it needs [one extra
+frontend's `/api/` proxy for instance, the http zone is worth the extra
+hop. It doesn't have to cost TLS: `http://` to an http-zone name is proxied
+and recorded just like `https://`. If the caller is nginx and you do use
+`https://`, it needs [one extra
 line](/reference/fghj-yaml/#reaching-the-tls-proxy-from-inside-a-container).
 
 ## The macros
@@ -169,18 +172,15 @@ Why not raw, and why not plain http, here specifically:
   host-side caller, via the virtual-IP forwarder above — it just can't
   be the TLS endpoint this case needs, and it leans on host plumbing the
   http zone doesn't need.)
-- **Plain `http://` on the http zone always redirects to `https://`.**
-  Port 80 in-zone is a deliberate redirect-only listener for every
-  `fghj.internal` name (see [Local CA & TLS
-  proxy](/concepts/local-ca-and-tls-proxy/)) — it's never relayed as
-  plaintext, because fghj always owns the CA and can always mint a valid
-  cert for its own zone, so there's no reason to ever fall back to a
-  weaker plaintext path the way there is for a real third-party domain
-  under [`additional_hosts`](/reference/fghj-yaml/#additional-hosts).
-- **So `https://` on the http zone is the only combination that's
-  reachable both ways** — same hostname, same TLS cert, whether the
-  request comes from inside the network (via the sidecar) or from the host
-  (via the host-side proxy).
+- **Plain `http://` on the http zone stays plain HTTP.** Port 80 relays it
+  by `Host`, with no redirect (see [Local CA & TLS
+  proxy](/concepts/local-ca-and-tls-proxy/)). That works for the
+  container's own calls, but a presigned URL is checked by an S3 client or
+  a browser that expects an `https://` endpoint, and a browser page served
+  over plain HTTP isn't a secure context.
+- **So `https://` on the http zone is the combination this case needs** —
+  same hostname, same TLS cert, whether the request comes from inside the
+  network (via the sidecar) or from the host (via the host-side proxy).
 
 The one thing this needs that the raw zone never did: the **container
 minting and using this URL** (here, `aikifactory` itself — it doesn't just
@@ -300,5 +300,6 @@ directory every container can read**.
 | DB/cache/broker connection string | raw | whatever the backing service speaks | No |
 | Internal API call, own or named port | raw | `http://...:<port>` | No |
 | This node's own primary port, called internally | raw | `http://<raw-domain>` (primary port implied) | No |
+| Internal HTTP call you want recorded | http | `http://<http-domain>` or `https://<http-domain>` (no port) | Only over `https://` |
 | Presigned URL / OAuth redirect / webhook URL handed to an external caller | http | `https://<http-domain>` (no port — only 80/443 exist) | Yes, if this same container also dials that URL itself |
 | `fghj.internal` + a raw port number | — | **never valid** | — |

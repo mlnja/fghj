@@ -170,7 +170,7 @@ async fn main() -> Result<()> {
     // Never dialed: nothing in a run's network presents the zone apex.
     let control_port = 0;
     tokio::join!(
-        proxy::serve_http_redirect(http_listener, routes.clone()),
+        proxy::serve_http(http_listener, control_port, routes.clone()),
         proxy::serve_https(
             https_listener,
             cert_resolver,

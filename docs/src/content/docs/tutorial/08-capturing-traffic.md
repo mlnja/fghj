@@ -102,9 +102,10 @@ the shortest path, and nobody looking.
 
 To make a call visible, give the caller the http name instead.
 `files-web` did exactly that in chapter 4, and it's why nginx's calls are
-in `api`'s list at all. The one thing to watch for is a caller that doesn't
-send the server name in the TLS handshake, which nginx doesn't unless
-told to; see [Reaching the TLS proxy from inside a
+in `api`'s list at all. Over `https://` or plain `http://`, either is
+recorded. The one thing to watch for over `https://` is a caller that
+doesn't send the server name in the TLS handshake, which nginx doesn't
+unless told to; see [Reaching the TLS proxy from inside a
 container](/reference/fghj-yaml/#reaching-the-tls-proxy-from-inside-a-container).
 
 When you're done, press **Stop** on each card that has a red dot.

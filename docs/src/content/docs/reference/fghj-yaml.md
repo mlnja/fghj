@@ -164,8 +164,8 @@ environment:
 - `${FGHJ_SERVICE_FQDN:name}` is the **raw** domain: straight to the
   container, on its own port, any protocol. The default.
 - `${FGHJ_SERVICE_FQDN_HTTP:name}` is the **http** domain: through fghj's
-  proxy, HTTPS on 443, no port, and recorded in the callee's **Traffic**
-  tab. See [Reaching the TLS proxy from inside a
+  proxy, `http://` on 80 or `https://` on 443, no port, and recorded in the
+  callee's **Traffic** tab. See [Reaching the TLS proxy from inside a
   container](#reaching-the-tls-proxy-from-inside-a-container).
 - `alias/name` names a service in an [included](#include) repo; no name at
   all means this service itself.
@@ -393,8 +393,8 @@ behavior for a node's own container port (a database's `5432`, an internal
 API's own port): fastest path, no extra hop, no TLS.
 
 A sibling's **http** domain, from inside the same container, resolves
-instead to this run's TLS proxy sidecar — the exact same SNI-dispatch
-logic, same hostname, same port (`443`/`80`), that a browser or host
+instead to this run's proxy sidecar — the exact same dispatch logic, same
+hostname, same ports (`443` and `80`), that a browser or host
 process outside the network gets when it dials that name. This is
 automatic for every node in a run: nothing to declare, no `extra_hosts`
 entry, no sentinel. Use the http domain (via
@@ -406,13 +406,20 @@ back out (a presigned S3 URL, an OAuth redirect, a webhook callback) and
 can only have one endpoint configured for both its own calls and the URLs
 it generates.
 
-The sidecar serves every service from one address, so it picks the service
-by the name the client sends in the TLS handshake (SNI), before any HTTP is
-read. Browsers, curl, wget and the HTTP clients of Node, Go, Python and Java
-send it on their own. **nginx doesn't**: a `proxy_pass` to an `https://` URL
-sends no name unless told to, the sidecar refuses the handshake, and the
-caller gets a 502 (`SSL_do_handshake() failed … access denied` in nginx's
-log). One line fixes it:
+Both schemes work, and both are recorded. A request is answered in the
+scheme it came in: `http://` on 80 is relayed as plain HTTP, never
+redirected to `https://`. Use `https://` when the URL is also handed to a
+browser or another outside caller; inside the network, `http://` is the
+simpler choice for a caller that has no reason to speak TLS.
+
+The sidecar serves every service from one address. Over `http://` it picks
+the service by the `Host` header. Over `https://` it has to pick before any
+HTTP is read, so it uses the name the client sends in the TLS handshake
+(SNI). Browsers, curl, wget and the HTTP clients of Node, Go, Python and
+Java send it on their own. **nginx doesn't**: a `proxy_pass` to an
+`https://` URL sends no name unless told to, the sidecar refuses the
+handshake, and the caller gets a 502 (`SSL_do_handshake() failed … access
+denied` in nginx's log). Either proxy to `http://`, or add one line:
 
 ```nginx
 location /api/ {
@@ -421,8 +428,8 @@ location /api/ {
 }
 ```
 
-The container also needs to trust fghj's local CA for that TLS connection
-to succeed. The cert and a ready-made full trust bundle are already mounted
+Over `https://`, the container also needs to trust fghj's local CA for
+the TLS connection to succeed. The cert and a ready-made full trust bundle are already mounted
 read-only in every container at `/etc/fghj/certs/`, so this is usually one
 line:
 

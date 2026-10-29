@@ -43,10 +43,10 @@ The raw one is the shorter macro because it's what most callers want.
 |---|---|---|
 | Domain | `*.fghj.raw.internal` | `*.fghj.internal` |
 | Reaches | the container itself | fghj's proxy: the sidecar from a container, fghjd from your machine |
-| Port | the service's own, which you write: `:5432`, `:3000` | none: `https://` is 443, and `http://` on 80 only redirects to it |
+| Port | the service's own, which you write: `:5432`, `:3000` | none: `http://` is 80, `https://` is 443 |
 | Protocol | anything: Postgres, Redis, gRPC, HTTP | HTTP and WebSocket only |
-| TLS | none | fghj's CA; the caller has to [trust it](/guides/networking-http-vs-raw/#trusting-fghjs-ca-inside-a-container) |
-| Recorded in the **Traffic** tab | never: nothing sits between the two containers | yes, while the callee is recording |
+| TLS | none | your choice: none over `http://`, or fghj's CA over `https://`, which the caller has to [trust](/guides/networking-http-vs-raw/#trusting-fghjs-ca-inside-a-container) |
+| Recorded in the **Traffic** tab | never: nothing sits between the two containers | yes, over either scheme, while the callee is recording |
 | Reachable from a browser | no | yes, the same URL |
 
 Use **raw** for a database, a cache, a broker, and any call you won't need
@@ -54,14 +54,22 @@ to watch. Use **http** when something outside the network needs the same
 URL (a presigned S3 URL, an OAuth redirect, a webhook callback), or when
 you want an HTTP call in the callee's Traffic tab.
 
+The zone decides whether the call goes through fghj; the scheme only
+decides whether it's encrypted on the way. The proxy answers a request in
+the scheme it came in, and never redirects one to the other. Write
+`https://` when a browser or a URL you hand out needs it, and `http://`
+when the caller would rather not deal with TLS: both are routed and
+recorded the same way.
+
 Two mistakes the table rules out:
 
 - **An http domain with a port**, like
   `http://${FGHJ_SERVICE_FQDN_HTTP:api}:3000`. The proxy listens on 80 and
   443 only, so this never connects.
-- **An http domain behind nginx** without `proxy_ssl_server_name on;`. The
-  proxy picks the service by the name sent in the TLS handshake, and nginx
-  doesn't send one unless told to, so the call fails with a 502. See
+- **An `https://` http domain behind nginx** without
+  `proxy_ssl_server_name on;`. The proxy picks the service by the name sent
+  in the TLS handshake, and nginx doesn't send one unless told to, so the
+  call fails with a 502. `http://` needs no such line. See
   [Reaching the TLS proxy from inside a
   container](/reference/fghj-yaml/#reaching-the-tls-proxy-from-inside-a-container).
 

@@ -101,8 +101,8 @@ impl DaemonControl {
         let http_listener = proxy::bind_http().await?;
         let https_listener = proxy::bind_https().await?;
         let http_task = supervisor::supervise_forever(
-            "http redirect listener (:80)",
-            proxy::serve_http_redirect(http_listener, self.registry.clone()),
+            "http proxy listener (:80)",
+            proxy::serve_http(http_listener, self.control_port, self.registry.clone()),
         );
         let https_task = supervisor::supervise_forever(
             "https proxy listener (:443)",

@@ -65,7 +65,7 @@ not the root's — which is what bounds what a copy of it could ever certify.
 host, port }`, not just a port.** The host-side proxy always relayed to
 `127.0.0.1` and only needed a port; the sidecar relays to sibling
 containers by their own network address. One trait, one `serve_https`
-/`serve_http_redirect` implementation, two different `resolve()` backings —
+/`serve_http` implementation, two different `resolve()` backings —
 the host-side one still hardcodes `127.0.0.1`, the sidecar's reads a route
 file. `web::ca` needed no change: it only ever checked `.is_some()` on the
 result.

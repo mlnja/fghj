@@ -192,11 +192,16 @@ So the browser only ever talks to one origin, the frontend's. `/api/` goes
 through to the api, with no CORS and no second hostname for the frontend to
 be configured with.
 
-`proxy_ssl_server_name on` is the one line fghj costs here. The sidecar
-serves every service from one address and tells them apart by the name the
-client sends at the start of the TLS handshake (SNI). Nearly every HTTP
-client sends it unasked; nginx's `proxy_pass` doesn't, and without it the
-sidecar refuses the connection and `/api/` answers 502. File bytes are the one exception,
+`proxy_ssl_server_name on` is the one line `https://` costs here. The
+sidecar serves every service from one address and, over TLS, tells them
+apart by the name the client sends at the start of the handshake (SNI).
+Nearly every HTTP client sends it unasked; nginx's `proxy_pass` doesn't,
+and without it the sidecar refuses the connection and `/api/` answers 502.
+`http://${FGHJ_SERVICE_FQDN_HTTP:api/api}` would need no extra line: the
+sidecar answers plain HTTP too, picks the service by the `Host` header, and
+records it all the same. This repo uses `https://` to show the one catch.
+
+File bytes are the one exception to the single origin,
 and that's on purpose: a download is a presigned link to
 `s3.files-api.files.fghj.internal`, which chapter 2 made sure the browser
 can reach.

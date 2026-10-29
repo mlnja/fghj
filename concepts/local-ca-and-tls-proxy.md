@@ -208,9 +208,13 @@ target.
 `fghjd` occupies ports 80 and 443, localhost-only
 (`proxy::bind_http`/`bind_https`):
 
-- **Port 80** 301-redirects to the same path on `https://`, except a routed
-  non-reserved `#AdditionalHost`, which never gets a cert and so is relayed
-  over plain HTTP.
+- **Port 80** relays plain HTTP, dispatched by `Host` exactly as 443
+  dispatches by SNI (`proxy::backend_for`): apex to the control API, routed
+  names to their backend, the rest to the 404. No redirect to `https://`: a
+  request is answered in the scheme it came in, and both are recorded. It
+  used to 301 every in-zone name, which left no way to be proxied and
+  recorded without also speaking TLS; plain HTTP already had the raw zone,
+  but that one is never recorded.
 - **Port 443** TLS-terminates via the resolver above, then dispatches the
   decrypted request based on the SNI name it was negotiated for:
   - The zone apex (`fghj.internal` itself) relays to the control API's
@@ -399,7 +403,7 @@ Implemented: `src/web/ca.rs` (root CA generation/persistence/trust install,
 the name-constrained signing CA, dynamic per-SNI leaf issuance, the two
 key-free trust files and their de-duplicated bundle), the
 `/etc/fghj/certs` bind on every container (`daemon::certs_dir`,
-`orchestrator::node_spec`), `src/web/proxy.rs` (HTTP redirect, TLS
+`orchestrator::node_spec`), `src/web/proxy.rs` (plain HTTP by Host, TLS
 termination,
 `RouteResolver`, apex vs. per-service dispatch, fancy-404 for unknown in-zone
 names). `daemon::WorkspaceRegistry` implements `RouteResolver` over real run

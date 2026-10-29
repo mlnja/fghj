@@ -97,7 +97,7 @@ on the run machinery at all.
 ## Three things it does at once
 
 **It is the proxy.** `serve_https` with a `DynamicCertResolver` over the
-mounted CA, plus `serve_http_redirect` on port 80 — the same pair the host
+mounted CA, plus `serve_http` on port 80 — the same pair the host
 runs. Exact route matches beat wildcard matches, the same precedence
 `daemon::routing`'s resolver uses.
 
