@@ -45,7 +45,7 @@ services:
     additional_hosts:
       - files.test
     environment:
-      API_UPSTREAM: https://${FGHJ_SERVICE_FQDN_HTTP:api/api}
+      API_UPSTREAM: http://${FGHJ_SERVICE_FQDN_HTTP:api/api}
     depends_on:
       api: {}
 ```
@@ -146,13 +146,15 @@ chapter fixes that from `files-api`'s side.
 `API_UPSTREAM` is `${FGHJ_SERVICE_FQDN_HTTP:api/api}`: "service `api` in
 the repo included as `api`, in the http zone". It expands to
 `api.files-api.files.fghj.internal`, the same name your browser would use,
-so no port: it's HTTPS on 443, through the workspace's sidecar.
+so no port: it's port 80, through the workspace's sidecar. The sidecar
+answers in whatever scheme it's asked in, so plain `http://` is fine here,
+and nginx doesn't have to deal with TLS.
 
 The raw name, `${FGHJ_SERVICE_FQDN:api/api}` plus `:3000`, would work too,
-one hop shorter and with no TLS. The http one is here for what it lets you
-see: a call through the sidecar is a call fghj can record, and a raw one
-goes straight from container to container with nothing in between. There's
-more on that [below](#watching-the-calls).
+one hop shorter. The http one is here for what it lets you see: a call
+through the sidecar is a call fghj can record, and a raw one goes straight
+from container to container with nothing in between. There's more on that
+[below](#watching-the-calls).
 
 So a hostname *can* name another repo's service, where `depends_on` can't.
 That's deliberate: an address is the network contract, and production config
@@ -178,8 +180,6 @@ server {
 
   location /api/ {
     proxy_pass ${API_UPSTREAM};
-    proxy_ssl_server_name on;
-    proxy_set_header Host $host;
   }
 
   location / {
@@ -192,14 +192,15 @@ So the browser only ever talks to one origin, the frontend's. `/api/` goes
 through to the api, with no CORS and no second hostname for the frontend to
 be configured with.
 
-`proxy_ssl_server_name on` is the one line `https://` costs here. The
-sidecar serves every service from one address and, over TLS, tells them
-apart by the name the client sends at the start of the handshake (SNI).
-Nearly every HTTP client sends it unasked; nginx's `proxy_pass` doesn't,
-and without it the sidecar refuses the connection and `/api/` answers 502.
-`http://${FGHJ_SERVICE_FQDN_HTTP:api/api}` would need no extra line: the
-sidecar answers plain HTTP too, picks the service by the `Host` header, and
-records it all the same. This repo uses `https://` to show the one catch.
+The sidecar serves every service from one address and tells them apart by
+the `Host` header. nginx sends the name from `proxy_pass` as `Host`, which
+is exactly right, so the one thing not to add is the common
+`proxy_set_header Host $host;`: that would send `files.test`, and the
+sidecar would route the call back to `web`. Proxying to `https://` works
+too, but needs [one more
+line](/reference/fghj-yaml/#reaching-the-tls-proxy-from-inside-a-container),
+because nginx doesn't send the server name in the TLS handshake unless
+told to.
 
 File bytes are the one exception to the single origin,
 and that's on purpose: a download is a presigned link to

@@ -428,6 +428,13 @@ location /api/ {
 }
 ```
 
+Over `http://`, the name that counts is the `Host` header, so a proxy in
+front must pass the upstream's name, not the browser's. nginx does that by
+default; the common `proxy_set_header Host $host;` overrides it with the
+name the browser used, and the sidecar then routes the call to whatever
+that name is, often back to the frontend itself. Leave `Host` alone, and
+pass the browser's name in `X-Forwarded-Host` if the upstream needs it.
+
 Over `https://`, the container also needs to trust fghj's local CA for
 the TLS connection to succeed. The cert and a ready-made full trust bundle are already mounted
 read-only in every container at `/etc/fghj/certs/`, so this is usually one

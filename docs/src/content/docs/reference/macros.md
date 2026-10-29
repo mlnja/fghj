@@ -69,7 +69,9 @@ Two mistakes the table rules out:
 - **An `https://` http domain behind nginx** without
   `proxy_ssl_server_name on;`. The proxy picks the service by the name sent
   in the TLS handshake, and nginx doesn't send one unless told to, so the
-  call fails with a 502. `http://` needs no such line. See
+  call fails with a 502. `http://` needs no such line, but then nginx must
+  not set `Host` to the browser's name, since that's what plain HTTP is
+  routed by. See
   [Reaching the TLS proxy from inside a
   container](/reference/fghj-yaml/#reaching-the-tls-proxy-from-inside-a-container).
 
