@@ -304,11 +304,5 @@ support.
 
 ---
 
-That's the tutorial. From here:
-
-- [Attaching a debugger](/guides/debugging/): the contract in one page,
-  plus recipes for Python, the JVM, Ruby, Go and PHP/Xdebug (which is the
-  exception: it dials out to your IDE, so `debug:` is the wrong tool).
-- [.fghj.yaml reference](/reference/fghj-yaml/): the page to keep open.
-- [Concepts](/concepts/architecture/): one page per subsystem, each
-  explaining why it is the way it is.
+**Next:** [Capturing traffic](/tutorial/08-capturing-traffic/): what the
+services say to each other, recorded.

@@ -95,6 +95,7 @@ export default defineConfig({
             { label: '5. Flows', slug: 'tutorial/05-flows' },
             { label: '6. When it goes wrong', slug: 'tutorial/06-when-it-goes-wrong' },
             { label: '7. Attaching a debugger', slug: 'tutorial/07-attaching-a-debugger' },
+            { label: '8. Capturing traffic', slug: 'tutorial/08-capturing-traffic' },
           ],
         },
         {
@@ -154,6 +155,7 @@ export default defineConfig({
           label: 'Reference',
           items: [
             { label: 'fghj.yaml', slug: 'reference/fghj-yaml' },
+            { label: 'Macros', slug: 'reference/macros' },
           ],
         },
       ],

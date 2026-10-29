@@ -1,14 +1,14 @@
 ---
 title: The fghj tutorial
-description: Run a four-repo file-sharing app one chapter at a time — a service, two stores, migrations and a seed, a second repo, flows, and a debugger.
+description: Run a four-repo file-sharing app one chapter at a time — a service, two stores, migrations and a seed, a second repo, flows, a debugger, and recorded traffic.
 sidebar:
   order: 0
 ---
 
 This is a book, not a reference. It starts with one repository answering
 one health check and ends with four repositories, eight containers, two
-migrations, a seed, a background worker, and a debugger stopped on a line
-of it. Every piece is explained as it appears. Read it start to finish once;
+migrations, a seed, a background worker, a debugger stopped on a line of
+it, and the calls between them on record. Every piece is explained as it appears. Read it start to finish once;
 after that the [.fghj.yaml reference](/reference/fghj-yaml/) is the page
 you'll actually keep open.
 
@@ -86,7 +86,8 @@ React, and the tutorial doesn't walk through it.
 Not every repo appears in every chapter. `files-api` has a tag for each one,
 `files-web` starts at `ch4`, and the worker and platform start at `ch5`. A
 chapter that doesn't change a repo still has a tag for it, so `git checkout
-chN` always works in every repo that exists by then.
+chN` always works in every repo that exists by then. Chapter 8 changes no
+repo at all, so it has no tags: stay on `ch7`.
 
 ## Before you start
 
@@ -126,3 +127,5 @@ fghj daemon status
    vocabulary, drift, `fghj exec`, and the doctor.
 7. [Attaching a debugger](/tutorial/07-attaching-a-debugger/): Node's
    inspector, `debug:`, and the one switch that isn't config.
+8. [Capturing traffic](/tutorial/08-capturing-traffic/): an upload followed
+   across four services, and what the Traffic tab can't see.

@@ -45,7 +45,7 @@ services:
     additional_hosts:
       - files.test
     environment:
-      API_UPSTREAM: http://${FGHJ_SERVICE_FQDN:api/api}:3000
+      API_UPSTREAM: https://${FGHJ_SERVICE_FQDN_HTTP:api/api}
     depends_on:
       api: {}
 ```
@@ -143,9 +143,16 @@ chapter fixes that from `files-api`'s side.
 
 ## Reaching across
 
-`API_UPSTREAM` is `${FGHJ_SERVICE_FQDN:api/api}`: "service `api` in the repo
-included as `api`". It expands to `api.files-api.files.fghj.raw.internal`.
-Raw zone, plain HTTP, port 3000: the container's real port, one hop, no TLS.
+`API_UPSTREAM` is `${FGHJ_SERVICE_FQDN_HTTP:api/api}`: "service `api` in
+the repo included as `api`, in the http zone". It expands to
+`api.files-api.files.fghj.internal`, the same name your browser would use,
+so no port: it's HTTPS on 443, through the workspace's sidecar.
+
+The raw name, `${FGHJ_SERVICE_FQDN:api/api}` plus `:3000`, would work too,
+one hop shorter and with no TLS. The http one is here for what it lets you
+see: a call through the sidecar is a call fghj can record, and a raw one
+goes straight from container to container with nothing in between. There's
+more on that [below](#watching-the-calls).
 
 So a hostname *can* name another repo's service, where `depends_on` can't.
 That's deliberate: an address is the network contract, and production config
@@ -155,9 +162,10 @@ has the api's address in it too. The two rules, exactly:
 - `alias/name` is service `name` in the repo included as `alias`.
 
 A name that matches nothing is a blocking warning. And a hostname never
-makes anything wait. It's drawn as a dotted **uses** edge. Two services
+makes anything wait, and isn't drawn in the graph at all. Two services
 calling each other is normal, and if a hostname meant waiting, they'd wait
-on each other forever.
+on each other forever. The [Macros](/reference/macros/) page has every
+form and rule.
 
 nginx is what uses the upstream. `files-web`'s image is the built React app
 plus this config, which the nginx image fills in from the environment at
@@ -170,6 +178,7 @@ server {
 
   location /api/ {
     proxy_pass ${API_UPSTREAM};
+    proxy_ssl_server_name on;
     proxy_set_header Host $host;
   }
 
@@ -180,8 +189,14 @@ server {
 ```
 
 So the browser only ever talks to one origin, the frontend's. `/api/` goes
-through to the api over the raw zone, with no CORS and no second hostname
-for the frontend to be configured with. File bytes are the one exception,
+through to the api, with no CORS and no second hostname for the frontend to
+be configured with.
+
+`proxy_ssl_server_name on` is the one line fghj costs here. The sidecar
+serves every service from one address and tells them apart by the name the
+client sends at the start of the TLS handshake (SNI). Nearly every HTTP
+client sends it unasked; nginx's `proxy_pass` doesn't, and without it the
+sidecar refuses the connection and `/api/` answers 502. File bytes are the one exception,
 and that's on purpose: a download is a presigned link to
 `s3.files-api.files.fghj.internal`, which chapter 2 made sure the browser
 can reach.
@@ -244,6 +259,14 @@ The derived name, `https://web.files-web.files.fghj.internal`, serves the
 same app, but you can't log in there. The frontend asks Descope to send you
 back to `/callback` on whatever origin it's served from, and Descope refuses
 a callback that isn't registered.
+
+## Watching the calls
+
+Because nginx reaches the api by its http name, every `/api/` call passes
+through the sidecar, and fghj can record it. Click `api`, open its
+**Traffic** tab, press **⏺ Record**, and use the app: the calls show up as
+nginx made them. [Chapter 8](/tutorial/08-capturing-traffic/) is about that
+tab.
 
 ---
 

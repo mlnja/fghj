@@ -171,6 +171,10 @@ a domain in both, and they mean different things:
 | `*.fghj.internal` | fghj's TLS proxy, which dispatches by hostname | anything a browser opens, and any URL you hand to someone outside the container |
 | `*.fghj.raw.internal` | the container itself, on its own real port | everything else: databases, brokers, internal API calls, any protocol that isn't HTTP |
 
+Only the first goes through a proxy, so only calls to a `*.fghj.internal`
+name show up in a service's **Traffic** tab. [Chapter
+8](/tutorial/08-capturing-traffic/) is about that.
+
 The Postgres wire protocol can't go through an HTTP proxy that dispatches
 on SNI, so the raw zone is the only answer for `db`. That's also why the
 bare `${FGHJ_SERVICE_FQDN}` template gives you the raw domain and the
@@ -202,9 +206,10 @@ Both templates do two things for you:
 
 A template that names nothing, like `${FGHJ_SERVICE_FQDN:bd}`, is a
 blocking warning: fghj refuses to start rather than hand `api` an address
-that will never resolve. See
-[HTTP vs. raw: choosing a zone](/guides/networking-http-vs-raw/) for the
-long version.
+that will never resolve. Every form these macros take, and where they
+work, is on the [Macros](/reference/macros/) reference page. See
+[HTTP vs. raw: choosing a zone](/guides/networking-http-vs-raw/) for which
+zone a call wants.
 
 ## The same name from inside the container
 

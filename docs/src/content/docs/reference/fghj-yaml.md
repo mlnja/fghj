@@ -103,8 +103,8 @@ services:
 | `build.ssh` | bool | Forwards the **workspace owner's** ssh-agent into the build as BuildKit's `default` socket, for a Dockerfile doing `RUN --mount=type=ssh` — cloning a private sibling repo, a private Go module, a private Cargo registry. The same agent fghj already forwards to `git clone`. Defaults to `false`. Note the credential comes from the person who owns the workspace, never from this config: a repo cannot ask for a key. |
 | `build.secrets` | list of `{id, file}` | BuildKit secret mounts — `id` is what the Dockerfile names (`RUN --mount=type=secret,id=npmrc`), `file` is where the bytes come from, resolved against this repo's checkout root exactly like a bind mount's `host`. There is deliberately **no `env:` variant**, which BuildKit itself supports: `fghjd` is a root daemon with no access to your shell environment, so there'd be nothing to read one from. |
 | `ports` | map of container-port→`#Port` | Declared container ports. The map key is the literal container port number (e.g. `"8080"`), published to Docker as-is — not a semantic label. See [Ports](#ports) below. |
-| `environment` | map or list | Either `{KEY: value}` or a list of `"KEY=value"` strings — mirrors Docker Compose's own `environment` shape. Values can reference a sibling's domain with `${FGHJ_SERVICE_FQDN}`/`${FGHJ_SERVICE_FQDN_HTTP}` — see [Domain templates in `environment`](#domain-templates-in-environment) below. |
-| `env_file` | list of strings | `.env`-style files loaded *before* `environment` — Compose's `env_file`. Each path resolves against this repo's own checkout root, same rule as `#Volume.host`. An explicit `environment` entry always wins over one loaded from a file. Resolves the same way for an `image:` service. Same `${FGHJ_SERVICE_FQDN}` templating as `environment` applies to loaded values too. |
+| `environment` | map or list | Either `{KEY: value}` or a list of `"KEY=value"` strings — mirrors Docker Compose's own `environment` shape. Values can reference a sibling's domain with `${FGHJ_SERVICE_FQDN}`/`${FGHJ_SERVICE_FQDN_HTTP}` — see [Domain templates in `environment`](#domain-templates-in-environment) below and [Macros](/reference/macros/). |
+| `env_file` | list of strings | `.env`-style files loaded *before* `environment` — Compose's `env_file`. Each path resolves against this repo's own checkout root, same rule as `#Volume.host`. An explicit `environment` entry always wins over one loaded from a file. Resolves the same way for an `image:` service. Same [macros](/reference/macros/) as `environment` apply to loaded values too. |
 | `platform` | string, optional | Pins the platform (`os[/arch[/variant]]`, e.g. `linux/arm64`) passed to `docker build --platform`, for cross-compiling this service's image to a specific architecture. Unset (the default) builds for the host's own platform. |
 | `command` | list of strings | Overrides the image's default `CMD`, Compose-`command`-style. Empty (the default) leaves the image's own `CMD`/`ENTRYPOINT` untouched. |
 | `restart` | `"no"` \| `"always"` \| `"on-failure"` \| `"unless-stopped"` | Compose-equivalent restart policy. Defaults to `"no"` — a stopped container stays stopped; `fghj daemon`'s own `ensure_running` is the usual way a container comes back, not Docker's own restart machinery. |
@@ -151,40 +151,28 @@ ephemeral localhost port, just with no `*.fghj.internal` name.
 
 ## Domain templates in `environment`
 
-`environment` (and `env_file`) values can reference a sibling's domain
-without hand-computing it. Every node actually has two derived domains —
-see [Node identity &
-domains](/concepts/node-identity-and-domains/#domain-derivation-one-formula-no-exceptions-two-zones)
-and [Split DNS](/concepts/split-dns/) — and the macro form you use picks
-which one you get:
+`environment` and `env_file` values can name another service's domain
+instead of spelling it out. The full rules are on the
+[Macros](/reference/macros/) page; the short version:
 
 ```yaml
 environment:
   DATABASE_URL: postgres://user:pass@${FGHJ_SERVICE_FQDN:postgres}:5432/app
-  PMA_ABSOLUTE_URI: https://${FGHJ_SERVICE_FQDN_HTTP}/
+  API_URL: https://${FGHJ_SERVICE_FQDN_HTTP:billing/api}
 ```
 
-| Token | Resolves to |
-|---|---|
-| `${FGHJ_SERVICE_FQDN}` | This node's own **raw** domain (`*.fghj.raw.internal`) — direct, in-network-only, resolved straight to the real container IP. This is the default because it's what nearly every real caller needs: a database connection string, an internal API call, a raw port that isn't HTTP(S) at all. |
-| `${FGHJ_SERVICE_FQDN:name}` | The **raw** domain of service `name` in this same repo. |
-| `${FGHJ_SERVICE_FQDN:alias/name}` | The **raw** domain of service `name` in the repo included as `alias`. This is the one place a file may name another repo's service: an address is the network contract, and production config has it too. |
-| `${FGHJ_SERVICE_FQDN_HTTP}` / `${FGHJ_SERVICE_FQDN_HTTP:…}` | The same lookups, but resolving to the **http** domain (`*.fghj.internal`) instead — proxied, TLS-terminated, the same address in or out of the run's docker network. Use this only when something specifically needs that proxied identity on purpose, e.g. minting a presigned URL meant to be handed to something outside the network. Reachable automatically from inside a container too — see [Reaching the TLS proxy from inside a container](#reaching-the-tls-proxy-from-inside-a-container) below. |
-
-A reference is not an edge. It expands to a hostname, nothing more: it
-never makes anything wait, never pulls anything into a run, and isn't drawn
-in the graph. A service could just as well hardcode the hostname, and fghj
-couldn't see that, so the graph doesn't depend on how an address happened to
-be spelled. If a service needs another, say so in `depends_on`: required to
-start, or `required: false` for one it only calls at runtime. Starting a run
-that leaves out a `required: false` dependency of something it starts gets an
-advisory ("'web.shop' needs 'billing/api' at runtime, but this run doesn't
-start it").
-
-A name that matches nothing — no such service, no such include, or no such
-service in the included repo — is a blocking warning. A repo that isn't
-cloned yet can't be checked, so its names pass until it is. You can't reach
-a *named port* this way, only the service's bare domain.
+- `${FGHJ_SERVICE_FQDN:name}` is the **raw** domain: straight to the
+  container, on its own port, any protocol. The default.
+- `${FGHJ_SERVICE_FQDN_HTTP:name}` is the **http** domain: through fghj's
+  proxy, HTTPS on 443, no port, and recorded in the callee's **Traffic**
+  tab. See [Reaching the TLS proxy from inside a
+  container](#reaching-the-tls-proxy-from-inside-a-container).
+- `alias/name` names a service in an [included](#include) repo; no name at
+  all means this service itself.
+- A name that matches nothing is a blocking warning.
+- A macro is not an edge: it never makes anything wait. Use
+  [`depends_on`](#depends_on) for that.
+- Macros expand in `environment` and `env_file` only, not in `command`.
 
 ## Volumes
 
@@ -418,6 +406,21 @@ back out (a presigned S3 URL, an OAuth redirect, a webhook callback) and
 can only have one endpoint configured for both its own calls and the URLs
 it generates.
 
+The sidecar serves every service from one address, so it picks the service
+by the name the client sends in the TLS handshake (SNI), before any HTTP is
+read. Browsers, curl, wget and the HTTP clients of Node, Go, Python and Java
+send it on their own. **nginx doesn't**: a `proxy_pass` to an `https://` URL
+sends no name unless told to, the sidecar refuses the handshake, and the
+caller gets a 502 (`SSL_do_handshake() failed … access denied` in nginx's
+log). One line fixes it:
+
+```nginx
+location /api/ {
+  proxy_pass https://api.files-api.files.fghj.internal;
+  proxy_ssl_server_name on;
+}
+```
+
 The container also needs to trust fghj's local CA for that TLS connection
 to succeed. The cert and a ready-made full trust bundle are already mounted
 read-only in every container at `/etc/fghj/certs/`, so this is usually one
@@ -509,6 +512,7 @@ advisory.
 A `${FGHJ_SERVICE_FQDN:…}` hostname isn't an edge. It must name an existing
 service, but it orders, waits on and starts nothing: declare the dependency
 in `depends_on` if there is one. See
+[Macros](/reference/macros/#a-macro-isnt-a-dependency) and
 [Dependency kinds](/concepts/dependency-kinds/).
 
 What an entry can name:
@@ -586,7 +590,7 @@ include:
 ```
 
 The alias is what `depends_on`, `flows` and hostnames use (`billing/db`,
-`${FGHJ_SERVICE_FQDN:billing/api}`). It can be anything, as long as it isn't
+[`${FGHJ_SERVICE_FQDN:billing/api}`](/reference/macros/)). It can be anything, as long as it isn't
 also the name of a service or flow in this file.
 
 fghj finds the repo by its git remote, so the folder it's checked out in can
@@ -661,7 +665,9 @@ services:
       test: ["CMD", "mysqladmin", "ping", "-p123"]
   migrate:
     image: sqldef/mysqldef
-    command: ["sh", "-c", "mysqldef -uroot -p123 -h ${FGHJ_SERVICE_FQDN:mysql} aikido < /schema/aikido.sql"]
+    environment:
+      MYSQL_HOST: ${FGHJ_SERVICE_FQDN:mysql}
+    command: ["sh", "-c", "mysqldef -uroot -p123 -h \"$MYSQL_HOST\" aikido < /schema/aikido.sql"]
     volumes:
       - host: docs/mysql
         container: /schema

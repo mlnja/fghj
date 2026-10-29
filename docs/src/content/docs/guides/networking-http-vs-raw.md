@@ -54,18 +54,27 @@ an OAuth provider) ever need to dial this exact URL?**
   that URL also [trusts fghj's CA](#trusting-fghjs-ca-inside-a-container)
   if it dials that same URL itself (not just hands it out).
 
+**Do you want to see the call in the callee's Traffic tab?** Only the http
+zone is proxied, so only a call to a `*.fghj.internal` name is ever
+recorded. A raw call goes straight from one container to the other with
+nothing in between to watch it. For an HTTP API you'll be debugging, a
+frontend's `/api/` proxy for instance, the http zone is worth the TLS hop.
+If the caller is nginx, it needs [one extra
+line](/reference/fghj-yaml/#reaching-the-tls-proxy-from-inside-a-container).
+
 ## The macros
 
 In `.fghj.yaml`, `environment`/`env_file` values can reference a domain
-without hand-computing it:
+without hand-computing it. The [Macros](/reference/macros/) reference has
+the full rules; here's which one to pick:
 
 | Token | Zone | Use for |
 |---|---|---|
 | `${FGHJ_SERVICE_FQDN}` | raw (this node's own) | Rare — a node referencing its own raw address. |
-| `${FGHJ_SERVICE_FQDN:name}` | raw (service `name` in this repo) | **The default choice.** `DATABASE_URL`, an internal API base URL, anything container-to-container. |
+| `${FGHJ_SERVICE_FQDN:name}` | raw (service `name` in this repo) | **The default choice.** `DATABASE_URL`, a cache, a broker, anything container-to-container you won't need to watch. |
 | `${FGHJ_SERVICE_FQDN:alias/name}` | raw (service `name` in the repo included as `alias`) | The same, across repos. |
 | `${FGHJ_SERVICE_FQDN_HTTP}` | http (this node's own) | This node minting a URL that points back at itself (e.g. an absolute callback URL for its own OAuth flow). |
-| `${FGHJ_SERVICE_FQDN_HTTP:name}` / `:alias/name` | http (another service's) | A sibling's proxied identity — the minio/presigned-URL case below. |
+| `${FGHJ_SERVICE_FQDN_HTTP:name}` / `:alias/name` | http (another service's) | A sibling's proxied identity — the minio/presigned-URL case below, or an HTTP call you want recorded. |
 
 A name that matches no service is a blocking warning, not a literal left in
 the container's environment. **They can't reach a named port on another
