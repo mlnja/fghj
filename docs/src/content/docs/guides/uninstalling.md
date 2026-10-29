@@ -33,6 +33,7 @@ more than you want:
 |---|---|
 | `--keep-ca` | The root CA trusted, so a reinstall doesn't re-prompt for keychain authorization |
 | `--keep-state` | `/var/lib/fghjd` — every wired workspace and both CAs' private keys |
+| `--keep-workspaces` | Only the workspace index and daemon settings; no CA file or key |
 
 Docker resources are left alone either way. See
 [Docker resources](#docker-resources) below.
@@ -186,9 +187,11 @@ cannot know whether you have been editing them.
 ## On Linux
 
 The same kinds of change, made the Linux way. `sudo apt remove fghj` runs
-`fghj uninstall --yes --keep-state` before the binaries go, which undoes the
-first three rows and the CA rows; `sudo apt purge fghj` also deletes
-`/var/lib/fghjd`.
+`fghj uninstall --yes --keep-workspaces` before the binaries go: afterwards
+no CA of fghj's is trusted anywhere or exists on disk, and fghj's sidecar
+containers are gone. Only `workspaces.json` and `daemon-state.json` stay, for
+a reinstall. `sudo apt purge fghj` deletes those too, and fghj's database in
+each wired workspace.
 
 | What | Where | Undone by |
 |---|---|---|
@@ -196,8 +199,11 @@ first three rows and the CA rows; `sudo apt purge fghj` also deletes
 | Split DNS | the `fghj0` dummy link, which carries fghjd's DNS server and `~fghj.internal ~fghj.raw.internal` as its routing domains in systemd-resolved | stopping fghjd deletes the link |
 | Loopback addresses | none: all of `127/8` is already local | — |
 | The root CA, for programs | `/usr/local/share/ca-certificates/fghj-local-ca.crt`, folded into `/etc/ssl/certs/ca-certificates.crt` | `fghj uninstall` |
-| The root CA, for browsers | `fghj local CA` in each workspace owner's Firefox profiles and Chrome/Chromium NSS database, snap ones included | `fghj uninstall`, for the user who ran `sudo` |
-| Daemon state | `/var/lib/fghjd` | `apt purge`, or `fghj uninstall` |
+| The root CA, for browsers | `fghj local CA` in each workspace owner's Firefox profiles and Chrome/Chromium NSS database, snap ones included | `fghj uninstall`, for every wired workspace's owner and whoever ran `sudo` |
+| The CAs' files and keys | `/var/lib/fghjd/ca`, `certs`, `sidecar-ca` | `apt remove`, or `fghj uninstall` |
+| fghj's sidecar containers | Docker, one per workspace with an environment | `apt remove`, or `fghj uninstall` |
+| The workspace index and settings | `/var/lib/fghjd/workspaces.json`, `daemon-state.json` | `apt purge`, or `fghj uninstall` |
+| fghj's database in each workspace | `<workspace>/.fghj/fghj.db` | `apt purge`, or `fghj uninstall` |
 | The service | `fghjd.service`, under `/usr/lib/systemd/system` | `apt remove` |
 
 To check by hand:

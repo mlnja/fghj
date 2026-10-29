@@ -394,6 +394,37 @@ fn exit_code_in(text: &str) -> Option<i64> {
 }
 
 /// `Ok(None)` if the container doesn't exist or isn't on `network`.
+/// Force-removes every container whose Compose service label is `service`, in
+/// any project. How many went.
+pub async fn remove_service_everywhere(docker: &Docker, service: &str) -> Result<usize> {
+    let mut filters: HashMap<&str, Vec<String>> = HashMap::new();
+    filters.insert(
+        "label",
+        vec![format!("com.docker.compose.service={service}")],
+    );
+    let listed = docker
+        .list_containers(Some(
+            ListContainersOptionsBuilder::new()
+                .all(true)
+                .filters(&filters)
+                .build(),
+        ))
+        .await
+        .context("docker list_containers failed")?;
+    let mut removed = 0;
+    for id in listed.into_iter().filter_map(|c| c.id) {
+        docker
+            .remove_container(
+                &id,
+                Some(RemoveContainerOptionsBuilder::default().force(true).build()),
+            )
+            .await
+            .with_context(|| format!("failed to remove container {id}"))?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
 pub async fn inspect_network_ip(
     docker: &Docker,
     name: &str,

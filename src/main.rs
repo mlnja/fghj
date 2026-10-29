@@ -77,12 +77,17 @@ enum Commands {
         /// Skip the confirmation prompt
         #[arg(short = 'y', long)]
         yes: bool,
-        /// Leave the root CA trusted in the System keychain
+        /// Leave the root CA trusted, in the system store and the browsers
         #[arg(long)]
         keep_ca: bool,
-        /// Leave /var/lib/fghjd (wired workspaces, CA key, run state) in place
+        /// Leave all of /var/lib/fghjd (wired workspaces, CA keys, run state) in place
         #[arg(long)]
         keep_state: bool,
+        /// Keep only the wired workspaces and daemon settings; every CA file and
+        /// key still goes, and a reinstall mints a new CA. What removing the
+        /// package does
+        #[arg(long, conflicts_with = "keep_state")]
+        keep_workspaces: bool,
     },
     /// Run a command inside a running node's container — like `docker
     /// compose exec`, full duplex (a real interactive shell works)
@@ -450,7 +455,7 @@ fn confirmed(answer: &str) -> bool {
 
 /// Needs root, and won't re-exec under `sudo`: silently escalating to delete a
 /// trusted root is the wrong shape.
-fn uninstall(yes: bool, keep_ca: bool, keep_state: bool) -> Result<()> {
+fn uninstall(yes: bool, keep_ca: bool, keep_state: bool, keep_workspaces: bool) -> Result<()> {
     let platform = fghj::platform::current();
     if unsafe { libc::geteuid() } != 0 {
         bail!(
@@ -478,19 +483,29 @@ fn uninstall(yes: bool, keep_ca: bool, keep_state: bool) -> Result<()> {
         );
         if !keep_ca {
             println!(
-                "  - the \"{}\" root certificate from {}",
+                "  - the \"{}\" root certificate from {}, and from every wired workspace \
+                 owner's {}",
                 fghj::web::ca::COMMON_NAME,
-                platform.trust.store_name()
+                platform.trust.store_name(),
+                platform.browser_trust.store_name()
             );
         }
-        if !keep_state {
+        if keep_workspaces {
             println!(
-                "  - {} — the CA private key, every wired workspace, and all run state",
+                "  - every CA file and key under {}, and fghj's sidecar containers \
+                 (the wired workspaces stay)",
                 fghj::persistence::fghjd_root().display()
             );
+        } else if !keep_state {
+            println!(
+                "  - {} — both CAs and their keys, every wired workspace, and all run state",
+                fghj::persistence::fghjd_root().display()
+            );
+            println!("  - fghj's own database in each wired workspace (.fghj/fghj.db)");
+            println!("  - fghj's sidecar containers, which hold the signing CA's key");
         }
         println!();
-        println!("Docker containers, networks and volumes are NOT removed (a volume may");
+        println!("Your own containers, networks and volumes are NOT removed (a volume may");
         println!(
             "hold data you still want). Neither are the binaries ({}).",
             platform.packaging.uninstall_hint()
@@ -510,6 +525,7 @@ fn uninstall(yes: bool, keep_ca: bool, keep_state: bool) -> Result<()> {
         fghj::uninstall::Options {
             keep_ca,
             keep_state,
+            keep_workspaces,
         },
         || {
             if !probe_daemon() {
@@ -532,12 +548,25 @@ fn uninstall(yes: bool, keep_ca: bool, keep_state: bool) -> Result<()> {
             fghj::web::ca::COMMON_NAME
         ),
         n => println!(
-            "removed {n} \"{}\" certificate(s) from {}",
+            "removed {n} \"{}\" certificate(s) from {} and the browsers",
             fghj::web::ca::COMMON_NAME,
             platform.trust.store_name()
         ),
     }
+    if outcome.sidecars_removed > 0 {
+        println!("removed {} sidecar container(s)", outcome.sidecars_removed);
+    }
+    if outcome.workspace_dbs_removed > 0 {
+        println!(
+            "removed fghj's database from {} workspace(s)",
+            outcome.workspace_dbs_removed
+        );
+    }
     match &outcome.state_dir_removed {
+        Some(path) if keep_workspaces => println!(
+            "removed every CA file under {}; kept the wired workspaces (--keep-workspaces)",
+            path.display()
+        ),
         Some(path) => println!("removed {}", path.display()),
         None if keep_state => println!(
             "kept {} (--keep-state)",
@@ -904,7 +933,8 @@ async fn main() -> Result<()> {
             yes,
             keep_ca,
             keep_state,
-        } => uninstall(yes, keep_ca, keep_state),
+            keep_workspaces,
+        } => uninstall(yes, keep_ca, keep_state, keep_workspaces),
         Commands::Exec {
             node,
             workspace,

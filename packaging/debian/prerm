@@ -5,13 +5,14 @@ set -e
 # is unwound below.
 #DEBHELPER#
 
-# Removing, not upgrading: a root CA trusted after the software that holds
-# its key is gone is exactly what nobody should be left with. This takes it
-# out of the system store and the browsers of whoever ran `sudo apt`, and
-# clears the DNS link and the /etc/hosts block. The state stays for a
-# reinstall; `apt purge` deletes it.
+# Removing, not upgrading: no CA of fghj's survives the package. This takes
+# it out of the system store and every workspace owner's browsers, deletes
+# every CA file and key, removes fghj's sidecar containers (they hold the
+# signing key), and clears the DNS link and the /etc/hosts block. Only the
+# workspace index and daemon settings stay, for a reinstall; `apt purge`
+# deletes those and each workspace's .fghj database too.
 if [ "$1" = remove ] && [ -x /usr/bin/fghj ]; then
-    /usr/bin/fghj uninstall --yes --keep-state || true
+    /usr/bin/fghj uninstall --yes --keep-workspaces || true
 fi
 
 exit 0

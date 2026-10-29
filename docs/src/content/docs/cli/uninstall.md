@@ -4,7 +4,7 @@ description: Removes the trusted root CA, /var/lib/fghjd, and every system chang
 ---
 
 ```
-sudo fghj uninstall [-y] [--keep-ca] [--keep-state]
+sudo fghj uninstall [-y] [--keep-ca] [--keep-state | --keep-workspaces]
 ```
 
 Removes everything fghj installed on this machine except the binaries and
@@ -29,8 +29,17 @@ disk. This command is the one that clears them.
    killed with `SIGKILL` never ran its own teardown, so these can still be
    installed with nothing alive to remove them. Each step is a
    no-op when there is nothing to undo.
-3. Deletes every `fghj local CA` certificate from the System keychain.
-4. Removes `/var/lib/fghjd`.
+3. Deletes every `fghj local CA` certificate from the system trust store
+   (the System keychain on macOS; `/usr/local/share/ca-certificates` on
+   Linux) and, on Linux, from the browser databases of every wired
+   workspace's owner and of the user who ran `sudo`.
+4. Removes fghj's sidecar containers, which hold the signing CA's key. Your
+   own containers, networks and volumes stay.
+5. Removes `/var/lib/fghjd`, and fghj's own database in each wired
+   workspace (`.fghj/fghj.db`). Nothing else in a workspace is touched.
+
+Once it's done, no CA of fghj's exists anywhere: not trusted, not on disk,
+not in a running container.
 
 The order matters. A live `fghjd` would re-mint and re-trust a CA on its
 next reconcile, undoing step 3 — so the daemon goes down first.
@@ -46,7 +55,8 @@ a *new* CA and trust that one too.
 |---|---|
 | `-y`, `--yes` | Skip the confirmation prompt |
 | `--keep-ca` | Leave the root CA trusted — avoids a fresh keychain authorization prompt when reinstalling |
-| `--keep-state` | Leave `/var/lib/fghjd` in place — keeps every wired workspace and the CA key |
+| `--keep-state` | Leave `/var/lib/fghjd` in place — keeps every wired workspace and the CA keys, and leaves the sidecars running |
+| `--keep-workspaces` | Keep only the workspace index and daemon settings; every CA file and key still goes, and so do the sidecars. A reinstall mints a new CA and still knows your workspaces. Removing the Ubuntu package runs this |
 
 Without `-y` it prints exactly what it will delete and waits. Anything but
 `y` or `yes` — including a bare Enter, or a closed stdin under a pipe or in

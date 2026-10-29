@@ -14,6 +14,10 @@ use crate::web::capture::CAPTURE_PORT;
 use super::naming::sidecar_name;
 use super::registry::Orchestrator;
 
+/// The Compose service label every sidecar carries, whatever its workspace:
+/// how `fghj uninstall` finds them.
+pub(crate) const SIDECAR_SERVICE: &str = "fghj-sidecar";
+
 impl Orchestrator {
     /// Starts the environment's in-network TLS proxy sidecar unless it's already
     /// running. Returns its name and its address on `network`.
@@ -90,7 +94,7 @@ impl Orchestrator {
                 image: &crate::sidecar_image::image_tag(),
                 command: &[],
                 project: network,
-                service_name: "fghj-sidecar",
+                service_name: SIDECAR_SERVICE,
                 binds: &binds,
                 restart_policy: "unless-stopped",
                 // Stateless, so a short grace period keeps teardown snappy.

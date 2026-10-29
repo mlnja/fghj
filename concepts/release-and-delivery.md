@@ -125,9 +125,13 @@ Pages), which rebuilds its index from each product's GitHub release assets.
   starts it on the new socket ([[docker-and-downloads]]). The package's
   scripts enable and (re)start the unit, so installing is the whole setup
   until the first `fghj wire`.
-- **Removing** it runs `fghj uninstall --yes --keep-state` from `prerm`,
-  while the binary still exists, so no trusted root outlives the software
-  that holds its key; `apt purge` also deletes `/var/lib/fghjd`.
+- **Removing** it runs `fghj uninstall --yes --keep-workspaces` from
+  `prerm`, while the binary still exists: no CA of fghj's survives it, not
+  trusted (system store, every workspace owner's browsers), not on disk
+  (`ca/`, `certs/`, `sidecar-ca/`), not in a running sidecar. Only the
+  workspace index and daemon settings stay, for a reinstall. `apt purge`
+  deletes those and each workspace's `.fghj/fghj.db`, reading the paths
+  from the index in shell, since the binary is gone by then.
 - **Checked** by installing it into clean `ubuntu:22.04`, `24.04` and
   `26.04` containers in the same job, before anything is published.
 - **Published** by attaching the `.deb`s to the GitHub release, then the

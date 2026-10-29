@@ -147,12 +147,16 @@ journalctl -u fghjd      # its log
 ### Uninstalling
 
 ```bash
-sudo apt remove fghj     # stops fghjd, and takes the CA out of every store
-sudo apt purge fghj      # also deletes /var/lib/fghjd: workspaces, CA keys, run state
+sudo apt remove fghj     # stops fghjd; no CA of fghj's is left trusted or on disk
+sudo apt purge fghj      # also forgets the wired workspaces
 ```
 
-Removing the package runs `fghj uninstall` before the binaries go, so no
-trusted root outlives the software holding its key. As with Homebrew,
+Removing the package runs `fghj uninstall --keep-workspaces` before the
+binaries go: the CA leaves the system store and every workspace owner's
+browsers, every CA file and key is deleted, and so are fghj's sidecar
+containers, which hold the signing key. Only the list of wired workspaces
+stays, so a reinstall mints a fresh CA and picks up where you were. Purging
+deletes that list too, along with fghj's database in each workspace. As with Homebrew,
 Docker resources and the repositories fghj cloned stay; see [What fghj
 touches, and how to remove it](/guides/uninstalling/).
 

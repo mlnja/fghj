@@ -3,9 +3,23 @@ set -e
 
 #DEBHELPER#
 
-# Purge is the "everything" one: wired workspaces, both CAs' keys, run state.
+# Purge is the "everything" one. Removal already took every CA file, key and
+# trust entry; what's left is the workspace index, the daemon settings, and
+# fghj's own database inside each wired workspace. The binary is gone by
+# now, so the workspace paths are read straight out of the index: one
+# `"<id>": "<path>"` pair per line, as fghjd writes it. Only fghj.db and
+# SQLite's files beside it are deleted, and .fghj only if that empties it.
 # Docker resources are left alone, as `fghj uninstall` leaves them.
 if [ "$1" = purge ]; then
+    index=/var/lib/fghjd/workspaces.json
+    if [ -f "$index" ]; then
+        sed -n 's/^[[:space:]]*"[^"]*":[[:space:]]*"\(\/[^"]*\)",\{0,1\}[[:space:]]*$/\1/p' "$index" |
+            while IFS= read -r workspace; do
+                rm -f "$workspace/.fghj/fghj.db" "$workspace/.fghj/fghj.db-wal" \
+                    "$workspace/.fghj/fghj.db-shm" "$workspace/.fghj/fghj.db-journal"
+                rmdir "$workspace/.fghj" 2>/dev/null || true
+            done
+    fi
     rm -rf /var/lib/fghjd
 fi
 
