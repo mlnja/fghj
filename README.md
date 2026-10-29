@@ -157,7 +157,8 @@ for a public site. The root's key never leaves `/var/lib/fghjd/ca/`.
 Outside your workspaces, nothing in your home directory changes, except on
 Linux the CA entry in your browsers' certificate databases. Inside a
 workspace fghj writes only `.fghj/` and the repos it clones.
-`sudo fghj uninstall` lists what it will remove and asks first. The full inventory, with commands to verify nothing is left, is
+`sudo fghj uninstall` lists what it will remove and asks first. The full
+inventory, with commands to verify nothing is left, is
 [What fghj touches, and how to remove it](https://fghj.mlops.ninja/guides/uninstalling/).
 
 ## Use it
@@ -195,7 +196,8 @@ Two domain zones, and the difference matters:
 The docs are at **[fghj.mlops.ninja](https://fghj.mlops.ninja/)**.
 
 - **[The tutorial](https://fghj.mlops.ninja/tutorial/)** — build a two-repo
-  workspace from nothing across seven chapters. Start here.
+  workspace from nothing across eight chapters, ending with capturing
+  the traffic between services. Start here.
 - **[What it fixes](https://fghj.mlops.ninja/guides/what-it-fixes/)** and
   **[fghj and OrbStack](https://fghj.mlops.ninja/guides/vs-orbstack/)** —
   where it fits next to what you already use.
@@ -218,6 +220,8 @@ cd docs && npm install && npm run dev
 | `schema/*.cue` | CUE schemas for `.fghj.yaml`. An **authoring aid** (editors, CI, `fghj validate`) — the Rust serde types are the enforcing boundary. |
 | `ui/` | The Svelte 5 UI, embedded into `fghjd` at compile time. |
 | `sidecar/` | Dockerfile for the in-network sidecar image. |
+| `packaging/` | The Debian package (`debian/`) and the check that installing and removing it leaves nothing behind. |
+| `e2e/` | An end-to-end check against the tutorial's example app. |
 | `docs/` | The documentation site. |
 | `concepts/` | The durable design record — one file per subsystem or precept, plus `AUDIT.md`, the punch list. Read this before proposing an architecture change. |
 | `SPEC.md` | Product vision (aspirational in places). |
