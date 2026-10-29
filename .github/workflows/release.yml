@@ -352,8 +352,12 @@ jobs:
           version=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # Only the macOS checksum is read here. Downloading everything also
+      # fetches the sidecar's `.dockerbuild` records, and one flaky blob among
+      # them failed the whole job, as it once did create-release.
       - uses: actions/download-artifact@v4
         with:
+          pattern: fghj-darwin-*
           path: artifacts
 
       - name: Check out the tap
