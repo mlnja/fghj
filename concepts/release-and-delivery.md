@@ -2,8 +2,9 @@
 
 > **Status:** implemented. `Justfile` (`release`, `update-tap`),
 > `.github/workflows/ci.yml`, `.github/workflows/release.yml`,
-> `src/sidecar_image.rs`, and `Formula/fghj.rb` in the separate
-> `mlnja/homebrew-tap` repo. The known gaps are listed at the bottom and
+> `src/sidecar_image.rs`, `[package.metadata.deb]` and `packaging/`,
+> `Formula/fghj.rb` in the separate `mlnja/homebrew-tap` repo, and the
+> separate `mlnja/apt` repo behind apt.mlops.ninja. The known gaps are listed at the bottom and
 > tracked in [[AUDIT]].
 
 Every other file in this folder describes how fghj behaves once it is running.
@@ -16,15 +17,15 @@ An installed fghj is not one thing:
 
 | Artifact | Where it comes from | Where it goes |
 |---|---|---|
-| `fghj` (CLI) | `release.yml`'s macOS matrix | `bin/` via Homebrew |
-| `fghjd` (root daemon) | same | `bin/`, plus a LaunchDaemon |
+| `fghj` (CLI) | `release.yml`'s `build` job (macOS) and `deb` job (Ubuntu) | `bin/` via Homebrew; `/usr/bin` via the `.deb` |
+| `fghjd` (root daemon) | same | the same, plus a LaunchDaemon or the `fghjd` systemd unit |
 | `ghcr.io/mlnja/fghj-sidecar` | `release.yml`'s linux matrix | the user's Docker image store |
 | the UI | compiled *into* both binaries | nowhere — see below |
 
 All four are keyed to one number: the `version` in `Cargo.toml`. The CLI and
 daemon carry it as `CARGO_PKG_VERSION`; the sidecar image is tagged with it
 (see [[in-network-sidecar]] for why the reference is registry-qualified); the
-Homebrew formula pins it. `just release` bumps it, commits, tags, and pushes,
+Homebrew formula pins it, and the `.deb` is `fghj_<version>-1_<arch>`. `just release` bumps it, commits, tags, and pushes,
 and the tag is what fires `release.yml`.
 
 The sidecar tag is read from `Cargo.toml` in CI rather than from the git tag
@@ -62,7 +63,7 @@ from the last `npm run build`, so a stale UI compiles happily into a local
 binary, so the symptom is "my change didn't appear", which points at its own
 cause.
 
-## Why the released binaries are macOS-only and the sidecar is not
+## Why the binaries are built per OS and the sidecar once
 
 Everything OS-specific sits behind `src/platform/`, and Linux (Ubuntu LTS) has
 its own implementations there: systemd-resolved for split DNS, Debian's CA
@@ -161,12 +162,17 @@ install it in mutually exclusive ways (Ubuntu's, Docker's, Desktop, rootless)
 and a hard dependency would pick one for them; apt installs recommends by
 default, and the doctor covers the rest.
 
-## What CI checks, and the one suite it can't run
+## What CI checks, and the one suite it doesn't run
 
-`ci.yml` runs three jobs:
+`ci.yml` runs four jobs:
 
-- **Check** (macOS): `cargo check --all-targets`, `clippy -D warnings`,
-  `cargo fmt --check`, `cargo test`.
+- **Check**, on `macos-latest`, `ubuntu-22.04`, `ubuntu-24.04` and
+  `ubuntu-latest` (26.04): `cargo check --all-targets`, `clippy -D
+  warnings`, `cargo fmt --check`, `cargo test`. Every platform backend
+  compiles on every OS, so each run also tests the other OS's parsers; what
+  only one OS can test is what probes the real system.
+- **Debian package** (Linux): builds the `.deb` and runs
+  `packaging/check-deb.sh` on it, the same check the release does.
 - **Sidecar image** (Linux): builds `sidecar/Dockerfile` on one architecture
   without pushing. The sidecar's Dockerfile is embedded in `fghjd` and only
   exercised on a fallback path, so a break in it would otherwise stay invisible
@@ -179,18 +185,19 @@ default, and the doctor covers the rest.
   its neighbours into columns of whitespace and a comment edit reflows lines it
   didn't touch. Gating on that buys churn, not correctness.
 
-Fourteen tests are marked
-`#[ignore = "needs a Docker daemon: ..."]` — the ones that start real
+The tests marked
+`#[ignore = "needs a Docker daemon: ..."]`, two dozen of them, — the ones that start real
 containers or run real builds (`docker/`'s exec and BuildKit tests,
 `orchestrator/health.rs`'s `wait_for_exit` tests, `orchestrator/start_node.rs`'s task tests,
 `orchestrator/observe.rs`'s published-port test, `persistence/rehydrate.rs`'s
 dead-container test). They run with `cargo test -- --ignored` on any machine
-with Docker, which in practice means a developer's Mac.
+with Docker.
 
-They are not in CI because GitHub's macOS runners cannot run Docker — no
-nested virtualization, so Docker Desktop won't start. The check job is macOS
-because that's the only platform the daemon's own code paths are written for,
-and those two facts are in direct conflict.
+GitHub's macOS runners cannot run Docker — no nested virtualization, so
+Docker Desktop won't start. Its Ubuntu runners can, so that's where these
+would run; they don't yet (see the known gaps). End to end, the machine
+itself is checked by `e2e/files-example.sh` against the tutorial's example
+app, run by hand on a Mac or an Ubuntu box with fghjd up.
 
 `cargo test` with an unreachable `DOCKER_HOST` is the check that the split is
 honest: if a test that needs a daemon is missing its `#[ignore]`, it fails
@@ -209,16 +216,13 @@ about a mutex to run.
 
 ## Known gaps
 
-- **The Docker-backed suite is developer-only.** The lib is known to compile on
-  Linux (the sidecar image is proof — it builds the whole crate on
-  `rust:1-bookworm`), so a Linux test job with Docker available is the obvious
-  next move. The tests have never been run there, and some may carry macOS
-  assumptions, so this is a real piece of work rather than a config line.
-- **No `LICENSE` file** and no `license` field in `Cargo.toml`. The tap formula
-  says `license "MIT"` with a `TODO: confirm` beside it.
-- **No uninstall path.** The CA stays in the system Keychain and the resolver
-  file under `/etc/resolver` across a full daemon stop, deliberately, but `brew uninstall` leaves both behind with nothing to
-  clean them up.
+- **The Docker-backed suite isn't in CI.** The Ubuntu Check jobs could run it
+  with `-- --ignored`, since those runners have Docker; nobody has wired
+  that up, and some of those tests may still assume macOS.
+- **Homebrew can't clean up on its own.** `brew uninstall` runs unprivileged,
+  so the trusted CA and `/var/lib/fghjd` outlive it unless `sudo fghj
+  uninstall` runs first; the docs say so, but nothing enforces it. The
+  `.deb` does it in `prerm`.
 
 ## Related
 

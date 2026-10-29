@@ -25,9 +25,10 @@ it (see [[local-ca-and-tls-proxy]]).
 
 ## Why `127.222.0.1` and not `127.0.0.1`
 
-`dns::ANSWER` is `web::proxy::PROXY_IP`, a loopback address `fghjd` aliases
-onto `lo0` for itself (`raw_net::add_loopback_alias`, called from
-`DaemonControl::activate`) and binds :80/:443 on. Two separate decisions are
+`dns::ANSWER` is `web::proxy::PROXY_IP`, a loopback address of `fghjd`'s own
+that it binds :80/:443 on. macOS has only `127.0.0.1` on `lo0`, so there it
+is aliased first (`platform::Loopback::add_alias`, called from
+`DaemonControl::activate`); Linux already routes all of `127/8` to `lo`. Two separate decisions are
 baked into that constant.
 
 **Why not `127.0.0.1`.** Binding the machine's usual loopback address at
@@ -59,8 +60,9 @@ case an alias does not cover is a server binding `0.0.0.0:80` *without*
 `SO_REUSEADDR`; that is rare (nginx, Apache, Caddy, Docker, Go and Node all
 set it) and such a server already fails against any other holder of port 80.
 
-Root is still required either way — `ifconfig`, the CA, `/etc/resolver`,
-`/etc/hosts`, and binding a privileged port on *any* address on macOS.
+Root is still required either way — `ifconfig` or `ip`, the CA, the OS
+resolver config, `/etc/hosts`, and binding a privileged port on any
+address.
 
 ## Why an ephemeral port, not the SPEC's suggested 5353
 
@@ -75,15 +77,16 @@ resolver to point at it — see below.
 
 ## Wiring into the OS resolver
 
-`dns::install_os_resolver_config` writes `/etc/resolver/<zone>` files, the
-config macOS's resolver subsystem reads to route any query under that
+`dns::install_os_resolver_config` hands the zones to the platform's
+`DnsRouting`. On macOS that's `platform/macos/resolver_dir.rs`, which writes
+`/etc/resolver/<zone>` files, the config macOS's resolver subsystem reads to route any query under that
 specific domain to a given nameserver/port — the "zero-overhead" native
 integration `SPEC.md` calls for, requiring no changes to `/etc/hosts` or the
 system-wide DNS configuration. Because the DNS server's port is only known
 after `dns::bind` actually runs, `run_control_api` calls
 `install_os_resolver_config` with that concrete port immediately afterward,
-every `fghjd` startup — cheap and idempotent (see `dns.rs`'s own test,
-`install_macos_resolver_is_idempotent_and_writes_expected_content`), so
+every `fghjd` startup — cheap and idempotent (see
+`resolver_dir.rs`'s `sync_resolver_is_idempotent_and_writes_expected_content`), so
 there's no harm in re-writing it even when nothing changed.
 
 It is a *sync*, not a single write, because the set of zones is not fixed.
@@ -92,11 +95,11 @@ Two of them are: `fghj.internal` and `fghj.raw.internal`
 whatever `wildcard_hosts` suffixes the currently-running containers declare,
 so they come and go — which is why `install_os_resolver_config` is called on
 every reconcile tick and not only at startup, and why
-`macos::sync_resolver` removes fghjd-authored files for zones that are no
+`resolver_dir.rs`'s `sync_resolver` removes fghjd-authored files for zones that are no
 longer live. It only ever touches files it recognizes as its own
 (`is_fghjd_resolver_content`, which parses the port back out of fghjd's own
 template); a hand-written `/etc/resolver` file for some unrelated domain is
-left alone. `clear_os_resolver_config` removes all of them on a clean
+left alone. `DnsRouting::clear` removes all of them on a clean
 shutdown, so a stopped `fghjd` doesn't leave names pointed at a dead port.
 
 On Linux the same routing goes through systemd-resolved

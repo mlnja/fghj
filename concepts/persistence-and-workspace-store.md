@@ -67,12 +67,15 @@ just the first: the captured `ssh_auth_sock` is only valid for the login
 session that was live when it was captured, and can go stale if the agent
 restarts. `live_ssh_auth_sock` doesn't trust the stored hint blindly either
 — it re-verifies the hint is still a live socket owned by the right uid,
-and if not, falls back to scanning macOS's well-known launchd socket
-location (`com.apple.launchd.*/Listeners` under `/private/var/run` since
-macOS 26, `/private/tmp` before; macOS's *login-session-scoped* system agent
-is bound to it, not any one terminal) to recover a working socket even when
-the original hint has gone dead. On other platforms there's no equivalent
-well-known path, so a dead hint is simply unusable there.
+and if not, asks the platform's `Session::session_ssh_agent` for the login
+session's own agent, which is bound to the session rather than any one
+terminal, to recover a working socket even when the original hint has gone
+dead. On macOS that's the launchd agent (`com.apple.launchd.*/Listeners`
+under `/private/var/run` since macOS 26, `/private/tmp` before); on Linux
+the first live socket under `/run/user/<uid>` of GNOME's `gcr/ssh` (24.04
+and later), GNOME Keyring's `keyring/ssh` (22.04), OpenSSH's own
+`openssh_agent` user unit, and gpg-agent's `gnupg/S.gpg-agent.ssh`.
+Anywhere else a dead hint is simply unusable.
 
 A workspace with no recorded owner (one wired before owners were recorded,
 or whose `.fghj` was recreated since) borrows whoever owns its folder
@@ -81,7 +84,7 @@ agent found by the same scan (`workspace_owner`). A folder owned by root
 leaves nobody to borrow, so git runs as root. When the remote then refuses
 the key, the pull log ends with a hint saying so and to run `fghj wire`
 from your own user. A refusal while running as the owner gets a hint about
-`ssh-add` instead. If the agent was macOS's own, found by the scan, the hint
+`ssh-add` instead. If the agent was the session's own, found by the scan, the hint
 also says that keys kept in another agent (1Password and the like) need
 `IdentityAgent` in `~/.ssh/config` or a `fghj wire` from the shell that has
 their `SSH_AUTH_SOCK`.
@@ -105,6 +108,5 @@ owner, as a second line of defense.
 
 Implemented: `src/persistence/` (`WorkspaceDb` in `persistence/sqlite/`, the workspace
 index, `WorkspaceOwner` capture/apply, `live_ssh_auth_sock` recovery,
-`harden_git_ssh`). The owner-capture/privilege-drop path is macOS-aware
-(the launchd socket recovery); Linux/Windows would need different
-ssh-agent discovery if this is ever ported.
+`harden_git_ssh`). The session-agent recovery knows macOS and Linux
+(`src/platform/*/session.rs`, `runtime_dir.rs`); Windows isn't supported.

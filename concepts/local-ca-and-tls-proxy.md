@@ -30,14 +30,14 @@ at `/var/lib/fghjd/ca/{ca-cert,ca-key}.pem` — **not** `/var/run`, because
 reboot would force the user to re-approve a brand-new one in Keychain Access
 on every restart, defeating the entire point of trusting it once.
 
-Installing that CA into the OS trust store (`trust::install`, via
-`security add-trusted-cert` against the System keychain) is kept as a
-**separate step** from generating it, so CA generation itself stays a pure,
+Installing that CA into the OS trust store (`TrustStore::install`: on macOS
+`security add-trusted-cert` against the System keychain, on Linux Debian's
+CA store) is kept as a **separate step** from generating it, so CA generation itself stays a pure,
 easily-testable filesystem operation with no side effects on the host's
 trust configuration.
 
-`trust::install` is safe to call on **every** `fghjd` start — it first
-runs `security verify-cert` (`trust::is_trusted`), a read-only trust
+`TrustStore::install` is safe to call on **every** `fghjd` start — on
+macOS it first runs `security verify-cert` (`is_trusted`), a read-only trust
 *evaluation* that never triggers a prompt, and only falls through to the
 actual trust-store write when the cert genuinely isn't trusted yet. This
 matters because modifying System keychain trust settings on macOS always
@@ -49,9 +49,23 @@ The check-first design doubles as a self-healing path: if trust is ever
 missing for any reason (first-ever run, or a user manually revoking it via
 Keychain Access while the persisted CA files remain on disk), the very next
 start notices and re-installs it — prompting exactly once, only when trust
-is actually absent. Under `brew services` the start that can prompt is the
-CLI's: `fghj daemon start`/`restart` (`trust_ca` in `src/main.rs`) run the
-same check in your terminal, as you, after activating the daemon.
+is actually absent. Under `brew services` the run that can prompt is the
+CLI's: the first `fghj wire`, and `fghj doctor --fix` (`trust_ca` in
+`src/main.rs`), run the same check in your terminal, as you.
+
+On Linux nothing prompts, so `fghjd` does it all itself, as root, on every
+start (`platform/linux/ca_certificates.rs`): the CA goes to
+`/usr/local/share/ca-certificates/fghj-local-ca.crt`, `update-ca-certificates`
+folds it into `/etc/ssl/certs/ca-certificates.crt`, and the check reads that
+bundle back, since an anchor the bundle was never rebuilt from trusts
+nothing. Browsers don't read it: Chrome and Chromium keep an NSS database in
+`~/.pki/nssdb`, and every Firefox profile its own, the snap's included. So
+`fghjd` also adds the CA to each one a workspace owner has
+(`platform/linux/nss.rs`, the per-user `UserTrust` capability), with
+`certutil` run as that owner so their files stay theirs: on every start, and
+inside the request `fghj wire` makes, so `wire` returns with the browser
+trusting it or says why not. Removal takes it out of all of them again
+([[release-and-delivery]]).
 
 ## Two CAs: the root signs one certificate, and it isn't a leaf
 
@@ -389,7 +403,7 @@ key-free trust files and their de-duplicated bundle), the
 termination,
 `RouteResolver`, apex vs. per-service dispatch, fancy-404 for unknown in-zone
 names). `daemon::WorkspaceRegistry` implements `RouteResolver` over real run
-state. Not implemented: any non-macOS trust-store install path (Linux would
-need `update-ca-certificates` or equivalent; Windows, the platform CA
-store). Real per-service routing was last manually re-verified end-to-end
+state. Trust stores: the System keychain on macOS, Debian's CA store and
+the browsers' NSS databases on Linux. Not implemented: Fedora's
+`update-ca-trust`, Arch's `trust anchor`, and Windows. Real per-service routing was last manually re-verified end-to-end
 against the fixtures on 2026-09-06.

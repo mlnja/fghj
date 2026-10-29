@@ -44,7 +44,7 @@ clone.**
 | Run arbitrary code at run time | any `image`, any `command` | [[docker-and-downloads]] |
 | Read and write any path on your disk | `#Volume.host` — bind mounts are **not** sandboxed; an absolute or `..`-escaping path passes straight through to Docker, exactly as in Compose | [[docker-and-downloads]] |
 | Request near-host-equivalent container privileges | `privileged: true`, `cap_add` | `schema/dependency.cue` |
-| Claim a hostname on your machine | `additional_hosts` → `/etc/hosts`, `wildcard_hosts` → `/etc/resolver` | [[host-aliases]] |
+| Claim a hostname on your machine | `additional_hosts` → `/etc/hosts`, `wildcard_hosts` → the OS resolver (`/etc/resolver`, or the `fghj0` link) | [[host-aliases]] |
 | Reach your ssh-agent during a build | `build.ssh: true` | [[build-inputs]] |
 
 The last row is the one with a real mitigation, and it is worth stating why.
@@ -64,8 +64,10 @@ The daemon's own privileges are a separate question from what a repo can ask
 for.
 
 **`fghjd` runs as root.** It has to: binding ports 80 and 443, writing
-`/etc/hosts` and `/etc/resolver`, installing a CA into the System keychain,
-and adding loopback aliases all require it. There is no design in which the proxy
+`/etc/hosts` and the OS resolver config, installing a CA into the system
+trust store, and (on macOS) adding loopback aliases all require it. On Linux
+it also writes the CA into each workspace owner's browser databases, but
+not as root: `certutil` runs as that owner, the way `git clone` does. There is no design in which the proxy
 listens on 443 unprivileged.
 
 **It does not do everything as root.** `WorkspaceOwner` is a snapshot of the
@@ -87,8 +89,10 @@ for a domain someone else owns. See [[host-aliases]] and
 [[local-ca-and-tls-proxy]].
 
 **It edits system files only inside a marked block it owns.**
-`/etc/hosts` (between `# fghj-managed-begin`/`-end`) and `/etc/resolver/<zone>`
-files it can recognize as its own by parsing its own template. Each
+`/etc/hosts` (between `# fghj-managed-begin`/`-end`), `/etc/resolver/<zone>`
+files it can recognize as its own by parsing its own template on macOS, and
+on Linux a link of its own (`fghj0`) and one file of its own in the CA
+store (`fghj-local-ca.crt`). Each
 mechanism reads the file, replaces only its own region, and preserves
 everything else verbatim. `fghj daemon stop` removes all of them.
 

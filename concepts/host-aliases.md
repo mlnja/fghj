@@ -75,13 +75,15 @@ That distinction forces two different delivery mechanisms, because
   spurious file change. `main.rs`'s `daemon_stop` can strip the block via
   `sudo` without `fghjd` being alive, the same way it cleans up the pidfile
   and resolver files.
-- **Wildcarded aliases** resolve only through fghjd's own DNS server. On
-  macOS that means `install_os_resolver_config` writes an `/etc/resolver`
-  file for the suffix, which is why that function takes a live
-  `wildcard_zones` list and runs on every reconcile tick rather than once at
-  startup ([[split-dns]]). On a platform without `/etc/resolver`, wildcard
-  aliases simply don't resolve — there is no `/etc/hosts` fallback that could
-  express them.
+- **Wildcarded aliases** resolve only through fghjd's own DNS server.
+  `install_os_resolver_config` routes the suffix to it — an `/etc/resolver`
+  file on macOS, one more `~suffix` routing domain on the `fghj0` link on
+  Linux — which is why that function takes a live `wildcard_zones` list and
+  runs on every reconcile tick rather than once at startup ([[split-dns]]).
+  On a platform with neither, wildcard aliases simply don't resolve — there
+  is no `/etc/hosts` fallback that could express them. On Linux a wildcard
+  under `.local` can still lose: mDNS (`nss-mdns`) answers `.local` names
+  before DNS is asked.
 
 The one CUE field splits into two Rust fields at resolve time —
 `Node.additional_hosts` holds the bare entries, `Node.wildcard_hosts` the
@@ -160,5 +162,5 @@ Implemented: `schema/component.cue` (`#AdditionalHost`, `#HostAlias`),
 running container in every workspace), `src/state/query.rs`
 (`resolve_route`'s two passes, `wildcard_suffixes`), `src/dns/`
 (`is_reserved_alias`, `cert_eligible`, wildcard zone install),
-`src/resolver/uniqueness.rs` (in-workspace collisions). macOS only for
-wildcards.
+`src/resolver/uniqueness.rs` (in-workspace collisions). Wildcards on macOS
+and Linux.

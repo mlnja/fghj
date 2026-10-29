@@ -149,9 +149,10 @@ thing by construction.
 
 `GET /daemon/net-status` is the other half, and its design rule is worth
 stating explicitly: it reads the three native-OS integration points back
-from their *actual* live state — `/etc/hosts`, the `/etc/resolver` files
-(via `dns::os_routing_status`, which parses fghjd's own template to
-recognize what it wrote), and `raw_net::current_routes` — rather than
+from their *actual* live state — `/etc/hosts`, the OS resolver config
+(via `DnsRouting::status`: the `/etc/resolver` files on macOS, parsing
+fghjd's own template to recognize what it wrote, or `resolvectl`'s view of
+the `fghj0` link on Linux), and `raw_net::current_routes` — rather than
 reporting what fghjd last computed as desired. Reporting the desired state
 would make the endpoint agree with fghjd by construction and therefore be
 incapable of showing the one thing worth showing: that something outside

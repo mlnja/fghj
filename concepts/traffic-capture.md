@@ -108,7 +108,7 @@ error. An upgrade (`101`, shown as `101 ⇄`) is recorded as open until its
 relay ends, then closed with its duration.
 
 `source` is `host` for anything arriving on the host proxy over loopback,
-which on macOS covers browsers, curl, and containers reaching the host
+which covers browsers, curl, and containers reaching the host
 through Docker's port mapping. A request through the sidecar names the node
 that sent it: fghjd maps the caller's IP to a node by inspecting the
 network. An IP that isn't a node, or one seen before the lookup returned, is

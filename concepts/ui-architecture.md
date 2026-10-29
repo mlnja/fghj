@@ -166,7 +166,7 @@ fresh from `graph.nodes`/`graph.edges` on every render (`$derived`):
   `Doctor`, the same report `fghj doctor` prints; and `Help`, the key to the
   map. Doctor's DNS and raw-zone checks
   expand into what they cover: the managed `/etc/hosts` block, the
-  `/etc/resolver` zones with the ephemeral port each points at, and the raw-zone
+  zones routed through the OS resolver with the ephemeral port each points at, and the raw-zone
   routes, which `raw-zone listeners` checks fghjd is actually listening on. Together these answer "is the plumbing actually up" without reading
   `fghjd`'s stdout — see [[split-dns]], [[host-aliases]],
   [[two-zones-and-raw-ports]], [[preflight-checks]].
