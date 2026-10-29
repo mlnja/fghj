@@ -74,7 +74,13 @@ sudo curl -fsSLo /etc/apt/keyrings/mlops-ninja.asc https://apt.mlops.ninja/key.a
 echo "deb [signed-by=/etc/apt/keyrings/mlops-ninja.asc] https://apt.mlops.ninja stable main" \
   | sudo tee /etc/apt/sources.list.d/mlops-ninja.list
 sudo apt update && sudo apt install fghj
+fghj doctor           # checks Docker, ports, DNS and the CA against the machine
 ```
+
+The package runs `fghjd` as a systemd unit and needs nothing else from you:
+as root it puts fghj's CA into the system store and routes
+`*.fghj.internal` through systemd-resolved, and your first `fghj wire` adds
+the CA to your browsers. `sudo apt remove fghj` leaves no trace of the CA.
 
 Via Homebrew (macOS on Apple Silicon):
 
@@ -93,14 +99,15 @@ points `fghjd` at the same Docker your `docker` command uses, and asks macOS
 to trust fghj's local CA, which shows a password dialog once. Until then
 `fghj doctor` shows those two as pending, not broken.
 
-It binds those ports on `127.222.0.1`, a loopback address it aliases for
-itself — **not** on `127.0.0.1` or `0.0.0.0`. If you already run something on
+It binds those ports on `127.222.0.1`, a loopback address of its own (macOS
+needs it aliased; Linux already routes all of `127/8` to loopback) —
+**not** on `127.0.0.1` or `0.0.0.0`. If you already run something on
 port 80, a local nginx or a `docker run -p 80:80`, it keeps working and
 `curl http://127.0.0.1/` still reaches it rather than fghj.
 
 ### Building from source
 
-If you'd rather not use the tap, you need Rust (stable), Node 22+, Docker,
+If you'd rather not use a package, you need Rust (stable), Node 22+, Docker,
 and a [supported OS](https://fghj.mlops.ninja/getting-started/installation/#prerequisites).
 `cue` is optional — only `fghj validate` needs it.
 
@@ -115,12 +122,11 @@ cargo build --release
 sudo cp target/release/fghj target/release/fghjd /usr/local/bin/
 ```
 
-Then start the daemon. It needs root to bind ports 80/443 (privileged on
-macOS whatever address they're on), alias its loopback address, answer DNS,
+Then start the daemon. It needs root to bind ports 80/443, answer DNS,
 install its root CA into the system trust store, and edit `/etc/hosts`:
 
 ```bash
-sudo fghjd            # foreground; supervise with a launchd LaunchDaemon for real use
+sudo fghjd            # foreground; for real use, launchd on macOS, systemd on Linux
 fghj daemon status    # -> "fghjd is running and active"
 fghj doctor           # Docker, BuildKit, ports, DNS, CA — all checked against the machine
 ```
@@ -132,22 +138,26 @@ Full details: [Installation](https://fghj.mlops.ninja/getting-started/installati
 A root daemon that edits system config should say exactly what it touches.
 This is all of it:
 
-| Change | Where | Undone by |
-|---|---|---|
-| A managed block of host entries | `/etc/hosts`, between `# fghj-managed-begin`/`-end` | `fghj daemon stop` |
-| A split-DNS resolver for `*.fghj.internal` only | `/etc/resolver/fghj.internal` | `fghj daemon stop` |
-| Loopback aliases | `127.222.0.1` and `127.223.0.0/16` on `lo0` | `fghj daemon stop` |
-| A local root CA, trusted for TLS | System keychain, as `fghj local CA` | `sudo fghj uninstall` |
-| Daemon state, including the CA's private key (root-only) | `/var/lib/fghjd` | `sudo fghj uninstall` |
-| Containers, networks and volumes, all prefixed `fghj-` | Docker | left alone, on purpose |
+| Change | macOS | Linux | Undone by |
+|---|---|---|---|
+| A managed block of host entries | `/etc/hosts`, between `# fghj-managed-begin`/`-end` | the same | `fghj daemon stop` |
+| Split DNS for fghj's zones only | `/etc/resolver/fghj.internal` | the `fghj0` link in systemd-resolved | `fghj daemon stop` |
+| Loopback aliases | `127.222.0.1` and `127.223.0.0/16` on `lo0` | none needed | `fghj daemon stop` |
+| A local root CA, trusted for TLS | the System keychain, as `fghj local CA` | the system store, and each workspace owner's browser databases | `sudo fghj uninstall` |
+| Daemon state, including the CA's private keys (root-only) | `/var/lib/fghjd` | the same | `sudo fghj uninstall` |
+| fghj's database for each workspace | `<workspace>/.fghj/fghj.db` | the same | `sudo fghj uninstall` |
+| Containers, networks and volumes, all prefixed `fghj-` | Docker | the same | only fghj's sidecars are removed; the rest is left alone, on purpose |
+
+On Ubuntu, removing the package runs `fghj uninstall` for you.
 
 Every leaf certificate is issued by an intermediate that is name-constrained
 to reserved local TLDs (`.internal`, `.test`, `.local`, `.localhost`) and
 excluded from IP addresses, so even a leaked signing key can't mint a cert
 for a public site. The root's key never leaves `/var/lib/fghjd/ca/`.
-Nothing is written to your home directory except the repos it clones into
-your workspace. `sudo fghj uninstall` lists what it will remove and asks
-first. The full inventory, with commands to verify nothing is left, is
+Outside your workspaces, nothing in your home directory changes, except on
+Linux the CA entry in your browsers' certificate databases. Inside a
+workspace fghj writes only `.fghj/` and the repos it clones.
+`sudo fghj uninstall` lists what it will remove and asks first. The full inventory, with commands to verify nothing is left, is
 [What fghj touches, and how to remove it](https://fghj.mlops.ninja/guides/uninstalling/).
 
 ## Use it

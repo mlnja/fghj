@@ -175,21 +175,25 @@ question: is the daemon up, and is it active.
 
 **A domain doesn't resolve at all.** Run `fghj doctor`. If `fghjd` is running
 but idle it has released ports 80/443, its loopback alias and DNS; `fghj
-daemon start` reconciles it back to active. On macOS the split-DNS hook is
-`/etc/resolver/fghj.internal` — if that file is gone, `fghj daemon restart`
-rewrites it. The file being *present* isn't proof it works: the DNS port in
-it is assigned fresh on each `fghjd` start, so one left behind by a previous
+daemon start` reconciles it back to active. The split-DNS hook is
+`/etc/resolver/fghj.internal` on macOS and the `fghj0` link in
+systemd-resolved on Linux — if it's gone, `fghj daemon restart` puts it
+back. Its being *present* isn't proof it works: the DNS port in it is
+assigned fresh on each `fghjd` start, so one left behind by a previous
 process points at nothing. That's exactly the case doctor's `fghj.internal
 resolves through the OS` check catches, by resolving a name the way your
 browser would instead of reading the file.
 
 **The browser shows a certificate warning.** The local CA isn't trusted —
 doctor's `root CA trusted by the system` check says so directly.
-Run `fghj doctor --fix` from a terminal: it trusts the CA, after a macOS
-password dialog. `fghjd` tries the same on every start, but under
+Run `fghj doctor --fix` from a terminal. On macOS it trusts the CA, after a
+password dialog: `fghjd` tries the same on every start, but under
 `brew services` macOS refuses it, because there's nobody to show the dialog
-to. Both only ever write when trust is genuinely absent, which is why they
-can check every time.
+to. On Linux `fghjd` trusts it in the system store on every start by itself,
+so what's usually missing is a browser: doctor's `browsers trust the root
+CA` check names whose, `--fix` adds it, and the browser needs a restart.
+They only ever write when trust is genuinely absent, which is why they can
+check every time.
 
 **A name resolves but you get fghj's 404 page.** DNS and TLS both worked and
 there's no route registered for that name — so the node isn't running, or

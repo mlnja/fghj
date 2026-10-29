@@ -9,16 +9,19 @@ fghj doctor --fix    # and fix what it can
 ```
 
 fghj takes more from your machine than most dev tools do: a Docker daemon
-new enough for BuildKit, ports 80 and 443 bound on a loopback alias that
-doesn't exist until `fghjd` creates it, OS DNS routing for
-`*.fghj.internal`, and a root CA trusted by your system keychain.
+new enough for BuildKit, ports 80 and 443 bound on a loopback address of its
+own, OS DNS routing for `*.fghj.internal`, and a root CA trusted by your
+system and your browsers.
 
 Each of those can go missing on its own — a Docker upgrade, an OS update
-that resets `/etc/resolver`, a keychain reset, another process grabbing 443 —
+that resets `/etc/resolver` or restarts systemd-resolved, a keychain reset,
+a new browser profile, another process grabbing 443 —
 and when one does, every one of them produces the same symptom: the browser
 says the connection was refused, and nothing says why.
 
 `fghj doctor` checks them all and tells you which one it is.
+
+On macOS:
 
 ```
 $ fghj doctor
@@ -37,6 +40,15 @@ $ fghj doctor
 ✓ root CA trusted by the system: /private/var/lib/fghjd/ca/ca-cert.pem verifies against the System keychain
 
 all clear
+```
+
+On Ubuntu the rows that differ read:
+
+```
+✓ proxy loopback alias: 127.222.0.1 needs no alias on this platform
+✓ systemd-resolved link fghj0 entries: fghj.internal -> 127.0.0.1:56373, fghj.raw.internal -> 127.0.0.1:56373
+✓ root CA trusted by the system: /var/lib/fghjd/ca/ca-cert.pem verifies against the system CA store (/etc/ssl/certs)
+✓ browsers trust the root CA: in the browsers' certificate databases under /home/you
 ```
 
 There's one sidecar line for all workspaces with an environment, and it names
@@ -99,10 +111,11 @@ The two things that warn rather than fail:
 ## The DNS check is the interesting one
 
 `fghjd`'s DNS server listens on a port the OS assigns fresh every time it
-starts, and `/etc/resolver/fghj.internal` is the only place that port is
-recorded. So a resolver file left behind by a *previous* `fghjd` process
-looks completely healthy — the file is there, the syntax is right, the zone
-is correct — and points at a port nothing is listening on. Every
+starts, and the OS resolver config (`/etc/resolver/fghj.internal` on macOS,
+the `fghj0` link on Linux) is the only place that port is recorded. So
+config left behind by a *previous* `fghjd` process looks completely healthy
+— the file or link is there, the zone is correct — and points at a port
+nothing is listening on. Every
 `*.fghj.internal` name then fails to resolve, with no visible cause.
 
 That's why the `fghj.internal resolves through the OS` check doesn't inspect
@@ -123,8 +136,10 @@ what it did, then runs the checks again and prints the result:
 - **Docker** — points `fghjd` at the Docker your `docker` command uses, as
   `fghj wire` does. `fghjd` restarts onto it if it changed.
 - **fghjd idle** — activates it, as [`fghj daemon start`](/cli/daemon/) does.
-- **CA not trusted** — trusts it, from your terminal. On macOS that's the
+- **CA not trusted** — on macOS, trusts it from your terminal, which is the
   password dialog.
+- **Browsers don't trust the CA** (Linux) — asks `fghjd` to add it to every
+  workspace owner's Firefox and Chrome databases again.
 
 Everything else — a port taken by another process, Docker not running at
 all — it can't fix, and the hint says what to do. Most of those point at

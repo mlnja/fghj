@@ -93,7 +93,8 @@ chN` always works in every repo that exists by then.
 You need:
 
 - **A supported OS.** See [Installation](/getting-started/installation/#prerequisites).
-- **Docker** running: Docker Desktop, OrbStack, or Colima.
+- **Docker** running: Docker Desktop, OrbStack or Colima on macOS; Docker
+  Engine, rootless Docker or Docker Desktop on Linux.
 - **`fghj` and `fghjd` installed**, and `fghjd` running. See
   [Installation](/getting-started/installation/).
 - **`cue`** on your `PATH`, for `fghj validate`.

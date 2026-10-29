@@ -36,13 +36,12 @@ OrbStack doesn't have to build. fghj is also not a container runtime at all
 — it has nothing to say about VM performance, file-sharing speed or
 Kubernetes, and OrbStack is a reasonable thing to run fghj's containers on.
 
-Today both run on macOS; where they can go differs. OrbStack *is* the VM, so
-on Linux there would be nothing for it to be — Docker runs natively there.
-fghj is macOS-specific only in its mechanisms (`/etc/resolver`, the System
-keychain), each of which has a Linux counterpart, and that port is in
-progress. For where it actually stands, read
-[installation](/getting-started/installation/) rather than trusting this
-paragraph.
+Where they run differs. OrbStack *is* the VM, so on Linux there would be
+nothing for it to be — Docker runs natively there. fghj was only ever
+macOS-specific in its mechanisms (`/etc/resolver`, the System keychain), and
+each has its Linux counterpart now: systemd-resolved for the zones, the
+system CA store and the browsers' own databases for trust. It runs on macOS
+and Ubuntu; see [installation](/getting-started/installation/).
 
 ## 1. Non-HTTP services, by name, on their real port
 
@@ -117,9 +116,10 @@ entitled to answer for it. When an ISP or corporate DNS server does,
 straightforwardly fixable; it follows from the TLD.
 
 fghj uses `.internal`, which ICANN designated for private use, and routes it
-with a per-zone `/etc/resolver/fghj.internal` file. macOS consults that file
-*by zone* and never sends the query to the default resolver, so an upstream
-server claiming the zone never sees it.
+by zone: a per-zone `/etc/resolver/fghj.internal` file on macOS, a
+routing-only domain on its own link in systemd-resolved on Linux. Either way
+the OS sends the query to fghjd *by zone* and never to the default resolver,
+so an upstream server claiming the zone never sees it.
 
 One honest caveat on our side: fghj accepts author-declared
 [`additional_hosts`](/reference/fghj-yaml/) under `.local` as well as
@@ -159,7 +159,7 @@ can mint.
 | TLD safe from upstream DNS | No, `.local` | Yes, `.internal` |
 | Serve your own TLS behind the name | No | Yes |
 | Container runtime | Yes, that's the product | No |
-| Platform | macOS only | macOS, Linux in progress |
+| Platform | macOS only | macOS, Ubuntu |
 | Multi-repo dependency graph | No | That's the product |
 | Licensing | Free for personal use, paid for commercial | MIT |
 

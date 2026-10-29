@@ -36,16 +36,28 @@ Installing that CA into the OS trust store is a separate step from
 generating it, and it's safe to run on every `fghjd` start: it first
 checks whether the cert is already trusted (a read-only check that never
 triggers a prompt) and only falls through to actually writing trust when
-it genuinely isn't trusted yet. This matters because modifying system
-trust settings always triggers an interactive password prompt — running
-as root doesn't bypass it. Without the pre-check, a crash-restart loop
-would re-prompt for a password on every single restart. The same
+it genuinely isn't trusted yet. On macOS this matters because modifying
+system trust settings always triggers an interactive password prompt —
+running as root doesn't bypass it. Without the pre-check, a crash-restart
+loop would re-prompt for a password on every single restart. The same
 check-first design doubles as a self-healing path: if trust is ever
 missing (first-ever run, or you manually revoke it while the CA files
 remain on disk), the next start notices and re-installs it, prompting
 exactly once. Under `brew services` that's done by your first
 [`fghj wire`](/cli/wire/), or later by [`fghj doctor --fix`](/cli/doctor/),
 both run from a terminal — see the caution below.
+
+On Linux nothing prompts, so `fghjd` does it all itself, as root. The
+system store is Debian's: the CA goes to
+`/usr/local/share/ca-certificates/fghj-local-ca.crt` and
+`update-ca-certificates` folds it into `/etc/ssl/certs/ca-certificates.crt`,
+which is what OpenSSL, GnuTLS, curl, Python and Go read; the check reads that
+bundle back, since a copied file it was never rebuilt from trusts nothing.
+Browsers keep their own NSS databases — `~/.pki/nssdb` for Chrome and
+Chromium, one per Firefox profile, snap ones included — so `fghjd` also adds
+the CA to each one a workspace's owner has, with `certutil`, run as that
+owner so their files stay theirs: on every start, and inside the request
+`fghj wire` makes.
 
 ## Two CAs, because one key has to leave the daemon
 
@@ -403,8 +415,8 @@ environment:
   NODE_EXTRA_CA_CERTS: /etc/fghj/certs/cert.pem
 ```
 
-`bundle.pem` carries the roots `fghjd` can see, which on macOS is the Admin
-and System trust domains. Certificates trusted only in your **User** domain
+`bundle.pem` carries the roots `fghjd` can see: the system store on Linux,
+and on macOS the Admin and System trust domains. Certificates trusted only in your **User** domain
 — in your login keychain, without an admin prompt — are not in it. OrbStack's
 development CA is the common example. If a container needs to trust one of
 those, trust it at the admin/System level instead (which is where anything
@@ -412,7 +424,7 @@ that asked you for a password already put it), or concatenate it into a
 bundle of your own.
 
 fghj's own CA is de-duplicated out of the merge, since once it's installed in
-your System keychain the enumeration returns it like any other root and it
+the system store the enumeration returns it like any other root and it
 would otherwise appear in the bundle twice.
 
 **Mounting is where fghj stops, deliberately.** Almost every mechanism Unix
@@ -441,9 +453,10 @@ and the presigned-URL case that motivated this.
 
 ## Limitations
 
-Non-macOS trust-store installation isn't implemented yet — Linux would
-need `update-ca-certificates` or equivalent, Windows the platform CA
-store.
+On Linux only Debian's store is implemented (Debian, Ubuntu and their
+derivatives). Fedora's `update-ca-trust` and Arch's `trust anchor` would
+each be a backend of their own; until then those distributions report the
+system store as unsupported in `fghj doctor`. Windows isn't supported.
 
 Nothing *activates* the trust files mounted into each container; they are
 only made available. See the reasoning under [Trust files for

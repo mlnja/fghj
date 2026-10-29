@@ -103,8 +103,8 @@ leave a half-cloned entry repo behind.
 
 ## Requirements
 
-`fghjd` must already be running (`sudo brew services start fghj`, or
-`sudo fghjd` in the foreground) — `wire` fails immediately with a clear
+`fghjd` must already be running (`sudo brew services start fghj` on macOS;
+on Ubuntu the package already runs it; or `sudo fghjd` in the foreground) — `wire` fails immediately with a clear
 error if it can't find the daemon's control API.
 
 ## What it does
@@ -128,9 +128,13 @@ own.
    for the full mechanism.
 3. Sends the entry repo and workspace path to `fghjd`'s control API, which
    registers the workspace (and clones the entry repo if needed).
-4. Trusts fghj's root CA if it isn't yet. On macOS that's a password
-   dialog, the first time only. Cancelling it doesn't fail the wire: HTTPS
-   shows certificate warnings until the CA is trusted.
+4. Makes sure your browser trusts fghj's root CA. On macOS the CLI asks the
+   System keychain to trust it, a password dialog the first time only;
+   cancelling it doesn't fail the wire, and HTTPS shows certificate warnings
+   until the CA is trusted. On Linux `fghjd` already trusts it system-wide,
+   and adds it to your Firefox and Chrome databases, as you, before `wire`
+   returns; anything it couldn't do is printed as a warning, such as a
+   missing `certutil`. Restart a browser that was open.
 5. Prints a link to open the workspace in the UI:
    `https://fghj.internal/?workspace=<id>`.
 

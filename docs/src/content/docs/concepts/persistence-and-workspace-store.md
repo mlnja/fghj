@@ -54,9 +54,12 @@ where the socket actually is.
 This identity is refreshed on **every** `fghj wire` of a given workspace,
 not just the first: the captured SSH agent socket is only valid for the
 login session that was live when it was captured, and can go stale if the
-agent restarts. On macOS, a stale hint is automatically recovered by
-falling back to the OS's well-known agent socket location, scoped to the
-current login session rather than any one terminal.
+agent restarts. A stale hint is recovered by falling back to the login
+session's own agent, scoped to that session rather than any one terminal: on
+macOS the launchd agent under `/private/var/run` or `/private/tmp`, and on
+Linux the first live one under `/run/user/<uid>` (GNOME's `gcr/ssh`, GNOME
+Keyring's `keyring/ssh`, OpenSSH's `openssh_agent`, gpg-agent's
+`gnupg/S.gpg-agent.ssh`).
 
 Every git subprocess `fghjd` runs also forces batch mode and
 auto-accepts unknown host keys, so a clone either succeeds or fails fast
@@ -67,6 +70,6 @@ subprocess's output could ever see, let alone answer.
 
 ## Limitations
 
-The owner-capture/privilege-drop path is macOS-aware (the fallback agent
-socket recovery); Linux/Windows would need a different SSH agent
-discovery mechanism if this is ever ported.
+The fallback agent discovery knows macOS and Linux; an agent anywhere else
+(1Password's, for one) is only found through the `SSH_AUTH_SOCK` that
+`fghj wire` records. Windows isn't supported.

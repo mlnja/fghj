@@ -157,7 +157,7 @@ Why not raw, and why not plain http, here specifically:
   and no certificate is ever issued for a `fghj.raw.internal` name. An S3
   client, a browser, or anything else that expects a `https://` endpoint
   has no raw option. (Plain `http://` against the raw zone *would* reach a
-  host-side caller on macOS, via the virtual-IP forwarder above — it just can't
+  host-side caller, via the virtual-IP forwarder above — it just can't
   be the TLS endpoint this case needs, and it leans on host plumbing the
   http zone doesn't need.)
 - **Plain `http://` on the http zone always redirects to `https://`.**
@@ -187,7 +187,7 @@ directory, read-only, into every container it starts:
 | Path in every container | Contents |
 |---|---|
 | `/etc/fghj/certs/cert.pem` | just fghj's CA cert, PEM-encoded, no key material |
-| `/etc/fghj/certs/bundle.pem` | that same cert **merged with this host's own real root CA store** — a complete trust store, not a single cert. Covers the Admin and System trust domains; a CA trusted only in your login keychain [isn't included](/concepts/local-ca-and-tls-proxy/#trust-files-for-containers). |
+| `/etc/fghj/certs/bundle.pem` | that same cert **merged with this host's own real root CA store** — a complete trust store, not a single cert. On macOS that's the Admin and System trust domains, so a CA trusted only in your login keychain [isn't included](/concepts/local-ca-and-tls-proxy/#trust-files-for-containers); on Linux, the system store. |
 
 There is nothing to mount, no path on the host to name, and no `.fghj.yaml`
 schema for it. What is left is *activating* them, which is one line of

@@ -17,9 +17,11 @@ sudo apt purge fghj                          # Ubuntu: runs `fghj uninstall` its
 Most of this page is macOS; what Linux touches instead is in
 [On Linux](#on-linux).
 
-`fghj uninstall` does everything `brew uninstall` can't: it stops the
-daemon, unwinds its system configuration, deletes the root CA from your
-System keychain, and removes `/var/lib/fghjd`. It prints what it is about
+`fghj uninstall` does everything removing the binaries can't: it stops the
+daemon, unwinds its system configuration, takes the root CA out of every
+store it was trusted in (the System keychain on macOS; the system store and
+your browsers on Linux), removes fghj's sidecar containers, and removes
+`/var/lib/fghjd`. It prints what it is about
 to remove and asks before doing any of it (`-y` skips the prompt).
 
 It needs root, and it will not silently re-run itself under `sudo` — a
@@ -41,10 +43,10 @@ Docker resources are left alone either way. See
 If you'd rather do it by hand, or `fghj` is already gone from your PATH,
 every step is spelled out in the sections that follow.
 
-## What is removed automatically
+## What is removed automatically (macOS)
 
 `fghj daemon stop` (and stopping the process) reverses every *system*
-change. These are unwound on a clean shutdown, and re-applied on the next
+change. Linux's own list is [below](#on-linux). These are unwound on a clean shutdown, and re-applied on the next
 start — you do not need to clean them up by hand unless `fghjd` was killed
 uncleanly.
 
@@ -94,7 +96,7 @@ sudo rm -rf /var/lib/fghjd
 Removing this is safe while the daemon is stopped. It forgets every wired
 workspace and discards the CA.
 
-## The root CA in your keychain
+## The root CA in your keychain (macOS)
 
 This is the one change that outlives `brew uninstall`, because it is not a
 file fghj owns — it is an entry in the **System keychain**, installed with
@@ -252,17 +254,23 @@ brew untap mlnja/tap
 # No process, no socket
 pgrep -l fghjd; ls /var/run/fghjd.sock 2>/dev/null
 
-# No system config
+# No system config, macOS
 grep -c fghj /etc/hosts; ls /etc/resolver/fghj.internal 2>/dev/null
 ifconfig lo0 | grep -E "127\.22[23]"
 security find-certificate -c "fghj local CA" \
   /Library/Keychains/System.keychain 2>/dev/null
+
+# No system config, Linux
+grep -c fghj /etc/hosts; ip link show fghj0 2>/dev/null
+ls /usr/local/share/ca-certificates/fghj-local-ca.crt 2>/dev/null
 
 # No state, no Docker resources
 ls /var/lib/fghjd 2>/dev/null
 docker ps -a --filter "name=^fghj-" --format '{{.Names}}'
 ```
 
-Every one of those should print nothing (or "not found"). If `pgrep` still
+Every one of those should print nothing (or "not found"); for the browsers
+on Linux, see the `certutil` loop in [On Linux](#on-linux). If `pgrep` still
 finds `fghjd`, something is supervising it — check
-`sudo launchctl list | grep fghj`.
+`sudo launchctl list | grep fghj` on macOS or `systemctl status fghjd` on
+Linux.

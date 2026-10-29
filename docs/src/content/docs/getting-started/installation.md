@@ -26,10 +26,13 @@ shims.
   authoring aid (see [`.fghj.yaml` reference](/reference/fghj-yaml/)).
 
 :::note[What this changes on your machine]
-`fghjd` edits `/etc/hosts` and `/etc/resolver`, aliases two loopback
-ranges, and trusts a local root CA. Everything but the
-CA and its state directory is undone by `fghj daemon stop`; those two are
-removed by `sudo fghj uninstall`. The full list, with commands to check it
+`fghjd` edits `/etc/hosts`, routes fghj's zones through the OS resolver
+(`/etc/resolver` on macOS, a systemd-resolved link on Linux), aliases
+loopback addresses on macOS, and trusts a local root CA: in the System
+keychain on macOS; in the system store and the browsers' own databases on
+Linux. Everything but the CA and its state directory is undone by
+`fghj daemon stop`; those two are removed by `sudo fghj uninstall`, which
+removing the Ubuntu package runs for you. The full list, with commands to check it
 yourself, is [What fghj touches, and how to remove
 it](/guides/uninstalling/).
 :::
@@ -192,6 +195,10 @@ Put the first two on your `PATH`:
 sudo cp target/release/fghj target/release/fghjd /usr/local/bin/
 ```
 
+On Linux, the first of these also needs what the package would have
+brought: `certutil` (`sudo apt install libnss3-tools`) for browser trust,
+and systemd-resolved for DNS.
+
 ## Start the daemon
 
 `fghjd` needs root to bind ports 80/443, alias its loopback address, answer
@@ -203,18 +210,27 @@ foreground:
 sudo fghjd
 ```
 
-The first time it starts it generates a local root CA, trusts it in the
-System keychain, and writes `/etc/resolver/fghj.internal` so macOS sends
-`*.fghj.internal` lookups to `fghjd`'s own DNS server. Those are the two
-system-level changes fghj makes; both are idempotent on later starts.
+The first time it starts it generates a local root CA and routes
+`*.fghj.internal` lookups to its own DNS server. Both are idempotent on later
+starts. How each happens depends on the OS:
 
-For a persistent install, supervise it with a launchd `LaunchDaemon` (a
-*daemon*, not a per-user `LaunchAgent` — it has to be root). The Homebrew
-formula declares exactly that, which is why it's started with
-`sudo brew services start fghj` rather than the usual unprivileged form.
-Under launchd, `fghjd` can't show the password dialog that trusting the CA
-needs, so it logs that and carries on; your first `fghj wire` trusts it from
-your terminal.
+| | macOS | Linux |
+|---|---|---|
+| DNS | writes `/etc/resolver/fghj.internal` | creates the `fghj0` link in systemd-resolved |
+| CA trust | the System keychain, which needs your password, so your first `fghj wire` does it from your terminal | the system store, at once, as root; your browsers' databases when a workspace is wired |
+
+For a persistent install, supervise it:
+
+- **macOS:** a launchd `LaunchDaemon` (a *daemon*, not a per-user
+  `LaunchAgent` — it has to be root). The Homebrew formula declares exactly
+  that, which is why it's started with `sudo brew services start fghj`
+  rather than the usual unprivileged form.
+- **Linux:** the systemd unit the package installs. From source, copy
+  [`packaging/debian/fghjd.service`](https://github.com/mlnja/fghj/blob/main/packaging/debian/fghjd.service)
+  to `/etc/systemd/system/`, point its `ExecStart` at `/usr/local/bin/fghjd`,
+  and `sudo systemctl enable --now fghjd`. Keep its `Restart=always`:
+  `fghjd` exits on purpose to switch to a different Docker, and relies on
+  being started again.
 
 ## Verify
 
@@ -235,11 +251,10 @@ Three states are worth telling apart:
 - **`fghjd is running and active`** — the normal state.
 
 `fghj daemon start`/`stop`/`restart` never touch the *process* lifecycle;
-they toggle whether the running daemon is occupying the machine, and `start`
-and `restart` also trust the CA if it isn't trusted yet. Stopping or
+they toggle whether the running daemon is occupying the machine. Stopping or
 restarting the process itself is your supervisor's job
-(`sudo brew services stop fghj`, `sudo brew services restart fghj`, or
-Ctrl-C).
+(`sudo brew services stop|restart fghj`, `sudo systemctl stop|restart
+fghjd`, or Ctrl-C).
 
 For the full picture — Docker and BuildKit, the loopback alias, both ports,
 OS DNS routing and CA trust, each checked against the machine rather than

@@ -14,11 +14,12 @@ the web UI.
 ## Requirements
 
 - Must run as root — `fghjd` refuses to start otherwise, since it needs
-  to bind ports 80/443 (privileged on macOS whatever address they use), alias
-  its loopback address, and write the system certificate trust store.
-- Needs a reachable Docker daemon — `fghjd` connects and pings it as the
-  very first startup step, so a bad Docker setup is reported immediately
-  rather than causing `fghjd` to come up half-broken.
+  to bind ports 80/443, alias its loopback address on macOS, route DNS
+  through the OS, and write the system certificate trust store.
+  (`fghjd --version` is the one thing it answers without root.)
+- Uses the Docker your first [`fghj wire`](/cli/wire/) names, saved across
+  restarts; before that, `/var/run/docker.sock` if it's live. Docker trouble
+  never stops it starting: [`fghj doctor`](/cli/doctor/) reports it.
 - Doesn't daemonize itself. For local development, run it directly in a
   terminal and leave it in the foreground. For a persistent install,
   supervise it with `systemd` or a `launchd` `LaunchDaemon`, which already
@@ -47,11 +48,14 @@ server bind and OS resolver config, alias `127.222.0.1` and bind ports 80/443 on
 `/etc/hosts`) → start serving. See [Control API](/concepts/control-api/)
 for why this exact order matters.
 
-Trusting the CA needs a password dialog, so it only works when `fghjd`
-runs in a terminal. Under `brew services` there's no login session to show
-one in: `fghjd` logs that and carries on, and HTTPS shows a certificate
-warning until your first [`fghj wire`](/cli/wire/), which trusts it from your
-terminal, as you. If trust is lost later, `fghj doctor --fix` restores it.
+On macOS, trusting the CA needs a password dialog, so it only works when
+`fghjd` runs in a terminal. Under `brew services` there's no login session
+to show one in: `fghjd` logs that and carries on, and HTTPS shows a
+certificate warning until your first [`fghj wire`](/cli/wire/), which trusts
+it from your terminal, as you. On Linux nothing needs asking: `fghjd` puts
+the CA in the system store on every start, and in each workspace owner's
+browser databases, as that owner. If trust is lost later,
+`fghj doctor --fix` restores it.
 
 ## Going idle without stopping it
 

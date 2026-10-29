@@ -52,5 +52,5 @@ body:
     id: logs
     attributes:
       label: Daemon log, if relevant
-      description: "Under Homebrew: `tail -n 200 $(brew --prefix)/var/log/fghjd.err.log`"
+      description: "macOS (Homebrew): `tail -n 200 $(brew --prefix)/var/log/fghjd.err.log`. Ubuntu: `journalctl -u fghjd -n 200`"
       render: text

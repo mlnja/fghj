@@ -44,8 +44,10 @@ setting.
 
 ### Why `127.222.0.1` and not `127.0.0.1`
 
-The proxy binds a loopback address `fghjd` aliases for itself
-(`ifconfig lo0 alias`) rather than the machine's usual `127.0.0.1`. That
+The proxy binds a loopback address of its own rather than the machine's
+usual `127.0.0.1`: on macOS `fghjd` aliases it onto `lo0` first (`ifconfig
+lo0 alias`), and on Linux it needs nothing, since all of `127/8` is already
+local. That
 leaves `127.0.0.1:80`, `127.0.0.1:443` and `0.0.0.0:80` entirely free, so
 installing fghj can't collide with a local nginx or a `docker run -p 80:80`
 that was already working — and a `curl http://127.0.0.1/` still reaches

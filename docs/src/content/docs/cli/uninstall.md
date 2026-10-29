@@ -10,22 +10,26 @@ sudo fghj uninstall [-y] [--keep-ca] [--keep-state | --keep-workspaces]
 Removes everything fghj installed on this machine except the binaries and
 your Docker resources.
 
-`brew uninstall` runs unprivileged, so two of fghj's artifacts survive it —
-and neither is easy to find later:
+Removing the binaries alone leaves fghj's two biggest artifacts behind, and
+neither is easy to find later:
 
-- a **trusted root certificate** in `/Library/Keychains/System.keychain`
+- a **trusted root certificate**: in `/Library/Keychains/System.keychain` on
+  macOS; on Linux in the system store and in your browsers' databases
 - `/var/lib/fghjd`, which holds that CA's **private key**, every wired
   workspace, and all run state
 
 Leaving those behind means a trusted root whose key is still sitting on
-disk. This command is the one that clears them.
+disk. This command is the one that clears them. On macOS run it before
+`brew uninstall`, which runs unprivileged and can't; on Ubuntu `apt remove`
+runs it for you.
 
 ## What it does, in order
 
 1. Stops `fghjd` if it is running, so the daemon unwinds its own system
    configuration.
-2. Clears the managed `/etc/hosts` block, `/etc/resolver/fghj*` and the
-   `lo0` aliases directly. This is belt and braces: a daemon that was
+2. Clears the managed `/etc/hosts` block, the OS DNS routing
+   (`/etc/resolver/fghj*` and the `lo0` aliases on macOS, the `fghj0` link
+   on Linux) directly. This is belt and braces: a daemon that was
    killed with `SIGKILL` never ran its own teardown, so these can still be
    installed with nothing alive to remove them. Each step is a
    no-op when there is nothing to undo.
@@ -54,7 +58,7 @@ a *new* CA and trust that one too.
 | Flag | Effect |
 |---|---|
 | `-y`, `--yes` | Skip the confirmation prompt |
-| `--keep-ca` | Leave the root CA trusted — avoids a fresh keychain authorization prompt when reinstalling |
+| `--keep-ca` | Leave the root CA trusted — on macOS, avoids a fresh keychain authorization prompt when reinstalling |
 | `--keep-state` | Leave `/var/lib/fghjd` in place — keeps every wired workspace and the CA keys, and leaves the sidecars running |
 | `--keep-workspaces` | Keep only the workspace index and daemon settings; every CA file and key still goes, and so do the sidecars. A reinstall mints a new CA and still knows your workspaces. Removing the Ubuntu package runs this |
 
@@ -64,7 +68,7 @@ CI — aborts without removing anything.
 
 ## It needs root, and won't escalate for you
 
-All three of its jobs require it: the System keychain, `/etc`, and
+All of its jobs require it: the system trust store, `/etc`, and
 `/var/lib/fghjd`. Run unprivileged, it refuses and tells you what to run:
 
 ```
@@ -81,7 +85,8 @@ wrong shape, however convenient.
 
 ## What it does not remove
 
-**The binaries.** Use `brew uninstall fghj`.
+**The binaries.** Use `brew uninstall fghj` on macOS. On Ubuntu,
+`sudo apt remove fghj` removes them and runs this command first.
 
 **Docker containers, networks, volumes and images.** Not an oversight: a
 named volume is *designed* to outlive its container and may hold a

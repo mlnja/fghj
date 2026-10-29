@@ -125,6 +125,19 @@ certificate your system already trusts, and its Postgres at
 `postgres.checkout-service.shop.fghj.raw.internal:5432`. Neither address is written
 down anywhere — both are derived from the graph.
 
+## Install
+
+Runs on macOS (Apple Silicon) through Homebrew, and on Ubuntu 22.04 or newer
+(`amd64`, `arm64`) through apt, which keeps it updated:
+
+```bash
+brew install mlnja/tap/fghj && sudo brew services start fghj   # macOS
+sudo apt install fghj                                          # Ubuntu, from apt.mlops.ninja
+```
+
+[Installation](/getting-started/installation/) has the one-time apt setup
+and what each OS changes on your machine.
+
 <CardGrid>
   <LinkCard
     title="Start the tutorial"

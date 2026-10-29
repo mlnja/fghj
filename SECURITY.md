@@ -16,7 +16,7 @@ release, and the advisory is published once that release is out.
 ## Supported versions
 
 Only the latest release gets security fixes. fghj is pre-1.0 and releases
-often, so upgrade with `brew upgrade fghj`.
+often, so upgrade with `brew upgrade fghj` or `sudo apt upgrade`.
 
 ## What is in scope
 

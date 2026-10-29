@@ -24,10 +24,10 @@ Tells `fghjd` to go idle:
 
 1. Stops and drops the DNS server and the HTTP/HTTPS reverse proxy,
    freeing ports 80/443, its loopback alias, and the DNS socket.
-2. Removes the (on macOS) `/etc/resolver` entries it authored — one per
-   zone (`fghj.internal`, `fghj.raw.internal`) plus one for every
-   currently-active [`wildcard_hosts`](/reference/fghj-yaml/#additional-hosts)
-   suffix.
+2. Removes the OS DNS routing it set up for its zones (`fghj.internal`,
+   `fghj.raw.internal`) and every currently-active
+   [`wildcard_hosts`](/reference/fghj-yaml/#additional-hosts) suffix: the
+   `/etc/resolver` files it authored on macOS, the `fghj0` link on Linux.
 3. Clears fghj's managed block from `/etc/hosts`, dropping every
    [additional host](/reference/fghj-yaml/#additional-hosts) alias.
 4. Tears down the raw zone's host-side plumbing — the listeners and
@@ -76,7 +76,8 @@ ever lost.
 
 Equivalent to `stop` followed by `start`.
 It doesn't restart the `fghjd` process: that's the service manager's job
-(`sudo brew services restart fghj`).
+(`sudo brew services restart fghj` on macOS, `sudo systemctl restart fghjd`
+on Linux).
 
 ## `fghj daemon status`
 
@@ -86,7 +87,8 @@ currently active or idle.
 ## What actually stops the process
 
 `fghjd` only exits in response to a real termination signal (SIGTERM/
-SIGINT) — e.g. `sudo brew services stop fghj`, `launchctl bootout`, a
+SIGINT) — e.g. `sudo brew services stop fghj`, `launchctl bootout`,
+`sudo systemctl stop fghjd`, a
 service uninstall, or system shutdown. On that path it still runs the same
 deactivation as `fghj daemon stop` first, so it never leaves stale ports,
 resolver config, or `/etc/hosts` entries behind for whatever starts next.
