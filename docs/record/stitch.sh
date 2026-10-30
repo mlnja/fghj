@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Glues the clips into demo.mp4 (for Reddit) and demo.gif (for the README):
 #
-#   1-wire.mp4 -> browser part 1 -> 3-ls.mp4 -> browser part 2 -> 5-same-url.mp4
+#   wire.mp4 -> browser part 1 -> ls.mp4 -> browser part 2 -> same-url.mp4
 #
 # browser.mov is one take, cut in two at B_CUT. The two waits in it (repos
 # downloading, containers starting) are sped up. Read the times off
@@ -25,7 +25,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p build
 
-for f in 1-wire.mp4 browser.mov 3-ls.mp4 5-same-url.mp4; do
+for f in wire.mp4 browser.mov ls.mp4 same-url.mp4; do
   [ -f "$f" ] || { echo "missing $f: record it first (see README.md)" >&2; exit 1; }
 done
 prev=-1
@@ -48,11 +48,11 @@ browser_part() {
 }
 
 echo "1/4 normalising clips"
-ffmpeg -y -v error -i 1-wire.mp4     -vf "$fit" "${enc[@]}" build/1.mp4
+ffmpeg -y -v error -i wire.mp4     -vf "$fit" "${enc[@]}" build/1.mp4
 browser_part build/2.mp4 "$B_START" "$B_DL_FROM" "$B_DL_TO" "$B_CUT"
-ffmpeg -y -v error -i 3-ls.mp4       -vf "$fit" "${enc[@]}" build/3.mp4
+ffmpeg -y -v error -i ls.mp4       -vf "$fit" "${enc[@]}" build/3.mp4
 browser_part build/4.mp4 "$B_CUT" "$B_UP_FROM" "$B_UP_TO" "$B_END"
-ffmpeg -y -v error -i 5-same-url.mp4 -vf "$fit" "${enc[@]}" build/5.mp4
+ffmpeg -y -v error -i same-url.mp4 -vf "$fit" "${enc[@]}" build/5.mp4
 
 echo "2/4 joining"
 inputs=(); graph=""; last="[0:v]"; offset=0

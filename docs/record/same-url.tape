@@ -1,6 +1,6 @@
 # Clip 5: the same https URL answers on the host and inside a container.
-# Run after the files-web/full flow is up:  vhs 5-same-url.tape  -> 5-same-url.mp4
-Output 5-same-url.mp4
+# Run after the files-web/full flow is up:  vhs same-url.tape  -> same-url.mp4
+Output same-url.mp4
 
 Require fghj
 Set Shell "zsh"

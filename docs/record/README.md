@@ -17,11 +17,11 @@ VHS writes `.mp4`, not GIFs, on purpose: those are intermediate clips.
 
 | # | What you see | Recorded with |
 |---|---|---|
-| 1 | `mkdir ~/files && cd ~/files`, `fghj wire https://github.com/fghj-examples/files-web.git`, then the cloned repo's `.fghj.yaml`: `include:` of two repos that aren't on disk, and `flows:` | VHS, `1-wire.tape` |
+| 1 | `mkdir ~/files && cd ~/files`, `fghj wire https://github.com/fghj-examples/files-web.git`, then the cloned repo's `.fghj.yaml`: `include:` of two repos that aren't on disk, and `flows:` | VHS, `wire.tape` |
 | 2 | The UI at `https://fghj.internal/`: select the `files-web/full` flow, the repos it needs show as placeholders; **Download all**, and the graph fills in (sped up) | `record-browser.sh`, first half |
-| 3 | `ls`: four repos, where there was one | VHS, `3-ls.tape` |
+| 3 | `ls`: four repos, where there was one | VHS, `ls.tape` |
 | 4 | Back in the UI: **Switch to flow**, every node goes green (sped up), then `https://files.test` with the padlock | `record-browser.sh`, second half |
-| 5 | `curl -s $URL` on the host, and the same URL through `fghj exec` inside a container. Same answer. | VHS, `5-same-url.tape` |
+| 5 | `curl -s $URL` on the host, and the same URL through `fghj exec` inside a container. Same answer. | VHS, `same-url.tape` |
 
 ## 0. Install once
 
@@ -72,7 +72,7 @@ git-ignored.
 nothing:
 
 ```bash
-vhs 1-wire.tape                 # -> 1-wire.mp4
+vhs wire.tape                 # -> wire.mp4
 ```
 
 **Clips 2 and 4**, one browser take:
@@ -103,16 +103,16 @@ select the Chrome window, and save the file as `browser.mov` in this folder.
 **Clip 3** (any time after Download all):
 
 ```bash
-vhs 3-ls.tape                   # -> 3-ls.mp4
+vhs ls.tape                   # -> ls.mp4
 ```
 
 **Clip 5** (with the flow up):
 
 ```bash
-vhs 5-same-url.tape             # -> 5-same-url.mp4
+vhs same-url.tape             # -> same-url.mp4
 ```
 
-For another browser take, run `vhs 1-wire.tape` again first: it resets and
+For another browser take, run `vhs wire.tape` again first: it resets and
 re-wires, so the UI starts from one repo again.
 
 ## 3. Stitch
@@ -150,8 +150,8 @@ seconds to re-run.
 - **A typo or wrong output in the terminal:** edit the `.tape` and run `vhs`
   again. Nothing in it is typed by hand.
 - **`fghj wire` takes longer than a minute:** clip 1 waits up to 60 s for the
-  prompt. Raise `Wait@60s` in `1-wire.tape`.
-- **A fumble in the browser:** run `vhs 1-wire.tape` and take the browser
+  prompt. Raise `Wait@60s` in `wire.tape`.
+- **A fumble in the browser:** run `vhs wire.tape` and take the browser
   again. Extra footage at either end is cut with `B_START`/`B_END`.
 - **Terminal text too small:** raise `Set FontSize` (now 20) in the tapes.
   If lines stop fitting, raise `Set Height` there too; `stitch.sh` fits any

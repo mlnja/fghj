@@ -1,6 +1,6 @@
 # Clip 3: after "Download all" in the UI, the other repos are on disk.
-#   vhs 3-ls.tape   -> 3-ls.mp4
-Output 3-ls.mp4
+#   vhs ls.tape   -> ls.mp4
+Output ls.mp4
 
 Require fghj
 Set Shell "zsh"

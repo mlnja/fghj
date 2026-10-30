@@ -1,7 +1,7 @@
 # Clip 1: an empty machine. Make a folder, wire the entry repo, look at its config.
-#   vhs 1-wire.tape   -> 1-wire.mp4
+#   vhs wire.tape   -> wire.mp4
 # It runs ./reset.sh first, so every take starts from nothing.
-Output 1-wire.mp4
+Output wire.mp4
 
 Require fghj
 Set Shell "zsh"
