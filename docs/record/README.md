@@ -1,47 +1,47 @@
-# Демо-GIF для fghj: как снять и склеить
+# Recording the demo GIF
 
-Главная мысль: **ничего не снимаем «вживую одним дублем»**. Терминальные куски
-печатает робот (VHS) по сценарию, без опечаток, и их можно перегенерировать
-сколько угодно. Браузер снимается отдельным коротким клипом. Потом скрипт
-склеивает три куска с мягкой склейкой. Затупил — переснимаешь только свой кусок,
-остальное не трогаешь. Экраны на записи не переключаешь вообще: «переключение»
-это просто склейка между клипами.
+Nothing here is recorded live in one take. The terminal clips are typed by
+[VHS](https://github.com/charmbracelet/vhs) from a script, so there are no
+typos and they can be regenerated at will. The browser is a separate short
+clip. `stitch.sh` then joins the three with a short crossfade. If one take
+goes wrong, redo that clip only. There is no switching between windows during
+a recording: the cut between clips does that.
 
-## Сюжет (~22–25 секунд)
+## The story (~22–25 seconds)
 
-| # | Что видно | Чем снимается | Длина |
+| # | What you see | Recorded with | Length |
 |---|---|---|---|
-| 1 | `files-web/.fghj.yaml` без комментариев: `include:` двух чужих репо и `flows:`. «Вот и весь конфиг.» | VHS, `01-config.tape` | ~5 с |
-| 2 | UI `https://fghj.internal/`: граф из 4 репо, выбираешь флоу `files-web/full`, ноды зеленеют (ускорено), потом новая вкладка `https://files.test`, приложение с замочком | запись экрана, `record-browser.sh` | ~10 с |
-| 3 | `curl -s $URL` с хоста и тот же URL через `fghj exec api.files-api -- node -e "fetch(...)"` изнутри контейнера. Один и тот же ответ. | VHS, `03-same-url.tape` | ~7 с |
+| 1 | `files-web/.fghj.yaml` without comments: `include:` of two other repos, and `flows:`. "That's the whole config." | VHS, `01-config.tape` | ~5 s |
+| 2 | The UI at `https://fghj.internal/`: a graph of 4 repos, pick the `files-web/full` flow, nodes turn green (sped up), then a new tab at `https://files.test` with the padlock | screen recording, `record-browser.sh` | ~10 s |
+| 3 | `curl -s $URL` on the host, and the same URL through `fghj exec api.files-api -- node -e "fetch(...)"` inside a container. Same answer. | VHS, `03-same-url.tape` | ~7 s |
 
-Это три главные фишки из README: граф без владельца, флоу, одно имя внутри и
-снаружи Docker. Пример берём из туториала (`fghj-examples/files-*`), чтобы
-любой зритель мог повторить.
+These are the three ideas from the README: a graph no repo owns, flows, and
+one hostname inside and outside Docker. The example is the tutorial's
+(`fghj-examples/files-*`), so anyone watching can reproduce it.
 
-## 0. Один раз поставить
+## 0. Install once
 
 ```bash
-brew install vhs gifski bat     # vhs притащит ttyd и ffmpeg
+brew install vhs gifski bat     # vhs brings ttyd and ffmpeg
 ```
 
-Терминалу (Terminal/iTerm/Ghostty) дать право на запись экрана:
+Give your terminal (Terminal, iTerm, Ghostty) screen recording permission:
 System Settings → Privacy & Security → Screen Recording.
 
-## 1. Подготовить воркспейс (заранее, не на камеру)
+## 1. Prepare the workspace (beforehand, off camera)
 
-Папка воркспейса должна называться `files`, тогда домены будут ровно как в
-туториале (`web.files-web.files.fghj.internal`).
+Name the workspace folder `files`, so the domains match the tutorial's
+(`web.files-web.files.fghj.internal`).
 
 ```bash
 mkdir -p ~/files && cd ~/files
 fghj wire https://github.com/fghj-examples/files-web.git
-fghj pull                       # клонирует остальные 3 репо и тянет образы
-fghj up files-web/full          # первый раз собирает всё, тут можно ждать минуты
-open https://files.test         # убедись, что открывается, замочек есть
+fghj pull                       # clones the other 3 repos and pulls images
+fghj up files-web/full          # the first run builds everything; this can take minutes
+open https://files.test         # check it loads with the padlock
 ```
 
-Прогони руками команды из клипа 3 и проверь, что оба ответа одинаковые:
+Run clip 3's commands by hand and check both answers match:
 
 ```bash
 URL=https://web.files-web.files.fghj.internal/api/health
@@ -49,83 +49,84 @@ curl -s $URL
 fghj exec api.files-api -- node -e "fetch('$URL').then(r=>r.text()).then(console.log)"
 ```
 
-Перед записью клипа 2 переключи воркспейс на «почти пустое», чтобы на камеру
-ноды стартовали, но уже из кэша, быстро:
+Before recording clip 2, switch the workspace to almost nothing, so the
+nodes start on camera, but from cache and quickly:
 
 ```bash
-fghj up files-platform/cache    # останется только Redis
+fghj up files-platform/cache    # leaves only Redis running
 ```
 
-Если какая-то команда ведёт себя не так, как я написал (я не мог прогнать fghj
-у себя, только склейку), напиши мне, что она вывела, поправлю тейп.
+If a command's output differs from what the tapes expect, fix the tape
+before recording.
 
-## 2. Снять клипы
+## 2. Record the clips
 
-Все команды ниже запускай из этой папки, `docs/record` в репо fghj. Клипы и
-промежуточные файлы в git не попадают (см. `.gitignore`).
+Run everything below from this folder, `docs/record`. Clips and build output
+are git-ignored.
 
-**Клип 1** (секунд 10, без твоего участия):
+**Clip 1** (about 10 seconds, hands off):
 
 ```bash
 vhs 01-config.tape              # -> 01-config.mp4
 ```
 
-**Клип 2**, браузер. Это единственный кусок руками:
+**Clip 2**, the browser. The only clip done by hand:
 
 ```bash
 ./record-browser.sh
 ```
 
-Скрипт открывает чистый профиль Chrome (без твоих закладок и расширений) ровно
-1200×720 в фиксированном месте экрана. Ты нажимаешь Enter, и записывается
-только этот прямоугольник. Дальше:
+The script opens a clean Chrome profile (no bookmarks or extensions) at
+exactly 1200×720 in a fixed spot. Press Enter, and only that rectangle is
+recorded. Then:
 
-1. Пауза 2 секунды на графе.
-2. Выбираешь флоу `files-web/full`, ждёшь, пока всё позеленеет. Ожидание
-   не страшно, скрипт склейки его ускорит.
-3. Открываешь `https://files.test` (Cmd+L, вставил, Enter), ждёшь, пока
-   загрузится, пауза 2 секунды.
-4. Ctrl-C в терминале (или само остановится через 60 с).
+1. Pause 2 seconds on the graph.
+2. Pick the `files-web/full` flow and wait for everything to go green. The
+   wait doesn't matter: `stitch.sh` speeds it up.
+3. Open `https://files.test` (Cmd+L, paste, Enter), wait for it to load,
+   pause 2 seconds.
+4. Ctrl-C in the terminal (or it stops by itself after 60 s).
 
-Перед следующим дублем снова `fghj up files-platform/cache`.
+Before another take, run `fghj up files-platform/cache` again.
 
-Если `screencapture` с `-R` у тебя капризничает: Cmd+Shift+5 → «Record Selected
-Portion», выдели окно Chrome, потом сохрани файл как `02-browser.mov` в эту папку.
+If `screencapture -R` misbehaves: Cmd+Shift+5 → Record Selected Portion,
+select the Chrome window, and save the file as `02-browser.mov` in this
+folder.
 
-**Клип 3** (после клипа 2, когда флоу `full` поднят):
+**Clip 3** (after clip 2, with the `full` flow up):
 
 ```bash
 vhs 03-same-url.tape            # -> 03-same-url.mp4
 ```
 
-## 3. Склеить
+## 3. Stitch
 
-Открой `02-browser.mov` в QuickTime и запиши четыре момента в секундах:
-откуда начать, когда нажал на флоу, когда позеленела последняя нода, когда
-загрузилась страница. Подставь их:
+Open `02-browser.mov` in QuickTime and note four times in seconds: where to
+start, when you picked the flow, when the last node went green, and when the
+page finished loading. Pass them in:
 
 ```bash
 B_START=1 B_FAST_FROM=4 B_FAST_TO=31 B_FAST_X=8 B_END=38 ./stitch.sh
 ```
 
-Получаются `demo.mp4` и `demo.gif`. Скрипт сам уменьшает GIF (1200 → 960 px,
-меньше кадров), пока он не влезет в 5 МБ. Посмотри, не понравилось, поменяй
-цифры и запусти снова, это секунды.
+This writes `demo.mp4` here and `demo.gif` to `docs/public/demo.gif`. It
+shrinks the GIF (1200 → 960 px, fewer frames) until it fits in 5 MB. If you
+don't like the result, change the numbers and run it again; it takes seconds.
 
-## 4. Куда что
+## 4. Where each goes
 
-- **README:** `stitch.sh` сам кладёт GIF в `docs/public/demo.gif`, остаётся
-  закоммитить его и добавить в README под теглайном:
+- **README:** commit `docs/public/demo.gif` and add this under the tagline:
   `![fghj: wire two repos, start one flow, same URL inside and outside Docker](docs/public/demo.gif)`
-- **Reddit:** загружай `demo.mp4`, а не GIF. Reddit сам перекодирует видео,
-  оно чётче и легче. Для r/rust можно пост-видео с текстом в первом комментарии,
-  или текстовый пост со ссылкой на репо, где GIF видно сразу.
+- **Reddit:** upload `demo.mp4`, not the GIF. Reddit re-encodes video, and
+  it comes out sharper and lighter than a GIF.
 
-## Если что-то пошло не так
+## When something goes wrong
 
-- **Опечатка или не тот вывод в терминале:** поправь `.tape`, запусти `vhs`
-  заново. Ручного ввода там нет.
-- **Затупил в браузере:** просто ещё дубль клипа 2. Лишнее в начале и в конце
-  отрезается через `B_START`/`B_END`, долгое ожидание ускоряется.
-- **Текст в терминале мелкий:** в обоих тейпах `Set FontSize 22`. Если строки перестали влезать, подними там же `Set Height`, склейка подгонит размер сама.
-- **Другая тема терминала:** `vhs themes` покажет список, поменяй `Set Theme`.
+- **A typo or wrong output in the terminal:** edit the `.tape` and run `vhs`
+  again. Nothing in it is typed by hand.
+- **A fumble in the browser:** record clip 2 again. Extra footage at either
+  end is cut with `B_START`/`B_END`, and the long wait is sped up.
+- **Terminal text too small:** raise `Set FontSize` (now 20) in both tapes.
+  If lines stop fitting, raise `Set Height` there too; `stitch.sh` fits any
+  size.
+- **Another terminal theme:** `vhs themes` lists them; change `Set Theme`.
