@@ -49,18 +49,18 @@ export default defineConfig({
             href: 'https://fonts.googleapis.com/css2?family=Podkova:wght@400..800&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap',
           },
         },
-        // Link-preview card for every page: the same image as the GitHub
-        // social preview (`public/social-preview.png`, rendered from
-        // `record/social-preview.html`). Starlight already sets
-        // `twitter:card` to `summary_large_image`.
-        { tag: 'meta', attrs: { property: 'og:image', content: 'https://fghj.mlops.ninja/social-preview.png' } },
-        { tag: 'meta', attrs: { property: 'og:image:width', content: '1280' } },
-        { tag: 'meta', attrs: { property: 'og:image:height', content: '640' } },
+        // Link-preview card for every page: the GitHub social preview's
+        // design at the 1.91:1 ratio link cards expect (`public/og-image.png`,
+        // rendered from `record/social-preview.html` at 1280x672 and scaled
+        // down). Starlight already sets `twitter:card` to `summary_large_image`.
+        { tag: 'meta', attrs: { property: 'og:image', content: 'https://fghj.mlops.ninja/og-image.png' } },
+        { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
+        { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
         {
           tag: 'meta',
           attrs: { property: 'og:image:alt', content: 'fghj: real HTTPS hostnames for multi-repo local dev, the same inside Docker and out' },
         },
-        { tag: 'meta', attrs: { name: 'twitter:image', content: 'https://fghj.mlops.ninja/social-preview.png' } },
+        { tag: 'meta', attrs: { name: 'twitter:image', content: 'https://fghj.mlops.ninja/og-image.png' } },
       ],
 
       customCss: ['./src/styles/fghj-tokens.css', './src/styles/fghj-theme.css'],

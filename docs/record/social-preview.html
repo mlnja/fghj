@@ -2,13 +2,13 @@
 <link href="https://fonts.googleapis.com/css2?family=Podkova:wght@800&family=Space+Grotesk:wght@400;500&family=JetBrains+Mono:wght@400;500;700&display=block" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0}
-html,body{width:1280px;height:640px;overflow:hidden}
-body{background:#101827;color:#f4f6ff;font-family:'Space Grotesk',sans-serif;position:relative}
+html,body{width:100vw;height:100vh;overflow:hidden}
+body{display:flex;align-items:center;background:#101827;color:#f4f6ff;font-family:'Space Grotesk',sans-serif;position:relative}
 body::before{content:"";position:absolute;inset:0;background:
  radial-gradient(900px 500px at 100% 0%,rgba(42,161,212,.20),transparent 60%),
  linear-gradient(rgba(147,160,178,.06) 1px,transparent 1px) 0 0/32px 32px,
  linear-gradient(90deg,rgba(147,160,178,.06) 1px,transparent 1px) 0 0/32px 32px}
-.wrap{position:relative;padding:84px 80px 0}
+.wrap{position:relative;width:100%;padding:0 80px 16px}
 .brand{display:flex;align-items:center;gap:22px}
 .brand svg{width:76px;height:76px}
 .brand h1{font-family:'Podkova',serif;font-weight:800;font-size:92px;line-height:1;letter-spacing:-1px}
