@@ -6,6 +6,7 @@
   import WorkspaceConfig from './lib/WorkspaceConfig.svelte';
   import TelemetryDrawer from './lib/TelemetryDrawer.svelte';
   import GraphSkeleton from './lib/GraphSkeleton.svelte';
+  import Welcome from './lib/Welcome.svelte';
 
   let universe = $state(null);
   // fghjd answered, but with an error: the workspace failed to resolve.
@@ -30,8 +31,12 @@
   let envPoll = null;
 
   let workspaces = $state([]);
+  // Whether `GET /workspaces` has answered once, so an empty list means
+  // "none wired" rather than "not asked yet".
+  let workspacesLoaded = $state(false);
+  const WORKSPACE_KEY = 'fghj:workspace';
   let currentWorkspaceId = $state(
-    new URLSearchParams(location.search).get('workspace') || localStorage.getItem('fghj:workspace') || null,
+    new URLSearchParams(location.search).get('workspace') || localStorage.getItem(WORKSPACE_KEY) || null,
   );
 
   function withWs(path) {
@@ -44,15 +49,49 @@
     try {
       const res = await fetch('/workspaces');
       workspaces = await res.json();
+      workspacesLoaded = true;
+      return true;
     } catch (e) {
       // best-effort; picker just stays empty
+      return false;
     }
   }
-  loadWorkspaces();
+
+  // Keeps the current workspace while it's still wired. Otherwise: the one
+  // used last, if it still is, else the first. None wired leaves `null`, and
+  // the welcome screen.
+  function chooseWorkspace() {
+    const ids = workspaces.map((w) => w.id);
+    if (currentWorkspaceId && ids.includes(currentWorkspaceId)) {
+      localStorage.setItem(WORKSPACE_KEY, currentWorkspaceId);
+      setUrlWorkspace(currentWorkspaceId);
+      return;
+    }
+    const stored = localStorage.getItem(WORKSPACE_KEY);
+    const next = (stored && ids.includes(stored) ? stored : ids[0]) ?? null;
+    if (next) {
+      selectWorkspace(next);
+    } else {
+      currentWorkspaceId = null;
+      setUrlWorkspace(null);
+      universe = null;
+      error = null;
+      env = null;
+    }
+  }
+
+  // The URL names the workspace on screen, so a reload comes back to it.
+  function setUrlWorkspace(id) {
+    const url = new URL(location.href);
+    if (id) url.searchParams.set('workspace', id);
+    else url.searchParams.delete('workspace');
+    history.replaceState(null, '', url);
+  }
 
   function selectWorkspace(id) {
     currentWorkspaceId = id;
-    localStorage.setItem('fghj:workspace', id);
+    localStorage.setItem(WORKSPACE_KEY, id);
+    setUrlWorkspace(id);
     universe = null;
     error = null;
     selectedNode = null;
@@ -85,7 +124,7 @@
       selectWorkspace(next);
     } else {
       currentWorkspaceId = null;
-      localStorage.removeItem('fghj:workspace');
+      localStorage.removeItem(WORKSPACE_KEY);
       universe = null;
       env = null;
       load();
@@ -95,6 +134,16 @@
   // Polled (see the effect below), so every outcome has to be able to
   // undo the last one: a success clears both the error and the outage.
   async function load() {
+    // Nothing to resolve yet: watch for a workspace to be wired instead.
+    if (!currentWorkspaceId) {
+      if (await loadWorkspaces()) {
+        backendDown = false;
+        if (workspaces.length) chooseWorkspace();
+      } else {
+        backendDown = true;
+      }
+      return;
+    }
     let data;
     try {
       const res = await fetch(withWs('/universe.json'));
@@ -110,6 +159,12 @@
       loadWorkspaces();
     }
     if (data.error) {
+      // Maybe it was removed under us (`fghj workspaces rm`, another tab): then
+      // move on to another one rather than show its error.
+      if (await loadWorkspaces() && !workspaces.some((w) => w.id === currentWorkspaceId)) {
+        chooseWorkspace();
+        return;
+      }
       error = data.error;
       return;
     }
@@ -120,7 +175,11 @@
     if (!currentFlow || !flows.includes(currentFlow))
       currentFlow = recent.find((f) => flows.includes(f)) ?? flows[0] ?? null;
   }
-  load();
+
+  (async () => {
+    if (await loadWorkspaces()) chooseWorkspace();
+    if (currentWorkspaceId) load();
+  })();
 
   // A poll skips its turn while its last request is still out. Otherwise
   // requests slower than the interval pile up, and fghjd works on every one.
@@ -142,6 +201,7 @@
   const pollRepos = polled(loadRepos);
 
   async function loadEnv() {
+    if (!currentWorkspaceId) return;
     try {
       const [envRes, recRes] = await Promise.all([
         fetch(withWs('/environment')),
@@ -179,6 +239,7 @@
   }
 
   async function loadRepos() {
+    if (!currentWorkspaceId) return;
     try {
       const res = await fetch(withWs('/repos'));
       if (res.ok) repoStatus = await res.json();
@@ -718,6 +779,8 @@
         detail={"It may be restarting or upgrading. If it was stopped with `fghj daemon stop`, run `fghj daemon start`; otherwise `fghj doctor` shows what is wrong."}
         onRetry={load}
       />
+    {:else if workspacesLoaded && !currentWorkspaceId}
+      <Welcome />
     {:else if activeTab === 'config'}
       <!-- Ahead of `error`: a workspace that no longer resolves still has to be removable. -->
       <WorkspaceConfig

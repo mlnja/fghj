@@ -169,6 +169,28 @@
     el.focus();
   }
 
+  // Closes a menu on a press anywhere outside `node` (which holds its button
+  // too, so the button still toggles) and on Escape.
+  function dismiss(node, close) {
+    const onPress = (e) => {
+      if (!node.contains(e.target)) close();
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') close();
+    };
+    document.addEventListener('pointerdown', onPress, true);
+    document.addEventListener('keydown', onKey);
+    return {
+      update(next) {
+        close = next;
+      },
+      destroy() {
+        document.removeEventListener('pointerdown', onPress, true);
+        document.removeEventListener('keydown', onKey);
+      },
+    };
+  }
+
   function pickWorkspace(id) {
     wsMenuOpen = false;
     onSelectWorkspace(id);
@@ -194,7 +216,7 @@
   </div>
   <div class="divider"></div>
 
-  <div class="flow-picker">
+  <div class="flow-picker" use:dismiss={() => (wsMenuOpen = false)}>
     <button class="flow-btn ws-btn" onclick={toggleWorkspaceMenu} title="switch workspace: {currentWorkspaceLabel}">
       <span class="name">{currentWorkspaceLabel}</span>
     </button>
@@ -210,9 +232,11 @@
     {/if}
   </div>
 
+  <!-- Flows, tabs and actions all act on a workspace; with none wired there is nothing for them to do. -->
+  {#if currentWorkspaceId}
   <div class="divider"></div>
 
-  <div class="flow-picker">
+  <div class="flow-picker" use:dismiss={() => (menuOpen = false)}>
     <button class="flow-btn flow-name-btn" onclick={openFlowMenu} title={currentFlow}>
       <span class="name">{currentFlow ?? '…'}</span>
       <span style="width:6px;height:6px;background:{hasConflict ? 'var(--danger)' : 'var(--success)'}"></span>
@@ -249,13 +273,14 @@
     {/each}
   </div>
 
+  {/if}
   <div class="divider"></div>
   <div class="help-btn" onclick={() => onOpenDrawer('logs')} title="fghjd telemetry (logs, pull queue, doctor, help)">⚡</div>
 
   <!-- Per-tab actions go last, so switching tabs never moves the rest. -->
-  {#if activeTab === 'repos' || activeTab === 'containers'}
+  {#if currentWorkspaceId && (activeTab === 'repos' || activeTab === 'containers')}
     <div class="divider"></div>
-    <div class="flow-picker pull-wrap">
+    <div class="flow-picker pull-wrap" use:dismiss={() => (actionsOpen = false)}>
       <button class="pull-btn actions-btn" onclick={() => (actionsOpen = !actionsOpen)} aria-expanded={actionsOpen}>
         {#if activeTab === 'repos' && (pulling || flowPulling)}<span class="spinner"></span> downloading…
         {:else if activeTab === 'containers' && (switchingFlow || envBusy)}<span class="spinner"></span> switching…
@@ -297,7 +322,7 @@
       {/if}
     </div>
   {/if}
-  {#if activeTab === 'containers'}
+  {#if currentWorkspaceId && activeTab === 'containers'}
     {#if showSeeds != null}
       <button
         class="pull-btn seeds-btn"

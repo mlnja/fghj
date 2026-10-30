@@ -23,7 +23,10 @@ Sleep 500ms
 Show
 
 Sleep 400ms
-Type "ls"
+Type "cd ~/files"
+Sleep 300ms
+Enter
+Type "tree -d"
 Sleep 300ms
 Enter
 Sleep 2.5s
