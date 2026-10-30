@@ -85,5 +85,5 @@ for try in "1200 $GIF_FPS" "1200 10" "960 10" "800 10"; do
   awk "BEGIN{exit !($mb <= $MAX_MB)}" && break
 done
 
-cp demo.gif ../public/demo.gif
-echo "4/4 done: $(pwd)/demo.mp4, and demo.gif copied to docs/public/demo.gif"
+cp demo.gif demo.mp4 ../public/
+echo "4/4 done: demo.gif and demo.mp4 copied to docs/public/"

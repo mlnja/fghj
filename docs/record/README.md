@@ -135,15 +135,16 @@ Open `browser.mov` in QuickTime and note seven times, in seconds:
 B_START=1 B_DL_FROM=4 B_DL_TO=19 B_CUT=21 B_UP_FROM=23 B_UP_TO=70 B_END=76 ./stitch.sh
 ```
 
-This writes `demo.mp4` here and `demo.gif` to `docs/public/demo.gif`. It
+This writes `demo.gif` and `demo.mp4`, and copies both to `docs/public/`. It
 shrinks the GIF (1200 → 960 px, fewer frames) until it fits in 5 MB. If the
 result runs long, raise `B_FAST_X` (default 10) or trim the pauses; it takes
 seconds to re-run.
 
 ## 4. Where each goes
 
-- **README:** commit `docs/public/demo.gif` and add this under the tagline:
-  `![fghj: wire one repo, download the rest, start one flow, same URL inside and outside Docker](docs/public/demo.gif)`
+- **README and docs site:** commit `docs/public/demo.gif` and
+  `docs/public/demo.mp4`. The README shows the GIF; the docs home page plays
+  the video, served at `/demo.mp4`.
 - **Reddit:** upload `demo.mp4`, not the GIF. Reddit re-encodes video, and
   it comes out sharper and lighter than a GIF.
 

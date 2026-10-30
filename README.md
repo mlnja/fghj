@@ -7,6 +7,8 @@
 
 **Local dev environments scoped to a user flow, not your whole fleet.**
 
+![fghj: wire one repo, download the rest from the UI, start one flow, and call the same HTTPS URL from the host and from inside a container](docs/public/demo.gif)
+
 [Docs](https://fghj.mlops.ninja/) ·
 [Tutorial](https://fghj.mlops.ninja/tutorial/) ·
 [What it fixes](https://fghj.mlops.ninja/guides/what-it-fixes/) ·

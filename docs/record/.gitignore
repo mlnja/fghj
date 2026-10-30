@@ -2,4 +2,3 @@ build/
 *.mp4
 *.mov
 *.gif
-!demo.mp4
