@@ -22,7 +22,7 @@ body::before{content:"";position:absolute;inset:0;background:
 .t .bar span{width:11px;height:11px;border-radius:50%;background:#3b4557}
 .t .bar em{font-style:normal;margin-left:8px}
 .t pre{padding:16px 18px;font-family:'JetBrains Mono',monospace;font-size:19px;line-height:1.6;color:#e3e8f2}
-s{color:#93a0b2;text-decoration-color:#f08a86;text-decoration-thickness:2px}
+s{color:#f08a86;text-decoration-color:#f08a86;text-decoration-thickness:2px}
 .p{color:#4ade80}.h{color:#9fdcf5}.o{color:#93a0b2}
 </style></head><body><div class="wrap">
 <div class="brand">
@@ -34,9 +34,9 @@ s{color:#93a0b2;text-decoration-color:#f08a86;text-decoration-thickness:2px}
 <p class="sub">Bring up only the services your user flow needs. No compose file to maintain.</p>
 <div class="terms">
 <div class="t"><div class="bar"><span></span><span></span><span></span><em>from your laptop</em></div>
-<pre><s>curl localhost:9000</s>  <s>:9001</s>  <s>:9002</s>  <s>:9003</s>
+<pre><span class="o">curl localhost:</span><s>9000</s> <s>9001</s> <span class="o">9002</span>
 <span class="p" style="display:inline-block;margin-top:6px">$</span> curl <span class="h">https://api.shop.fghj.internal</span>/health</pre></div>
 <div class="t"><div class="bar"><span></span><span></span><span></span><em>from inside any container</em></div>
-<pre><s>curl host.docker.internal:9001</s>  <s>:9002</s>  <s>:9003</s>
+<pre><span class="o">curl host.docker.internal:</span><s>9000</s> <s>9001</s> <span class="o">9002</span>
 <span class="p" style="display:inline-block;margin-top:6px">$</span> curl <span class="h">https://api.shop.fghj.internal</span>/health</pre></div>
 </div></div></body></html>
