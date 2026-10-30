@@ -37,8 +37,10 @@ runs it for you.
    (the System keychain on macOS; `/usr/local/share/ca-certificates` on
    Linux) and, on Linux, from the browser databases of every wired
    workspace's owner and of the user who ran `sudo`.
-4. Removes fghj's sidecar containers, which hold the signing CA's key. Your
-   own containers, networks and volumes stay.
+4. Has fghjd remove fghj's sidecar containers, which hold the signing CA's
+   key. Your own containers, networks and volumes stay. If fghjd isn't
+   running, it can't, and the warning gives the `docker rm` command that
+   does.
 5. Removes `/var/lib/fghjd`, and fghj's own database in each wired
    workspace (`.fghj/fghj.db`). Nothing else in a workspace is touched.
 

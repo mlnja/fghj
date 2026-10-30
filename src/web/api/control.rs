@@ -9,6 +9,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::daemon::control::DaemonControl;
+use crate::daemon::registry::WorkspaceRegistry;
 use crate::state::query;
 use crate::web::api::error::{bad_request, err_response};
 use crate::web::proxy;
@@ -79,6 +80,23 @@ pub(crate) async fn post_daemon_stop(State(daemon): State<Arc<DaemonControl>>) -
         daemon_log::warn(format!("fghjd: failed to persist daemon state: {e}"));
     }
     Json(serde_json::json!({ "active": false })).into_response()
+}
+
+/// `fghj uninstall`: every sidecar of fghj's, in any workspace, since each
+/// holds the signing CA's key. Asked of fghjd so the CLI needn't carry a
+/// Docker client.
+pub(crate) async fn post_daemon_sidecars_remove(
+    State(registry): State<Arc<WorkspaceRegistry>>,
+) -> Response {
+    match crate::docker::remove_service_everywhere(
+        &registry.docker(),
+        crate::orchestrator::sidecar::SIDECAR_SERVICE,
+    )
+    .await
+    {
+        Ok(removed) => Json(serde_json::json!({ "removed": removed })).into_response(),
+        Err(e) => err_response(e),
+    }
 }
 
 pub(crate) async fn get_daemon_status(State(daemon): State<Arc<DaemonControl>>) -> Response {

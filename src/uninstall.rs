@@ -27,6 +27,10 @@ pub struct Options {
 /// material.
 const WORKSPACE_FILES: &[&str] = &["workspaces.json", "daemon-state.json"];
 
+/// What fghjd does for `remove_sidecars`, for when it can't.
+const REMOVE_SIDECARS_BY_HAND: &str =
+    "docker rm -f $(docker ps -aq --filter label=com.docker.compose.service=fghj-sidecar)";
+
 #[derive(Debug, Default)]
 pub struct Outcome {
     pub daemon_was_running: bool,
@@ -42,7 +46,15 @@ pub struct Outcome {
 /// Users' Docker resources are left alone: a volume may hold data they want,
 /// and the `fghj-` prefix is a filter, not proof of ownership. Only fghj's
 /// own sidecars go, which hold the signing CA's key.
-pub fn purge(opts: Options, stop_daemon: impl FnOnce() -> Result<bool>) -> Outcome {
+///
+/// `remove_sidecars` asks fghjd to remove them, `Ok(None)` if it isn't
+/// running. It's called after `stop_daemon`, which only stands fghjd down:
+/// the process and its control socket stay up.
+pub fn purge(
+    opts: Options,
+    stop_daemon: impl FnOnce() -> Result<bool>,
+    remove_sidecars: impl FnOnce() -> Result<Option<usize>>,
+) -> Outcome {
     let mut outcome = Outcome::default();
 
     // Read first: it's what says whose browsers and workspaces fghj touched,
@@ -50,7 +62,6 @@ pub fn purge(opts: Options, stop_daemon: impl FnOnce() -> Result<bool>) -> Outco
     let workspaces: Vec<PathBuf> = persistence::load_index(&persistence::default_index_path())
         .into_values()
         .collect();
-    let saved = persistence::load_daemon_state(&persistence::default_state_path());
 
     match stop_daemon() {
         Ok(running) => outcome.daemon_was_running = running,
@@ -94,15 +105,12 @@ pub fn purge(opts: Options, stop_daemon: impl FnOnce() -> Result<bool>) -> Outco
         return outcome;
     }
 
-    let host = saved
-        .docker_host
-        .unwrap_or_else(|| crate::docker::DEFAULT_SOCKET.to_string());
-    match remove_sidecars(&host) {
-        Ok(n) => outcome.sidecars_removed = n,
-        // No Docker means no sidecar to hold a key either.
-        Err(e) if !crate::docker::is_live_socket(&host) => {
-            let _ = e;
-        }
+    match remove_sidecars() {
+        Ok(Some(n)) => outcome.sidecars_removed = n,
+        Ok(None) => outcome.warnings.push(format!(
+            "fghjd isn't running, so it couldn't remove fghj's sidecar containers; \
+             remove any that are left with `{REMOVE_SIDECARS_BY_HAND}`"
+        )),
         Err(e) => outcome
             .warnings
             .push(format!("could not remove fghj's sidecar containers: {e:#}")),
@@ -155,29 +163,6 @@ fn invoking_user() -> Option<persistence::WorkspaceOwner> {
         home: persistence::workspace_owner::home_dir_of(uid)?,
         ssh_auth_sock: None,
     })
-}
-
-/// On its own runtime and thread: `uninstall` is synchronous, and the CLI
-/// that calls it is already inside one.
-fn remove_sidecars(host: &str) -> Result<usize> {
-    let host = host.to_string();
-    std::thread::spawn(move || -> Result<usize> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        runtime.block_on(async {
-            let docker =
-                bollard::Docker::connect_with_socket(&host, 30, bollard::API_DEFAULT_VERSION)
-                    .with_context(|| format!("failed to connect to {host}"))?;
-            crate::docker::remove_service_everywhere(
-                &docker,
-                crate::orchestrator::sidecar::SIDECAR_SERVICE,
-            )
-            .await
-        })
-    })
-    .join()
-    .map_err(|_| anyhow::anyhow!("the sidecar removal thread panicked"))?
 }
 
 fn remove_state_dir(root: &Path) -> Result<bool> {
@@ -302,7 +287,7 @@ mod tests {
             keep_state: true,
             ..Options::default()
         };
-        let outcome = purge(opts, || anyhow::bail!("socket refused"));
+        let outcome = purge(opts, || anyhow::bail!("socket refused"), || Ok(Some(0)));
         assert!(!outcome.daemon_was_running);
         assert!(
             outcome
@@ -321,7 +306,7 @@ mod tests {
             keep_state: true,
             ..Options::default()
         };
-        let outcome = purge(opts, || Ok(false));
+        let outcome = purge(opts, || Ok(false), || Ok(Some(0)));
         assert_eq!(outcome.certificates_removed, 0);
         assert_eq!(outcome.sidecars_removed, 0);
         assert_eq!(outcome.state_dir_removed, None);

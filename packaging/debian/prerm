@@ -1,18 +1,29 @@
 #!/bin/sh
 set -e
 
-# cargo-deb's systemd stop goes here, so fghjd is down before what it set up
-# is unwound below.
-#DEBHELPER#
-
 # Removing, not upgrading: no CA of fghj's survives the package. This takes
 # it out of the system store and every workspace owner's browsers, deletes
 # every CA file and key, removes fghj's sidecar containers (they hold the
 # signing key), and clears the DNS link and the /etc/hosts block. Only the
 # workspace index and daemon settings stay, for a reinstall; `apt purge`
 # deletes those and each workspace's .fghj database too.
+#
+# It runs before the service stops: `fghj uninstall` only stands fghjd down,
+# and asks it to remove the sidecars, since the CLI has no Docker client of
+# its own. If fghjd was already down, the docker CLI removes them instead.
 if [ "$1" = remove ] && [ -x /usr/bin/fghj ]; then
     /usr/bin/fghj uninstall --yes --keep-workspaces || true
+    if command -v docker >/dev/null 2>&1; then
+        # The Docker fghjd was wired to, as it saved it, pretty-printed.
+        host=$(sed -n 's/^[[:space:]]*"docker_host":[[:space:]]*"\([^"]*\)".*/\1/p' \
+            /var/lib/fghjd/daemon-state.json 2>/dev/null || true)
+        export DOCKER_HOST="${host:-unix:///var/run/docker.sock}"
+        sidecars=$(docker ps -aq --filter label=com.docker.compose.service=fghj-sidecar 2>/dev/null || true)
+        [ -z "$sidecars" ] || docker rm -f $sidecars >/dev/null 2>&1 || true
+    fi
 fi
+
+# cargo-deb's systemd stop goes here, after the unwinding above.
+#DEBHELPER#
 
 exit 0

@@ -534,6 +534,16 @@ fn uninstall(yes: bool, keep_ca: bool, keep_state: bool, keep_workspaces: bool) 
             http_post_json("/daemon/stop", &serde_json::json!({}))?;
             Ok(true)
         },
+        || {
+            if !probe_daemon() {
+                return Ok(None);
+            }
+            let resp = http_post_json("/daemon/sidecars/remove", &serde_json::json!({}))?;
+            if let Some(err) = resp.get("error") {
+                bail!("{}", err.as_str().unwrap_or("unknown error"));
+            }
+            Ok(Some(resp["removed"].as_u64().unwrap_or(0) as usize))
+        },
     );
 
     if outcome.daemon_was_running {
