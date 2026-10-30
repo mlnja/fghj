@@ -1,9 +1,8 @@
-# Clip 3: the same https URL answers on the host and inside a container. ~8 s.
-# Run after the files-web/full flow is up:  vhs 03-same-url.tape  -> 03-same-url.mp4
-Output 03-same-url.mp4
+# Clip 5: the same https URL answers on the host and inside a container.
+# Run after the files-web/full flow is up:  vhs 5-same-url.tape  -> 5-same-url.mp4
+Output 5-same-url.mp4
 
 Require fghj
-Require curl
 Set Shell "zsh"
 Set FontSize 20
 Set Width 1200
@@ -11,9 +10,10 @@ Set Height 720
 Set Padding 28
 Set WindowBar Colorful
 Set Theme "Catppuccin Mocha"
-Set TypingSpeed 30ms
+Set TypingSpeed 35ms
+Set WaitPattern /\$\s*$/
+Require curl
 
-# exec zsh -f: a clean shell, so your own prompt theme stays out of the shot.
 Hide
 Type "exec zsh -f"
 Enter

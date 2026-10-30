@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
-# Glues the three clips into demo.mp4 (for Reddit) and demo.gif (for the README).
+# Glues the clips into demo.mp4 (for Reddit) and demo.gif (for the README):
 #
-#   ./stitch.sh
+#   1-wire.mp4 -> browser part 1 -> 3-ls.mp4 -> browser part 2 -> 5-same-url.mp4
 #
-# Clip 2 is trimmed and its slow middle (containers starting) sped up.
-# Tune these from the timestamps you see in QuickTime (seconds, decimals ok):
-B_START=${B_START:-0}      # where clip 2 starts being interesting
-B_FAST_FROM=${B_FAST_FROM:-4}   # flow picked, nodes start turning
-B_FAST_TO=${B_FAST_TO:-30}      # last node green
-B_FAST_X=${B_FAST_X:-10}        # how much faster that stretch plays
-B_END=${B_END:-40}         # app page loaded, padlock visible
+# browser.mov is one take, cut in two at B_CUT. The two waits in it (repos
+# downloading, containers starting) are sped up. Read the times off
+# QuickTime, in seconds (decimals ok), each one later than the one before:
+B_START=${B_START:-0}      # start of the take you want to keep
+B_DL_FROM=${B_DL_FROM:-5}  # pressed Download all
+B_DL_TO=${B_DL_TO:-20}     # the graph has filled in
+B_CUT=${B_CUT:-23}         # cut here to the `ls` clip
+B_UP_FROM=${B_UP_FROM:-26} # pressed Switch to flow
+B_UP_TO=${B_UP_TO:-80}     # last node green
+B_END=${B_END:-90}         # app page loaded, padlock visible
+B_FAST_X=${B_FAST_X:-10}   # how much faster the two waits play
+#
+#   B_DL_FROM=6.5 B_DL_TO=31 B_CUT=34 ... ./stitch.sh
 #
 # Output size: 1200 px wide; drops to 960 and fewer fps if the GIF is over MAX_MB.
 W=1200; H=720; FPS=30; GIF_FPS=${GIF_FPS:-12}; MAX_MB=${MAX_MB:-5}
@@ -19,26 +25,45 @@ set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p build
 
+for f in 1-wire.mp4 browser.mov 3-ls.mp4 5-same-url.mp4; do
+  [ -f "$f" ] || { echo "missing $f: record it first (see README.md)" >&2; exit 1; }
+done
+prev=-1
+for v in B_START B_DL_FROM B_DL_TO B_CUT B_UP_FROM B_UP_TO B_END; do
+  awk "BEGIN{exit !(${!v} > $prev)}" || { echo "$v=${!v} must be later than the time before it" >&2; exit 1; }
+  prev=${!v}
+done
+
 dur() { ffprobe -v error -show_entries format=duration -of csv=p=0 "$1"; }
 fit="scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=0x1e1e2e,setsar=1,fps=${FPS},format=yuv420p"
 enc=(-c:v libx264 -preset slow -crf 18 -an -movflags +faststart)
 
+# browser_part OUT FROM FAST_FROM FAST_TO TO: plays FAST_FROM..FAST_TO at B_FAST_X.
+browser_part() {
+  ffmpeg -y -v error -i browser.mov -filter_complex "
+    [0:v]trim=$2:$3,setpts=PTS-STARTPTS[a];
+    [0:v]trim=$3:$4,setpts=(PTS-STARTPTS)/${B_FAST_X}[b];
+    [0:v]trim=$4:$5,setpts=PTS-STARTPTS[c];
+    [a][b][c]concat=n=3:v=1,${fit}[v]" -map "[v]" "${enc[@]}" "$1"
+}
+
 echo "1/4 normalising clips"
-ffmpeg -y -v error -i 01-config.mp4   -vf "$fit" "${enc[@]}" build/1.mp4
-ffmpeg -y -v error -i 03-same-url.mp4 -vf "$fit" "${enc[@]}" build/3.mp4
-ffmpeg -y -v error -i 02-browser.mov -filter_complex "
-  [0:v]trim=${B_START}:${B_FAST_FROM},setpts=PTS-STARTPTS[a];
-  [0:v]trim=${B_FAST_FROM}:${B_FAST_TO},setpts=(PTS-STARTPTS)/${B_FAST_X}[b];
-  [0:v]trim=${B_FAST_TO}:${B_END},setpts=PTS-STARTPTS[c];
-  [a][b][c]concat=n=3:v=1,${fit}[v]" -map "[v]" "${enc[@]}" build/2.mp4
+ffmpeg -y -v error -i 1-wire.mp4     -vf "$fit" "${enc[@]}" build/1.mp4
+browser_part build/2.mp4 "$B_START" "$B_DL_FROM" "$B_DL_TO" "$B_CUT"
+ffmpeg -y -v error -i 3-ls.mp4       -vf "$fit" "${enc[@]}" build/3.mp4
+browser_part build/4.mp4 "$B_CUT" "$B_UP_FROM" "$B_UP_TO" "$B_END"
+ffmpeg -y -v error -i 5-same-url.mp4 -vf "$fit" "${enc[@]}" build/5.mp4
 
 echo "2/4 joining"
-d1=$(dur build/1.mp4); d2=$(dur build/2.mp4)
-o1=$(awk "BEGIN{print $d1-$XF}"); o2=$(awk "BEGIN{print $d1+$d2-2*$XF}")
-ffmpeg -y -v error -i build/1.mp4 -i build/2.mp4 -i build/3.mp4 -filter_complex "
-  [0:v][1:v]xfade=transition=fade:duration=${XF}:offset=${o1}[x];
-  [x][2:v]xfade=transition=fade:duration=${XF}:offset=${o2},tpad=stop_mode=clone:stop_duration=${HOLD}[v]" \
-  -map "[v]" "${enc[@]}" demo.mp4
+inputs=(); graph=""; last="[0:v]"; offset=0
+for i in 1 2 3 4 5; do inputs+=(-i "build/$i.mp4"); done
+for i in 1 2 3 4; do
+  offset=$(awk "BEGIN{print $offset + $(dur build/$i.mp4) - $XF}")
+  graph+="${last}[$i:v]xfade=transition=fade:duration=${XF}:offset=${offset}[x$i];"
+  last="[x$i]"
+done
+graph+="${last}tpad=stop_mode=clone:stop_duration=${HOLD}[v]"
+ffmpeg -y -v error "${inputs[@]}" -filter_complex "$graph" -map "[v]" "${enc[@]}" demo.mp4
 echo "   demo.mp4: $(awk "BEGIN{printf \"%.1f\", $(dur demo.mp4)}") s"
 
 make_gif() { # width fps
