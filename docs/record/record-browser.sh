@@ -19,7 +19,8 @@ open -na "Google Chrome" --args \
   https://fghj.internal/
 
 # avfoundation numbers cameras and screens together; find the main screen.
-screen=$(ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1 \
+# Listing devices always exits non-zero, hence the || true.
+screen=$( { ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1 || true; } \
   | sed -n 's/.*\[\([0-9]*\)\] Capture screen 0.*/\1/p')
 [ -n "$screen" ] || { echo "ffmpeg can't see the screen: give your terminal Screen Recording permission" >&2; exit 1; }
 
