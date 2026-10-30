@@ -92,13 +92,15 @@ the pauses don't.
 3. Press **Switch to flow**, and wait for every node to go green. Pause.
 4. Open `https://files.test` (Cmd+L, paste, Enter), wait for it to load.
    Pause.
-5. Ctrl-C in the terminal.
+5. Press `q` in the terminal. ffmpeg finishes the file and saves `browser.mov`.
 
 Nothing needs doing between steps 2 and 3: `stitch.sh` puts the `ls` clip
 there.
 
-If `screencapture -R` misbehaves: Cmd+Shift+5 → Record Selected Portion,
-select the Chrome window, and save the file as `browser.mov` in this folder.
+If the recording is cut wrong (not a Retina screen), run it as
+`SCALE=1 ./record-browser.sh`. If it won't record at all: Cmd+Shift+5 →
+Record Selected Portion, select the Chrome window, and save the file as
+`browser.mov` in this folder.
 
 **Clip 3** (any time after Download all):
 
