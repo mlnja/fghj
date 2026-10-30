@@ -1,0 +1,42 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Podkova:wght@800&family=Space+Grotesk:wght@400;500&family=JetBrains+Mono:wght@400;500;700&display=block" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0}
+html,body{width:1280px;height:640px;overflow:hidden}
+body{background:#101827;color:#f4f6ff;font-family:'Space Grotesk',sans-serif;position:relative}
+body::before{content:"";position:absolute;inset:0;background:
+ radial-gradient(900px 500px at 100% 0%,rgba(42,161,212,.20),transparent 60%),
+ linear-gradient(rgba(147,160,178,.06) 1px,transparent 1px) 0 0/32px 32px,
+ linear-gradient(90deg,rgba(147,160,178,.06) 1px,transparent 1px) 0 0/32px 32px}
+.wrap{position:relative;padding:84px 80px 0}
+.brand{display:flex;align-items:center;gap:22px}
+.brand svg{width:76px;height:76px}
+.brand h1{font-family:'Podkova',serif;font-weight:800;font-size:92px;line-height:1;letter-spacing:-1px}
+.eyebrow{font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:700;letter-spacing:.04em;color:#93a0b2;margin-left:auto;display:flex;align-items:center;gap:10px}
+.eyebrow i{width:10px;height:10px;border-radius:50%;background:#4ade80;display:block}
+.tag{margin-top:34px;font-size:46px;font-weight:500;line-height:1.18;letter-spacing:-.5px;max-width:1080px}
+.tag b{color:#2aa1d4;font-weight:500}
+.sub{margin-top:14px;font-size:25px;color:#c2ccda}
+.terms{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:44px}
+.t{background:#18202f;border:1px solid #3b4557;border-radius:10px;overflow:hidden}
+.t .bar{display:flex;align-items:center;gap:8px;padding:11px 16px;border-bottom:1px solid #232c3f;font-family:'JetBrains Mono',monospace;font-size:15px;color:#93a0b2}
+.t .bar span{width:11px;height:11px;border-radius:50%;background:#3b4557}
+.t .bar em{font-style:normal;margin-left:8px}
+.t pre{padding:16px 18px;font-family:'JetBrains Mono',monospace;font-size:19px;line-height:1.6;color:#e3e8f2}
+.p{color:#4ade80}.h{color:#9fdcf5}.o{color:#93a0b2}
+</style></head><body><div class="wrap">
+<div class="brand">
+<svg viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#006591"/><path d="M11 24V13a5 5 0 0 1 5-5h4" stroke="#faf8ff" stroke-width="3.2" fill="none" stroke-linecap="round"/><path d="M11 17h6.5" stroke="#faf8ff" stroke-width="3.2" stroke-linecap="round"/></svg>
+<h1>fghj</h1>
+<div class="eyebrow"><i></i>open source · macOS · Ubuntu</div>
+</div>
+<p class="tag">Real HTTPS hostnames for multi-repo local dev, <b>the same inside Docker and out.</b></p>
+<p class="sub">Bring up only the services your user flow needs. No compose file to maintain.</p>
+<div class="terms">
+<div class="t"><div class="bar"><span></span><span></span><span></span><em>from your laptop</em></div>
+<pre><span class="p">$</span> curl <span class="h">https://api.shop.fghj.internal</span>/health
+<span class="o">{"status":"ok"}</span></pre></div>
+<div class="t"><div class="bar"><span></span><span></span><span></span><em>from inside any container</em></div>
+<pre><span class="p">$</span> curl <span class="h">https://api.shop.fghj.internal</span>/health
+<span class="o">{"status":"ok"}</span></pre></div>
+</div></div></body></html>
