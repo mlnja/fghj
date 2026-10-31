@@ -137,6 +137,10 @@ export default defineConfig({
           items: [
             { label: 'What fghj fixes', slug: 'guides/what-it-fixes' },
             { label: 'fghj and OrbStack', slug: 'guides/vs-orbstack' },
+            { label: 'One URL inside and outside Docker', slug: 'guides/localhost-vs-host-docker-internal' },
+            { label: 'Trusted HTTPS for Compose services', slug: 'guides/https-localhost-docker-compose' },
+            { label: 'OAuth callbacks on local HTTPS', slug: 'guides/oauth-callback-localhost' },
+            { label: 'Recording traffic between services', slug: 'guides/record-http-traffic-between-services' },
             { label: 'HTTP vs. raw: choosing a zone', slug: 'guides/networking-http-vs-raw' },
             { label: 'Attaching a debugger', slug: 'guides/debugging' },
             { label: 'Python services in fghj', slug: 'guides/python' },

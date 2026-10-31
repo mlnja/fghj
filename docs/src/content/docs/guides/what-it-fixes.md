@@ -128,6 +128,9 @@ from a third party's servers still can't reach a local-only hostname; for
 that you still need a tunnel.
 :::
 
+The full walkthrough, with the cookie and token-exchange details, is
+[OAuth callbacks on a real HTTPS hostname](/guides/oauth-callback-localhost/).
+
 ## Cookies that behave like production
 
 Cookies aren't scoped by port — [RFC 6265 §8.5](https://www.rfc-editor.org/rfc/rfc6265#section-8.5)
