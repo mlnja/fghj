@@ -53,8 +53,8 @@ when Compose recreates it, or a published host port, which is the
 port-juggling the domain was supposed to remove.
 
 fghj's [raw zone](/guides/networking-http-vs-raw/) is built for exactly
-this. Each raw node gets its **own virtual IP** on a loopback alias, DNAT'd
-to the port its author declared, so the canonical port is the port:
+this. Each raw node gets its **own virtual IP** on a loopback alias, where fghjd
+listens on the port its author declared and forwards to the container, so the canonical port is the port:
 
 ```bash
 psql -h db.web.storefront.shop.fghj.raw.internal -p 5432
