@@ -145,7 +145,7 @@ This is all of it:
 | A managed block of host entries | `/etc/hosts`, between `# fghj-managed-begin`/`-end` | the same | `fghj daemon stop` |
 | Split DNS for fghj's zones only | `/etc/resolver/fghj.internal` | the `fghj0` link in systemd-resolved | `fghj daemon stop` |
 | Loopback aliases | `127.222.0.1` and `127.223.0.0/16` on `lo0` | none needed | `fghj daemon stop` |
-| A local root CA, trusted for TLS | the System keychain, as `fghj local CA` | the system store, and each workspace owner's browser databases | `sudo fghj uninstall` |
+| A local root CA, trusted for TLS | your login keychain, as `fghj local CA` | the system store, and each workspace owner's browser databases | `sudo fghj uninstall` |
 | Daemon state, including the CA's private keys (root-only) | `/var/lib/fghjd` | the same | `sudo fghj uninstall` |
 | fghj's database for each workspace | `<workspace>/.fghj/fghj.db` | the same | `sudo fghj uninstall` |
 | Containers, networks and volumes, all prefixed `fghj-` | Docker | the same | only fghj's sidecars are removed; the rest is left alone, on purpose |

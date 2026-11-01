@@ -38,7 +38,7 @@ Kubernetes, and OrbStack is a reasonable thing to run fghj's containers on.
 
 Where they run differs. OrbStack *is* the VM, so on Linux there would be
 nothing for it to be — Docker runs natively there. fghj was only ever
-macOS-specific in its mechanisms (`/etc/resolver`, the System keychain), and
+macOS-specific in its mechanisms (`/etc/resolver`, the keychain), and
 each has its Linux counterpart now: systemd-resolved for the zones, the
 system CA store and the browsers' own databases for trust. It runs on macOS
 and Ubuntu; see [installation](/getting-started/installation/).

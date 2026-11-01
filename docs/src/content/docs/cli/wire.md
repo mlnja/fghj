@@ -128,8 +128,9 @@ own.
    for the full mechanism.
 3. Sends the entry repo and workspace path to `fghjd`'s control API, which
    registers the workspace (and clones the entry repo if needed).
-4. Makes sure your browser trusts fghj's root CA. On macOS the CLI asks the
-   System keychain to trust it, a password dialog the first time only;
+4. Makes sure your browser trusts fghj's root CA. On macOS the CLI trusts it
+   in your login keychain, for your user only: a password dialog the first
+   time only;
    cancelling it doesn't fail the wire, and HTTPS shows certificate warnings
    until the CA is trusted. On Linux `fghjd` already trusts it system-wide,
    and adds it to your Firefox and Chrome databases, as you, before `wire`

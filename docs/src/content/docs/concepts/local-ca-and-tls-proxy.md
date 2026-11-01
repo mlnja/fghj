@@ -120,8 +120,8 @@ trusts for *every* hostname. If that matters to you, regenerate the root:
 sudo brew services stop fghj     # or: sudo launchctl bootout system/sh.brew.fghj
 
 # 2. untrust and delete the old root, and the signing CA under it
-sudo security delete-certificate -c "fghj local CA" \
-  /Library/Keychains/System.keychain
+security delete-certificate -t -c "fghj local CA" \
+  ~/Library/Keychains/login.keychain-db
 sudo rm /var/lib/fghjd/ca/ca-cert.pem /var/lib/fghjd/ca/ca-key.pem \
   /var/lib/fghjd/ca/signing-cert.pem /var/lib/fghjd/ca/signing-key.pem \
   /var/lib/fghjd/ca/signing-generation
@@ -134,21 +134,19 @@ fghj doctor --fix
 ```
 
 :::caution[Step 4 has to come from a terminal]
-Installing a root into the System trust store needs an Authorization
-Services prompt, and **running as root does not bypass it** — that gate is
-about user interaction, not file permissions. A launchd *system* daemon has
-no session to show a prompt in, so `fghjd` started by `brew services` fails
-with `SecTrustSettingsSetTrustSettings: The authorization was denied since
-no user interaction was possible`. It logs that and carries on serving,
-and `fghj doctor` reports the CA as untrusted.
+Trusting a root needs an Authorization Services prompt, and **running as
+root does not bypass it** — that gate is about user interaction, not file
+permissions. A launchd *system* daemon has no session to show a prompt in,
+so `fghjd` doesn't try: trust lives in your login keychain, for your user
+only, and only a process running as you, in your session, can put it there.
 
-So `fghj wire` and `fghj doctor --fix`, which run in your terminal, do the
-same check and ask for the password there. After that the
-check at the top of every start is a no-op. The command they run is:
+So `fghj wire` and `fghj doctor --fix`, which run in your terminal, check
+it and ask for the password there; after that they find it trusted and do
+nothing. No `sudo`. The command they run is:
 
 ```sh
-security add-trusted-cert -d -r trustRoot \
-  -k /Library/Keychains/System.keychain /var/lib/fghjd/ca/ca-cert.pem
+security add-trusted-cert -r trustRoot \
+  -k ~/Library/Keychains/login.keychain-db /var/lib/fghjd/ca/ca-cert.pem
 ```
 :::
 

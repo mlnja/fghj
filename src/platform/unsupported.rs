@@ -62,7 +62,7 @@ impl TrustStore for NoTrustStore {
         Ok(())
     }
 
-    fn remove(&self) -> usize {
+    fn remove(&self, _users: &[WorkspaceOwner]) -> usize {
         0
     }
 
@@ -176,7 +176,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cert = tmp.path().join("ca.pem");
         NoTrustStore.install(&cert).unwrap();
-        assert_eq!(NoTrustStore.remove(), 0);
+        assert_eq!(NoTrustStore.remove(&[]), 0);
         assert_eq!(NoTrustStore.is_trusted(&cert), None);
         assert_eq!(NoTrustStore.store_name(), "the system trust store");
     }

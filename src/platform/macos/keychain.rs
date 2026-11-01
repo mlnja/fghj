@@ -1,21 +1,27 @@
-//! macOS trust: the root CA in the System keychain, via `security`.
+//! macOS trust: the root CA in your login keychain, trusted for your user
+//! only, via `security`.
+//!
+//! Not the System keychain: writing there needs root, and trusting a root
+//! needs a password dialog, which only a process in your login session can
+//! show. No single process has both, so the CLI does it, as you.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
 
+use crate::persistence::WorkspaceOwner;
 use crate::platform::TrustStore;
 use crate::web::ca::COMMON_NAME;
 
-/// Machine-wide: every user's browser must trust it.
+/// Where fghjd ≤ 0.2.0 put the CA. Only cleaned up now.
 const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
 
-pub(super) struct SystemKeychain;
+pub(super) struct LoginKeychain;
 
-impl TrustStore for SystemKeychain {
-    /// macOS asks for a password before trusting a root, and a launchd daemon
-    /// has no session to ask in.
+impl TrustStore for LoginKeychain {
+    /// A per-user store, and macOS asks for a password before trusting a root;
+    /// a launchd daemon is neither that user nor has a session to ask in.
     fn installed_by_user(&self) -> bool {
         true
     }
@@ -24,8 +30,28 @@ impl TrustStore for SystemKeychain {
         install_trust(ca_cert_path)
     }
 
-    fn remove(&self) -> usize {
-        remove_trust()
+    fn remove(&self, users: &[WorkspaceOwner]) -> usize {
+        let legacy = delete_all(Command::new("security"), Path::new(SYSTEM_KEYCHAIN), false);
+        legacy
+            + users
+                .iter()
+                .map(|user| {
+                    let keychain = login_keychain(Path::new(&user.home));
+                    let as_user = || {
+                        let mut cmd = Command::new("security");
+                        if unsafe { libc::geteuid() } == 0 {
+                            user.apply_to_command(&mut cmd);
+                        }
+                        cmd
+                    };
+                    // `-t` also drops the trust setting, but may need a
+                    // password the user can refuse; the certificate goes either way.
+                    match delete_all(as_user(), &keychain, true) {
+                        0 => delete_all(as_user(), &keychain, false),
+                        n => n,
+                    }
+                })
+                .sum::<usize>()
     }
 
     fn is_trusted(&self, ca_cert_path: &Path) -> Option<bool> {
@@ -33,7 +59,7 @@ impl TrustStore for SystemKeychain {
     }
 
     fn store_name(&self) -> &'static str {
-        SYSTEM_KEYCHAIN
+        "your login keychain"
     }
 
     fn install_notice(&self) -> &'static str {
@@ -46,73 +72,74 @@ impl TrustStore for SystemKeychain {
     }
 }
 
+fn login_keychain(home: &Path) -> PathBuf {
+    home.join("Library/Keychains/login.keychain-db")
+}
+
 /// Loops: `delete-certificate` removes one match per call, and repeated installs
 /// leave several CAs. A non-zero exit means none are left.
-fn remove_trust() -> usize {
+fn delete_all(mut security: Command, keychain: &Path, with_trust: bool) -> usize {
+    security.arg("delete-certificate");
+    if with_trust {
+        security.arg("-t");
+    }
+    security
+        .args(["-c", COMMON_NAME])
+        .arg(keychain)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     let mut removed = 0;
-    while removed < 32 {
-        let ok = Command::new("security")
-            .args(["delete-certificate", "-c", COMMON_NAME, SYSTEM_KEYCHAIN])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !ok {
-            break;
-        }
+    while removed < 32 && security.status().map(|s| s.success()).unwrap_or(false) {
         removed += 1;
     }
     removed
 }
 
 /// `verify-cert` evaluates trust without prompting, so this is safe to call
-/// anytime.
+/// anytime. As the calling user: their trust settings, and any machine-wide
+/// ones an earlier fghj made.
 fn is_trusted(ca_cert_path: &Path) -> bool {
     Command::new("security")
         .args(["verify-cert", "-c"])
         .arg(ca_cert_path)
-        .args(["-k", SYSTEM_KEYCHAIN])
         // `output`, not `status`, to keep its chatter out of the log.
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
-/// Checks first, since `add-trusted-cert` always prompts. Runs on every start,
-/// so revoked trust self-heals.
+/// Checks first, since `add-trusted-cert` always prompts.
 fn install_trust(ca_cert_path: &Path) -> Result<()> {
     if is_trusted(ca_cert_path) {
         return Ok(());
     }
+    if unsafe { libc::geteuid() } == 0 {
+        anyhow::bail!(
+            "not trusting fghj's CA as root: it goes in your own login keychain. \
+             Run `fghj doctor --fix` without sudo"
+        );
+    }
+    let home = std::env::var_os("HOME").context("HOME isn't set")?;
+    let keychain = login_keychain(Path::new(&home));
 
     let status = Command::new("security")
-        .args([
-            "add-trusted-cert",
-            "-d",
-            "-r",
-            "trustRoot",
-            "-k",
-            SYSTEM_KEYCHAIN,
-        ])
+        .args(["add-trusted-cert", "-r", "trustRoot", "-k"])
+        .arg(&keychain)
         .arg(ca_cert_path)
         .status()
         .context("failed to run `security add-trusted-cert`")?;
     if !status.success() {
-        // A launchd system daemon has no session to prompt in, so under
-        // `brew services` this always fails; the CLI, in a terminal, can.
         anyhow::bail!(
             "`security add-trusted-cert` failed for {cert}\n\
-             macOS asks for a password before trusting a root, and only a process in \
-             your login session can ask: fghjd under `brew services` or ssh can't. \
-             From a terminal, run `fghj daemon restart`, or:\n\
+             macOS asks for your password before trusting a root, so it needs a terminal \
+             in your login session (not ssh). Run `fghj doctor --fix`, or:\n\
              \n\
-             \x20   security add-trusted-cert -d -r trustRoot -k {keychain} {cert}",
+             \x20   security add-trusted-cert -r trustRoot -k {keychain} {cert}",
             cert = ca_cert_path.display(),
-            keychain = SYSTEM_KEYCHAIN,
+            keychain = keychain.display(),
         );
     }
-    println!("installed the fghj local CA into the System trust store");
+    println!("trusted the fghj local CA in your login keychain");
     Ok(())
 }
 
@@ -121,10 +148,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_store_is_the_machine_wide_keychain() {
+    fn the_store_is_the_users_login_keychain() {
         assert_eq!(
-            SystemKeychain.store_name(),
-            "/Library/Keychains/System.keychain"
+            login_keychain(Path::new("/Users/someone")),
+            Path::new("/Users/someone/Library/Keychains/login.keychain-db")
         );
     }
 }

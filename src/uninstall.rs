@@ -94,8 +94,9 @@ pub fn purge(
     // Trust before disk: a trusted cert whose key we deleted is still a trusted
     // root.
     if !opts.keep_ca {
-        outcome.certificates_removed = platform.trust.remove()
-            + owners(&workspaces)
+        let owners = owners(&workspaces);
+        outcome.certificates_removed = platform.trust.remove(&owners)
+            + owners
                 .iter()
                 .map(|owner| platform.browser_trust.remove(owner))
                 .sum::<usize>();

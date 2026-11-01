@@ -37,7 +37,7 @@ $ fghj doctor
 ✓ /etc/resolver entries: fghj.internal -> 127.0.0.1:49969, fghj.raw.internal -> 127.0.0.1:49969
 ✓ raw-zone listeners: fghjd is listening on all 11
 ✓ fghj.internal resolves through the OS: doctor.fghj.internal -> 127.222.0.1
-✓ root CA trusted by the system: /private/var/lib/fghjd/ca/ca-cert.pem verifies against the System keychain
+✓ root CA trusted by the system: /private/var/lib/fghjd/ca/ca-cert.pem verifies against your login keychain
 
 all clear
 ```

@@ -13,8 +13,8 @@ your Docker resources.
 Removing the binaries alone leaves fghj's two biggest artifacts behind, and
 neither is easy to find later:
 
-- a **trusted root certificate**: in `/Library/Keychains/System.keychain` on
-  macOS; on Linux in the system store and in your browsers' databases
+- a **trusted root certificate**: in your login keychain on macOS; on
+  Linux in the system store and in your browsers' databases
 - `/var/lib/fghjd`, which holds that CA's **private key**, every wired
   workspace, and all run state
 
@@ -33,10 +33,11 @@ runs it for you.
    killed with `SIGKILL` never ran its own teardown, so these can still be
    installed with nothing alive to remove them. Each step is a
    no-op when there is nothing to undo.
-3. Deletes every `fghj local CA` certificate from the system trust store
-   (the System keychain on macOS; `/usr/local/share/ca-certificates` on
-   Linux) and, on Linux, from the browser databases of every wired
-   workspace's owner and of the user who ran `sudo`.
+3. Deletes every `fghj local CA` certificate from the trust store: on
+   macOS from the login keychain of every wired workspace's owner and of
+   the user who ran `sudo` (and from the System keychain, where fghj 0.2.0
+   and earlier put it); on Linux from `/usr/local/share/ca-certificates`
+   and from those same users' browser databases.
 4. Has fghjd remove fghj's sidecar containers, which hold the signing CA's
    key. Your own containers, networks and volumes stay. If fghjd isn't
    running, it can't, and the warning gives the `docker rm` command that

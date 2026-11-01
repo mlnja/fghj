@@ -478,10 +478,13 @@ fn host_checks(wired: bool, owners: &[crate::persistence::WorkspaceOwner]) -> Ve
         resolver_files_check(platform::current().dns.status()),
         dns_resolution_check(),
         raw_routes_check(raw_net::route_health()),
-        ca_trust_check(&cert, wired, |cert| {
-            platform::current().trust.is_trusted(cert)
-        }),
     ];
+    // A per-user store says nothing to root; `user_ca_trust_check` asks as you.
+    if !platform::current().trust.installed_by_user() {
+        checks.push(ca_trust_check(&cert, wired, |cert| {
+            platform::current().trust.is_trusted(cert)
+        }));
+    }
     checks.extend(browser_trust_check(
         &cert,
         owners,
@@ -662,6 +665,17 @@ pub async fn daemon_report(docker: &Docker, daemon: &DaemonControl) -> Report {
         )),
     }
     Report { checks }
+}
+
+/// `ca-trust` where the store is the user's own, so the CLI checks it as them
+/// and fghjd's report leaves it out. `None` where fghjd checks it.
+pub fn user_ca_trust_check(wired: bool) -> Option<Check> {
+    let trust = &platform::current().trust;
+    if !trust.installed_by_user() {
+        return None;
+    }
+    let cert = web::ca::ca_cert_path(&crate::daemon::ca_dir());
+    Some(ca_trust_check(&cert, wired, |cert| trust.is_trusted(cert)))
 }
 
 /// Only what the CLI can check from where it runs.

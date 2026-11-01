@@ -8,17 +8,18 @@ use crate::persistence::WorkspaceOwner;
 /// certificates fghj issues: the OS's own, or the browsers' where they keep
 /// their own.
 pub trait TrustStore: Send + Sync {
-    /// Whether the CLI installs it, from the user's terminal, because it asks
-    /// for a password a system daemon can't show (macOS). Otherwise fghjd does
-    /// it, as root, on every start.
+    /// Whether the CLI installs and checks it, from the user's terminal, as
+    /// that user: a per-user store that asks for a password a system daemon
+    /// can't show (macOS). Otherwise fghjd does it, as root, on every start.
     fn installed_by_user(&self) -> bool;
 
     /// A no-op when already trusted. Runs on every start, so revoked trust
     /// self-heals.
     fn install(&self, ca_cert_path: &Path) -> Result<()>;
 
-    /// How many certificates were removed.
-    fn remove(&self) -> usize;
+    /// How many certificates were removed. `users` are whose own stores to
+    /// clear too, where the store is per user.
+    fn remove(&self, users: &[WorkspaceOwner]) -> usize;
 
     /// `None` where unsupported, so `doctor` can tell it from "not trusted".
     fn is_trusted(&self, ca_cert_path: &Path) -> Option<bool>;

@@ -180,6 +180,14 @@ fn workspace_root(flag: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+/// Whether anything is wired yet. Via the API, like `derive_workspace`.
+fn is_wired() -> bool {
+    http_get_json("/workspaces")
+        .ok()
+        .and_then(|w| w.as_array().map(|a| !a.is_empty()))
+        .unwrap_or(false)
+}
+
 /// Via the API, since `workspaces.json` is root-only. Every failure is `None`:
 /// `graph` works without a daemon.
 fn derive_workspace(cwd: &Path) -> Option<PathBuf> {
@@ -891,10 +899,17 @@ fn doctor(fix: bool) -> Result<()> {
     }
 
     let mut report = fetch_report()?;
-    if fix && apply_fixes(&report, &client) {
+    let user_checks = || -> Vec<fghj::doctor::Check> {
+        fghj::doctor::user_ca_trust_check(is_wired()).into_iter().collect()
+    };
+    let mut user = user_checks();
+    let local: Vec<fghj::doctor::Check> = client.iter().chain(&user).cloned().collect();
+    if fix && apply_fixes(&report, &local) {
         println!();
         report = fetch_report()?;
+        user = user_checks();
     }
+    report.checks.extend(user);
     for check in &report.checks {
         print_check(check);
     }

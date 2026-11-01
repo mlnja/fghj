@@ -101,7 +101,7 @@ brew uninstall fghj
 ```
 
 `brew uninstall` runs unprivileged, so it cannot touch the two artifacts
-that outlive it: the root CA trusted in your System keychain, and `fghjd`'s
+that outlive it: the root CA trusted in your login keychain, and `fghjd`'s
 durable state under `/var/lib/fghjd` — which holds that CA's private key.
 `sudo fghj uninstall` removes both, along with every system change the
 daemon made. It lists what it will delete and asks first; `-y` skips the
@@ -217,7 +217,7 @@ starts. How each happens depends on the OS:
 | | macOS | Linux |
 |---|---|---|
 | DNS | writes `/etc/resolver/fghj.internal` | creates the `fghj0` link in systemd-resolved |
-| CA trust | the System keychain, which needs your password, so your first `fghj wire` does it from your terminal | the system store, at once, as root; your browsers' databases when a workspace is wired |
+| CA trust | your login keychain, for your user only, which needs your password, so your first `fghj wire` (or `fghj doctor --fix`) does it from your terminal | the system store, at once, as root; your browsers' databases when a workspace is wired |
 
 For a persistent install, supervise it:
 

@@ -119,12 +119,13 @@ pub async fn run_control_api() -> Result<()> {
         ));
     }
 
-    // Last: it can fail outside fghj's control (no session to prompt in). The
-    // doctor's `ca-trust` check reports it.
-    if let Err(e) =
-        tokio::task::spawn_blocking(move || platform::current().trust.install(&cert_path))
-            .await
-            .context("CA trust install task panicked")?
+    // Last: it can fail outside fghj's control. The doctor's `ca-trust` check
+    // reports it. Not where the CLI does it: fghjd isn't that user.
+    if !platform::current().trust.installed_by_user()
+        && let Err(e) =
+            tokio::task::spawn_blocking(move || platform::current().trust.install(&cert_path))
+                .await
+                .context("CA trust install task panicked")?
     {
         daemon_log::warn(format!("fghjd: failed to trust the root CA: {e:#}"));
     }

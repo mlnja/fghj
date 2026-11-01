@@ -8,6 +8,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 
 use super::super::run;
+use crate::persistence::WorkspaceOwner;
 use crate::platform::TrustStore;
 
 /// Named for fghj, so it can't be mistaken for, or overwrite, anyone else's.
@@ -45,7 +46,7 @@ impl TrustStore for CaCertificates {
         Ok(())
     }
 
-    fn remove(&self) -> usize {
+    fn remove(&self, _users: &[WorkspaceOwner]) -> usize {
         if std::fs::remove_file(ANCHOR).is_err() {
             return 0;
         }

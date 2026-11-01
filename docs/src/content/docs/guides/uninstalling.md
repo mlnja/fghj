@@ -19,7 +19,7 @@ Most of this page is macOS; what Linux touches instead is in
 
 `fghj uninstall` does everything removing the binaries can't: it stops the
 daemon, unwinds its system configuration, takes the root CA out of every
-store it was trusted in (the System keychain on macOS; the system store and
+store it was trusted in (your login keychain on macOS; the system store and
 your browsers on Linux), removes fghj's sidecar containers, and removes
 `/var/lib/fghjd`. It prints what it is about
 to remove and asks before doing any of it (`-y` skips the prompt).
@@ -99,15 +99,18 @@ workspace and discards the CA.
 ## The root CA in your keychain (macOS)
 
 This is the one change that outlives `brew uninstall`, because it is not a
-file fghj owns — it is an entry in the **System keychain**, installed with
-`security add-trusted-cert` so your browser trusts `*.fghj.internal`
-certificates.
+file fghj owns — it is an entry in your **login keychain**, trusted for your
+user only, installed with `security add-trusted-cert` so your browser trusts
+`*.fghj.internal` certificates. fghj 0.2.0 and earlier put it in the System
+keychain instead; check both.
 
 ```bash
 # Confirm it is there
+security find-certificate -c "fghj local CA" ~/Library/Keychains/login.keychain-db
 security find-certificate -c "fghj local CA" /Library/Keychains/System.keychain
 
 # Remove it
+security delete-certificate -t -c "fghj local CA" ~/Library/Keychains/login.keychain-db
 sudo security delete-certificate -c "fghj local CA" \
   /Library/Keychains/System.keychain
 ```
@@ -257,6 +260,8 @@ pgrep -l fghjd; ls /var/run/fghjd.sock 2>/dev/null
 # No system config, macOS
 grep -c fghj /etc/hosts; ls /etc/resolver/fghj.internal 2>/dev/null
 ifconfig lo0 | grep -E "127\.22[23]"
+security find-certificate -c "fghj local CA" \
+  ~/Library/Keychains/login.keychain-db 2>/dev/null
 security find-certificate -c "fghj local CA" \
   /Library/Keychains/System.keychain 2>/dev/null
 
