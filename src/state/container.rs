@@ -114,6 +114,17 @@ impl ContainerObserved {
         matches!(self.status.as_str(), "running" | "restarting" | "paused")
     }
 
+    /// Whether two readings say the same about the container, ignoring what
+    /// the drift check writes (`sync`, `seeded`), which Docker never reports.
+    pub fn same_reading(&self, other: &Self) -> bool {
+        self.status == other.status
+            && self.published_port == other.published_port
+            && self.ports == other.ports
+            && self.exit_code == other.exit_code
+            && self.interrupted == other.interrupted
+            && self.unseen == other.unseen
+    }
+
     /// After a fresh reading: down now, when nobody could see it go down
     /// (`went_unwatched`), is an interruption; up again clears it.
     pub fn settle_interruption(&mut self, went_unwatched: bool) {

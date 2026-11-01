@@ -281,6 +281,27 @@ impl ContainerStatus {
                 .copied()
         }
     }
+
+    #[cfg(test)]
+    pub fn with_ports(status: &str, host_ports: &[(&str, u16)]) -> Self {
+        Self {
+            status: status.to_string(),
+            exit_code: None,
+            host_ports: host_ports
+                .iter()
+                .map(|(p, h)| (p.to_string(), *h))
+                .collect(),
+        }
+    }
+
+    /// Every container port Docker published, keyed the way `.fghj.yaml`
+    /// names them: a bare number for tcp, `port/udp` otherwise.
+    pub fn published_ports(&self) -> impl Iterator<Item = (String, u16)> + '_ {
+        self.host_ports.iter().map(|(port, host)| {
+            let key = port.strip_suffix("/tcp").unwrap_or(port);
+            (key.to_string(), *host)
+        })
+    }
 }
 
 /// `Ok(None)` if the container doesn't exist.

@@ -40,10 +40,7 @@ impl Orchestrator {
             let inspected = listed.get(&c.desired.container_name);
             let host_port = |port: &str| inspected.and_then(|s| s.host_port(port));
             let published_port = c.desired.status_port.as_deref().and_then(host_port);
-            let mut ports = c.observed.ports.clone();
-            for (port, host) in ports.iter_mut() {
-                *host = host_port(port);
-            }
+            let ports = read_ports(&c.observed.ports, inspected);
             let (status, exit_code) = match inspected {
                 Some(s) => (s.status.clone(), s.exit_code),
                 None => ("removed".to_string(), None),
@@ -140,11 +137,61 @@ pub struct DriftReport {
     pub seeded: Option<bool>,
 }
 
+/// Each known port's host binding as Docker has it now. A record that never
+/// got its ports (one written before the start reported them) would otherwise
+/// never get them, so then they come from Docker: fghj publishes only
+/// declared ports, so what Docker published is the list.
+fn read_ports(
+    known: &BTreeMap<String, Option<u16>>,
+    inspected: Option<&docker::ContainerStatus>,
+) -> BTreeMap<String, Option<u16>> {
+    if known.is_empty() {
+        return inspected
+            .into_iter()
+            .flat_map(|s| s.published_ports())
+            .map(|(port, host)| (port, Some(host)))
+            .collect();
+    }
+    known
+        .keys()
+        .map(|port| (port.clone(), inspected.and_then(|s| s.host_port(port))))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::persistence::WorkspaceDb;
     use crate::state::{ContainerDesired, ContainerInfo, PortRoute};
+
+    #[test]
+    fn ports_a_record_never_got_come_from_what_docker_published() {
+        let listed =
+            docker::ContainerStatus::with_ports("running", &[("80/tcp", 32785), ("53/udp", 32786)]);
+        let ports = read_ports(&BTreeMap::new(), Some(&listed));
+        assert_eq!(
+            ports,
+            BTreeMap::from([
+                ("80".to_string(), Some(32785)),
+                ("53/udp".to_string(), Some(32786))
+            ])
+        );
+        assert!(read_ports(&BTreeMap::new(), None).is_empty());
+    }
+
+    #[test]
+    fn known_ports_keep_their_keys_and_take_dockers_current_binding() {
+        let known = BTreeMap::from([("3000".to_string(), Some(1)), ("9229".to_string(), Some(2))]);
+        let listed = docker::ContainerStatus::with_ports("running", &[("3000/tcp", 32783)]);
+        let ports = read_ports(&known, Some(&listed));
+        assert_eq!(
+            ports,
+            BTreeMap::from([
+                ("3000".to_string(), Some(32783)),
+                ("9229".to_string(), None)
+            ])
+        );
+    }
     use std::sync::Arc;
 
     struct DriftingPortContainer {

@@ -19,6 +19,7 @@ pub(super) fn reduce(
             ports,
             exit_code,
             unseen,
+            based_on,
         } => {
             let mut next = state.clone();
             if let Some(container) = next
@@ -26,6 +27,13 @@ pub(super) fn reduce(
                 .as_mut()
                 .and_then(|run| run.containers.get_mut(&node_id))
             {
+                // Older than what's here: a start or stop recorded its own
+                // result since the snapshot, or one is still under way and
+                // will. Writing this would undo it.
+                if container.pending_action.is_some() || !container.observed.same_reading(&based_on)
+                {
+                    return Ok(next);
+                }
                 let observed = &mut container.observed;
                 if unseen {
                     observed.unseen = true;
@@ -226,6 +234,7 @@ mod tests {
                 ports: BTreeMap::from([("http".into(), Some(54321)), ("db".into(), None)]),
                 exit_code: None,
                 unseen: false,
+                based_on: Default::default(),
             },
         )
         .unwrap();
@@ -236,7 +245,8 @@ mod tests {
         assert_eq!(c.observed.ports.get("db"), Some(&None));
     }
 
-    fn observed(status: Option<&str>) -> Action {
+    /// Against whatever `state` holds, as the observer reads it.
+    fn observed(state: &WorkspaceState, status: Option<&str>) -> Action {
         Action::ContainerObserved {
             node_id: "web".into(),
             status: status.unwrap_or("running").into(),
@@ -244,6 +254,9 @@ mod tests {
             ports: BTreeMap::new(),
             exit_code: None,
             unseen: status.is_none(),
+            based_on: state.env.as_ref().unwrap().containers["web"]
+                .observed
+                .clone(),
         }
     }
 
@@ -260,13 +273,13 @@ mod tests {
             (Some("running"), false),
             (Some("exited"), false),
         ] {
-            state = reduce(&state, observed(status)).unwrap();
+            state = reduce(&state, observed(&state, status)).unwrap();
             let c = &state.env.as_ref().unwrap().containers["web"];
             assert_eq!(c.observed.interrupted, interrupted, "after {status:?}");
             assert_eq!(c.observed.unseen, status.is_none());
         }
         // Unseen keeps the last reading, so routes don't churn on a blip.
-        let state = reduce(&state, observed(None)).unwrap();
+        let state = reduce(&state, observed(&state, None)).unwrap();
         assert_eq!(
             state.env.as_ref().unwrap().containers["web"]
                 .observed
@@ -287,6 +300,7 @@ mod tests {
                 ports: BTreeMap::new(),
                 exit_code: None,
                 unseen: false,
+                based_on: Default::default(),
             },
         )
         .unwrap();
@@ -305,6 +319,7 @@ mod tests {
                 ports: BTreeMap::new(),
                 exit_code: None,
                 unseen: false,
+                based_on: Default::default(),
             },
         )
         .unwrap();
@@ -610,6 +625,7 @@ mod tests {
                 ports: BTreeMap::new(),
                 exit_code: None,
                 unseen: false,
+                based_on: Default::default(),
             },
         )
         .unwrap();
@@ -757,6 +773,78 @@ mod tests {
         assert_eq!(
             next.env.as_ref().unwrap().containers["web"].pending_action,
             None
+        );
+    }
+
+    /// What `fghj up` hit with a slow build: the observer snapshots the
+    /// start's placeholder, Docker has no container yet, the start records
+    /// the real one, and only then does the observation land.
+    #[test]
+    fn an_observation_of_the_placeholder_does_not_undo_the_start_that_finished_meanwhile() {
+        let state = workspace(vec![]);
+        let state = reduce(&state, working("web", Some(PendingAction::Starting))).unwrap();
+        let snapshot = state.env.as_ref().unwrap().containers["web"]
+            .observed
+            .clone();
+
+        let mut info = container("web");
+        info.observed.status = "running".into();
+        info.observed.published_port = Some(32785);
+        info.observed.ports = BTreeMap::from([("80".into(), Some(32785))]);
+        let state = reduce(
+            &state,
+            Action::EnvCreateProgress {
+                network: "fghj-net".into(),
+                sidecar_container_name: "fghj-sidecar".into(),
+                sidecar_ip: None,
+                info,
+            },
+        )
+        .unwrap();
+
+        let state = reduce(
+            &state,
+            Action::ContainerObserved {
+                node_id: "web".into(),
+                status: "removed".into(),
+                published_port: None,
+                ports: BTreeMap::new(),
+                exit_code: None,
+                unseen: false,
+                based_on: snapshot,
+            },
+        )
+        .unwrap();
+        let web = &state.env.as_ref().unwrap().containers["web"].observed;
+        assert_eq!(web.status, "running");
+        assert_eq!(web.ports.get("80"), Some(&Some(32785)));
+    }
+
+    #[test]
+    fn an_observation_of_a_node_being_worked_on_waits_for_the_work_to_report() {
+        let mut web = container("web");
+        web.observed.status = "running".into();
+        web.pending_action = Some(PendingAction::Stopping);
+        let state = workspace(vec![web]);
+        let based_on = state.env.as_ref().unwrap().containers["web"]
+            .observed
+            .clone();
+        let next = reduce(
+            &state,
+            Action::ContainerObserved {
+                node_id: "web".into(),
+                status: "exited".into(),
+                published_port: None,
+                ports: BTreeMap::new(),
+                exit_code: Some(0),
+                unseen: false,
+                based_on,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            next.env.as_ref().unwrap().containers["web"].observed.status,
+            "running"
         );
     }
 
