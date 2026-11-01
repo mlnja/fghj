@@ -18,7 +18,12 @@ pub async fn report(orchestrator: &Orchestrator, actor: &ActorHandle) -> Sidecar
     };
     let observation = orchestrator.observe(&env).await;
     for (node_id, observed) in &observation.containers {
-        let _ = actor.dispatch(container_observed(node_id, observed)).await;
+        let Some(based_on) = env.containers.get(node_id).map(|c| &c.observed) else {
+            continue;
+        };
+        let _ = actor
+            .dispatch(container_observed(node_id, observed, based_on))
+            .await;
     }
     volumes::observe_volumes(orchestrator, actor).await;
     observation.sidecar
@@ -43,7 +48,12 @@ fn config_drift_observed(report: &DriftReport) -> Action {
 }
 
 /// Takes `ContainerObserved` only, so an observation can't carry `desired`.
-fn container_observed(node_id: &str, observed: &ContainerObserved) -> Action {
+/// `based_on` is the reading the snapshot held when Docker was asked.
+fn container_observed(
+    node_id: &str,
+    observed: &ContainerObserved,
+    based_on: &ContainerObserved,
+) -> Action {
     Action::ContainerObserved {
         node_id: node_id.to_string(),
         status: observed.status.clone(),
@@ -51,6 +61,7 @@ fn container_observed(node_id: &str, observed: &ContainerObserved) -> Action {
         ports: observed.ports.clone(),
         exit_code: observed.exit_code,
         unseen: observed.unseen,
+        based_on: based_on.clone(),
     }
 }
 
@@ -72,15 +83,14 @@ mod tests {
     #[test]
     fn container_observed_translates_status_and_ports_without_touching_desired() {
         let c = container("web", "running");
-        let action = container_observed(&c.node_id, &c.observed);
+        let action = container_observed(&c.node_id, &c.observed, &ContainerObserved::default());
         match action {
             Action::ContainerObserved {
                 node_id,
                 status,
                 published_port,
                 ports,
-                exit_code: _,
-                unseen: _,
+                ..
             } => {
                 assert_eq!(node_id, "web");
                 assert_eq!(status, "running");
@@ -120,7 +130,10 @@ mod tests {
         let handle = crate::actor::spawn(state);
 
         let observed = container("web", "exited");
-        let action = container_observed(&observed.node_id, &observed.observed);
+        let before = handle.current().env.as_ref().unwrap().containers["web"]
+            .observed
+            .clone();
+        let action = container_observed(&observed.node_id, &observed.observed, &before);
         handle.dispatch(action).await.unwrap();
 
         let current = handle.current();

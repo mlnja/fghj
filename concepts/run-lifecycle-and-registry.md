@@ -174,6 +174,20 @@ including flagging a container that's vanished entirely (`docker rm`'d by
 hand, outside fghj) as `"removed"`. This is explicitly analogous to a
 Kubernetes controller's reconcile loop.
 
+Docker is asked *after* the state is read, so a reading can be older than
+what fghj has recorded by the time it lands. With a slow first build that's
+the normal case: the snapshot holds a start's placeholder, which Docker has
+no container for, and the start records the real container while the
+listing is in flight. Applied, that reading would mark a node it had just
+started `"removed"` and wipe its ports. So each observation carries
+`based_on`, the reading it was taken against, and the reducer drops it if
+the container's reading has changed since (`ContainerObserved::same_reading`,
+which ignores the drift check's fields) or an action on the node is still in
+flight; the next tick reads again. And `read_ports` fills a record that has
+no ports from what Docker published, since a record that missed them would
+otherwise never get them back: the observer only refreshes ports it already
+knows.
+
 `observe` reads Docker with **one `list_containers` per workspace per tick**,
 filtered on the environment's compose project label (every node and the
 sidecar carry it), not an inspect per container: a big workspace was making

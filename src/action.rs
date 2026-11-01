@@ -4,7 +4,9 @@
 use std::collections::BTreeMap;
 
 use crate::persistence::WorkspaceOwner;
-use crate::state::{ContainerInfo, EnvCreateError, EnvSpec, EnvState, PendingAction, SyncStatus};
+use crate::state::{
+    ContainerInfo, ContainerObserved, EnvCreateError, EnvSpec, EnvState, PendingAction, SyncStatus,
+};
 
 /// Requests (`*Requested`, `EnvPlanned`, `OwnerSet`) can be rejected; reports
 /// (`*Observed`, `*Settled`, `EnvCreate*`) never are.
@@ -37,6 +39,10 @@ pub enum Action {
         exit_code: Option<i64>,
         /// Docker didn't answer; every other field is the last reading.
         unseen: bool,
+        /// The reading this one was taken against. Docker is asked after the
+        /// snapshot, so a start can finish in between; if the container's
+        /// reading has moved on since, this one is older and is dropped.
+        based_on: ContainerObserved,
     },
     /// `Ok(None)` is a delete. The only way post-action state reaches the reducer.
     /// `of` is the action this settles, and the report is dropped once the node
