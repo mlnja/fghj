@@ -900,7 +900,9 @@ fn doctor(fix: bool) -> Result<()> {
 
     let mut report = fetch_report()?;
     let user_checks = || -> Vec<fghj::doctor::Check> {
-        fghj::doctor::user_ca_trust_check(is_wired()).into_iter().collect()
+        fghj::doctor::user_ca_trust_check(is_wired())
+            .into_iter()
+            .collect()
     };
     let mut user = user_checks();
     let local: Vec<fghj::doctor::Check> = client.iter().chain(&user).cloned().collect();
