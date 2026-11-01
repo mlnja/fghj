@@ -28,9 +28,9 @@ shims.
 :::note[What this changes on your machine]
 `fghjd` edits `/etc/hosts`, routes fghj's zones through the OS resolver
 (`/etc/resolver` on macOS, a systemd-resolved link on Linux), aliases
-loopback addresses on macOS, and trusts a local root CA: in the System
-keychain on macOS; in the system store and the browsers' own databases on
-Linux. Everything but the CA and its state directory is undone by
+loopback addresses on macOS, and trusts a local root CA: in your login
+keychain on macOS, by your first `fghj wire`; in the system store and the
+browsers' own databases on Linux. Everything but the CA and its state directory is undone by
 `fghj daemon stop`; those two are removed by `sudo fghj uninstall`, which
 removing the Ubuntu package runs for you. The full list, with commands to check it
 yourself, is [What fghj touches, and how to remove
@@ -48,8 +48,9 @@ The second command needs `sudo`. That is not an oversight:
 `brew install` runs unprivileged and Homebrew never starts a service at
 install time (`brew install postgresql` doesn't start Postgres either), and
 `fghjd` is declared with `require_root true` because it binds ports 80/443
-(privileged on macOS regardless of which address they're on), installs a
-root CA, and edits `/etc/resolver` and `/etc/hosts`. Homebrew
+(privileged on macOS regardless of which address they're on), keeps its
+CA's private key under `/var/lib/fghjd`, and edits `/etc/resolver` and
+`/etc/hosts`. Homebrew
 therefore installs it as a *LaunchDaemon* under `/Library/LaunchDaemons`
 rather than a per-user LaunchAgent, and refuses to start it unprivileged.
 This is the same shape as `dnsmasq` or `nginx` on macOS.
