@@ -34,6 +34,16 @@ export default defineConfig({
       // request `ui/src/app.css` makes — so the docs and the web UI render in
       // literally the same type.
       head: [
+        // Raster icons next to the SVG one. Google Search only shows a site's
+        // favicon if it is a multiple of 48px and crawlable at a stable URL, and
+        // it doesn't reliably take an SVG; `/favicon.ico` is also what it and
+        // older clients fetch blindly. All of them are rendered from
+        // `public/favicon.svg`.
+        { tag: 'link', attrs: { rel: 'icon', href: '/favicon.ico', sizes: '48x48' } },
+        { tag: 'link', attrs: { rel: 'icon', type: 'image/png', href: '/favicon-96x96.png', sizes: '96x96' } },
+        { tag: 'link', attrs: { rel: 'icon', type: 'image/png', href: '/icon-192.png', sizes: '192x192' } },
+        { tag: 'link', attrs: { rel: 'apple-touch-icon', href: '/apple-touch-icon.png', sizes: '180x180' } },
+        { tag: 'link', attrs: { rel: 'manifest', href: '/site.webmanifest' } },
         {
           tag: 'link',
           attrs: { rel: 'preconnect', href: 'https://fonts.googleapis.com' },

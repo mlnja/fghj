@@ -2,6 +2,14 @@
 title: Real HTTPS hostnames for multi-repo local dev
 description: One HTTPS hostname per service, the same inside Docker and out. Multi-repo local dev with no compose file.
 template: splash
+# Google takes a site's name from WebSite structured data on the home page.
+# Without it, it falls back to the parent domain's name ("mlops.ninja") for
+# every page on this subdomain.
+head:
+  - tag: script
+    attrs:
+      type: application/ld+json
+    content: '{"@context":"https://schema.org","@type":"WebSite","name":"fghj","alternateName":["fghj.mlops.ninja","fghj: local dev orchestration"],"url":"https://fghj.mlops.ninja/"}'
 hero:
   title: fghj
   tagline: One hostname per service — the same one inside the docker network and out. Real HTTPS, real ports, no compose file.
