@@ -300,10 +300,12 @@ async fn handle_https_connection(
         return;
     };
 
-    let backend = backend_for(&name, control_port, routes.as_ref());
-
-    let route = move |_: &Request<Incoming>| match &backend {
-        Some(backend) => Route::Forward(backend.clone()),
+    // Per request, not per connection: a browser keeps its connection across a
+    // recreate, and the node comes back on new ports.
+    let sni = name.clone();
+    let route = move |_: &Request<Incoming>| match backend_for(&sni, control_port, routes.as_ref())
+    {
+        Some(backend) => Route::Forward(backend),
         None => Route::Respond(not_found_response()),
     };
     if let Err(e) = serve_connection(tls_stream, client_ip, "https", route).await {
@@ -883,6 +885,41 @@ mod tests {
             assert_eq!(header_line(&dump, "x-forwarded-host"), Some(ROUTED));
             assert_eq!(header_line(&dump, "x-forwarded-for"), Some("127.0.0.1"));
         }
+    }
+
+    struct MovingRoute(std::sync::Mutex<u16>);
+
+    impl RouteResolver for MovingRoute {
+        fn resolve(&self, host: &str) -> Option<Backend> {
+            (host == ROUTED).then(|| Backend {
+                host: "127.0.0.1".to_string(),
+                port: *self.0.lock().unwrap(),
+                traffic: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_kept_alive_connection_follows_a_route_to_its_new_port() {
+        let old_port = header_echo_backend().await;
+        let new_port = header_echo_backend().await;
+        let route = Arc::new(MovingRoute(std::sync::Mutex::new(old_port)));
+        let (addr, ca_der) = https_proxy(0, route.clone()).await;
+
+        let mut client = tls_client(addr, ROUTED, ca_der).await;
+        let (status, _, _) = get(&mut client, ROUTED, &[]).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The node was recreated: its old port is gone, a new one serves it.
+        let gone = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        *route.0.lock().unwrap() = gone.local_addr().unwrap().port();
+        drop(gone);
+        let (status, _, _) = get(&mut client, ROUTED, &[]).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+        *route.0.lock().unwrap() = new_port;
+        let (status, _, _) = get(&mut client, ROUTED, &[]).await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
