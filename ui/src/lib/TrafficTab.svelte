@@ -4,6 +4,8 @@
   // page doesn't stop it, only the Stop button or a fghjd restart does. This
   // component only follows it, over SSE, while the tab is open. See
   // `concepts/traffic-capture.md`.
+  import { headerDiff } from './headerDiff.js';
+
   let { nodeId, trafficUrl } = $props();
 
   let mode = $state(null);
@@ -167,6 +169,21 @@
   }
 </script>
 
+{#snippet headerLines(before, after)}
+  {#if after}
+    {#each headerDiff(before, after) as l}
+      <div class="kv {l.op}">
+        <span><span class="sign">{l.op === 'add' ? '+' : l.op === 'del' ? '−' : ''}</span>{l.name}</span>
+        <span>{l.value}</span>
+      </div>
+    {/each}
+  {:else}
+    {#each before as [k, v]}
+      <div class="kv"><span>{k}</span><span>{v}</span></div>
+    {/each}
+  {/if}
+{/snippet}
+
 {#snippet bodyView(body, side)}
   {@const ct = body.content_type ?? 'no content type'}
   <div class="body-meta">
@@ -252,14 +269,16 @@
         <div class="kv"><span>Method</span><span>{detail.method}</span></div>
         <div class="kv"><span>Status</span><span>{detail.status ?? '—'}</span></div>
         <div class="kv"><span>Source</span><span>{detail.source}</span></div>
-        <div class="section-title">Response headers</div>
-        {#each detail.response.headers as [k, v]}
-          <div class="kv"><span>{k}</span><span>{v}</span></div>
-        {/each}
-        <div class="section-title">Request headers</div>
-        {#each detail.request.headers as [k, v]}
-          <div class="kv"><span>{k}</span><span>{v}</span></div>
-        {/each}
+        <div class="section-title">
+          Response headers
+          {#if detail.response.forwarded}<span class="legend"><span class="del">− as {nodeId} sent</span> <span class="add">+ as the client got</span></span>{/if}
+        </div>
+        {@render headerLines(detail.response.headers, detail.response.forwarded)}
+        <div class="section-title">
+          Request headers
+          {#if detail.request.forwarded}<span class="legend"><span class="del">− as the client sent</span> <span class="add">+ as {nodeId} got</span></span>{/if}
+        </div>
+        {@render headerLines(detail.request.headers, detail.request.forwarded)}
       {:else if detailTab === 'request'}
         {@render bodyView(detail.request.body, 'request')}
       {:else if detailTab === 'response'}
@@ -341,6 +360,16 @@
   .kv { display: grid; grid-template-columns: minmax(110px, 30%) 1fr; gap: 8px; }
   .kv span:first-child { color: var(--ink-dim); font-weight: 600; word-break: break-all; }
   .kv span:last-child { color: var(--ink); word-break: break-all; }
+  .kv.add, .kv.del { margin: 0 -4px; padding: 0 4px; border-radius: 2px; }
+  .kv.add { background: var(--success-bg); }
+  .kv.del { background: var(--danger-bg); }
+  .kv.add > span { color: var(--success); }
+  .kv.del > span { color: var(--danger); }
+  .sign { display: inline-block; width: 1.2ch; }
+  .kv:not(.add):not(.del) .sign { display: none; }
+  .legend { margin-left: 8px; text-transform: none; letter-spacing: 0; }
+  .legend .add { color: var(--success); }
+  .legend .del { color: var(--danger); }
   .body-meta { color: var(--ink-faint); }
   .note { color: var(--warning); }
   .note.error { color: var(--danger); white-space: pre-wrap; }

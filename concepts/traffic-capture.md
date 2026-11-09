@@ -99,10 +99,16 @@ takes exactly the path it took before: no wrapper, no copy.
 
 ## What a record holds
 
-The client's request headers are recorded **before** the proxy adds
-`X-Forwarded-*` and strips hop-by-hop headers, so the record matches what the
-browser's own DevTools would show. The response headers are recorded after
-hop-by-hop stripping, which is also what the browser received. A backend that
+Headers are recorded on both sides of the proxy: the request as the client
+sent it and as the backend received it, and the response as the backend sent
+it and as the client received it. The proxy changes them in between: it adds
+`X-Forwarded-*`, and strips hop-by-hop headers (`connection`,
+`transfer-encoding` and the like), which describe one connection, not the
+request. The Traffic tab shows the two as a diff: removed lines in red, added
+ones in green, so a rewritten `x-forwarded-for` reads as its old line followed
+by its new one. The received side includes the framing the proxy writes
+itself, such as `transfer-encoding: chunked` for a body of unknown length.
+"Copy as curl" uses the client's side. A backend that
 couldn't be reached is recorded as the 502 the client got, together with the
 error. An upgrade (`101`, shown as `101 ⇄`) is recorded as open until its
 relay ends, then closed with its duration.

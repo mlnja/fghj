@@ -266,6 +266,8 @@ impl TrafficLog {
             accounted: headers_weight(&request_headers),
             request_headers,
             response_headers: Vec::new(),
+            request_forwarded: None,
+            response_forwarded: None,
             status: None,
             ttfb_ms: None,
             duration_ms: None,
@@ -411,8 +413,15 @@ struct Data {
     host: String,
     scheme: String,
     source: String,
+    /// As the client sent them, and the backend sent its answer.
     request_headers: Vec<(String, String)>,
     response_headers: Vec<(String, String)>,
+    /// As the proxy passed them on, after its own changes. `None` from a
+    /// sidecar that predates them.
+    #[serde(default)]
+    request_forwarded: Option<Vec<(String, String)>>,
+    #[serde(default)]
+    response_forwarded: Option<Vec<(String, String)>>,
     status: Option<u16>,
     ttfb_ms: Option<f64>,
     duration_ms: Option<f64>,
@@ -459,6 +468,8 @@ impl Data {
     fn weight(&self) -> usize {
         headers_weight(&self.request_headers)
             + headers_weight(&self.response_headers)
+            + self.request_forwarded.as_deref().map_or(0, headers_weight)
+            + self.response_forwarded.as_deref().map_or(0, headers_weight)
             + self.request.data.len()
             + self.response.data.len()
             + self.request.parts.iter().map(Part::weight).sum::<usize>()
@@ -501,6 +512,19 @@ fn header_list(headers: &HeaderMap) -> Vec<(String, String)> {
             )
         })
         .collect()
+}
+
+/// Plus the framing hyper adds as it writes: it chunks a body of unknown
+/// length itself, so the header map never says so.
+fn forwarded_list<B: Body>(headers: &HeaderMap, body: &B) -> Vec<(String, String)> {
+    let mut list = header_list(headers);
+    if !body.is_end_stream()
+        && !headers.contains_key(header::CONTENT_LENGTH)
+        && !headers.contains_key(header::TRANSFER_ENCODING)
+    {
+        list.push(("transfer-encoding".to_string(), "chunked".to_string()));
+    }
+    list
 }
 
 fn headers_weight(headers: &[(String, String)]) -> usize {
@@ -911,6 +935,7 @@ pub struct Detail {
 #[derive(Serialize)]
 struct SideView {
     headers: Vec<(String, String)>,
+    forwarded: Option<Vec<(String, String)>>,
     body: BodyView,
 }
 
@@ -966,10 +991,12 @@ impl Exchange {
             ttfb_ms: d.ttfb_ms,
             request: SideView {
                 headers: d.request_headers.clone(),
+                forwarded: d.request_forwarded.clone(),
                 body: d.request.view(),
             },
             response: SideView {
                 headers: d.response_headers.clone(),
+                forwarded: d.response_forwarded.clone(),
                 body: d.response.view(),
             },
         }
@@ -1021,6 +1048,20 @@ impl Recording {
         }
     }
 
+    /// The request as it goes on to the backend.
+    pub fn forwarded<B: Body>(&self, req: &Request<B>) {
+        let forwarded = forwarded_list(req.headers(), req.body());
+        self.ex.data.lock().unwrap().request_forwarded = Some(forwarded);
+    }
+
+    /// The answer as it goes back to the client.
+    pub fn forwarded_response<B: Body>(&self, resp: &Response<B>) {
+        let forwarded = forwarded_list(resp.headers(), resp.body());
+        self.ex.data.lock().unwrap().response_forwarded = Some(forwarded);
+        self.publish();
+    }
+
+    /// The backend's answer, as it sent it.
     pub fn response<B>(&self, resp: &Response<B>, upgraded: bool) {
         {
             let mut d = self.ex.data.lock().unwrap();

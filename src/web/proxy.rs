@@ -390,6 +390,9 @@ async fn forward(
         .then(|| hyper::upgrade::on(&mut req));
     strip_hop_by_hop(req.headers_mut(), client_upgrade.is_some());
     add_forwarded_headers(req.headers_mut(), client_ip, proto);
+    if let Some(rec) = rec {
+        rec.forwarded(&req);
+    }
 
     let mut slot = upstream.lock().await;
     let reusable = match slot.take() {
@@ -432,9 +435,12 @@ async fn forward(
     };
 
     let upgraded = resp.status() == StatusCode::SWITCHING_PROTOCOLS;
-    strip_hop_by_hop(resp.headers_mut(), upgraded);
     if let Some(rec) = rec {
         rec.response(&resp, upgraded);
+    }
+    strip_hop_by_hop(resp.headers_mut(), upgraded);
+    if let Some(rec) = rec {
+        rec.forwarded_response(&resp);
     }
     if upgraded {
         // The backend connection now belongs to the upgraded stream.
@@ -1410,6 +1416,59 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("exchange {id} never settled");
+    }
+
+    fn header_pairs(v: &serde_json::Value) -> Vec<String> {
+        let mut pairs: Vec<String> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| format!("{}: {}", h[0].as_str().unwrap(), h[1].as_str().unwrap()))
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
+    #[tokio::test]
+    async fn a_recording_has_the_headers_the_backend_received_beside_the_clients() {
+        let backend_port = header_echo_backend().await;
+        let store = crate::web::traffic::TrafficStore::default();
+        let log = store.log("ws", "cart");
+        log.set_mode(Some(crate::web::traffic::BodyMode::Text));
+        let (addr, ca_der) = https_proxy(0, recorded_routes(backend_port, &log)).await;
+        let mut client = tls_client(addr, ROUTED, ca_der).await;
+
+        // Chunked, so the backend connection needs framing of its own.
+        let chunks =
+            ["a", "b"].map(|c| Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from(c))));
+        let streamed = http_body_util::StreamBody::new(futures_util::stream::iter(chunks));
+        client.ready().await.unwrap();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/checkout")
+            .header(header::HOST, ROUTED)
+            .header(header::CONNECTION, "keep-alive")
+            .header(X_FORWARDED_FOR, "6.6.6.6")
+            .body(streamed.boxed())
+            .unwrap();
+        let resp = client.send_request(req).await.unwrap();
+        let dump = resp.into_body().collect().await.unwrap().to_bytes();
+        let mut received: Vec<String> = std::str::from_utf8(&dump)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        received.sort();
+
+        let v = settled(&log, log.summaries()[0].id).await;
+        assert_eq!(header_pairs(&v["request"]["forwarded"]), received);
+        let sent = header_pairs(&v["request"]["headers"]);
+        assert!(sent.contains(&"connection: keep-alive".to_string()));
+        assert!(sent.contains(&"x-forwarded-for: 6.6.6.6".to_string()));
+        assert!(received.contains(&"x-forwarded-for: 6.6.6.6, 127.0.0.1".to_string()));
+        assert!(received.contains(&"transfer-encoding: chunked".to_string()));
+        assert!(!received.iter().any(|h| h.starts_with("connection:")));
+        assert!(v["response"]["forwarded"].is_array());
     }
 
     #[tokio::test]
