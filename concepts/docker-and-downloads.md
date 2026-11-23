@@ -55,15 +55,14 @@ talks to the Engine API directly via `bollard`.
 A few choices in `src/docker/` exist specifically because `bollard`'s API
 is lower-level than `docker build`/`docker run`:
 
-- **`build_image`** has to hand the Docker daemon a tar stream of the build
-  context itself — there's no "build from this directory" call at the API
-  level. It builds that tar in a blocking task (`tar::Builder::append_dir_all`)
-  before ever touching the async `docker.build_image` call. It then picks one
-  of *two* builders off that same tar: the classic one, or BuildKit when the
-  build declares secrets or ssh forwarding. See [[build-inputs]] for why the
-  split exists rather than one uniform path, and for the two things bollard's
-  BuildKit driver forces on the caller (a process-global `SSH_AUTH_SOCK` and a
-  `!Send` solve future).
+- **`build_context`** makes the build context a tar stream itself, in a
+  blocking task, honouring `.dockerignore` the way the CLI does. That one tar
+  goes to whichever route builds it. Normally that's the workspace owner's own
+  `docker buildx build -`, which reads it on stdin, so the build runs on their
+  builder with their registry logins ([[builder-parity]]). Without a `docker`
+  CLI it goes to bollard's BuildKit driver, which forces two things on the
+  caller: a process-global `SSH_AUTH_SOCK` and a `!Send` solve future
+  ([[build-inputs]]).
 - **`run_container`** has to construct the create/start sequence manually,
   and — because a failed `start_container` can leave a container behind in
   `Created` state — always best-effort force-removes on any error in that

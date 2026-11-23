@@ -72,7 +72,7 @@ it in the audit's tracker — the concept files stay the durable record.
 | [[seeds-and-migrations]] | `migrates:` and `seeds:` are ordinary services with one keyword. Waiting on a store waits on its migration; a seed runs only on data it hasn't filled, keyed on the volumes, not the container. |
 | [[language-boundaries]] | What `.fghj.yaml` deliberately cannot say — no host-process node kind, no branch on an edge — and how to tell a boundary from a missing knob. |
 | [[build-inputs]] | A build may carry `target`, file secrets and the workspace owner's forwarded ssh-agent — but the credential path comes from `WorkspaceOwner`, never from the repo's own config, and every build goes through BuildKit, with no classic-builder fallback. |
-| [[builder-parity]] | fghj builds on the same BuildKit the user's own `docker build` would have reached, because two engines disagreeing about one Dockerfile is a failure nobody can attribute. |
+| [[builder-parity]] | fghj builds with the workspace owner's own `docker buildx build`, in their login session, so it gets the same builder and the same registry logins as their `docker build`. Two engines disagreeing about one Dockerfile is a failure nobody can attribute. The bollard fallback never pulls its BuildKit image. |
 
 ## Subsystem guides
 

@@ -149,6 +149,16 @@ impl Session for PlainSession {
     fn is_session_agent(&self, _sock: &str) -> bool {
         false
     }
+
+    fn as_user_in_session(
+        &self,
+        _uid: u32,
+        _gid: u32,
+        _env: &[(String, std::ffi::OsString)],
+        _argv: &[std::ffi::OsString],
+    ) -> Option<Vec<std::ffi::OsString>> {
+        None
+    }
 }
 
 pub(super) struct NoPackaging;

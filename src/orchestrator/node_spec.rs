@@ -73,6 +73,9 @@ impl Orchestrator {
             let builder = owner
                 .as_ref()
                 .and_then(|o| crate::buildx::default_builder(std::path::Path::new(&o.home)));
+            // Their own `docker buildx`, for their builder and their registry
+            // logins; bollard only when there is none.
+            let cli = docker::BuildxCli::find(owner.as_ref()).await;
             let mut what = format!("{tag}  ·  {}", build_dir.display());
             if let Some(source) = &build.source {
                 what.push_str(&format!("  ·  from {}", source.url));
@@ -88,9 +91,11 @@ impl Orchestrator {
             if let Some(platform) = platform {
                 what.push_str(&format!("  ·  {platform}"));
             }
-            what.push_str(&match &builder {
-                Some(b) => format!("  ·  buildkit: {}", b.builder),
-                None => String::from("  ·  buildkit: dockerd"),
+            what.push_str(&match (&cli, &builder) {
+                (Some(_), Some(b)) => format!("  ·  buildkit: {} (docker buildx)", b.builder),
+                (Some(_), None) => String::from("  ·  buildkit: docker buildx"),
+                (None, Some(b)) => format!("  ·  buildkit: {}", b.builder),
+                (None, None) => String::from("  ·  buildkit: dockerd"),
             });
             ev.record("building image", "running", Some(what.clone()))
                 .await;
@@ -117,6 +122,7 @@ impl Orchestrator {
                 secrets: &secrets,
                 ssh_auth_sock: ssh_auth_sock.as_deref(),
                 builder: builder.as_ref(),
+                cli: cli.as_ref(),
             };
             let context = docker::build_context(&opts).await?;
             what.push_str(&format!(

@@ -1,6 +1,6 @@
 ---
 title: Docker & downloads
-description: Building and running containers via the Docker Engine API directly, and how background clone jobs keep the UI responsive.
+description: Running containers via the Docker Engine API directly, building with your own docker buildx, and how background clone jobs keep the UI responsive.
 ---
 
 ## Building without Compose
@@ -12,12 +12,14 @@ Desktop's own UI (and `docker ps`/`compose ls`) groups a run's containers
 together as if they were a real Compose stack, even though `fghjd` talks
 to the Docker Engine API directly.
 
-A few consequences of talking to the Engine API directly rather than
-shelling out to `docker build`/`docker run`:
+Builds are the one exception: they go through *your* `docker buildx build`,
+so they run on the builder, the cache and the registry logins your own
+`docker build` uses (see [Which BuildKit builds it](#which-buildkit-builds-it)).
+`fghj` still makes the build context itself, a tar stream, and hands it to the
+CLI on stdin.
 
-- **Building** requires handing the Docker daemon a tar stream of the
-  build context itself — there's no "build from this directory" call at
-  the API level.
+A few consequences of talking to the Engine API directly for everything else:
+
 - **Running** a container means constructing the create/start sequence
   manually, and — because a failed start can leave a container behind in
   a `Created` state — `fghjd` always best-effort force-removes on any
@@ -65,28 +67,17 @@ source, something large is reaching the builder that probably shouldn't:
 information into a binary whenever it finds a repository beside the source,
 and `git` inside the builder cannot read it, which fails the build outright.
 
-On failure, the failing step and its exit code, pulled out of BuildKit's
-error:
+On failure, the end of the build's own output: the last 40 lines, which
+hold the failing step, its compiler errors and BuildKit's summary:
 
 ```
-failing step: /bin/sh -c go build -o /out/app ./cmd/app
-exit code: 1
+#9 [3/3] RUN go build -o /out/app ./cmd/app
+#9 0.912 cmd/app/main.go:12:2: undefined: handler
+#9 ERROR: process "/bin/sh -c go build -o /out/app ./cmd/app" did not complete successfully: exit code: 1
 ```
 
-**What is not there is the step's own output** — the compiler errors. BuildKit
-streams those over a separate gRPC channel that the Docker API client `fghjd`
-uses doesn't expose, so the daemon never sees them. The event says so and
-gives you the command to run by hand:
-
-```
-docker build -f Dockerfile /Users/me/src/storefront
-```
-
-That's a real gap rather than a design choice — and a shallow one. BuildKit
-hands back a reference specifically so a caller can subscribe to the build's
-status stream, log lines included; `bollard` just keeps the channel it would
-need crate-private. Until that opens up, a build failure is the one thing that
-will send you to a terminal.
+Only that tail is kept, in the event. Nothing is shown while a build is still
+running.
 
 ### Which BuildKit builds it
 
@@ -104,36 +95,46 @@ versions — buildx's builder on BuildKit v0.32.2, `dockerd`'s embedded one on
 v0.29.0 — which is enough for the two to disagree about whether a `RUN` may
 write to a directory that doesn't exist yet.
 
-So `fghjd` reads `~/.docker/buildx/current` and `instances/<name>` — the
-**workspace owner's** home, not the daemon's, since `fghjd` runs as root and
-`/var/root/.docker` holds no buildx config at all — and when a
-container-backed builder is selected it builds on BuildKit at the **same
-image digest** as that builder. The engine is named in the start event so you
-never have to guess which one ran:
+So `fghjd` builds with **your own `docker buildx build`**, run as the
+workspace owner rather than as root. Whatever builder your `docker build`
+would pick, `fghj`'s build picks too, along with:
+
+- **Your registry logins.** A `FROM` on a private registry (ECR, GHCR, a
+  company mirror) uses your credential helper or keychain, just as on the
+  command line. On macOS the CLI runs inside your login session, because
+  that's the only place the keychain answers.
+- **Your build cache.** A repo you just built on the command line is warm
+  for `fghj` too.
+
+The builder is named in the start event so you never have to guess which one
+ran:
 
 ```
-building image   fghj/shop-storefront:main  ·  /Users/me/src/storefront  ·  buildkit: orb-builder
+building image   fghj/shop-storefront:main  ·  /Users/me/src/storefront  ·  buildkit: orb-builder (docker buildx)
 ```
 
-It reads `buildkit: dockerd` when no container-backed builder is selected, and
-that path is unchanged from before.
+#### When there's no `docker` CLI
 
-Two things worth knowing about how this is done:
+If `fghjd` can't find a `docker` binary with the buildx plugin, it builds
+through the Docker API instead. A CLI build that *fails* is not retried this
+way. The fallback still follows your selected buildx builder, as far as an
+API client can:
 
-- **`fghj` runs its own BuildKit container** (`fghj_buildkit`, with a
-  `fghj_buildkit_state` cache volume) rather than reusing buildx's. It is
-  pinned to the same image digest, so it is the same engine, but it is a
-  second container and a second build cache — the first `fghj` build of a repo
-  is cold even if you built it on the CLI a minute earlier. This is
-  deliberate: stopping or reconfiguring the builder your own `docker build`
-  depends on is not `fghj`'s to do, and `bollard` enforces that by refusing to
-  adopt containers it didn't create. When the digest moves, `fghj` replaces its
-  container and keeps the cache volume.
-- **The image crosses the socket twice.** A BuildKit running in a container
-  has no access to `dockerd`'s image store — this is why `buildx` itself needs
-  `--load` — so the build exports a docker-format tarball and `fghj` streams
-  it back into `/images/load`. Compared with the embedded builder, that is one
-  extra copy of every image you build.
+- **It runs its own BuildKit container** (`fghj_buildkit`, with a
+  `fghj_buildkit_state` cache volume) on the **same image** as buildx's
+  builder, pinned by image id. It never pulls that image: buildx's container
+  already has it on your machine, and a pull would need registry logins the
+  daemon doesn't have. This is a second build cache, so the first build of a
+  repo is cold.
+- **Registry logins don't reach it.** A private `FROM` fails there.
+- **The image crosses the socket twice.** A BuildKit in a container can't
+  write to `dockerd`'s image store, so the build exports a tarball and `fghj`
+  streams it back in.
+- **A failure shows only the failing step and its exit code.** The step's
+  own output isn't available on this path.
+
+The start event reads `buildkit: orb-builder` (no `docker buildx`) on this
+path, or `buildkit: dockerd` when no container-backed builder is selected.
 
 ## Volumes: two shapes, one Docker primitive
 

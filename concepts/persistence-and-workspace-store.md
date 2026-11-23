@@ -89,11 +89,13 @@ also says that keys kept in another agent (1Password and the like) need
 `IdentityAgent` in `~/.ssh/config` or a `fghj wire` from the shell that has
 their `SSH_AUTH_SOCK`.
 
-The agent is borrowed for `docker build` too, not just `git clone` — but by a
-different mechanism, because there is no subprocess to configure. bollard reads
-`SSH_AUTH_SOCK` out of `fghjd`'s own environment, so the path
-`live_ssh_auth_sock` returns has to be set process-globally around the build
-rather than handed to a `Command`. See [[build-inputs]].
+The agent is borrowed for `docker build` too, not just `git clone`. A build
+normally runs the owner's own `docker buildx build` as them, so the path
+`live_ssh_auth_sock` returns goes in as `--ssh default=<path>`, as it would for
+`git` ([[builder-parity]]). The bollard fallback has no subprocess to
+configure. bollard reads `SSH_AUTH_SOCK` out of `fghjd`'s own environment, so
+there the path has to be set process-globally around the build. See
+[[build-inputs]].
 
 `harden_git_ssh` is applied to every git subprocess regardless — it forces
 `BatchMode=yes` and auto-accepts unknown host keys via `GIT_SSH_COMMAND`,

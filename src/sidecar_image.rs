@@ -79,6 +79,7 @@ async fn build_locally(docker: &Docker, tag: &str) -> Result<()> {
             ssh_auth_sock: None,
             // Not a user repo, so no `docker build` of it to agree with.
             builder: None,
+            cli: None,
         },
     )
     .await

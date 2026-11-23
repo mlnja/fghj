@@ -3,8 +3,8 @@
 > **Status:** implemented. Language in `schema/component.cue` (`#Build`,
 > `#BuildSecret`) and `src/resolver/` (`config::Build`, `graph::NodeBuild`,
 > `graph::NodeBuildSecret`); transport in `src/docker/image.rs`
-> (`BuildOpts`, `build_image`, `build_image_buildkit`,
-> `solve_on_dedicated_thread`, `SSH_AUTH_SOCK_ENV`); resolution in
+> (`BuildOpts`, `build_image`, `build_image_buildkit`, `on_dedicated_thread`,
+> `SSH_AUTH_SOCK_ENV`) and `src/docker/cli_build.rs` (`build_args`); resolution in
 > `src/orchestrator/node_spec.rs` (`build_node_image`, `resolve_build_secrets`);
 > drift in `src/orchestrator/spec.rs`. Closes [[AUDIT]] E3.
 
@@ -115,6 +115,12 @@ build to discover it.
 The blunter error message is the price, paid uniformly. It's visible in
 `build_image_buildkit`'s own error context rather than hidden behind a
 condition nobody can predict.
+
+That price is now paid only on the fallback. Builds normally run through the
+owner's `docker buildx build` ([[builder-parity]]), where every input here maps
+to its CLI flag: `--target`, `--build-arg`, `--secret id=…,src=…` and
+`--ssh default=<socket>`. The error carries the last lines of the build's own
+output there.
 
 ### The price may have stopped being necessary
 
