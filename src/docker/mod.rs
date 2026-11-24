@@ -1,11 +1,13 @@
 //! Thin wrappers over bollard, one file per kind of Docker object.
 
+mod cli_build;
 mod container;
 mod host;
 mod image;
 mod network;
 mod volume;
 
+pub use cli_build::BuildxCli;
 pub use container::*;
 pub use host::{DEFAULT_SOCKET, is_live_socket, users_docker_host};
 pub use image::*;

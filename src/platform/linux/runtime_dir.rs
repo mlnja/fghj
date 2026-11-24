@@ -1,6 +1,7 @@
 //! Linux paths, and the per-user runtime directory (`/run/user/<uid>`) where
 //! login-session ssh-agents keep their sockets.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::platform::Session;
@@ -43,6 +44,45 @@ impl Session for RuntimeDir {
             .map(|found| found.to_string_lossy().into_owned())
     }
 
+    /// `setpriv` is util-linux, so always there, unlike `sudo`. `--init-groups`
+    /// keeps the user's supplementary groups, `docker` among them. A credential
+    /// helper on the session bus (`secretservice`, `pass` via gpg-agent) needs
+    /// the user's runtime dir and bus, when they're logged in.
+    fn as_user_in_session(
+        &self,
+        uid: u32,
+        gid: u32,
+        env: &[(String, OsString)],
+        argv: &[OsString],
+    ) -> Option<Vec<OsString>> {
+        let mut line: Vec<OsString> = [
+            String::from("/usr/bin/setpriv"),
+            format!("--reuid={uid}"),
+            format!("--regid={gid}"),
+            String::from("--init-groups"),
+            String::from("/usr/bin/env"),
+            String::from("-i"),
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        line.extend(crate::platform::session::env_pairs(env));
+        let runtime = self.run_user.join(uid.to_string());
+        if runtime.is_dir() {
+            let mut dir = OsString::from("XDG_RUNTIME_DIR=");
+            dir.push(&runtime);
+            line.push(dir);
+            let bus = runtime.join("bus");
+            if bus.exists() {
+                let mut address = OsString::from("DBUS_SESSION_BUS_ADDRESS=unix:path=");
+                address.push(&bus);
+                line.push(address);
+            }
+        }
+        line.extend(argv.iter().cloned());
+        Some(line)
+    }
+
     fn is_session_agent(&self, sock: &str) -> bool {
         let Ok(rest) = Path::new(sock).strip_prefix(&self.run_user) else {
             return false;
@@ -75,6 +115,51 @@ mod tests {
             Some("/run/user/1000/openssh_agent")
         );
         assert_eq!(dir.session_ssh_agent(1001, &live), None);
+    }
+
+    #[test]
+    fn a_command_runs_as_the_user_with_their_groups_and_session_bus() {
+        let run_user = tempfile::tempdir().unwrap();
+        let runtime = run_user.path().join("1000");
+        std::fs::create_dir(&runtime).unwrap();
+        std::fs::write(runtime.join("bus"), "").unwrap();
+        let dir = RuntimeDir {
+            run_user: run_user.path().to_path_buf(),
+        };
+        let env = [(String::from("HOME"), OsString::from("/home/me"))];
+        let argv = [OsString::from("/usr/bin/docker"), OsString::from("version")];
+        let line = dir.as_user_in_session(1000, 1000, &env, &argv).unwrap();
+        let line: Vec<String> = line
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            line,
+            [
+                "/usr/bin/setpriv".to_string(),
+                "--reuid=1000".into(),
+                "--regid=1000".into(),
+                "--init-groups".into(),
+                "/usr/bin/env".into(),
+                "-i".into(),
+                "HOME=/home/me".into(),
+                format!("XDG_RUNTIME_DIR={}", runtime.display()),
+                format!(
+                    "DBUS_SESSION_BUS_ADDRESS=unix:path={}",
+                    runtime.join("bus").display()
+                ),
+                "/usr/bin/docker".into(),
+                "version".into(),
+            ]
+        );
+
+        // Not logged in: no session to point at.
+        let line = dir.as_user_in_session(1001, 1001, &env, &argv).unwrap();
+        assert!(
+            !line
+                .iter()
+                .any(|a| a.to_string_lossy().starts_with("XDG_RUNTIME_DIR="))
+        );
     }
 
     #[test]

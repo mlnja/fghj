@@ -1,8 +1,10 @@
 # Builder parity: build where `docker build` would have
 
-> Implemented in `src/buildx.rs` (`default_builder`, `HostBuilder`);
-> `src/docker/image.rs` (`BuildOpts::builder`, `solve_on_host_builder`,
-> `buildkit_image_of`, `retire_builder_if_image_changed`, `load_image_tar`,
+> Implemented in `src/docker/cli_build.rs` (`BuildxCli`);
+> `src/platform/` (`Session::as_user_in_session`); `src/buildx.rs`
+> (`default_builder`, `HostBuilder`); `src/docker/image.rs`
+> (`BuildOpts::{cli, builder}`, `solve_on_host_builder`, `buildkit_image_id_of`,
+> `retire_builder_if_image_changed`, `prepare_fghj_buildkit`, `load_image_tar`,
 > `FGHJ_BUILDKIT_CONTAINER`); `src/orchestrator/node_spec.rs` (`build_node_image`).
 
 ## The bug this closes
@@ -42,109 +44,152 @@ with the CLI on the same machine is worth more than any property fghj could
 choose for itself, because disagreement is unattributable: the user has no
 way to tell a bug in their Dockerfile from a bug in fghj.
 
-## Resolution: read buildx's own state, as the owner
+## Resolution: the owner's own `docker buildx build`
 
-`buildx` keeps plain JSON under `~/.docker/buildx`, so this needs no
-subprocess:
+The one thing guaranteed to build where `docker build` would is the user's
+`docker` CLI itself. So that is what fghj runs, as the workspace owner:
 
-- `current` → `{"Key":"orbstack","Name":"orb-builder","Global":false}`
-- `instances/<name>` → the driver and its nodes.
+```
+docker buildx build --progress=plain --load -t <tag> -f <dockerfile> \
+  [--target …] [--platform …] [--build-arg …] [--secret id=…,src=…] [--ssh default=…] -
+```
 
-A `docker-container` driver resolves to a container named
-`buildx_buildkit_<nodeName>`. That name is buildx's own fixed convention
-(hardcoded in its `driver/docker-container/factory.go`), not something stored
-in the instance file, so `container_name` reproduces it rather than reading
-it. Any other driver — `docker`, `remote`, `kubernetes` — returns `None` and
-fghj keeps its previous behaviour.
+- **Same builder by construction.** buildx picks it, from the owner's
+  `~/.docker`; fghj doesn't need to know which one it is.
+- **Their registry logins.** A private `FROM`, or a BuildKit image that came
+  through a company mirror, needs the owner's credential helper
+  (`credsStore: osxkeychain`, `ecr-login`, `secretservice`, …). Root `fghjd`
+  has none, and a credential store only answers inside the owner's login
+  session. As root, `Session::as_user_in_session` wraps the CLI per OS, always
+  ending in `env -i` so root's environment stays behind:
+  - **macOS:** `launchctl asuser <uid> sudo -u #<uid> -H env -i … docker …`.
+    Both halves are needed: `asuser` for the session the keychain answers in,
+    `sudo` for the uid. `asuser` needs root, so the drop has to come after it.
+  - **Linux:** `setpriv --reuid --regid --init-groups env -i … docker …`.
+    `setpriv` is util-linux, so it's always there, where `sudo` may not be.
+    `--init-groups` keeps the owner's `docker` group, without which the CLI
+    can't reach the socket. When the owner is logged in, `XDG_RUNTIME_DIR` and
+    `DBUS_SESSION_BUS_ADDRESS` point at their session bus, which
+    `secretservice` and `pass` need.
+  - **Anywhere else:** no CLI, so the bollard fallback.
+- **Same cache** as their own builds, and `--load` puts the image in dockerd.
+- **fghj's context, not the directory.** The context goes in on stdin as the
+  same tar the bollard path sends (`-` as the context, `-f` naming a file
+  inside it). A git source's `.git` and an inline Dockerfile are therefore
+  handled exactly as before, and the Events tab still says how big the context is.
+- **The failing step's output comes back.** The error carries the last 40
+  lines of `--progress=plain` output.
+- **Cancellation.** The CLI runs in its own process group. Dropping the build
+  sends that group SIGTERM, which buildx turns into a cancelled solve.
+- **Hints and plugin hooks are off** (`DOCKER_CLI_HINTS=false`,
+  `DOCKER_CLI_HOOKS=false`). A `docker scout` hook on every build is for a
+  person at a terminal.
+- **The image must land where fghjd looks.** After the build fghj inspects the
+  tag through its own Docker connection. If it isn't there, the CLI's context
+  and the socket `fghj wire` gave fghjd point at different engines, and the
+  error says so.
 
-**The home directory must be the workspace owner's, never the process's.**
-`fghjd` runs as root, so `$HOME` is `/var/root`, which holds no buildx config
-at all. Reading the process's environment would resolve to "no builder
-selected" on every machine and silently produce the exact wrong answer — the
-bug, wearing the fix's clothes. `build_node_image` therefore loads
-`WorkspaceOwner` first and passes `o.home`. This is the same hazard
-[[persistence-and-workspace-store]] describes for `git`, and for the Docker
-socket ([[docker-and-downloads]]).
+`fghjd` runs under launchd or systemd with a bare `PATH`, so
+`BuildxCli::find` looks for `docker` in the usual places itself
+(`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/snap/bin`,
+`~/.orbstack/bin`, `~/.docker/bin`, Docker.app, OrbStack.app), then checks
+`docker buildx version` as the owner. The CLI's `PATH` starts with the
+directory the binary is in, where OrbStack and Docker Desktop put their
+`docker-credential-*` helpers.
 
-## fghj runs its own BuildKit, at buildx's image
+## Fallback: bollard, only when there is no CLI
 
-fghj does **not** build inside buildx's container. bollard stamps ownership
-labels on containers and volumes it manages and refuses to adopt one it did
-not create:
+When `find` finds no `docker` binary, no buildx plugin, no owner to run as,
+or no way to run as them on this OS,
+the build goes through bollard as before. A *failed* CLI build is not retried
+there: building twice would only hide the real error.
+
+The fallback still follows buildx's selected builder. It reads buildx's plain
+JSON under the **owner's** `~/.docker/buildx` (`current`, then
+`instances/<name>`). A `docker-container` driver resolves to the container
+`buildx_buildkit_<nodeName>`. That is buildx's fixed convention, hardcoded in
+its `driver/docker-container/factory.go`, not something stored in the
+instance file. Any other driver means dockerd's embedded BuildKit. The home
+must be the owner's: root's `$HOME` holds no buildx config, and reading it
+would resolve to "no builder" on every machine.
+
+### fghj runs its own BuildKit, at buildx's image
+
+bollard can't talk to buildx's container. It stamps ownership labels on what
+it manages and refuses one it didn't create:
 
 ```
 ownership label `com.github.fussybeaver.bollard.buildkit.managed` does not match
 ```
 
-There is no opt-out, and that is the right guard rather than an obstacle to
-route around. Stopping or reconfiguring the builder the user's own
-`docker build` depends on is not fghj's to do.
+So the fallback runs a persistent container of its own, `fghj_buildkit`, with
+a `fghj_buildkit_state` cache volume, on the **same image** as buildx's.
 
-So fghj runs a persistent container of its own, `fghj_buildkit`, with a
-`fghj_buildkit_state` cache volume, pinned to the **same image** as buildx's.
-Same engine, separate lifecycle.
+### Pin by local image id, and never pull
 
-### Pin by digest, not by tag
+`buildkit_image_id_of` takes the image id straight from buildx's container.
+Both alternatives fail:
 
-The image is resolved to a **repo digest**
-(`moby/buildkit@sha256:…`) via `inspect_container` → image id →
-`inspect_image().repo_digests`, falling back to the tag only if that fails.
+- **A tag moves.** `moby/buildkit:buildx-stable-1` pulled today is a
+  different BuildKit from the one buildx's container was made from a week ago.
+- **A repo digest names a registry.** The first `RepoDigests` entry is
+  whatever the image was pulled through, for instance
+  `<account>.dkr.ecr.<region>.amazonaws.com/dockerhub/moby/buildkit@sha256:…`.
 
-This is not fastidiousness; matching tags is actively wrong.
-`moby/buildkit:buildx-stable-1` *moves*. A container created from it a week
-ago runs v0.32.2 while pulling the same tag today gets v0.33.1. An early
-version of this feature compared `Config.Image` strings, found them equal,
-and reported success while running a *different* BuildKit from the CLI — the
-original bug with extra steps, and now invisible to every string comparison
-available. The test therefore asserts on `buildkitd --version` executed
-*inside* both containers, which is the property actually under test.
+bollard's `bootstrap()` pulls the image before creating a container, every
+time, with no credentials (`// TODO: registry auth` in its source). A mirror
+needing a login then fails with "no basic auth credentials", though the image
+is already on the machine. Because buildx's container exists, its image is
+always local, so `prepare_fghj_buildkit` creates `fghj_buildkit` from that id
+itself, before `bootstrap()` runs:
 
-`retire_builder_if_image_changed` removes `fghj_buildkit` when the resolved
-digest no longer matches, keeping the cache volume (`v: false`).
+- with bollard's ownership labels and the resource id of the existing volume;
+- with bollard's host config: privileged, init, `host` network, the state
+  volume at `/var/lib/buildkit`, restart `unless-stopped`;
+- with its daemon argument `--allow-insecure-entitlement=network.host`.
 
-## The two costs, paid knowingly
+`bootstrap()` then finds a container it recognises and only starts it. This
+mirrors `DockerContainer::create` at the pinned bollard rev. The `#[ignore]`d
+build tests catch any drift: `bootstrap()` rejects a container that differs.
 
-- **A second build cache.** `fghj_buildkit_state` is not buildx's state
-  volume, so the first fghj build of a repo is cold even if the CLI built it
-  a minute earlier. Unavoidable given the ownership guard above, and the
-  cheaper half of the trade.
-- **Every image crosses the socket twice.** A BuildKit in a container has no
-  access to `dockerd`'s image store — this is why `buildx` itself needs
-  `--load` — and bollard has no `impl Build for DockerContainer` to hide it.
-  So the solve exports a docker-format tarball to a tempdir and
-  `load_image_tar` streams it back through `/images/load`. One extra copy of
-  every built image, on the embedded path's zero.
+`retire_builder_if_image_changed` removes `fghj_buildkit` when its image id no
+longer matches buildx's, and keeps the cache volume (`v: false`). Containers
+made by older fghj versions, pinned by digest, are retired once this way.
 
-The embedded path is unchanged and still taken whenever no container-backed
-builder is selected, which is why `on_dedicated_thread` was generalised out of
-`solve_on_dedicated_thread`: two solve shapes, one `!Send` workaround.
+Two costs come with the fallback:
+
+- **A second build cache.** The first fghj build of a repo is cold.
+- **Every image crosses the socket twice.** BuildKit in a container can't
+  write to dockerd's image store, so the solve exports a tarball and
+  `load_image_tar` streams it back.
 
 ## Which engine ran is reported, always
 
-The Events tab names it, because "which BuildKit built this" is the first
-thing worth knowing when a build behaves differently from the CLI and the one
-thing no error message mentions:
+The Events tab names it. "Which BuildKit built this" is the first thing worth
+knowing when a build behaves differently from the CLI, and no error message
+mentions it:
 
 ```
-building image   fghj/app:main  ·  /Users/me/src/app  ·  buildkit: orb-builder
+building image   fghj/app:main  ·  /Users/me/src/app  ·  buildkit: orb-builder (docker buildx)
 ```
 
-`buildkit: dockerd` on the embedded path. `BuildReport::builder` carries it.
+The tag is `docker buildx` when buildx chose a builder fghj doesn't read
+(dockerd's own, a remote). On the fallback it is the builder's name, or
+`dockerd` for the embedded path.
 
 ## Status
 
-Implemented. Verified against a real daemon by three `#[ignore]`d tests in
-`src/docker/image.rs` (`mod build_tests`) covering: the image landing in dockerd's
-store and running; container reuse across two builds with identical layer
-digests, version parity with buildx, and buildx's own container and volume
-left untouched; and `--build-arg`/`--target` surviving the tar round trip.
+Implemented. Verified against a real daemon by the `#[ignore]`d tests in
+`src/docker/image.rs` (`mod build_tests`):
 
-## Related
+- the CLI route builds fghj's tar with an inline Dockerfile, a build arg and a
+  secret, and leaves `.git` out;
+- a failing step's own output reaches the error;
+- the fallback's container is made from buildx's local image id, with no pull;
+- the fallback's container is reused across builds and runs buildx's BuildKit
+  version, while buildx's own container is left alone;
+- `--build-arg` and `--target` survive the fallback.
 
-- [[build-inputs]] — why every build goes through BuildKit at all, and the
-  progress-stream cost that decision accepted. That cost is what makes the
-  engine mismatch so hard to diagnose: without step output, a version
-  disagreement looks like an ordinary build failure.
-- [[docker-and-downloads]] — where `build_image` sits in the Docker layer.
-- [[persistence-and-workspace-store]] — `WorkspaceOwner`, and why a root
-  daemon must borrow the owner's home rather than read its own.
+The command lines the root route builds are unit-tested per OS. Whether a
+credential store actually answers there (the keychain under `launchctl asuser`,
+the session bus under `setpriv`) needs a real `fghjd`, and no test covers it.

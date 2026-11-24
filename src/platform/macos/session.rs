@@ -1,5 +1,6 @@
 //! macOS paths and login sessions.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::platform::Session;
@@ -40,6 +41,35 @@ impl Session for MacSession {
     fn is_session_agent(&self, sock: &str) -> bool {
         sock.contains(&format!("/{LAUNCHD_SOCKET_PREFIX}"))
     }
+
+    /// `launchctl asuser` puts the command in the user's bootstrap namespace,
+    /// where their keychain answers; it needs root, so `sudo` drops to the
+    /// user after it. `env -i` leaves root's environment behind.
+    fn as_user_in_session(
+        &self,
+        uid: u32,
+        _gid: u32,
+        env: &[(String, OsString)],
+        argv: &[OsString],
+    ) -> Option<Vec<OsString>> {
+        let mut line: Vec<OsString> = [
+            "/bin/launchctl",
+            "asuser",
+            &uid.to_string(),
+            "/usr/bin/sudo",
+            "-u",
+            &format!("#{uid}"),
+            "-H",
+            "/usr/bin/env",
+            "-i",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        line.extend(crate::platform::session::env_pairs(env));
+        line.extend(argv.iter().cloned());
+        Some(line)
+    }
 }
 
 const LAUNCHD_SOCKET_PREFIX: &str = "com.apple.launchd.";
@@ -47,6 +77,34 @@ const LAUNCHD_SOCKET_PREFIX: &str = "com.apple.launchd.";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_runs_as_the_user_in_their_launchd_session() {
+        let env = [(String::from("HOME"), OsString::from("/Users/me"))];
+        let argv = [
+            OsString::from("/usr/local/bin/docker"),
+            OsString::from("version"),
+        ];
+        let line = MacSession.as_user_in_session(501, 20, &env, &argv).unwrap();
+        assert_eq!(
+            line,
+            [
+                "/bin/launchctl",
+                "asuser",
+                "501",
+                "/usr/bin/sudo",
+                "-u",
+                "#501",
+                "-H",
+                "/usr/bin/env",
+                "-i",
+                "HOME=/Users/me",
+                "/usr/local/bin/docker",
+                "version",
+            ]
+            .map(OsString::from)
+        );
+    }
 
     #[test]
     fn the_launchd_agent_is_the_session_agent() {

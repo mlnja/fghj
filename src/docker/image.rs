@@ -22,8 +22,12 @@ pub struct BuildOpts<'a> {
     /// A live agent socket to lend the build; `fghjd` is root and has none.
     pub ssh_auth_sock: Option<&'a str>,
     /// `None` is dockerd's embedded BuildKit, a different engine from the one
-    /// `docker build` uses when buildx has a container builder selected.
+    /// `docker build` uses when buildx has a container builder selected. Only
+    /// read when `cli` is `None`, and for the report.
     pub builder: Option<&'a crate::buildx::HostBuilder>,
+    /// The owner's `docker buildx`, which builds wherever their `docker build`
+    /// would. `None` falls back to bollard.
+    pub cli: Option<&'a super::BuildxCli>,
 }
 
 /// bollard reads `SSH_AUTH_SOCK` from the process environment, so it has to be
@@ -168,7 +172,10 @@ pub async fn build_image_from(
     context: Vec<u8>,
 ) -> Result<BuildReport> {
     let context_bytes = context.len() as u64;
-    build_image_buildkit(docker, opts, context).await?;
+    match opts.cli {
+        Some(cli) => cli.build(docker, opts, context).await?,
+        None => build_image_buildkit(docker, opts, context).await?,
+    }
     Ok(BuildReport {
         context_bytes,
         builder: opts.builder.map(|b| b.builder.clone()),
@@ -405,10 +412,13 @@ async fn solve_on_host_builder(
         .context("failed to create a directory for the exported image")?;
     let tar = dir.path().join("image.tar");
 
-    let image = buildkit_image_of(docker, &builder.container).await;
-    if let Some(image) = &image {
-        retire_builder_if_image_changed(docker, image).await;
-    }
+    // buildx's container holds its image, so the image is always local; with
+    // no container to read it from there is nothing to agree with.
+    let Some(image) = buildkit_image_id_of(docker, &builder.container).await else {
+        return solve_on_embedded(docker, tag, frontend, load).await;
+    };
+    retire_builder_if_image_changed(docker, &image).await;
+    prepare_fghj_buildkit(docker, &image).await?;
 
     let outcome = {
         let docker = docker.clone();
@@ -419,9 +429,7 @@ async fn solve_on_host_builder(
             let mut driver = DockerContainerBuilder::new(&docker);
             driver.name(FGHJ_BUILDKIT_CONTAINER);
             driver.lifecycle(DockerContainerLifecycle::Persistent);
-            if let Some(image) = &image {
-                driver.image(image);
-            }
+            driver.image(&image);
             let driver = driver.bootstrap().await?;
 
             let request = ImageExporterOutput::builder(&tag).dest(&tar);
@@ -445,32 +453,19 @@ async fn solve_on_host_builder(
     Ok(Ok(()))
 }
 
-/// buildx's BuildKit image, pinned by repo digest: its default tag moves, so a
-/// tag match could still be a different version. Falls back to the tag, then
-/// bollard's default.
-async fn buildkit_image_of(docker: &Docker, container: &str) -> Option<String> {
-    let config = docker
+/// buildx's BuildKit image, by its local image id. Not a tag, which moves,
+/// and not a repo digest, which names a registry (a company mirror, say) that
+/// a pull would have to log in to.
+async fn buildkit_image_id_of(docker: &Docker, container: &str) -> Option<String> {
+    docker
         .inspect_container(
             container,
             None::<bollard::query_parameters::InspectContainerOptions>,
         )
         .await
-        .ok()?;
-    let tag = config
-        .config
-        .and_then(|c| c.image)
-        .filter(|i| !i.is_empty());
-
-    let digest = match config.image.filter(|i| !i.is_empty()) {
-        Some(id) => docker
-            .inspect_image(&id)
-            .await
-            .ok()
-            .and_then(|i| i.repo_digests)
-            .and_then(|d| d.into_iter().next()),
-        None => None,
-    };
-    digest.or(tag)
+        .ok()?
+        .image
+        .filter(|id| !id.is_empty())
 }
 
 /// Removes fghj's BuildKit container if its image no longer matches buildx's;
@@ -505,6 +500,154 @@ async fn retire_builder_if_image_changed(docker: &Docker, desired: &str) {
             ),
         )
         .await;
+}
+
+/// bollard's labels on what it manages. `bootstrap()` adopts a container and
+/// volume carrying them, and checks nothing else that `prepare_fghj_buildkit`
+/// doesn't set the way it would.
+const BOLLARD_LABEL: &str = "com.github.fussybeaver.bollard.buildkit";
+
+/// Creates `fghj_buildkit` from the local `image` before bollard's
+/// `bootstrap()` can: bollard pulls the image first, always and without
+/// credentials, so an image that came from a private registry fails with
+/// "no basic auth credentials" though it is already on the machine. Given a
+/// container and volume of its own shape, `bootstrap()` only starts it.
+/// Mirrors `DockerContainer::create` at the pinned bollard rev; the
+/// `#[ignore]`d build tests catch a drift.
+async fn prepare_fghj_buildkit(docker: &Docker, image: &str) -> Result<()> {
+    use bollard::models::{
+        ContainerCreateBody, HostConfig, Mount, MountType, RestartPolicy, RestartPolicyNameEnum,
+        SystemInfoCgroupDriverEnum, VolumeCreateRequest,
+    };
+
+    let exists = docker
+        .inspect_container(
+            FGHJ_BUILDKIT_CONTAINER,
+            None::<bollard::query_parameters::InspectContainerOptions>,
+        )
+        .await
+        .is_ok();
+    if exists {
+        return Ok(());
+    }
+
+    let volume_name = format!("{FGHJ_BUILDKIT_CONTAINER}_state");
+    let mut labels = std::collections::HashMap::from([
+        (format!("{BOLLARD_LABEL}.managed"), String::from("true")),
+        (
+            format!("{BOLLARD_LABEL}.driver"),
+            String::from("docker-container"),
+        ),
+        (
+            format!("{BOLLARD_LABEL}.lifecycle-schema"),
+            String::from("1"),
+        ),
+        (
+            format!("{BOLLARD_LABEL}.builder-name"),
+            String::from(FGHJ_BUILDKIT_CONTAINER),
+        ),
+        (format!("{BOLLARD_LABEL}.state-volume"), volume_name.clone()),
+    ]);
+    let resource_key = format!("{BOLLARD_LABEL}.resource-id");
+    // The volume is the cache and outlives the container; its id is the pair's.
+    let resource_id = match docker.inspect_volume(&volume_name).await {
+        Ok(volume) => volume.labels.get(&resource_key).cloned(),
+        Err(_) => {
+            let mut fresh = labels.clone();
+            fresh.insert(resource_key.clone(), new_resource_id());
+            docker
+                .create_volume(VolumeCreateRequest {
+                    name: Some(volume_name.clone()),
+                    labels: Some(fresh),
+                    ..Default::default()
+                })
+                .await
+                .with_context(|| format!("failed to create the {volume_name} volume"))?
+                // Two builds at once: the volume either made is the one both use.
+                .labels
+                .get(&resource_key)
+                .cloned()
+        }
+    };
+    // A volume bollard won't recognise is for `bootstrap()` to report.
+    let Some(resource_id) = resource_id else {
+        return Ok(());
+    };
+    labels.insert(resource_key, resource_id);
+
+    let info = docker
+        .info()
+        .await
+        .context("failed to read the Docker daemon's info")?;
+    let cgroup_parent = matches!(
+        info.cgroup_driver,
+        Some(SystemInfoCgroupDriverEnum::CGROUPFS)
+    )
+    .then(|| String::from("/docker/buildx"));
+    let userns_mode = info
+        .security_options
+        .as_ref()
+        .is_some_and(|options| options.iter().any(|o| o == "userns"))
+        .then(|| String::from("host"));
+
+    let body = ContainerCreateBody {
+        image: Some(image.to_string()),
+        env: Some(vec![]),
+        // What bollard's default `host` network adds, as buildx's own does.
+        cmd: Some(vec![String::from(
+            "--allow-insecure-entitlement=network.host",
+        )]),
+        labels: Some(labels),
+        host_config: Some(HostConfig {
+            privileged: Some(true),
+            mounts: Some(vec![Mount {
+                typ: Some(MountType::VOLUME),
+                source: Some(volume_name),
+                target: Some(String::from("/var/lib/buildkit")),
+                ..Default::default()
+            }]),
+            init: Some(true),
+            network_mode: Some(String::from("host")),
+            cgroup_parent,
+            userns_mode,
+            restart_policy: Some(RestartPolicy {
+                name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let created = docker
+        .create_container(
+            Some(
+                bollard::query_parameters::CreateContainerOptionsBuilder::default()
+                    .name(FGHJ_BUILDKIT_CONTAINER)
+                    .build(),
+            ),
+            body,
+        )
+        .await;
+    match created {
+        Ok(_) => Ok(()),
+        // Another build made it first.
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 409, ..
+        }) => Ok(()),
+        Err(e) => Err(anyhow::Error::from(e).context(format!(
+            "failed to create the {FGHJ_BUILDKIT_CONTAINER} container"
+        ))),
+    }
+}
+
+/// bollard's ids are random base-36; any unique string does.
+fn new_resource_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("fghj{nanos:x}{:x}", std::process::id())
 }
 
 async fn load_image_tar(docker: &Docker, tar: &Path) -> Result<()> {
@@ -888,6 +1031,7 @@ mod build_tests {
                 secrets: &[],
                 ssh_auth_sock: None,
                 builder: None,
+                cli: None,
             },
         )
         .await
@@ -920,6 +1064,7 @@ mod build_tests {
                 secrets: &[(String::from("token"), secret_path)],
                 ssh_auth_sock: None,
                 builder: None,
+                cli: None,
             },
         )
         .await
@@ -963,6 +1108,7 @@ mod build_tests {
                 secrets: &[(String::from("token"), secret_path)],
                 ssh_auth_sock: None,
                 builder: None,
+                cli: None,
             },
         )
         .await
@@ -1054,6 +1200,7 @@ mod build_tests {
                 secrets: &[],
                 ssh_auth_sock: None,
                 builder: Some(&builder),
+                cli: None,
             },
         )
         .await
@@ -1094,6 +1241,7 @@ mod build_tests {
                     secrets: &[],
                     ssh_auth_sock: None,
                     builder: Some(&builder),
+                    cli: None,
                 },
             )
             .await
@@ -1158,11 +1306,140 @@ mod build_tests {
                 secrets: &[],
                 ssh_auth_sock: None,
                 builder: Some(&builder),
+                cli: None,
             },
         )
         .await
         .expect("build on the host builder");
 
         assert_eq!(fixture.run(&["cat", "/greeting"]), "hello-host-builder");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon and the docker CLI with buildx: see concepts/release-and-delivery.md"]
+    async fn the_owners_docker_buildx_builds_fghjs_context_and_the_image_lands_in_docker() {
+        let cli = crate::docker::BuildxCli::find(None)
+            .await
+            .expect("this test needs `docker buildx` on this machine");
+        let fixture = BuildFixture::new("cli", "FROM busybox\nRUN echo from-the-repo > /where\n");
+        fixture.write("secret.txt", "s3cret");
+        std::fs::create_dir(fixture.dir.path().join(".git")).unwrap();
+        fixture.write(".git/HEAD", "ref: refs/heads/main\n");
+        let mut args = BTreeMap::new();
+        args.insert(String::from("GREETING"), String::from("hello-cli"));
+        let secrets = [(String::from("tok"), fixture.dir.path().join("secret.txt"))];
+
+        let report = build_image(
+            &docker(),
+            &BuildOpts {
+                context_dir: fixture.dir.path(),
+                dockerfile: INLINE_DOCKERFILE,
+                // The inline Dockerfile wins over the file, and `.git` stays out.
+                dockerfile_inline: Some(
+                    "FROM busybox\n\
+                     ARG GREETING\n\
+                     COPY . /ctx\n\
+                     RUN --mount=type=secret,id=tok cat /run/secrets/tok > /secret\n\
+                     RUN echo \"$GREETING\" > /greeting\n",
+                ),
+                skip_git_dir: true,
+                tag: &fixture.tag,
+                platform: None,
+                args: &args,
+                target: None,
+                secrets: &secrets,
+                ssh_auth_sock: None,
+                builder: None,
+                cli: Some(&cli),
+            },
+        )
+        .await
+        .expect("build through docker buildx");
+
+        assert!(report.context_bytes > 0);
+        assert_eq!(fixture.run(&["cat", "/greeting"]), "hello-cli");
+        assert_eq!(fixture.run(&["cat", "/secret"]), "s3cret");
+        assert_eq!(
+            fixture.run(&["sh", "-c", "test -e /ctx/.git && echo yes || echo no"]),
+            "no"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon and the docker CLI with buildx: see concepts/release-and-delivery.md"]
+    async fn a_failing_step_through_docker_buildx_reports_its_output() {
+        let cli = crate::docker::BuildxCli::find(None)
+            .await
+            .expect("this test needs `docker buildx` on this machine");
+        let fixture = BuildFixture::new(
+            "cli-fail",
+            "FROM busybox\nRUN echo marker-before-failure && exit 3\n",
+        );
+        let err = build_image(
+            &docker(),
+            &BuildOpts {
+                context_dir: fixture.dir.path(),
+                dockerfile: "Dockerfile",
+                dockerfile_inline: None,
+                skip_git_dir: false,
+                tag: &fixture.tag,
+                platform: None,
+                args: &BTreeMap::new(),
+                target: None,
+                secrets: &[],
+                ssh_auth_sock: None,
+                builder: None,
+                cli: Some(&cli),
+            },
+        )
+        .await
+        .expect_err("the RUN exits 3");
+        let text = format!("{err:#}");
+        assert!(text.contains("marker-before-failure"), "got: {text}");
+        assert!(text.contains("exit code: 3"), "got: {text}");
+    }
+
+    /// A machine whose BuildKit image came through a registry fghjd can't log
+    /// in to: no pull may happen. The container is pinned by image id, which
+    /// no registry could serve, so a pull would fail the build.
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon and a buildx builder: see concepts/release-and-delivery.md"]
+    async fn fghjs_builder_is_made_from_buildxs_local_image_without_a_pull() {
+        let builder = host_builder();
+        let _ = Command::new("docker")
+            .args(["rm", "-f", FGHJ_BUILDKIT_CONTAINER])
+            .output();
+        let fixture = BuildFixture::new("no-pull", "FROM busybox\nRUN true\n");
+        build_image(
+            &docker(),
+            &BuildOpts {
+                context_dir: fixture.dir.path(),
+                dockerfile: "Dockerfile",
+                dockerfile_inline: None,
+                skip_git_dir: false,
+                tag: &fixture.tag,
+                platform: None,
+                args: &BTreeMap::new(),
+                target: None,
+                secrets: &[],
+                ssh_auth_sock: None,
+                builder: Some(&builder),
+                cli: None,
+            },
+        )
+        .await
+        .expect("build on a freshly made fghj builder");
+
+        let image_of = |name: &str| {
+            let out = Command::new("docker")
+                .args(["inspect", "-f", "{{.Image}}", name])
+                .output()
+                .expect("docker inspect");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(
+            image_of(FGHJ_BUILDKIT_CONTAINER),
+            image_of(&builder.container)
+        );
     }
 }

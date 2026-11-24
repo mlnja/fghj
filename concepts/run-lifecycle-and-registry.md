@@ -234,8 +234,9 @@ happened:
   events pane. `restart` stays `"no"` unless a node asks otherwise.
 - **Starting, called off** — a start is the one action another can take
   over. Stop and Delete are accepted while `pending_action` is `Starting`;
-  converge sees the action change, aborts the start's task (a BuildKit solve
-  on its own thread included: dropping it ends the session) and marks the
+  converge sees the action change, aborts the start's task (a build
+  included: `docker buildx build`'s process group gets SIGTERM, which cancels
+  the solve, and a bollard solve on its own thread ends with its session) and marks the
   start's open steps `cancelled` in its events. The aborted task's
   `SettleGuard` still reports, tagged `of: Starting`, and the reducer drops a
   settle whose action the node has moved on from. A start with no container
